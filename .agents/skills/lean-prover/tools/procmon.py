@@ -8,8 +8,10 @@ nothing.  This samples throughout and reports the maximum.
 What is measured: the sum of RSS over the process subtree rooted at a given pid,
 INCLUDING that pid.  For ``lake env lean X`` that is ``lake`` + its ``lean``
 child; for ``lake serve`` it is ``lake`` + ``lean --server`` + any worker it
-spawns.  ``ps -axo pid=,ppid=,rss=`` is read once per sample and the tree is
-reconstructed from it, so a child that appears mid-run is picked up.
+spawns.  Creme's selected OS adapter reads one process snapshot per sample and
+the tree is reconstructed from it, so a child that appears mid-run is picked
+up. Darwin uses ``ps -axo`` and Linux uses ``ps -eo``; unsupported adapters
+return a structured capability error.
 
 Sampling interval: default 0.15 s (``--interval``). Sampling has non-zero host
 cost, so the interval and sample count are recorded rather than implied.

@@ -18,6 +18,14 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 Shared code does not invoke another OS's command as a fallback. An unavailable
 telemetry sample never proves a host is quiet or under pressure.
 
+Optimized cache copies run into a randomly named, Creme-owned staging
+directory beside the requested destination. A failed clone or reflink attempt
+cannot occupy the destination and therefore falls back to the portable copy.
+Only a complete staged tree is published. Recursive-copy and publication
+failures return structured `ERROR`; if the portable copy created a partial
+destination, Creme retains it for explicit inspection and never guesses that
+it is safe to delete.
+
 ## Reclamation safety
 
 Ordinary macOS reclamation selects only Lean server candidates that share the
@@ -37,4 +45,6 @@ The semaphore stores one optional hard hold and a list of identified soft
 holds under an `flock` mutex. A lease expiry does not release a hold. Breaking
 requires expiry plus a same-invocation quiet-host result; manual macOS holds
 also require a successful other-GUI-session scan. Corrupt state is reported
-and never reset automatically.
+and never reset automatically, including shape-correct objects with malformed
+hold fields. The state directory is mode `0700`; its mutex, state, and log are
+mode `0600` so free-form hold notes are not exposed to other local users.

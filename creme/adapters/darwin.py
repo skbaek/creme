@@ -167,20 +167,27 @@ class DarwinAdapter(Adapter):
         return self.result("human_gui_sessions", "OK", "GUI sessions enumerated", {"sessions": sessions})
 
     def copy_cache(self, source: Path, destination: Path, execute: bool) -> CapabilityResult:
-        if not source.is_dir() or destination.exists():
-            return super().copy_cache(source, destination, execute)
-        data = {"source": str(source), "destination": str(destination), "method": "apfs-clone-or-copy"}
-        if not execute:
-            return self.result("cache_copy", "PREVIEW", "APFS clone with portable fallback", data)
-        try:
-            cloned = self._run(["/bin/cp", "-c", "-R", str(source), str(destination)], timeout=1800)
-        except (OSError, subprocess.SubprocessError):
-            cloned = None
-        if cloned is not None and cloned.returncode == 0:
-            data["method"] = "apfs-clone"
-            return self.result("cache_copy", "OK", "APFS clone completed", data)
-        fallback = super().copy_cache(source, destination, True)
-        return self.result("cache_copy", fallback.status, "APFS clone unavailable; portable copy used", fallback.data)
+        def clone(staged: Path) -> bool:
+            try:
+                result = self._run(
+                    ["/bin/cp", "-c", "-R", str(source), str(staged)],
+                    timeout=1800,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return False
+            return result.returncode == 0
+
+        return self._copy_cache_with_optimized_staging(
+            source,
+            destination,
+            execute,
+            preview_method="apfs-clone-or-copy",
+            preview_detail="APFS clone with portable fallback",
+            success_method="apfs-clone",
+            success_detail="APFS clone completed",
+            unavailable_detail="APFS clone unavailable",
+            optimized_copy=clone,
+        )
 
     def reclaim(self, arguments: list[str]) -> CapabilityResult:
         allowed = {"--dry-run", "--hard-pressure"}

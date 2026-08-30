@@ -66,6 +66,10 @@ python3 quadrant-bench.py --workdir <worktree> --module Blanc/X.lean --decl NAME
         -k 3 --separate-lsp-servers --fidelity full --out rec.json
 ```
 
+`quadrant-bench.py` temporarily rewrites its real target for the in-situ
+quadrants. Run it only in a clean disposable worktree: normal exits restore the
+file, but a kill or host loss can leave it dirty.
+
 The private campaign scorer and corpus-specific self-test are intentionally not
 part of Creme v0.1. Recompute public decision constants with reviewed records
 and a separately reviewed scoring packet before publishing them.

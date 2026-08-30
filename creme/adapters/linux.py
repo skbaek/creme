@@ -128,21 +128,27 @@ class LinuxAdapter(Adapter):
         )
 
     def copy_cache(self, source: Path, destination: Path, execute: bool) -> CapabilityResult:
-        if not source.is_dir() or destination.exists():
-            return super().copy_cache(source, destination, execute)
-        data = {"source": str(source), "destination": str(destination), "method": "reflink-auto-or-copy"}
-        if not execute:
-            return self.result("cache_copy", "PREVIEW", "reflink-auto copy with portable fallback", data)
         cp = shutil.which("cp")
-        if cp:
+        def reflink(staged: Path) -> bool:
+            if not cp:
+                return False
             try:
-                copied = subprocess.run(
-                    [cp, "--reflink=auto", "-a", str(source), str(destination)],
+                result = subprocess.run(
+                    [cp, "--reflink=auto", "-a", str(source), str(staged)],
                     capture_output=True, text=True, timeout=1800,
                 )
             except (OSError, subprocess.SubprocessError):
-                copied = None
-            if copied is not None and copied.returncode == 0:
-                return self.result("cache_copy", "OK", "Linux reflink-auto copy completed", data)
-        fallback = super().copy_cache(source, destination, True)
-        return self.result("cache_copy", fallback.status, "reflink copy unavailable; portable copy used", fallback.data)
+                return False
+            return result.returncode == 0
+
+        return self._copy_cache_with_optimized_staging(
+            source,
+            destination,
+            execute,
+            preview_method="reflink-auto-or-copy",
+            preview_detail="reflink-auto copy with portable fallback",
+            success_method="reflink-auto",
+            success_detail="Linux reflink-auto copy completed",
+            unavailable_detail="reflink copy unavailable",
+            optimized_copy=reflink,
+        )

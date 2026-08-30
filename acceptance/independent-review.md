@@ -8,7 +8,10 @@ The final audited candidate is local Creme `main` at
 `df2c2b431f3a67438a1eca8ff4f743f0c585c148`, tree
 `8198f5885730c930009e2d9881be026e36602977`. The goal branch at
 `dcf5353e472695d0ceadea42119a157487289b1b` has the same tree; the diff is
-empty.
+empty. Report commit `23905937526d72db9a8fabbb322db883c31e9a06` and
+lead-authored acceptance commit `845918e1426466512b1748e07a729dcb5f672e05`
+are evidence-only descendants of `dcf5353`: they change only files under
+`acceptance/` and do not change the audited code/configuration tree.
 
 The initial review audited code candidate
 `c8df90ffde564d82d2d46bbe7df0d5600c6b2911`. The final history adds the
@@ -16,13 +19,14 @@ lead-authored acceptance evidence at `9fd74d6`, this independent report at
 `d23d665`, cache-copy remediation at `3624f50`, profile/semaphore/tooling
 hardening at `dcf5353`, and merge `df2c2b4`. The complete diff and reachable
 history of that integrated candidate were re-reviewed in the bounded final
-follow-up.
+follow-up. The later `2390593` report and `845918e` acceptance descendants were
+separately checked for evidence-only scope; neither changes the code candidate.
 
 **Verdict: BLOCKED; do not publish or call C12 closed.** The candidate has no
 detected credential or tracked personal-path leak, the complete cheap suite
 passes, and the earlier code-level B6 finding is closed. The license,
-public-remote/CI/clean-room, Claude/client, Linux, and macOS-approval gates all
-remain open.
+public-remote/CI/clean-room, clean-client trust/MCP-liveness, Claude, Linux,
+macOS owner-approval, and authority-transition gates all remain open.
 
 ## Blocking findings
 
@@ -54,16 +58,20 @@ push remain owner actions.
 
 ### B3 — Required client acceptance is incomplete, including Claude
 
-`acceptance/client-discovery.md` is still an unfilled template. The older
-Codex checkpoint proves static discovery only and expressly says it did not
-prove MCP liveness, a Lean edit, or a fresh empty client configuration root.
-The exact-candidate macOS record adds direct Lean CLI sibling edits, not a
-fresh-client Lean MCP invocation. Claude remains explicitly `OPEN`; no fresh
-Claude Creme-root session has demonstrated instructions, both skills, MCP
-approval/liveness, sibling access, wrong-root controls, and a representative
-edit. `acceptance/self-hosting.md` therefore correctly keeps the bootstrap
-Plans/Elanc control plane active and does not deprecate Elanc. C2, C9, C11,
-C13, and C12 remain blocked.
+`acceptance/client-discovery.md` is now partially filled, and the exact-
+candidate Codex CLI rechecks record discovery of the Creme root instructions,
+both project skills, and both sibling repositories. The current trusted client
+also exposes the expected 22 named Creme MCP tools. No MCP tool was invoked,
+however, so this is registration evidence rather than an MCP-liveness result.
+The `--ignore-user-config` control exposes zero MCP tools and is explicitly a
+failed clean-client registration control: its fail-closed behavior is useful,
+but it does not satisfy fresh-client trust, approval, registration, or
+liveness. Claude remains explicitly `OPEN`; no fresh Claude Creme-root session
+has demonstrated instructions, both skills, MCP approval/liveness, sibling
+access, wrong-root controls, and a representative edit.
+`acceptance/self-hosting.md` therefore correctly keeps the bootstrap Plans/
+Elanc control plane active and does not deprecate Elanc. C2, C9, C11, C13, and
+C12 remain blocked.
 
 The committed static Claude/Codex model is not itself the problem. Current
 official documentation supports `@AGENTS.md`, project `.mcp.json`, project
@@ -83,11 +91,15 @@ run. C7, C11, and C12 remain blocked; no Linux parity claim is accepted.
 
 ### B5 — macOS preservation still awaits the named owner decision
 
-The lead-authored evidence-only update records the exact `c8df90f` candidate,
-44 cheap tests, live host capabilities, and representative Jaune/Blanc edits.
-It still says the material behavior differences require owner approval before
-they become the final v0.1 preservation claim, and Claude remains open. That
-keeps C6 open even though the recorded technical checks pass.
+The lead-authored evidence-only update records the exact `df2c2b4` candidate,
+52 passing cheap-suite tests, live host capabilities, representative Jaune/
+Blanc edits, and a passing staged-copy smoke using the selected APFS clone
+path with matching bytes and no owned stage left behind. It also records the
+Codex discovery and trusted-client registration results described in B3, but
+not an MCP invocation or successful clean-client registration. The material
+behavior differences still require owner approval before they become the final
+v0.1 preservation claim, and Claude remains open. That keeps C6 open even
+though the recorded macOS technical checks pass.
 
 ## Closed finding in the final follow-up
 
@@ -186,10 +198,16 @@ and its eventual report-only commit; tests used disposable temporary roots and
 the configured temporary bytecode prefix. No Lean command, client, build,
 dependency fetch, remote mutation, or network mutation was run.
 
-- `git rev-parse main main^{tree} HEAD HEAD^{tree}` -> main
-  `df2c2b431f3a67438a1eca8ff4f743f0c585c148`, branch
-  `dcf5353e472695d0ceadea42119a157487289b1b`, and identical tree
-  `8198f5885730c930009e2d9881be026e36602977`; final tree diff empty.
+- `git rev-parse dcf5353^{tree} 2390593^{tree} 845918e^{tree} main^{tree}` and
+  the corresponding scoped diffs -> `dcf5353` and audited main `df2c2b4`
+  share code-candidate tree `8198f5885730c930009e2d9881be026e36602977`;
+  `2390593` changes only `acceptance/independent-review.md`, while `845918e`
+  changes only `acceptance/client-discovery.md`, `acceptance/macos.md`, and
+  `acceptance/self-hosting.md`.
+- `git show 2390593` and `git show 845918e` -> both descendants are
+  evidence-only; no code, configuration, executable, symlink, dependency,
+  workflow, permission, or runtime behavior changed. Per the bounded final
+  attestation, no suite was rerun for these evidence-only diffs.
 - `git show 3624f50`, `git show dcf5353`, and full
   `git diff c8df90f..df2c2b4` inspection -> integrated changes limited to the
   recorded acceptance/report, cache-copy remediation, and reviewed hardening;

@@ -454,8 +454,7 @@ def main():
         # ---------------- Q2 / Q4: language-server quadrants --------------
         # Server-reuse policy, and why it is a knob rather than a constant:
         # sharing ONE server across Q2 and Q4 is what makes the sweep
-        # affordable (the import environment is paid once -- MEASURED: the
-        # second file's didOpen costs about a fifth of the first's).  But a
+        # affordable because the import environment is paid once. But a
         # shared server has ONE resident footprint, so its peak RSS cannot be
         # attributed to a quadrant.  If the scoring needs per-quadrant peak
         # memory, --separate-lsp-servers buys it at the price of a second

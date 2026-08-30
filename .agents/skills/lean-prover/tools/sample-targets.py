@@ -23,7 +23,7 @@ awkward":
      bench can actually run;
   2. the target must not sit under a ``set_option`` ceiling wrapper (a separate
      experiment);
-  3. the seven fit-set targets are removed, because grading a rule on the
+  3. caller-supplied fit targets are removed, because grading a rule on the
      targets its constants were fitted to is a fit, not a validation.
 A fabrication/fidelity failure is NOT an exclusion here: it is a rule input
 discovered at measurement time, recorded by the bench as a refusal.
@@ -34,7 +34,6 @@ auditable rather than asserted.
 Usage:
   sample-targets.py --workdir DIR [--baseline scripts/baseline-elab.txt]
                     --seed 20260826 [-n 24] [--out draw.json]
-                    [--exclude-fit-set/--no-exclude-fit-set]
                     [--exclude "Blanc/X.lean:Decl" ...]
                     [--tier-bounds 2.5,15.0] [--census census.json]
 
@@ -65,18 +64,6 @@ qbench = _load("qbench", "quadrant-bench.py")
 
 BUCKETS = [("b0_0.1", 0.0, 0.1), ("b0.1_0.5", 0.1, 0.5),
            ("b0.5_0.9", 0.5, 0.9), ("b0.9_1", 0.9, 1.0001)]
-
-# The seven fit targets (evidence/lean-edit-loop/targets.md).
-FIT_SET = [
-    ("Blanc/ExecutionSettlement.lean", "Frame.raw_commits_of_settlementCommits"),
-    ("Blanc/ExecutionSettlement.lean", "Exec.descendantFrames_runOk_create_codeDepositRollback"),
-    ("Blanc/ExecutionSettlement.lean", "Frame.settlementCommits_ofCall_of_raw_commits"),
-    ("Blanc/LidoCircuitBreakerEnumeration.lean", "RegistryWitness.enumeration_word_arithmetic"),
-    ("Blanc/LidoCircuitBreakerEnumeration.lean", "pauserSet_target_zero_no_success"),
-    ("Blanc/LidoCircuitBreakerAttainment.lean", "freshWorld_previousPauserZero"),
-    ("Blanc/LidoCircuitBreakerAttainment.lean", "replWorld_countDecrement"),
-]
-
 
 def read_baseline(path):
     rows = []
@@ -159,7 +146,6 @@ def main():
                     help="LO,HI seconds; default = terciles of the baseline")
     ap.add_argument("--exclude", action="append", default=[],
                     help="'module:decl' to remove; repeatable")
-    ap.add_argument("--no-exclude-fit-set", action="store_true")
     ap.add_argument("--verbose-reasons", action="store_true")
     ap.add_argument("--max-baseline", type=float, default=None,
                     help="drop modules whose baseline elaboration exceeds this "
@@ -182,7 +168,7 @@ def main():
     def tier_of(t):
         return "light" if t < lo else ("mid" if t < hi else "heavy")
 
-    excl = set(FIT_SET) if not args.no_exclude_fit_set else set()
+    excl = set()
     for e in args.exclude:
         m, _, d = e.partition(":")
         excl.add((m, d))
@@ -214,15 +200,6 @@ def main():
             e["tier"] = tier_of(secs)
             e["bucket"] = bucket_of(e["suffix_fraction"])
             e["stratum"] = e["tier"] + "|" + e["bucket"]
-            # Cost estimate, MEASURED rather than assumed.  validation-design
-            # guessed "7-8x the module's whole-file time"; a real k=3
-            # four-quadrant run with the default full fidelity check on
-            # Blanc/LidoCircuitBreakerEnumeration.lean (baseline 6.776 s) took
-            # 83.4 s wall = 12.3x, and there is a fixed floor of roughly 10 s
-            # (server spawn, didOpen debounce, telemetry, interpreter start)
-            # that dominates on light modules.  Both terms are recorded.
-            e["est_sweep_cost_s"] = round(10.0 + 12.3 * secs, 1)
-            e["est_cost_model"] = "10 s fixed + 12.3 x baseline (measured, k=3, --fidelity full)"
             population.append(e)
     census_s = time.perf_counter() - t0
 
@@ -282,7 +259,6 @@ def main():
                           "source": ("explicit" if args.tier_bounds
                                      else "terciles of committed baseline")},
         "buckets": [[b[0], b[1], b[2]] for b in BUCKETS],
-        "fit_set_excluded": (not args.no_exclude_fit_set),
         "caller_exclusions": args.exclude,
         "modules_in_baseline": len(rows),
         "modules_missing_from_worktree": missing,
@@ -293,20 +269,14 @@ def main():
         "quota": quota,
         "shortfall_redistributed": shortfall,
         "draw_size": len(draw),
-        "estimated_sweep_cost_s": round(sum(e["est_sweep_cost_s"] for e in draw), 1),
-        "estimated_cost_note": ("10 s fixed + 12.3 x baseline per target, from a "
-                                "measured k=3 --fidelity full run; the design's "
-                                "7-8x figure understates it"),
-        "max_single_target_cost_s": (max((e["est_sweep_cost_s"] for e in draw), default=0)),
+        "estimated_cost_note": "no portable cost model; measure the selected corpus and host separately",
         "draw": draw,
     }
     text = json.dumps(out, indent=2)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(text + "\n")
-        print("sample-targets: wrote %s (%d targets, est %.0f s of elaboration)"
-              % (args.out, len(draw), out["estimated_sweep_cost_s"]),
-              file=sys.stderr)
+        print("sample-targets: wrote %s (%d targets)" % (args.out, len(draw)), file=sys.stderr)
     else:
         print(text)
     if args.census:

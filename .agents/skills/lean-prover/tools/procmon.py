@@ -11,12 +11,8 @@ child; for ``lake serve`` it is ``lake`` + ``lean --server`` + any worker it
 spawns.  ``ps -axo pid=,ppid=,rss=`` is read once per sample and the tree is
 reconstructed from it, so a child that appears mid-run is picked up.
 
-Sampling interval: default 0.15 s (``--interval``).  One ``ps -axo`` call was
-MEASURED at 15.3 ms on this host (20-call mean), so 0.15 s costs about 10% of a
-single core while sampling -- small beside a Lean elaboration on a many-core
-host, but not zero, which is why the interval is recorded in every result rather
-than implied.  A 1.35 s run yields ~9 samples; that suffices because a Lean
-process's RSS rises to a plateau and only falls at exit.
+Sampling interval: default 0.15 s (``--interval``). Sampling has non-zero host
+cost, so the interval and sample count are recorded rather than implied.
 
 Known limitation, stated rather than hidden: RSS summed over a tree
 double-counts shared pages (the ``lean`` binary's text, and any shared mapping
@@ -32,33 +28,28 @@ Usage:
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
 import time
 
-_PS = ["/bin/ps", "-axo", "pid=,ppid=,rss=,comm="]
+_CREME_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+if _CREME_ROOT not in sys.path:
+    sys.path.insert(0, _CREME_ROOT)
+
+from creme.adapters import get_adapter  # noqa: E402
 
 
-def snapshot():
-    """Return {pid: (ppid, rss_kib, comm)} for every process on the host."""
-    try:
-        out = subprocess.run(_PS, capture_output=True, text=True).stdout
-    except Exception:
-        return {}
+def snapshot_result():
+    """Return a portable process table plus a structured capability error."""
+    result = get_adapter().process_snapshot()
+    if result.status != "OK" or not result.data:
+        return {}, result.detail
     procs = {}
-    for line in out.split("\n"):
-        parts = line.split(None, 3)
-        if len(parts) < 3:
-            continue
-        try:
-            pid = int(parts[0])
-            ppid = int(parts[1])
-            rss = int(parts[2])
-        except ValueError:
-            continue
-        procs[pid] = (ppid, rss, parts[3] if len(parts) > 3 else "")
-    return procs
+    for row in result.data.get("processes", []):
+        procs[row["pid"]] = (row["ppid"], row["rss_kib"], row["command"])
+    return procs, None
 
 
 def subtree(procs, root):
@@ -92,12 +83,15 @@ class ProcMon:
         self.peak_members = []
         self.samples = 0
         self.nonempty_samples = 0
+        self.capability_error = None
         self.t0 = None
 
     def _loop(self):
         while not self._stop.is_set():
             t = time.perf_counter()
-            procs = snapshot()
+            procs, error = snapshot_result()
+            if error:
+                self.capability_error = error
             self.samples += 1
             pids = subtree(procs, self.root_pid) & set(procs)
             if pids:
@@ -133,6 +127,7 @@ class ProcMon:
             "interval_s": self.interval,
             "samples": self.samples,
             "samples_with_live_tree": self.nonempty_samples,
+            "process_snapshot_error": self.capability_error,
             "peak_tree_rss_kib": self.peak_tree_kib,
             "peak_tree_rss_gib": round(self.peak_tree_kib / 1048576.0, 3),
             "peak_single_rss_kib": self.peak_single_kib,

@@ -21,6 +21,7 @@ class AdapterTest(unittest.TestCase):
     def test_unsupported_never_falls_through_to_another_os(self):
         adapter = get_adapter("Plan9")
         self.assertEqual(adapter.telemetry().status, "UNAVAILABLE")
+        self.assertEqual(adapter.process_snapshot().status, "UNAVAILABLE")
         self.assertEqual(adapter.reclaim([]).status, "UNAVAILABLE")
         self.assertEqual(adapter.gui_sessions(1).status, "UNAVAILABLE")
 

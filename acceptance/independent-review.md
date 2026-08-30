@@ -4,25 +4,25 @@ Review date: 2026-08-31 (Asia/Seoul)
 
 ## Exact candidate and verdict
 
-The audited code candidate is local Creme `main` at
-`c8df90ffde564d82d2d46bbe7df0d5600c6b2911`, tree
-`1019b7a74943cde256bd902d82e2945f64ab4e56`.
+The final audited candidate is local Creme `main` at
+`df2c2b431f3a67438a1eca8ff4f743f0c585c148`, tree
+`8198f5885730c930009e2d9881be026e36602977`. The goal branch at
+`dcf5353e472695d0ceadea42119a157487289b1b` has the same tree; the diff is
+empty.
 
-The review began on `codex/creme-v0.1-agent-infrastructure` at
-`cd32139dd4ec21f1f6e55a57de93c74f66b21253`; that commit and the named
-candidate had the same tree and an empty diff. During the review, the branch
-advanced to lead-authored evidence commit
-`9fd74d60a13ae5502cf9f0281130d364f965f7de`. Its diff from the audited tree is
-limited to `acceptance/macos.md`; it updates the exercised commit to `c8df90f`,
-the cheap-suite count to 44, and representative sibling-edit evidence. It does
-not change runtime code or configuration. This report therefore audits the
-exact `c8df90f` code tree and separately checks `9fd74d6` for that scope.
+The initial review audited code candidate
+`c8df90ffde564d82d2d46bbe7df0d5600c6b2911`. The final history adds the
+lead-authored acceptance evidence at `9fd74d6`, this independent report at
+`d23d665`, cache-copy remediation at `3624f50`, profile/semaphore/tooling
+hardening at `dcf5353`, and merge `df2c2b4`. The complete diff and reachable
+history of that integrated candidate were re-reviewed in the bounded final
+follow-up.
 
 **Verdict: BLOCKED; do not publish or call C12 closed.** The candidate has no
-detected credential or tracked personal-path leak, and the complete cheap suite
-passes, but the license, public-remote/CI/clean-room, Claude/client, Linux, and
-macOS-approval gates remain open. One additional code-level capability-contract
-blocker is recorded below.
+detected credential or tracked personal-path leak, the complete cheap suite
+passes, and the earlier code-level B6 finding is closed. The license,
+public-remote/CI/clean-room, Claude/client, Linux, and macOS-approval gates all
+remain open.
 
 ## Blocking findings
 
@@ -89,22 +89,24 @@ It still says the material behavior differences require owner approval before
 they become the final v0.1 preservation claim, and Claude remains open. That
 keeps C6 open even though the recorded technical checks pass.
 
-### B6 — Cache-copy execution can escape the documented structured result
+## Closed finding in the final follow-up
 
-`docs/capabilities.md` says every host operation reports a structured status
-and describes clone/reflink followed by portable recursive-copy fallback.
-`Adapter.copy_cache`, however, calls `shutil.copytree` without translating an
-`OSError` into `CapabilityResult(status="ERROR", ...)`. The Darwin and Linux
-adapters call that method after an optimized copy fails. If the optimized
-command created a partial destination before returning nonzero, the fallback
-immediately rejects the now-existing destination; other copy failures can
-raise out of the CLI entirely. The tests cover preview and a successful macOS
-clone, but not optimized-command failure, partial destination, or recursive
-copy failure. This is fail-safe with respect to not widening a process target,
-but it contradicts the public capability/error contract and leaves Linux's
-required fallback unproven. Close it with exception-to-`ERROR` handling,
-partial-destination policy that never deletes unproven user data, and focused
-Darwin/Linux failure tests before C5/C7/C12 acceptance.
+### B6 — CLOSED: cache-copy failures are structured and staged safely
+
+Commit `3624f50115a3c41bb249b08df79a31947da3a71c` closes the original
+code-level blocker. Portable recursive-copy `OSError` now returns structured
+`ERROR` and retains any caller-destination partial for inspection. Darwin clone
+and Linux reflink attempts run in a random Creme-owned staging directory beside
+the requested destination; failed optimized attempts cannot occupy the caller's
+destination, complete stages are rechecked and atomically published, and the
+owned stage is cleaned without deleting unproven caller data.
+
+Four focused failure tests passed on the final tree: portable copy failure with
+a retained partial destination; Darwin partial-clone fallback; Linux partial-
+reflink fallback; and combined Darwin clone/fallback failure returning
+structured `ERROR`. The full suite includes those cases. This closes B6 as a
+code finding; it does not substitute for the still-blocked conventional Linux,
+public CI, or clean-room acceptance gates.
 
 ## Non-blocking findings and residual risks
 
@@ -128,10 +130,9 @@ Darwin/Linux failure tests before C5/C7/C12 acceptance.
   entry that is a symlink to another directory.
 - OS-specific executable literals are confined to `creme/adapters/`.
   Non-adapter subprocesses invoke portable/project tools (`git`, `lake`, the
-  Python interpreter, or a caller-supplied command). `procmon.py` still says
-  the exact Darwin-shaped `ps -axo ...` command is read each sample although
-  it now dispatches through adapters and Linux uses `ps -eo ...`; this is a
-  documentation inaccuracy, not a cross-OS invocation.
+  Python interpreter, or a caller-supplied command). Commit `dcf5353` corrected
+  `procmon.py` to describe Darwin `ps -axo`, Linux `ps -eo`, and adapter
+  dispatch rather than implying one Darwin-shaped command on every platform.
 - The generated Codex profile grants write access to exactly the three reviewed
   workspace roots and explicitly grants their `.git` directories, with network
   limited to three GitHub domains. Those are consequential permissions, but
@@ -139,34 +140,22 @@ Darwin/Linux failure tests before C5/C7/C12 acceptance.
   are not installed implicitly. Current Codex documentation confirms that
   extending `:workspace` does not itself make `.git` writable and that network
   domain rules require the proxy feature, so these settings are deliberate.
-- `render_codex_profile` interpolates POSIX paths into TOML quoted keys without
-  escaping quotes, backslashes, or newlines. An ordinary path renders as
-  intended, while a legal path containing `"` renders invalid TOML. Preview
-  makes this visible and the user must explicitly select `--write`, so this is
-  not treated as silent permission widening, but robust TOML serialization and
-  a hostile-path test are recommended.
-- `cmd_client_profile` writes through a predictable `.tmp.<pid>` name rather
-  than `mkstemp`, unlike the host-profile writer. The destination directory is
-  normally user-owned and the operation is explicit, so this is hardening
-  rather than a demonstrated privilege boundary break; use an exclusive
-  mode-0600 temporary file and cleanup on failure.
-- Semaphore corruption is safely never reset, but `_validate` validates only
-  outer shape and labels. A shape-valid hold missing `renewed_at` or
-  `lease_seconds` passes validation and later raises `KeyError` instead of a
-  clear `SemaphoreError`. Extend field/type validation and test it. The state
-  directory also relies on the user's umask; mode `0700` for the directory and
-  `0600` for state/log files would better protect free-form notes on shared
-  hosts.
-- `quadrant-bench.py` intentionally rewrites the real target module for Q1 and
-  restores it in `finally`. A kill or host loss can leave a reversible dirty
-  proof file. The edit protocol is described in the tool, but the operational
-  warning should be more prominent and callers should use a disposable
-  worktree.
+- Commit `dcf5353` closed the two generated-profile hardening notes. TOML keys
+  now use JSON-compatible basic-string escaping, including hostile legal paths,
+  and profile installation uses `mkstemp`, fsync, atomic replace, mode `0600`,
+  and failure cleanup. Both behaviors have focused tests.
+- The same commit closed the semaphore hardening notes. It validates the exact
+  hold schema and field types/ranges/relationships before use, preserves
+  corrupt bytes, forces the state directory to `0700`, and forces mutex, state,
+  and log files to `0600`. Focused malformed-hold and permission tests pass.
+- The in-place benchmark risk remains intrinsic, but `dcf5353` now documents it
+  prominently in both the tool and its README and requires a clean disposable
+  worktree. A kill can still leave only that disposable worktree dirty.
 - GitHub Actions dependencies use mutable major tags (`actions/checkout@v4`,
   `actions/setup-python@v5`) rather than immutable commit SHAs. This is common
-  but leaves avoidable CI supply-chain drift. Also, `git diff --check` is
-  generally vacuous in a clean CI checkout; use a range-aware committed-tree
-  whitespace check if that is intended as a gate.
+  but leaves avoidable CI supply-chain drift. The previously vacuous clean-CI
+  whitespace check is fixed: `scripts/check.sh` now checks the committed tree
+  against Git's empty tree as well as checking working-tree changes.
 - `git fsck --full --no-reflogs` found four dangling blobs and no reachable
   corruption. `git count-objects -v` also reports an empty worktree-admin
   `refs` directory as garbage. Neither is reachable from a branch and neither
@@ -197,11 +186,15 @@ and its eventual report-only commit; tests used disposable temporary roots and
 the configured temporary bytecode prefix. No Lean command, client, build,
 dependency fetch, remote mutation, or network mutation was run.
 
-- `git rev-parse c8df90f^{tree}` and `git rev-parse cd32139^{tree}` -> both
-  `1019b7a74943cde256bd902d82e2945f64ab4e56`; initial candidate diff empty.
-- `git diff --name-status c8df90f..9fd74d6` -> only
-  `M acceptance/macos.md`; manual diff scope confirmed evidence-only.
-- `git ls-files`, `git ls-files -s`, full reads of all 64 tracked paths, and
+- `git rev-parse main main^{tree} HEAD HEAD^{tree}` -> main
+  `df2c2b431f3a67438a1eca8ff4f743f0c585c148`, branch
+  `dcf5353e472695d0ceadea42119a157487289b1b`, and identical tree
+  `8198f5885730c930009e2d9881be026e36602977`; final tree diff empty.
+- `git show 3624f50`, `git show dcf5353`, and full
+  `git diff c8df90f..df2c2b4` inspection -> integrated changes limited to the
+  recorded acceptance/report, cache-copy remediation, and reviewed hardening;
+  no unexplained executable, symlink, dependency, or client-surface addition.
+- `git ls-files`, `git ls-files -s`, full reads of all 65 tracked paths, and
   JSON enumeration of every manifest source/artifact -> complete current-tree
   inventory; only three `100755` entries and two in-repository `120000` links.
 - `git log --all --graph --decorate --oneline`, `git for-each-ref`,
@@ -216,15 +209,18 @@ dependency fetch, remote mutation, or network mutation was run.
 - Candidate subprocess/platform-literal enumeration plus manual reachability
   review -> OS commands confined to adapters; generic `git`/`lake`/Python and
   caller commands outside them.
-- `./scripts/check.sh` under Python 3.9.6 -> PASS, 44/44 unit tests; compileall
-  PASS; `git diff --check` PASS.
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v` with the four named
+  cache-copy failure methods -> PASS, 4/4 focused tests.
+- `./scripts/check.sh` under Python 3.9.6 -> PASS, 52/52 unit tests; compileall,
+  working-tree whitespace, and complete committed-tree whitespace checks PASS.
 - `CREME_PROVENANCE_ELANC_ROOT="$ELANC_ROOT"
   CREME_PROVENANCE_PLANS_ROOT="$PLANS_ROOT" python3 -m unittest
   scripts.tests.test_extraction_manifest -v` -> PASS, 6/6 including every
   pinned local source digest. `ELANC_ROOT` and `PLANS_ROOT` were reviewer-local
   paths and are deliberately not recorded in the public report.
-- Direct semaphore probes -> `_validate` accepted a hold with only `label`, and
-  `_expired` then raised `KeyError`, confirming the residual validation defect.
+- Final malformed-semaphore and file-mode tests -> PASS; the earlier incomplete
+  hold now raises `SemaphoreError` without replacing its bytes, and generated
+  state artifacts have the documented private modes.
 - `git remote -v` -> no output; public remote gate open.
 
 Current client-claim review used official documentation only:
@@ -247,6 +243,6 @@ is approved; the owner-approved public remote exists; public Ubuntu CI and a
 fresh conventional Linux run pass; fresh Codex and Claude sessions complete
 the full discovery/MCP/sibling/wrong-root/edit matrix; public-only clean-room
 onboarding passes; the macOS behavior differences are owner-approved; the
-cache-copy structured-error/fallback defect is closed and tested; Elanc is
-actually deprecated/archival; and a final history/secret/mode/path diff review
+Elanc authority transition is actually completed and Elanc is deprecated or
+archival; and a final history/secret/mode/path diff review after those changes
 finds no new blocker.

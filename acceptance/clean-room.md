@@ -49,4 +49,3 @@ also exercise a fresh client trust/approval ceremony, Lean MCP liveness, live
 Claude Code, and the representative sibling edits under the public-only
 layout. Public CI, conventional Linux acceptance, and the owner decision on
 the recorded macOS behavior differences remain separate mandatory gates.
-

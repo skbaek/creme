@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "lean-lsp-mcp": {
+      "command": "uvx",
+      "args": ["lean-lsp-mcp==0.26.1"],
+      "env": {
+        "LEAN_LOG_LEVEL": "INFO",
+        "LEAN_MCP_TOOL_DESCRIPTIONS": "{\"lean_multi_attempt\":\"Compare at least two genuinely uncertain proof candidates at one proof position without editing the file. Use only after inspecting the exact goal. If a closing lemma or tactic is already known, apply it directly and verify with lean_goal and lean_diagnostic_messages. Do not add filler snippets. Every submitted snippet is evaluated and may incur expensive elaboration.\"}"
+      }
+    }
+  }
+}
+

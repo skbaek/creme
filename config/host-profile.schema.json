@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Creme host profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fingerprint", "facts", "workspace", "policy", "overrides"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "machine", "logical_cores", "physical_memory_bytes"],
+      "properties": {
+        "system": {"enum": ["Darwin", "Linux"]},
+        "machine": {"type": "string", "minLength": 1},
+        "logical_cores": {"type": "integer", "minimum": 1},
+        "physical_memory_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "jaune", "blanc"],
+      "properties": {
+        "root": {"type": "string", "minLength": 1},
+        "jaune": {"type": "string", "minLength": 1},
+        "blanc": {"type": "string", "minLength": 1},
+        "goal_store": {"type": ["string", "null"]}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_memory_gib", "heavy_workers", "light_workers"],
+      "properties": {
+        "task_memory_gib": {"type": "integer", "minimum": 1, "maximum": 8},
+        "heavy_workers": {"type": "integer", "minimum": 1},
+        "light_workers": {"type": "integer", "minimum": 1}
+      }
+    },
+    "overrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_memory_gib", "heavy_workers", "light_workers"],
+      "properties": {
+        "task_memory_gib": {"type": ["integer", "null"], "minimum": 1, "maximum": 8},
+        "heavy_workers": {"type": ["integer", "null"], "minimum": 1},
+        "light_workers": {"type": ["integer", "null"], "minimum": 1}
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "fingerprint": "e64f1a3f6eb1d1690466f217a37da5003b2dc6787f4c48144805e455ebf3b1fa",
+  "facts": {
+    "system": "Linux",
+    "machine": "x86_64",
+    "logical_cores": 4,
+    "physical_memory_bytes": 8589934592
+  },
+  "workspace": {
+    "root": "..",
+    "jaune": "jaune",
+    "blanc": "blanc",
+    "goal_store": null
+  },
+  "policy": {
+    "task_memory_gib": 4,
+    "heavy_workers": 1,
+    "light_workers": 2
+  },
+  "overrides": {
+    "task_memory_gib": null,
+    "heavy_workers": null,
+    "light_workers": null
+  }
+}

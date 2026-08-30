@@ -36,6 +36,11 @@ def _json(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
 
 
+def _toml_string(value: object) -> str:
+    """Render a TOML basic string using its JSON-compatible escape subset."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
 def _profile_path(text: Optional[str]) -> Path:
     return Path(text).expanduser().resolve() if text else ROOT / DEFAULT_RELATIVE_PROFILE
 
@@ -188,7 +193,7 @@ def render_codex_profile(workspace: Path) -> str:
         "[features]",
         "network_proxy = true",
         "",
-        f'[projects."{creme}"]',
+        f"[projects.{_toml_string(creme)}]",
         'trust_level = "trusted"',
         "",
         "[permissions.creme-relay]",
@@ -197,9 +202,9 @@ def render_codex_profile(workspace: Path) -> str:
         "",
         "[permissions.creme-relay.workspace_roots]",
     ]
-    lines.extend(f'"{root}" = true' for root in roots)
+    lines.extend(f"{_toml_string(root)} = true" for root in roots)
     lines.extend(["", "[permissions.creme-relay.filesystem]"])
-    lines.extend(f'"{root / ".git"}" = "write"' for root in roots)
+    lines.extend(f'{_toml_string(root / ".git")} = "write"' for root in roots)
     lines.extend([
         "", "[permissions.creme-relay.network]", "enabled = true",
         "", "[permissions.creme-relay.network.domains]",
@@ -226,9 +231,20 @@ def cmd_client_profile(arguments: argparse.Namespace) -> int:
         print(f"REFUSED — output exists: {output}; use --replace after review")
         return 1
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(output.name + f".tmp.{os.getpid()}")
-    temporary.write_text(rendered, encoding="utf-8")
-    os.replace(temporary, output)
+    fd, temporary = tempfile.mkstemp(
+        prefix=output.name + ".tmp.",
+        dir=str(output.parent),
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     print(f"OK — reviewed Codex profile written to {output}")
     return 0
 

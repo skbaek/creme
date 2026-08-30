@@ -22,6 +22,11 @@ Fidelity gate: the fabricated prefix is checked with ``check-fidelity.py`` befor
 any Q3/Q4 number is produced.  A non-faithful prefix means Q3/Q4 are UNAVAILABLE
 for that target; the refusal is recorded as a result, never worked around.
 
+Destructive-edit boundary: Q1/Q2 temporarily rewrite the selected real module
+and restore it in ``finally``. Run this tool only in a disposable worktree with
+a clean tracked tree. A process kill or host loss can prevent restoration; the
+caller must inspect and discard or repair that disposable worktree afterward.
+
 Verdict classification for Q1/Q3 reuses ``check-fidelity.py``'s
 ``parse_output``/``classify_run``, which alternate over BOTH success and failure
 signatures and know that Lean emits ``error:`` as well as coded forms like

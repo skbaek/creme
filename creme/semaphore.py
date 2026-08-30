@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import tempfile
 import time
@@ -18,6 +19,10 @@ DEFAULT_LEASE_SECONDS = 1800
 MAX_LEASE_SECONDS = 14400
 MANUAL_LABEL = "manual-macos-session"
 MANUAL_GRACE_SECONDS = 300
+HOLD_KEYS = {
+    "label", "pid", "uid", "note", "manual",
+    "acquired_at", "renewed_at", "lease_seconds",
+}
 
 
 class SemaphoreError(Exception):
@@ -55,10 +60,35 @@ def _validate(state: Any) -> dict[str, Any]:
         raise SemaphoreError("hard hold is malformed")
     if not isinstance(state["soft"], list) or not all(isinstance(item, dict) for item in state["soft"]):
         raise SemaphoreError("soft holds are malformed")
-    labels = [item.get("label") for item in state["soft"]]
-    if state["hard"]:
-        labels.append(state["hard"].get("label"))
-    if any(not isinstance(label, str) or not label for label in labels) or len(labels) != len(set(labels)):
+    holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
+    for hold in holds:
+        if set(hold) != HOLD_KEYS:
+            raise SemaphoreError("hold has an unexpected shape")
+        if not isinstance(hold["label"], str) or not hold["label"]:
+            raise SemaphoreError("hold label must be a non-empty string")
+        if not isinstance(hold["note"], str):
+            raise SemaphoreError("hold note must be a string")
+        if not isinstance(hold["manual"], bool):
+            raise SemaphoreError("hold manual flag must be boolean")
+        if not isinstance(hold["pid"], int) or isinstance(hold["pid"], bool) or hold["pid"] < 1:
+            raise SemaphoreError("hold pid must be a positive integer")
+        if not isinstance(hold["uid"], int) or isinstance(hold["uid"], bool) or hold["uid"] < 0:
+            raise SemaphoreError("hold uid must be a non-negative integer")
+        for key in ("acquired_at", "renewed_at"):
+            value = hold[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise SemaphoreError(f"hold {key} must be a positive finite number")
+        lease = hold["lease_seconds"]
+        if isinstance(lease, bool) or not isinstance(lease, int) or not 1 <= lease <= MAX_LEASE_SECONDS:
+            raise SemaphoreError("hold lease_seconds is outside the supported range")
+        if hold["renewed_at"] < hold["acquired_at"]:
+            raise SemaphoreError("hold renewed_at predates acquired_at")
+        if hold["manual"] != (hold["label"] == MANUAL_LABEL):
+            raise SemaphoreError("manual hold flag and reserved label disagree")
+    if state["hard"] and state["hard"]["manual"]:
+        raise SemaphoreError("manual hold cannot be hard")
+    labels = [hold["label"] for hold in holds]
+    if len(labels) != len(set(labels)):
         raise SemaphoreError("hold labels must be unique non-empty strings")
     return state
 
@@ -66,9 +96,14 @@ def _validate(state: Any) -> dict[str, Any]:
 @contextmanager
 def locked_state() -> Iterator[tuple[Path, dict[str, Any]]]:
     root = state_root()
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        root.chmod(0o700)
+    except OSError as exc:
+        raise SemaphoreError(f"cannot secure semaphore directory: {exc}")
     mutex = root / "mutex"
     with mutex.open("a+", encoding="utf-8") as lock:
+        os.fchmod(lock.fileno(), 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         path = root / "state.json"
         if path.exists():
@@ -85,6 +120,7 @@ def _save(path: Path, state: dict[str, Any]) -> None:
     _validate(state)
     fd, temporary = tempfile.mkstemp(prefix="state-", suffix=".json", dir=str(path.parent))
     try:
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(state, handle, indent=2, sort_keys=True)
             handle.write("\n")
@@ -102,7 +138,9 @@ def _log(action: str, label: str, verdict: str, detail: str) -> None:
         "verdict": verdict, "detail": detail,
     }
     path = state_root() / "log.jsonl"
-    with path.open("a", encoding="utf-8") as handle:
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 

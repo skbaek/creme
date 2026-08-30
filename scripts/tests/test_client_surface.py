@@ -9,7 +9,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import stat
+import tempfile
+from types import SimpleNamespace
 import unittest
+
+from creme.cli import cmd_client_profile, render_codex_profile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -127,6 +132,33 @@ class ClientSurfaceTest(unittest.TestCase):
         )
         self.assertIn("experimental and not a v0.1 acceptance-supported client", discovery)
         self.assertIn("retained experimental compatibility", acceptance)
+
+    def test_generated_codex_profile_escapes_legal_hostile_paths(self) -> None:
+        workspace = Path('/tmp/work"space\\line\nnext')
+        rendered = render_codex_profile(workspace)
+        self.assertIn(json.dumps(str(workspace / "creme")), rendered)
+        self.assertNotIn(str(workspace / "creme"), rendered)
+        self.assertIn('\\"', rendered)
+        self.assertIn('\\\\', rendered)
+        self.assertNotIn("\nnext", rendered)
+
+    def test_client_profile_write_is_private_atomic_and_leaves_no_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "client" / "creme.config.toml"
+            arguments = SimpleNamespace(
+                workspace_root=str(root / "workspace"),
+                write=True,
+                output=str(output),
+                replace=False,
+            )
+            self.assertEqual(cmd_client_profile(arguments), 0)
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+            self.assertEqual(
+                output.read_text(),
+                render_codex_profile((root / "workspace").resolve()),
+            )
+            self.assertEqual(list(output.parent.glob(output.name + ".tmp.*")), [])
 
 
 if __name__ == "__main__":

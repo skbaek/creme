@@ -40,4 +40,3 @@ retained as an explicitly experimental surface until live discovery is proven.
 
 See [client discovery](client-discovery.md) for current official discovery
 semantics and the permission-is-not-discovery negative control.
-

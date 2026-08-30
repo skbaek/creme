@@ -107,4 +107,3 @@ explicitly says otherwise.
 Completion means every mandatory goal condition maps to inspectable evidence
 on the exact candidate. Update the state brief at green boundaries and write a
 final report; a completed plan is not by itself a completed goal.
-

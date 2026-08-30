@@ -193,4 +193,3 @@ def write_reviewed(path: Path, profile: dict[str, Any]) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-

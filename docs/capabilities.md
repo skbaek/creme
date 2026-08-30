@@ -38,4 +38,3 @@ holds under an `flock` mutex. A lease expiry does not release a hold. Breaking
 requires expiry plus a same-invocation quiet-host result; manual macOS holds
 also require a successful other-GUI-session scan. Corrupt state is reported
 and never reset automatically.
-

@@ -270,4 +270,3 @@ def break_expired(label: str, reason: str, adapter: Optional[Adapter] = None) ->
         _save(path, state)
     _log("break", label, "OK", reason)
     return True, "expired hold broken after fail-closed quiet-host certification"
-

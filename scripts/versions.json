@@ -6,4 +6,3 @@
   "supported_os": ["Darwin", "Linux"],
   "clients": ["Codex", "Claude Code", "Antigravity"]
 }
-

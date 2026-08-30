@@ -143,19 +143,25 @@ Do not alter the real client home or global settings during this control.
 
 | Check | Codex | Claude Code |
 | --- | --- | --- |
-| Client version recorded |  |  |
-| Exact Creme commit recorded |  |  |
-| CWD/project is Creme |  |  |
-| Root instructions observed |  |  |
-| `lean-inspector` observed and invoked |  |  |
-| `lean-prover` observed |  |  |
-| Pinned Lean MCP observed |  |  |
-| Lean MCP diagnostics returned |  |  |
-| Jaune ordinary read succeeded |  |  |
-| Blanc ordinary read succeeded |  |  |
-| Wrong-root control omitted Creme discovery |  |  |
-| Synthetic access-without-discovery control passed |  |  |
-| Trust and approvals explicitly recorded |  |  |
+| Client version recorded | CLI 0.151.0-alpha.7.1 | Desktop 1.34493.1; CLI absent |
+| Exact Creme commit recorded | `df2c2b431f3a67438a1eca8ff4f743f0c585c148` | OPEN |
+| CWD/project is Creme | PASS, two ephemeral tasks | OPEN; desktop locked |
+| Root instructions observed | PASS | OPEN |
+| `lean-inspector` observed and invoked | observed; invocation OPEN | OPEN |
+| `lean-prover` observed | PASS | OPEN |
+| Pinned Lean MCP observed | 22 tools in current trusted client; zero with ignored user trust | OPEN |
+| Lean MCP diagnostics returned | OPEN; external hard semaphore held | OPEN |
+| Jaune ordinary read succeeded | PASS | OPEN |
+| Blanc ordinary read succeeded | PASS | OPEN |
+| Wrong-root control omitted Creme discovery | synthetic PASS; live client matrix OPEN | OPEN |
+| Synthetic access-without-discovery control passed | PASS | PASS static fixture only |
+| Trust and approvals explicitly recorded | current trust is not clean-room evidence | OPEN |
+
+Task identifiers and the two Codex configuration controls are recorded in
+`acceptance/self-hosting.md`. This table is deliberately incomplete: an
+observed tool registry without a tool invocation is not MCP liveness, inherited
+trust is not a fresh approval, and the static Claude fixture is not a live
+Claude session.
 
 Antigravity is recorded separately as retained experimental compatibility. It
 does not satisfy either required v0.1 client column until a dedicated live

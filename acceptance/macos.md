@@ -2,7 +2,7 @@
 
 Date: 2026-08-31 (Asia/Seoul)
 Candidate exercised: local Creme `main` at
-`10e1b96cca71230b13ade9371ad64a82543d4cfa`
+`c8df90ffde564d82d2d46bbe7df0d5600c6b2911`
 
 Host facts are reported only at public-safe granularity: Darwin arm64, 10
 logical cores, 24 GiB physical memory. The ignored live profile fingerprinted
@@ -10,7 +10,7 @@ those static facts and validated `VALID`; no live profile is tracked.
 
 | Workflow | Command/control | Verdict |
 |---|---|---|
-| portable suite | `./scripts/check.sh` | PASS, 35 tests |
+| portable suite | `./scripts/check.sh` | PASS, 44 tests |
 | adapter selection | `python3 -m creme platform` | PASS, Darwin selected |
 | host initialization | preview, reviewed `init --write`, `validate-profile` | PASS, `VALID` |
 | doctor | `python3 -m creme doctor --workspace-root <workspace> --json` | PASS, no failed checks |
@@ -23,9 +23,29 @@ those static facts and validated `VALID`; no live profile is tracked.
 | fresh Codex discovery | see `acceptance/self-hosting.md` | PASS for discovery; write-mode task not launched |
 | fresh Claude discovery | installed Desktop app was detected, but desktop was locked | OPEN |
 
-The three disposable cache/semaphore/temp directories were removed after their
-contents and state transitions were verified. No live global client config or
-client database was mutated.
+## Representative sibling edits
+
+Both edits ran serially under the shared soft semaphore. Each used a detached,
+disposable worktree at the exact public-onboarding branch commit, copied the
+corresponding main checkout's `.lake` directory through Creme's preview-first
+cache-copy command, added only an untracked `CremeSmoke.lean`, and was removed
+after verification.
+
+| Repository | Exact commit | Edit and compilation | Cheap repository gate | Verdict |
+|---|---|---|---|---|
+| Jaune | `92b2b1eca27a569942175c2647de2b41d7402765` | `import Jaune`; `example (n : Nat) : n = n := by rfl`; `lake env lean CremeSmoke.lean` | `scripts/check-hygiene.sh`; `scripts/check-integrity.sh` | PASS; 0 unallowlisted hygiene findings and 0 pending integrity findings |
+| Blanc | `162b84020f1462bc490e4f7793ce01cbf4807b1b` | `import Blanc`; same theorem; `lake env lean CremeSmoke.lean` | `scripts/check-doc-counts.sh`; `scripts/check-layering.sh` | PASS; 12/12 counts and 229 modules with no layering violation |
+
+The first Jaune invocation intentionally demonstrated the blank-worktree
+failure mode: dependencies were fetched but the project module was not yet
+built, so `Jaune` was unavailable. The documented worktree cache-copy step was
+then applied and the exact command passed. This is prerequisite evidence, not
+a suppressed failure. Both cache copies selected APFS clone; no tracked source
+or build dependency was changed.
+
+All disposable cache/semaphore/temp directories and sibling smoke worktrees
+were removed after their contents and state transitions were verified. No live
+global client config or client database was mutated.
 
 ## Intentional differences from the private helpers
 

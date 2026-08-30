@@ -67,11 +67,11 @@
       "ref": "629f7f4bb545d5f8aee7cd2b4cabfd240ae904ab",
       "path": ".agents/skills/lean-prover/resources/proof-checklist.md",
       "sha256": "39e0785e5a9851a7498410ae90327493698794e617957342690147965b48fd35",
-      "classification": "move",
+      "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/resources/proof-checklist.md"],
-      "rationale": "The checklist is already generic, public-safe, and byte-for-byte reusable.",
+      "rationale": "Retain generic tactic hygiene while leaving dated Blanc proof-performance measurements and doctrine in Blanc.",
       "license_disposition": "publication-blocked-pending-user-selected-license",
-      "transitive_evidence_disposition": "none"
+      "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
       "id": "elanc-tool-readme",
@@ -151,11 +151,11 @@
       "ref": "629f7f4bb545d5f8aee7cd2b4cabfd240ae904ab",
       "path": ".agents/skills/lean-prover/tools/procmon.py",
       "sha256": "a96583ab0fd4a92c717e6deb0ee3a40312cd64a81c1f9d0f7bc11194ef54cf40",
-      "classification": "move",
+      "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/tools/procmon.py"],
-      "rationale": "The process monitor is generic and was copied byte-for-byte; platform capability selection remains outside it.",
+      "rationale": "Retain generic process-tree sampling while routing process discovery through Creme OS adapters and removing host-specific measurements.",
       "license_disposition": "publication-blocked-pending-user-selected-license",
-      "transitive_evidence_disposition": "none"
+      "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
       "id": "elanc-tool-quadrant-bench",
@@ -175,9 +175,9 @@
       "ref": "629f7f4bb545d5f8aee7cd2b4cabfd240ae904ab",
       "path": ".agents/skills/lean-prover/tools/rule.py",
       "sha256": "8ceb240e03e8c341304b09a22038acab683f293cde091d901dc940568eb4c9f0",
-      "classification": "move",
+      "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/tools/rule.py"],
-      "rationale": "The mechanical helper remains available for explicit bounded use and was copied byte-for-byte; prose no longer grants it policy authority.",
+      "rationale": "Retain the mechanical decision engine but require caller-supplied, reviewed model constants instead of private fitted values.",
       "license_disposition": "publication-blocked-pending-user-selected-license",
       "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
@@ -187,11 +187,11 @@
       "ref": "629f7f4bb545d5f8aee7cd2b4cabfd240ae904ab",
       "path": ".agents/skills/lean-prover/tools/sample-targets.py",
       "sha256": "67c30047a9a4f924fc45e13259f68437045fad9096f54f9fc54c07ac6fe17035",
-      "classification": "move",
+      "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/tools/sample-targets.py"],
-      "rationale": "The target sampler is generic and was copied byte-for-byte.",
+      "rationale": "Retain generic stratified sampling while removing private fit targets and host/corpus cost constants.",
       "license_disposition": "publication-blocked-pending-user-selected-license",
-      "transitive_evidence_disposition": "none"
+      "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
       "id": "elanc-tool-score",
@@ -655,17 +655,17 @@
     {"destination": ".agents/mcp_config.json", "relationship": "derived", "source_ids": ["elanc-antigravity-mcp", "plans-creme-goal"]},
     {"destination": ".agents/skills/lean-inspector/SKILL.md", "relationship": "derived", "source_ids": ["elanc-skill-inspector"]},
     {"destination": ".agents/skills/lean-prover/SKILL.md", "relationship": "derived", "source_ids": ["elanc-skill-prover", "plans-lean-edit-loops"]},
-    {"destination": ".agents/skills/lean-prover/resources/proof-checklist.md", "relationship": "exact-copy", "source_ids": ["elanc-proof-checklist"], "sha256": "39e0785e5a9851a7498410ae90327493698794e617957342690147965b48fd35"},
+    {"destination": ".agents/skills/lean-prover/resources/proof-checklist.md", "relationship": "derived", "source_ids": ["elanc-proof-checklist"]},
     {"destination": ".agents/skills/lean-prover/tools/README.md", "relationship": "derived", "source_ids": ["elanc-tool-readme", "plans-lean-edit-loops"]},
     {"destination": ".agents/skills/lean-prover/tools/check-drift.py", "relationship": "exact-copy", "source_ids": ["elanc-tool-check-drift"], "sha256": "9d2277aa85b34ecb4cd4979d024be2e801b36e0ed3ffb47789838e1c3f4b09f6"},
     {"destination": ".agents/skills/lean-prover/tools/check-fidelity.py", "relationship": "derived", "source_ids": ["elanc-tool-check-fidelity", "plans-lean-edit-loops"]},
     {"destination": ".agents/skills/lean-prover/tools/leanlex.py", "relationship": "exact-copy", "source_ids": ["elanc-tool-leanlex"], "sha256": "f61910bdca7582e9557a471d780c7ba90599fa4b4f93e450369c75be43697516"},
     {"destination": ".agents/skills/lean-prover/tools/lsp-probe.py", "relationship": "exact-copy", "source_ids": ["elanc-tool-lsp-probe"], "sha256": "6c4af36790c976c458ae51e632647651ced3f1b5b4863d22f29df3485eed32ca"},
     {"destination": ".agents/skills/lean-prover/tools/mk-prefix.py", "relationship": "exact-copy", "source_ids": ["elanc-tool-mk-prefix", "plans-lean-edit-loops"], "sha256": "7feaf211cc238fb0251b8630edf75970e197572e9c23d589d755a87284e1b7af"},
-    {"destination": ".agents/skills/lean-prover/tools/procmon.py", "relationship": "exact-copy", "source_ids": ["elanc-tool-procmon"], "sha256": "a96583ab0fd4a92c717e6deb0ee3a40312cd64a81c1f9d0f7bc11194ef54cf40"},
+    {"destination": ".agents/skills/lean-prover/tools/procmon.py", "relationship": "derived", "source_ids": ["elanc-tool-procmon"]},
     {"destination": ".agents/skills/lean-prover/tools/quadrant-bench.py", "relationship": "derived", "source_ids": ["elanc-tool-quadrant-bench", "plans-lean-edit-loops"]},
-    {"destination": ".agents/skills/lean-prover/tools/rule.py", "relationship": "exact-copy", "source_ids": ["elanc-tool-rule", "plans-lean-edit-loops"], "sha256": "8ceb240e03e8c341304b09a22038acab683f293cde091d901dc940568eb4c9f0"},
-    {"destination": ".agents/skills/lean-prover/tools/sample-targets.py", "relationship": "exact-copy", "source_ids": ["elanc-tool-sample-targets"], "sha256": "67c30047a9a4f924fc45e13259f68437045fad9096f54f9fc54c07ac6fe17035"},
+    {"destination": ".agents/skills/lean-prover/tools/rule.py", "relationship": "derived", "source_ids": ["elanc-tool-rule", "plans-lean-edit-loops"]},
+    {"destination": ".agents/skills/lean-prover/tools/sample-targets.py", "relationship": "derived", "source_ids": ["elanc-tool-sample-targets"]},
     {"destination": ".claude/settings.json", "relationship": "derived", "source_ids": ["elanc-claude-settings", "plans-creme-goal"]},
     {"destination": ".claude/skills/lean-inspector", "relationship": "derived-symlink", "source_ids": ["elanc-claude-skills-link"], "symlink_target": "../../.agents/skills/lean-inspector"},
     {"destination": ".claude/skills/lean-prover", "relationship": "derived-symlink", "source_ids": ["elanc-claude-skills-link"], "symlink_target": "../../.agents/skills/lean-prover"},

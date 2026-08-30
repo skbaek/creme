@@ -96,6 +96,27 @@ class DarwinAdapter(Adapter):
         }
         return self.result("telemetry", "OK", "Darwin telemetry sampled", data)
 
+    def process_snapshot(self) -> CapabilityResult:
+        try:
+            processes = self._run(["/bin/ps", "-axo", "pid=,ppid=,rss=,comm="])
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self.result("process_snapshot", "UNAVAILABLE", str(exc))
+        if processes.returncode:
+            return self.result("process_snapshot", "UNAVAILABLE", "Darwin ps snapshot failed")
+        rows = []
+        for line in processes.stdout.splitlines():
+            fields = line.split(maxsplit=3)
+            if len(fields) != 4:
+                continue
+            try:
+                rows.append({
+                    "pid": int(fields[0]), "ppid": int(fields[1]),
+                    "rss_kib": int(fields[2]), "command": Path(fields[3]).name,
+                })
+            except ValueError:
+                continue
+        return self.result("process_snapshot", "OK", "Darwin process snapshot sampled", {"processes": rows})
+
     def quiet_host(self) -> CapabilityResult:
         sample = self.telemetry()
         if sample.status != "OK" or not sample.data:

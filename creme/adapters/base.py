@@ -57,6 +57,12 @@ class Adapter:
             "cannot certify host quiet on an unsupported platform",
         )
 
+    def process_snapshot(self) -> CapabilityResult:
+        return self.result(
+            "process_snapshot", "UNAVAILABLE",
+            f"process snapshots are not implemented for {self.system}",
+        )
+
     def gui_sessions(self, owner_uid: int) -> CapabilityResult:
         return self.result(
             "human_gui_sessions", "UNAVAILABLE",

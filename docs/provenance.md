@@ -22,20 +22,16 @@ ownership evidence but is not a license grant.
 
 Creme's reviewed history begins with `ec0972b` and the self-hosting spine; it
 does not share or merge the private source histories. Exact provenance is
-content-level and limited to the eight files named below.
+content-level and limited to the four files named below.
 
 ## Exact copies and derived content
 
-Eight artifacts are byte-for-byte moves from Elanc:
+Four artifacts are byte-for-byte moves from Elanc:
 
-- `.agents/skills/lean-prover/resources/proof-checklist.md`
 - `.agents/skills/lean-prover/tools/check-drift.py`
 - `.agents/skills/lean-prover/tools/leanlex.py`
 - `.agents/skills/lean-prover/tools/lsp-probe.py`
 - `.agents/skills/lean-prover/tools/mk-prefix.py`
-- `.agents/skills/lean-prover/tools/procmon.py`
-- `.agents/skills/lean-prover/tools/rule.py`
-- `.agents/skills/lean-prover/tools/sample-targets.py`
 
 For each, the destination SHA-256 equals the recorded source SHA-256. All other
 artifacts are explicitly `derived`, `derived-symlink`, or

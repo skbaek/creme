@@ -39,8 +39,8 @@ path from silently selecting the wrong tree.
 
 ## The measurement instruments
 
-These produced the guide's constants. They are kept because a constant nobody
-can re-measure is a constant nobody can correct.
+These instruments support a new reviewed measurement packet. Creme does not
+ship private host/corpus constants as portable policy.
 
 | tool | what it does |
 |---|---|
@@ -60,8 +60,8 @@ toolchain bump requires re-deriving it.
 ## Re-measuring the guide's constants
 
 ```sh
-python3 sample-targets.py --workdir <worktree> --seed <N> -n 24 \
-        --tier-bounds 2.5,15 --max-baseline 40 --out draw.json
+python3 sample-targets.py --workdir <worktree> --seed <N> -n <COUNT> \
+        --tier-bounds <LOW>,<HIGH> --max-baseline <SECONDS> --out draw.json
 python3 quadrant-bench.py --workdir <worktree> --module Blanc/X.lean --decl NAME \
         -k 3 --separate-lsp-servers --fidelity full --out rec.json
 ```
@@ -71,6 +71,4 @@ part of Creme v0.1. Recompute public decision constants with reviewed records
 and a separately reviewed scoring packet before publishing them.
 
 Any run whose output is a timing takes the host **exclusively** — no other
-agent, gate, build, or sweep. This is not a formality: an unchanged
-configuration measured 6.5 s beside an idle host and 11.3 s beside a foreign
-Lean tree.
+agent, gate, build, or sweep. Concurrent elaboration invalidates attribution.

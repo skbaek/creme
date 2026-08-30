@@ -88,6 +88,30 @@ class LinuxAdapter(Adapter):
         }
         return self.result("telemetry", "OK", "Linux telemetry sampled", data)
 
+    def process_snapshot(self) -> CapabilityResult:
+        try:
+            processes = subprocess.run(
+                ["ps", "-eo", "pid=,ppid=,rss=,comm="],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self.result("process_snapshot", "UNAVAILABLE", str(exc))
+        if processes.returncode:
+            return self.result("process_snapshot", "UNAVAILABLE", "Linux ps snapshot failed")
+        rows = []
+        for line in processes.stdout.splitlines():
+            fields = line.split(maxsplit=3)
+            if len(fields) != 4:
+                continue
+            try:
+                rows.append({
+                    "pid": int(fields[0]), "ppid": int(fields[1]),
+                    "rss_kib": int(fields[2]), "command": Path(fields[3]).name,
+                })
+            except ValueError:
+                continue
+        return self.result("process_snapshot", "OK", "Linux process snapshot sampled", {"processes": rows})
+
     def quiet_host(self) -> CapabilityResult:
         sample = self.telemetry()
         if sample.status != "OK" or not sample.data:
@@ -122,4 +146,3 @@ class LinuxAdapter(Adapter):
                 return self.result("cache_copy", "OK", "Linux reflink-auto copy completed", data)
         fallback = super().copy_cache(source, destination, True)
         return self.result("cache_copy", fallback.status, "reflink copy unavailable; portable copy used", fallback.data)
-

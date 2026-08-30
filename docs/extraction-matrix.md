@@ -28,17 +28,17 @@ for, the machine ledger.
 | `.agents/mcp_config.json` | split | `.agents/mcp_config.json` | Keep the Antigravity-compatible pinned MCP surface; remove host wording. | L1 / E0 |
 | `.agents/skills/lean-inspector/SKILL.md` | split | same path | Keep inspection workflow; replace private-root assumptions with Creme/sibling authority. | L1 / E0 |
 | `.agents/skills/lean-prover/SKILL.md` | split | same path | Keep reusable proof workflow; point project doctrine back to Jaune/Blanc. | L1 / E0 |
-| `.agents/skills/lean-prover/resources/proof-checklist.md` | move | same path | Exact copy; SHA-256 `39e0785e…48fd35`. | L1 / E0 |
+| `.agents/skills/lean-prover/resources/proof-checklist.md` | split | same path | Keep generic tactic hygiene; leave dated Blanc proof-performance evidence in Blanc. | L1 / E1 |
 | `.agents/skills/lean-prover/tools/README.md` | split | same path | Remove private paths and the superseded cost-only selector; retain lifecycle guidance. | L1 / E1 |
 | `.agents/skills/lean-prover/tools/check-drift.py` | move | same path | Exact copy; SHA-256 `9d2277aa…4b09f6`. | L1 / E0 |
 | `.agents/skills/lean-prover/tools/check-fidelity.py` | split | same path | Retain semantic-fidelity checks under the revised verdict-first method. | L1 / E1 |
 | `.agents/skills/lean-prover/tools/leanlex.py` | move | same path | Exact copy; SHA-256 `f61910bd…97516`. | L1 / E0 |
 | `.agents/skills/lean-prover/tools/lsp-probe.py` | move | same path | Exact copy; SHA-256 `6c4af367…d32ca`. | L1 / E0 |
 | `.agents/skills/lean-prover/tools/mk-prefix.py` | move | same path | Exact copy; SHA-256 `7feaf211…1b7af`. Private experiments justify use but are not runtime inputs. | L1 / E1 |
-| `.agents/skills/lean-prover/tools/procmon.py` | move | same path | Exact copy; SHA-256 `a96583ab…54cf40`; OS selection stays in adapters. | L1 / E0 |
+| `.agents/skills/lean-prover/tools/procmon.py` | split | same path | Route process discovery through the OS adapter; remove host timing constants. | L1 / E1 |
 | `.agents/skills/lean-prover/tools/quadrant-bench.py` | split | same path | Keep measurements advisory; remove policy authority from the refuted model. | L1 / E1 |
-| `.agents/skills/lean-prover/tools/rule.py` | move | same path | Exact copy; SHA-256 `8ceb240e…c9f0`; prose limits it to explicit bounded use. | L1 / E1 |
-| `.agents/skills/lean-prover/tools/sample-targets.py` | move | same path | Exact copy; SHA-256 `67c30047…17035`. | L1 / E0 |
+| `.agents/skills/lean-prover/tools/rule.py` | split | same path | Keep the engine; require caller-supplied reviewed model constants. | L1 / E1 |
+| `.agents/skills/lean-prover/tools/sample-targets.py` | split | same path | Remove private fit targets and host/corpus cost constants. | L1 / E1 |
 | `.agents/skills/lean-prover/tools/score.py` | retire | — | It promotes the cost-only selection rule contradicted by later experiments. | L0 / E1 |
 | `.agents/skills/lean-prover/tools/selftest.py` | retire | — | It tests only the retired scoring policy. | L0 / E1 |
 | `.claude/agents/worker-high.md` | remain | — | Current public core does not need client-specific worker presets. | L0 / E0 |
@@ -91,9 +91,8 @@ skills and tools, root instructions/shims, client-discovery evidence, the host
 profile and capability implementation, relevant entry points, and current
 tests. Thin package initializers and wholly new glue are not provenance claims.
 
-The exact-copy set is intentionally small: the proof checklist and seven Python
-tools (`check-drift.py`, `leanlex.py`, `lsp-probe.py`, `mk-prefix.py`,
-`procmon.py`, `rule.py`, and `sample-targets.py`). All other carried content is
+The exact-copy set is intentionally small: four Python tools (`check-drift.py`,
+`leanlex.py`, `lsp-probe.py`, and `mk-prefix.py`). All other carried content is
 marked derived or compatibility-only, even where the semantic change is small.
 
 ## Cutover consequences

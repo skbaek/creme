@@ -109,7 +109,7 @@ class ClientSurfaceTest(unittest.TestCase):
             ROOT / ".agents/mcp_config.json",
         )
         forbidden = (
-            re.compile(r"/Users/"),
+            re.compile("/" + "Users" + "/"),
             re.compile(r"/home/[^/]+/"),
             re.compile(r"~/(?:\.codex|\.claude)/"),
             re.compile(r"(?i)(?:api[_-]?key|access[_-]?token|secret)\s*[:=]"),

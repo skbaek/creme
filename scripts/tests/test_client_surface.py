@@ -1,0 +1,133 @@
+"""Static checks for Creme's committed, public client surface.
+
+These tests parse files only. They deliberately do not launch a client, start
+MCP, inspect a user's home directory, or mutate trust/approval state.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import re
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+PINNED_MCP = "lean-lsp-mcp==0.26.1"
+SKILLS = ("lean-inspector", "lean-prover")
+
+
+def _json(relative: str) -> dict:
+    return json.loads((ROOT / relative).read_text(encoding="utf-8"))
+
+
+class ClientSurfaceTest(unittest.TestCase):
+    def test_canonical_instruction_shim(self) -> None:
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        normalized_agents = " ".join(agents.split())
+        self.assertIn("Creme is the public launch root", agents)
+        self.assertIn("does not load these instructions", normalized_agents)
+        self.assertLess(len(agents.encode("utf-8")), 32 * 1024)
+        self.assertEqual(
+            (ROOT / "CLAUDE.md").read_text(encoding="utf-8").strip(),
+            "@AGENTS.md",
+        )
+
+    def test_codex_config_is_project_scoped_and_pinned(self) -> None:
+        text = (ROOT / ".codex/config.toml").read_text(encoding="utf-8")
+        sections = re.findall(r"^\[([^]]+)]\s*$", text, flags=re.MULTILINE)
+        self.assertTrue(sections)
+        self.assertTrue(
+            all(section.startswith("mcp_servers.lean-lsp-mcp") for section in sections)
+        )
+        self.assertRegex(text, r'(?m)^command\s*=\s*"uvx"\s*$')
+        self.assertRegex(
+            text, rf'(?m)^args\s*=\s*\["{re.escape(PINNED_MCP)}"\]\s*$'
+        )
+        self.assertRegex(text, r"(?m)^required\s*=\s*true\s*$")
+        self.assertRegex(
+            text,
+            r'(?m)^default_tools_approval_mode\s*=\s*"writes"\s*$',
+        )
+        self.assertNotRegex(text, r"(?m)^\[permissions(?:\.|])")
+        self.assertNotRegex(text, r"(?m)^\[projects(?:\.|])")
+
+    def test_claude_settings_grant_only_relative_sibling_access(self) -> None:
+        settings = _json(".claude/settings.json")
+        self.assertEqual(set(settings), {"$schema", "permissions"})
+        permissions = settings["permissions"]
+        self.assertEqual(set(permissions), {"additionalDirectories"})
+        self.assertEqual(
+            permissions["additionalDirectories"], ["../jaune/", "../blanc/"]
+        )
+        for path in permissions["additionalDirectories"]:
+            self.assertFalse(Path(path).is_absolute())
+        self.assertNotIn("enableAllProjectMcpServers", settings)
+        self.assertNotIn("allow", permissions)
+
+    def test_mcp_surfaces_have_one_matching_pinned_server(self) -> None:
+        claude = _json(".mcp.json")
+        antigravity = _json(".agents/mcp_config.json")
+        self.assertEqual(set(claude["mcpServers"]), {"lean-lsp-mcp"})
+        self.assertEqual(set(antigravity["mcpServers"]), {"lean-lsp-mcp"})
+        claude_server = claude["mcpServers"]["lean-lsp-mcp"]
+        antigravity_server = antigravity["mcpServers"]["lean-lsp-mcp"]
+        self.assertEqual(claude_server.get("type", "stdio"), "stdio")
+        self.assertEqual(
+            {key: value for key, value in claude_server.items() if key != "type"},
+            antigravity_server,
+        )
+        self.assertEqual(claude_server["command"], "uvx")
+        self.assertEqual(claude_server["args"], [PINNED_MCP])
+
+        codex = (ROOT / ".codex/config.toml").read_text(encoding="utf-8")
+        codex_descriptions = re.search(
+            r"(?ms)^LEAN_MCP_TOOL_DESCRIPTIONS\s*=\s*'''(.*?)'''\s*$",
+            codex,
+        )
+        self.assertIsNotNone(codex_descriptions)
+        self.assertEqual(
+            json.loads(codex_descriptions.group(1)),
+            json.loads(claude_server["env"]["LEAN_MCP_TOOL_DESCRIPTIONS"]),
+        )
+
+    def test_claude_skills_are_documented_per_skill_symlinks(self) -> None:
+        for skill in SKILLS:
+            canonical = ROOT / ".agents/skills" / skill
+            skill_file = canonical / "SKILL.md"
+            shim = ROOT / ".claude/skills" / skill
+            with self.subTest(skill=skill):
+                self.assertTrue(skill_file.is_file(), skill_file)
+                self.assertTrue(shim.is_symlink(), shim)
+                self.assertEqual(shim.resolve(), canonical.resolve())
+
+    def test_machine_readable_surface_has_no_host_paths_or_credentials(self) -> None:
+        files = (
+            ROOT / ".codex/config.toml",
+            ROOT / ".claude/settings.json",
+            ROOT / ".mcp.json",
+            ROOT / ".agents/mcp_config.json",
+        )
+        forbidden = (
+            re.compile(r"/Users/"),
+            re.compile(r"/home/[^/]+/"),
+            re.compile(r"~/(?:\.codex|\.claude)/"),
+            re.compile(r"(?i)(?:api[_-]?key|access[_-]?token|secret)\s*[:=]"),
+        )
+        for path in files:
+            text = path.read_text(encoding="utf-8")
+            for pattern in forbidden:
+                with self.subTest(path=path.relative_to(ROOT), pattern=pattern.pattern):
+                    self.assertIsNone(pattern.search(text))
+
+    def test_antigravity_is_retained_but_not_acceptance_supported(self) -> None:
+        discovery = (ROOT / "docs/client-discovery.md").read_text(encoding="utf-8")
+        acceptance = (ROOT / "acceptance/client-discovery.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("experimental and not a v0.1 acceptance-supported client", discovery)
+        self.assertIn("retained experimental compatibility", acceptance)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -26,4 +26,3 @@ copy of operational policy alive.
 
 Creme is optional for building Jaune or Blanc. Users who do not want the
 enhanced agent workflow continue to clone and build either library normally.
-

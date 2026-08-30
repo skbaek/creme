@@ -72,4 +72,3 @@ completed task list. Re-run drift-prone checks, close independent review
 findings, account for compatibility paths, and report branch/worktree/push
 state. If a user-owned publication, license, or protected-merge gate remains,
 the goal remains open.
-

@@ -84,4 +84,3 @@ snapshot and refuses ambiguous subtrees.
 - [Lean edit loops](docs/guides/lean-edit-loops.md)
 - [Migration from Elanc/Plans](docs/migration.md)
 - [Provenance](docs/provenance.md)
-

@@ -41,4 +41,3 @@ The lead may adapt internal implementation, packet boundaries, and cheap test
 selection. Changes to objective, public claim, security boundary, supported
 platforms, license, remote, or a protected/default merge require the authority
 named in the goal.
-

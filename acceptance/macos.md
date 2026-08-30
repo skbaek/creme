@@ -2,7 +2,7 @@
 
 Date: 2026-08-31 (Asia/Seoul)
 Candidate exercised: local Creme `main` at
-`c8df90ffde564d82d2d46bbe7df0d5600c6b2911`
+`df2c2b431f3a67438a1eca8ff4f743f0c585c148`
 
 Host facts are reported only at public-safe granularity: Darwin arm64, 10
 logical cores, 24 GiB physical memory. The ignored live profile fingerprinted
@@ -10,17 +10,17 @@ those static facts and validated `VALID`; no live profile is tracked.
 
 | Workflow | Command/control | Verdict |
 |---|---|---|
-| portable suite | `./scripts/check.sh` | PASS, 44 tests |
+| portable suite | `./scripts/check.sh` | PASS, 52 tests plus compile and working/committed-tree whitespace checks |
 | adapter selection | `python3 -m creme platform` | PASS, Darwin selected |
 | host initialization | preview, reviewed `init --write`, `validate-profile` | PASS, `VALID` |
 | doctor | `python3 -m creme doctor --workspace-root <workspace> --json` | PASS, no failed checks |
 | live telemetry | `python3 -m creme telemetry` outside the command sandbox | PASS, structured sample; no Lean processes |
 | reclaim safety | `python3 -m creme reclaim --dry-run` outside the command sandbox | PASS, zero owned/foreign targets and no signals |
-| cache copy | copied tracked `config/` to a disposable destination, then `diff -r` | PASS, APFS clone selected and bytes matched |
+| cache copy | copied tracked `config/` to a disposable destination, then `diff -r`; repeated after staged-copy hardening | PASS, APFS clone selected, bytes matched, and no owned stage remained |
 | temp directory | `python3 -m creme tempdir --create --prefix creme-acceptance-` | PASS, valid Darwin runtime temp root |
 | semaphore X/Y | two soft holds; hard refused; release X; Y converts to hard; release | PASS, expected refusal and transitions |
 | wrong root | doctor invoked from Jaune with Creme on `PYTHONPATH` | PASS negative control, exit 1 with `WRONG_ROOT` |
-| fresh Codex discovery | see `acceptance/self-hosting.md` | PASS for discovery; write-mode task not launched |
+| fresh Codex discovery | see `acceptance/self-hosting.md` | PASS for exact-root discovery and trusted-client registration; MCP invocation remains open |
 | fresh Claude discovery | installed Desktop app was detected, but desktop was locked | OPEN |
 
 ## Representative sibling edits

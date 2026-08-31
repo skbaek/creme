@@ -392,7 +392,7 @@
       "path": "README.md",
       "sha256": "c886cfb38a77629c2b0e2d46d308a004245c832828f65462e1e90ef6b9a4c2ca",
       "classification": "split",
-      "destination_paths": ["AGENTS.md", "README.md", "docs/client-discovery.md", "docs/migration.md"],
+      "destination_paths": ["AGENTS.md", "README.md", "docs/client-discovery.md", "docs/migration.md", "docs/setup.md"],
       "rationale": "The launch-root and setup concepts move into canonical instructions and client discovery; Elanc branding and private layout prose do not.",
       "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
@@ -404,7 +404,7 @@
       "path": "docs/migration.md",
       "sha256": "dc286a7314aa216630a4a188529d11c6a9cca718eb7c2c74fca3fb68032fca36",
       "classification": "split",
-      "destination_paths": ["AGENTS.md", "docs/client-discovery.md", "acceptance/client-discovery.md", "docs/migration.md", "scripts/tests/test_client_surface.py", "scripts/tests/test_permission_is_not_discovery.py"],
+      "destination_paths": ["AGENTS.md", "docs/client-discovery.md", "acceptance/client-discovery.md", "docs/migration.md", "docs/setup.md", "scripts/tests/test_client_surface.py", "scripts/tests/test_permission_is_not_discovery.py"],
       "rationale": "Reuse the permission-is-not-discovery and launch-root lessons, with fresh public client evidence and no private host instructions.",
       "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
@@ -440,7 +440,7 @@
       "path": "docs/setup.md",
       "sha256": "d33369d4c4a0ff245f3303e83fd5a2b064122a094f6cdb108f5d36d44ca2372f",
       "classification": "split",
-      "destination_paths": ["AGENTS.md", "README.md", "docs/client-discovery.md", "docs/host-profile.md", "docs/migration.md", "creme/cli.py", "scripts/creme"],
+      "destination_paths": ["AGENTS.md", "README.md", "docs/client-discovery.md", "docs/host-profile.md", "docs/migration.md", "docs/setup.md", "creme/cli.py", "scripts/creme", "scripts/tests/test_client_surface.py"],
       "rationale": "Preserve reviewed setup concepts through a portable CLI and public launch guidance; do not copy machine-local paths or implicit global mutations.",
       "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
@@ -536,7 +536,7 @@
       "path": "creme-agent-infrastructure-goal.md",
       "sha256": "7beba8d11650c225a9fee572933ae45dfbdd913f505fee668dffb157f5a2b2fa",
       "classification": "split",
-      "destination_paths": ["AGENTS.md", "README.md", ".gitignore", ".claude/settings.json", ".codex/config.toml", ".mcp.json", ".agents/mcp_config.json", ".github/workflows/ci.yml", "docs/architecture.md", "docs/capabilities.md", "docs/client-discovery.md", "docs/guides/execution.md", "docs/host-profile.md", "docs/migration.md", "acceptance/client-discovery.md", "config/host-profile.schema.json", "config/host-profile.example.json", "creme/adapters/__init__.py", "creme/adapters/base.py", "creme/adapters/darwin.py", "creme/adapters/linux.py", "creme/doctor.py", "creme/profile.py", "creme/cli.py", "scripts/check.sh", "scripts/creme", "scripts/versions.json", "scripts/tests/test_adapters.py", "scripts/tests/test_client_surface.py", "scripts/tests/test_doctor.py", "scripts/tests/test_permission_is_not_discovery.py", "scripts/tests/test_profile.py", "scripts/tests/test_semaphore.py"],
+      "destination_paths": ["AGENTS.md", "README.md", ".gitignore", ".claude/settings.json", ".codex/config.toml", ".mcp.json", ".agents/mcp_config.json", ".github/workflows/ci.yml", "docs/architecture.md", "docs/capabilities.md", "docs/client-discovery.md", "docs/guides/execution.md", "docs/host-profile.md", "docs/migration.md", "docs/setup.md", "acceptance/client-discovery.md", "config/host-profile.schema.json", "config/host-profile.example.json", "creme/adapters/__init__.py", "creme/adapters/base.py", "creme/adapters/darwin.py", "creme/adapters/linux.py", "creme/doctor.py", "creme/profile.py", "creme/cli.py", "scripts/check.sh", "scripts/creme", "scripts/versions.json", "scripts/tests/test_adapters.py", "scripts/tests/test_client_surface.py", "scripts/tests/test_doctor.py", "scripts/tests/test_permission_is_not_discovery.py", "scripts/tests/test_profile.py", "scripts/tests/test_semaphore.py"],
       "rationale": "The private goal supplies reviewed product boundaries and acceptance requirements; reusable outcomes are implemented without publishing the goal or making it a runtime dependency.",
       "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "remain-private-goal-not-runtime-dependency"
@@ -695,10 +695,11 @@
     {"destination": "docs/guides/lean-edit-loops.md", "relationship": "derived", "source_ids": ["plans-lean-edit-loops"]},
     {"destination": "docs/host-profile.md", "relationship": "derived", "source_ids": ["elanc-setup-doc", "elanc-doctor", "plans-creme-goal", "plans-memory-extraction"]},
     {"destination": "docs/migration.md", "relationship": "derived", "source_ids": ["elanc-readme", "elanc-migration", "elanc-setup-doc", "plans-creme-goal"]},
+    {"destination": "docs/setup.md", "relationship": "derived", "source_ids": ["elanc-readme", "elanc-migration", "elanc-setup-doc", "plans-creme-goal"]},
     {"destination": "scripts/check.sh", "relationship": "derived", "source_ids": ["elanc-ci", "plans-creme-goal"]},
     {"destination": "scripts/creme", "relationship": "derived", "source_ids": ["elanc-setup-doc", "plans-creme-goal"]},
     {"destination": "scripts/tests/test_adapters.py", "relationship": "derived", "source_ids": ["elanc-telemetry", "elanc-doctor", "plans-creme-goal"]},
-    {"destination": "scripts/tests/test_client_surface.py", "relationship": "derived", "source_ids": ["elanc-migration", "plans-creme-goal"]},
+    {"destination": "scripts/tests/test_client_surface.py", "relationship": "derived", "source_ids": ["elanc-migration", "elanc-setup-doc", "plans-creme-goal"]},
     {"destination": "scripts/tests/test_doctor.py", "relationship": "derived", "source_ids": ["elanc-doctor", "elanc-doctor-test", "plans-creme-goal"]},
     {"destination": "scripts/tests/test_permission_is_not_discovery.py", "relationship": "derived", "source_ids": ["elanc-migration", "plans-creme-goal"]},
     {"destination": "scripts/tests/test_profile.py", "relationship": "derived", "source_ids": ["elanc-doctor", "elanc-doctor-test", "plans-creme-goal"]},

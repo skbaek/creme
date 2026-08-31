@@ -133,6 +133,34 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertIn("experimental and not a v0.1 acceptance-supported client", discovery)
         self.assertIn("retained experimental compatibility", acceptance)
 
+    def test_first_machine_setup_is_public_and_self_contained(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        setup = (ROOT / "docs/setup.md").read_text(encoding="utf-8")
+        self.assertIn("docs/setup.md", readme)
+        for repository in ("creme", "jaune", "blanc"):
+            self.assertIn(
+                f"https://github.com/skbaek/{repository}.git",
+                setup,
+            )
+        for command in (
+            "python3 -m creme init",
+            "python3 -m creme validate-profile",
+            "python3 -m creme doctor",
+            "lake build",
+        ):
+            self.assertIn(command, setup)
+        for authority in (
+            "guides/goal.md",
+            "guides/execution.md",
+            "jaune/blob/main/scripts/GATES.md",
+            "blanc/blob/main/scripts/GATES.md",
+        ):
+            self.assertIn(authority, setup)
+        self.assertIn("Plans is not the method authority", setup)
+        self.assertNotIn("~/elanc", setup)
+        self.assertNotIn("/" + "Users" + "/", setup)
+        self.assertNotRegex(setup, r"/home/[^/]+/")
+
     def test_generated_codex_profile_escapes_legal_hostile_paths(self) -> None:
         workspace = Path('/tmp/work"space\\line\nnext')
         rendered = render_codex_profile(workspace)

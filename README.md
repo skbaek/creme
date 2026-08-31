@@ -17,21 +17,24 @@ host capabilities; an explicit `UNAVAILABLE` is a supported result.
 
 ## Blank-host setup
 
-Prerequisites are Git, Python 3.9 or newer, and a current Codex or Claude Code
-client. Lean work additionally needs `uvx` and the sibling repositories'
-documented Lean/Lake toolchain.
+For a new macOS or Linux account, start with the complete, preview-first
+[first-machine setup guide](docs/setup.md). It covers system prerequisites,
+Codex and Claude Code installation/trust, the Lean toolchain, disk planning,
+public cloning, host initialization, sibling builds, optional fixtures, and a
+representative client check.
+
+The shortest path after prerequisites are present is:
 
 ```sh
-mkdir agent-workspace
-cd agent-workspace
+cd ~
 git clone https://github.com/skbaek/creme.git creme
 git clone https://github.com/skbaek/jaune.git jaune
 git clone https://github.com/skbaek/blanc.git blanc
-cd creme
+cd ~/creme
 python3 -m creme platform
-python3 -m creme init
-python3 -m creme init --write
-python3 -m creme doctor
+python3 -m creme init --workspace-root ..
+python3 -m creme init --workspace-root .. --write
+python3 -m creme doctor --workspace-root ..
 ```
 
 `init` previews by default. Its live output is `.creme/host-profile.json`, which
@@ -56,6 +59,8 @@ filesystem access does not load Creme's instructions, skills, or MCP config.
 
 Before real work, read [AGENTS.md](AGENTS.md), the appropriate sibling's
 `scripts/GATES.md`, and [the execution guide](docs/guides/execution.md).
+New goal documents use [the public goal-writing guide](docs/guides/goal.md),
+even when a concrete goal is stored in a private repository.
 Client discovery and its negative control are documented in
 [docs/client-discovery.md](docs/client-discovery.md).
 
@@ -79,6 +84,7 @@ snapshot and refuses ambiguous subtrees.
 ## Design and migration
 
 - [Architecture and authority](docs/architecture.md)
+- [First-machine setup](docs/setup.md)
 - [Capability contract](docs/capabilities.md)
 - [Host profile](docs/host-profile.md)
 - [Goal contracts](docs/guides/goal.md)

@@ -56,11 +56,11 @@ not substitutes for, the machine ledger.
 | `.mcp.json` | split | `.mcp.json` | Keep the pinned Claude project server with explicit stdio/public-safe descriptions. | L1 / E0 |
 | `AGENTS.md` | split | `AGENTS.md`, `docs/guides/execution.md` | Extract generic workflow; repository doctrine and concrete state remain with their owners. | L1 / E0 |
 | `CLAUDE.md` | compatibility notice | `CLAUDE.md` | Preserve the one-line `@AGENTS.md` import; trailing-byte difference prevents an exact-copy claim. | L1 / E0 |
-| `README.md` | split | `AGENTS.md`, `README.md`, `docs/client-discovery.md`, `docs/migration.md` | Preserve launch/setup concepts, not Elanc branding or private layout prose. | L1 / E0 |
-| `docs/migration.md` | split | `AGENTS.md`, `docs/client-discovery.md`, `acceptance/client-discovery.md`, `docs/migration.md`, two client-surface tests | Preserve permission-is-not-discovery with fresh public evidence. | L1 / E0 |
+| `README.md` | split | `AGENTS.md`, `README.md`, `docs/client-discovery.md`, `docs/migration.md`, `docs/setup.md` | Preserve launch/setup concepts, not Elanc branding or private layout prose. | L1 / E0 |
+| `docs/migration.md` | split | `AGENTS.md`, `docs/client-discovery.md`, `acceptance/client-discovery.md`, `docs/migration.md`, `docs/setup.md`, two client-surface tests | Preserve permission-is-not-discovery with fresh public evidence. | L1 / E0 |
 | `docs/portability-acceptance-2026-07-24.md` | remain | — | Dated private acceptance stays historical and non-runtime. | L0 / E1 |
 | `docs/portability-plan.md` | remain | — | Superseded plan stays historical; current capability truth comes from Creme. | L0 / E1 |
-| `docs/setup.md` | split | instructions/README, client/host/migration docs, `creme/cli.py`, `scripts/creme` | Convert setup into a portable, preview-first flow without implicit global mutation. | L1 / E0 |
+| `docs/setup.md` | split | instructions/README, `docs/setup.md`, client/host/migration docs, `creme/cli.py`, `scripts/creme` | Convert setup into a portable, preview-first flow without implicit global mutation. | L1 / E0 |
 | `scripts/codex-host-semaphore` | split | semaphore/CLI modules, capability/execution docs, semaphore tests | Reimplement reconciled lease/manual-lock semantics behind the capability boundary. | L1 / E0 |
 | `scripts/codex-host-telemetry` | split | Darwin/Linux adapters, CLI, capability docs, adapter tests | Dispatch by OS and provide honest Linux behavior. | L1 / E0 |
 | `scripts/codex-reclaim-lean` | split | reclaim/Darwin/CLI modules, capability docs, reclaim test | Preserve current ownership proof and frozen-plan safeguards, not the stale installed copy. | L1 / E0 |
@@ -73,7 +73,7 @@ not substitutes for, the machine ledger.
 
 | Source path | Class | Creme destination(s) | Decision and evidence | License / evidence |
 | --- | --- | --- | --- | --- |
-| `creme-agent-infrastructure-goal.md` | split | instructions/README, client surfaces, architecture/capability/host/migration docs, host package, CI/tests | Implement reviewed product boundaries without publishing the private goal or depending on Plans at runtime. | L1 / E1 |
+| `creme-agent-infrastructure-goal.md` | split | instructions/README, client surfaces, architecture/capability/host/migration/setup docs, host package, CI/tests | Implement reviewed product boundaries without publishing the private goal or depending on Plans at runtime. | L1 / E1 |
 | `creme-memory-extraction.md` | split | `AGENTS.md`, capability/execution/host docs, host-profile files, adapter/profile modules | Incorporate reviewed Tier A/B content only; opaque client memory and state do not migrate. | L1 / E1 |
 | `guide/goal.md` | split | `AGENTS.md`, `docs/guides/{goal,execution}.md` | Extract goal identity/readiness/evidence rules; concrete goals stay in the goal store. | L1 / E1 |
 | `guide/lead.md` | split | `AGENTS.md`, `docs/guides/execution.md`, semaphore module/tests | Extract accountable execution and host-resource discipline; concrete lead state stays private. | L1 / E1 |

@@ -51,8 +51,8 @@ matches them exactly.
 
 ## Closed stale findings
 
-- The public remote now exists and is recorded honestly as empty; the first
-  push remains separately blocked on license.
+- The public remote now exists and is recorded honestly as empty. MIT licensing
+  and the first push are owner-approved; exact-candidate review precedes it.
 - Creme authority activation is complete. Elanc fails closed, Jaune/Blanc point
   enhanced agent work to Creme, and Plans owns concrete state rather than the
   reusable execution method.
@@ -75,8 +75,8 @@ matches them exactly.
 - Post-`df2c2b4`, host-runtime Python and project client configuration are
   unchanged. Later executable behavior is limited to the reviewed CI workflow.
 - Four dangling blobs are unreachable and will not transfer in an ordinary
-  push. Commit history exposes the recorded author identity; owner awareness is
-  retained as an explicit publication gate.
+  push. Commit history exposes the recorded author identity, whose publication
+  the owner approved on 2026-08-31.
 
 ## CI review
 

@@ -46,8 +46,8 @@ evidence contains no machine-private path.
 ## Gates still open
 
 C9 still requires three fresh clones from the actual public remotes after the
-owner approves the license and the first push. That run must
-also exercise a fresh client trust/approval ceremony, Lean MCP liveness, live
-Claude Code, and the representative sibling edits under the public-only
-layout. Public CI, conventional Linux acceptance, and the owner decision on
-the recorded macOS behavior differences remain separate mandatory gates.
+owner-authorized first push. That run must also exercise a fresh client
+trust/approval ceremony, Lean MCP liveness, live Claude Code, and the
+representative sibling edits under the public-only layout. Public CI and
+conventional Linux acceptance remain separate mandatory gates; the owner has
+already approved the recorded macOS behavior differences.

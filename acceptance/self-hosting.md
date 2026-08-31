@@ -136,5 +136,5 @@ Creme is therefore the active repository control plane for new agent-assisted
 work. New sessions must launch from the Creme root, not Elanc or Plans. This
 activation does **not** close full v0.1 self-hosting acceptance: a fresh Codex
 trust/approval ceremony and representative edit, a fresh Claude Code run, the
-license and first-public-push gates, public-only clean-room evidence, and
-conventional Linux acceptance remain open.
+owner-authorized first push, public-only clean-room evidence, and conventional
+Linux acceptance remain open.

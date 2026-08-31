@@ -10,24 +10,24 @@ commits and the new Ubuntu runtime workflow. The local integration tip then
 advanced to `d66db65d288884c2596b8db5bf547998e377704a`; its complete delta from
 the reviewed candidate only adds job timeouts and pins the Jaune/Blanc checkout
 inputs to the exact accepted commits. The lead verified that narrow diff and
-reran the 52-test portable suite.
+reran the then-current 52-test portable suite. The license-ledger test raises
+the candidate suite to 53 and requires a fresh exact-candidate run.
 
-**Verdict: BLOCKED; do not call C12 accepted or publish until the license and
-mandatory public-host/client gates close.** No new code/configuration security
-blocker was found. This report supersedes the stale working-tree copy of the
-earlier `df2c2b4` review; that earlier detailed review remains reachable in Git
-history.
+**Verdict: BLOCKED; do not call C12 accepted until mandatory public-host/client
+gates close and the exact published candidate receives final review.** No new
+code/configuration security blocker was found. This report supersedes the stale
+working-tree copy of the earlier `df2c2b4` review; that earlier detailed review
+remains reachable in Git history.
 
 ## Blocking findings and retained gates
 
-### B1 — No license grant
+### B1 — License grant (closed after this reviewed scope)
 
-No reachable revision contains `LICENSE`, `LICENCE`, `COPYING`, `NOTICE`, an
-SPDX identifier, or another license grant. Four byte-exact Elanc copies and the
-derived/re-expressed private-source material remain correctly inventoried.
-Repository creation and publication-token permission do not supply a grant.
-The owner must select the license and explicitly apply it to both exact and
-derived material before the first push.
+The owner selected MIT on 2026-08-31 and explicitly applied it to both the four
+byte-exact Elanc copies and the derived/re-expressed private-source material.
+The current integration tree adds `LICENSE` and updates the normative manifest.
+This closes the decision gate but remains subject to the final independent
+review of the exact candidate containing those changes.
 
 ### B2 — Public and fresh-client evidence is not yet complete
 
@@ -42,12 +42,12 @@ registration/approval and representative edit remain open. Live Claude Code,
 public-only clean-room onboarding, and the separate fresh conventional Linux
 client/edit run also remain open.
 
-### B3 — Owner dispositions remain open
+### B3 — Owner dispositions (closed)
 
-The owner has not yet recorded approval of the four named macOS
-safety/portability changes or the Git author name/email disclosure in public
-history. These are release decisions, not code defects, but they block the
-corresponding C6/C12 claims.
+On 2026-08-31 the owner approved the four named macOS safety/portability changes
+and publication of the existing Git author name/email. These release decisions
+no longer block C6/C12; the final reviewer must confirm that the public record
+matches them exactly.
 
 ## Closed stale findings
 
@@ -107,8 +107,8 @@ git diff --check f4446b2..d66db65
 
 ## Close condition
 
-After license recording and first push, require successful public CI, actual
-public-only onboarding, fresh Codex and Claude Code matrices, conventional
-Linux acceptance, macOS/identity owner dispositions, and one final independent
-history/secret/path/mode/claim review of the exact published candidate. Only
-that final review may change this verdict to accepted.
+After the first push, require successful public CI, actual public-only
+onboarding, fresh Codex and Claude Code matrices, conventional Linux
+acceptance, and one final independent history/secret/path/mode/claim review of
+the exact published candidate. Only that final review may change this verdict
+to accepted.

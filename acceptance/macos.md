@@ -10,7 +10,7 @@ those static facts and validated `VALID`; no live profile is tracked.
 
 | Workflow | Command/control | Verdict |
 |---|---|---|
-| portable suite | `./scripts/check.sh` | PASS, 52 tests plus compile and working/committed-tree whitespace checks |
+| portable suite | `./scripts/check.sh` | PASS before license recording, 52 tests plus compile and working/committed-tree whitespace checks; the license-ledger test raises the candidate suite to 53 |
 | adapter selection | `python3 -m creme platform` | PASS, Darwin selected |
 | host initialization | preview, reviewed `init --write`, `validate-profile` | PASS, `VALID` |
 | doctor | `python3 -m creme doctor --workspace-root <workspace> --json` | PASS, no failed checks |
@@ -49,6 +49,28 @@ repeat the representative Blanc edit against exact public `main`
 `18ca2b4310688465300378067b3a76f9bfadf4a5` (or a later reviewed descendant),
 which includes Creme followed by the reconciled Proxy Pair integration.
 
+## Post-Proxy client-edit resource control
+
+A current-trusted Codex task (`01a055dd-aae5-71a0-9edf-2ebd716a1b3e`)
+launched from Creme and targeted an isolated Blanc clone at exact
+`18ca2b4310688465300378067b3a76f9bfadf4a5`. It created only an
+untracked `CremeSmoke.lean` with `import Blanc` and `n = n` by `rfl`, then
+requested Lean MCP diagnostics before the two documented cheap gates.
+
+The MCP unexpectedly rebuilt most of the 1,355-unit environment despite the
+copied cache. It reached approximately 1,263 units without returning terminal
+`success: true`; swap rose from about 1.47 GiB to 13.37 GiB, crossing the hard
+host-pressure trigger. The client was interrupted, the exact isolated process
+group was verified by its clone-local working directory and paths, and that
+group alone was terminated. No Lean process remained and swap recovered to
+about 2.98 GiB. The canonical Blanc checkout was untouched and the Creme
+semaphore hold was released.
+
+Verdict: **FAILED SAFELY / NOT ACCEPTANCE EVIDENCE**. No cheap gate ran and the
+representative client-mediated edit remains open. This attempt will not be
+retried automatically on the same host; the earlier post-Proxy read-only MCP
+diagnostics remain valid evidence for liveness only.
+
 All disposable cache/semaphore/temp directories and sibling smoke worktrees
 were removed after their contents and state transitions were verified. No live
 global client config or client database was mutated.
@@ -66,5 +88,5 @@ global client config or client database was mutated.
   live samples.
 
 These are safety/portability changes, not gate or proof-semantic changes. The
-owner-approval question is still required before treating any material behavior
-difference as the final v0.1 preservation claim.
+owner approved all four named differences on 2026-08-31 for the v0.1 macOS
+preservation claim.

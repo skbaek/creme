@@ -31,7 +31,7 @@ evidence contains no machine-private path.
 | Check | Verdict | Evidence |
 |---|---|---|
 | three-repository world | PASS | `<offline-root>` initially contained only `creme/`, `jaune/`, and `blanc/`; no Elanc, Plans, `.codex`, or `.claude` tree was present |
-| portable suite | PASS | `./scripts/check.sh`: 52 tests plus compile and working/committed-tree whitespace checks |
+| portable suite | PASS | `./scripts/check.sh`: 52 tests before license recording; the license-ledger test raises the candidate suite to 53, plus compile and working/committed-tree whitespace checks |
 | platform selection | PASS | `python3 -m creme platform` selected Darwin |
 | onboarding preview | PASS | `python3 -m creme init` printed the profile plan without writing |
 | onboarding write | PASS | `python3 -m creme init --write` created only the ignored local host profile |

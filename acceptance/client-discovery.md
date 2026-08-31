@@ -161,6 +161,7 @@ Do not alter the real client home or global settings during this control.
 | Lean MCP diagnostics returned | PASS for Jaune `ae1b7d5` and post-Proxy Blanc `18ca2b4` in current trusted client | OPEN |
 | Jaune ordinary read succeeded | PASS | OPEN |
 | Blanc ordinary read succeeded | PASS | OPEN |
+| Representative sibling edit | FAILED SAFELY under hard host pressure; no acceptance claimed | OPEN |
 | Wrong-root control omitted Creme discovery | synthetic PASS; live client matrix OPEN | OPEN |
 | Synthetic access-without-discovery control passed | PASS | PASS static fixture only |
 | Trust and approvals explicitly recorded | OPEN; ignored-user-config plus an invocation-only trust override still exposed zero MCP tools | OPEN |
@@ -168,7 +169,10 @@ Do not alter the real client home or global settings during this control.
 Task identifiers, the two Codex configuration controls, and the later direct
 MCP task are recorded in `acceptance/self-hosting.md`. This table is
 deliberately incomplete: direct liveness under inherited trust is not a fresh
-approval ceremony, and the static Claude fixture is not a live Claude session.
+approval ceremony, the interrupted post-Proxy edit did not return a terminal
+MCP success or run its cheap gates, and the static Claude fixture is not a live
+Claude session. The resource-control disposition is recorded in
+`acceptance/macos.md`.
 
 Antigravity is recorded separately as retained experimental compatibility. It
 does not satisfy either required v0.1 client column until a dedicated live

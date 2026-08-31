@@ -20,9 +20,9 @@
     }
   ],
   "license_disposition": {
-    "status": "publication-blocked-pending-user-selected-license",
-    "evidence": "Neither source snapshot contains a tracked LICENSE, LICENCE, COPYING, or NOTICE file, and the reviewed source paths contain no SPDX or copyright/license grant header.",
-    "required_action": "The user selects and records a public Creme license before publication; provenance review must confirm that the selected license covers every moved or split source listed here."
+    "status": "owner-approved-mit-license-recorded",
+    "evidence": "On 2026-08-31 the repository owner approved the MIT License for every byte-exact copy and derived or re-expressed artifact carried from the inventoried Elanc and Plans sources; the tracked LICENSE records the grant.",
+    "required_action": "Retain the tracked MIT LICENSE and this source-to-destination ledger so every carried artifact remains covered and attributable."
   },
   "sources": [
     {
@@ -34,7 +34,7 @@
       "classification": "split",
       "destination_paths": [".agents/mcp_config.json"],
       "rationale": "Retain the Antigravity-compatible project MCP surface while removing host-specific wording and keeping the reviewed version pin.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -46,7 +46,7 @@
       "classification": "split",
       "destination_paths": [".agents/skills/lean-inspector/SKILL.md"],
       "rationale": "Preserve proof-state inspection workflow while replacing private-root assumptions with Creme and sibling-repository authority.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -58,7 +58,7 @@
       "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/SKILL.md"],
       "rationale": "Preserve reusable proof-editing discipline and point project-specific doctrine back to Jaune and Blanc.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -70,7 +70,7 @@
       "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/resources/proof-checklist.md"],
       "rationale": "Retain generic tactic hygiene while leaving dated Blanc proof-performance measurements and doctrine in Blanc.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
@@ -82,7 +82,7 @@
       "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/tools/README.md"],
       "rationale": "Keep tool usage and lifecycle guidance but remove private absolute examples and superseded quadrant-selection claims.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
@@ -94,7 +94,7 @@
       "classification": "move",
       "destination_paths": [".agents/skills/lean-prover/tools/check-drift.py"],
       "rationale": "The drift checker is generic and was copied byte-for-byte.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -106,7 +106,7 @@
       "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/tools/check-fidelity.py"],
       "rationale": "Retain semantic fidelity checks with public paths and the revised verdict-first edit-loop contract.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
@@ -118,7 +118,7 @@
       "classification": "move",
       "destination_paths": [".agents/skills/lean-prover/tools/leanlex.py"],
       "rationale": "The lexer support is generic and was copied byte-for-byte.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -130,7 +130,7 @@
       "classification": "move",
       "destination_paths": [".agents/skills/lean-prover/tools/lsp-probe.py"],
       "rationale": "The probe is generic and was copied byte-for-byte.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -142,7 +142,7 @@
       "classification": "move",
       "destination_paths": [".agents/skills/lean-prover/tools/mk-prefix.py"],
       "rationale": "The scratch-prefix constructor is generic and was copied byte-for-byte.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
@@ -154,7 +154,7 @@
       "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/tools/procmon.py"],
       "rationale": "Retain generic process-tree sampling while routing process discovery through Creme OS adapters and removing host-specific measurements.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
@@ -166,7 +166,7 @@
       "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/tools/quadrant-bench.py"],
       "rationale": "Keep measurements as advisory data while removing the refuted rule that treated the quadrant model as a workflow selector.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
@@ -178,7 +178,7 @@
       "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/tools/rule.py"],
       "rationale": "Retain the mechanical decision engine but require caller-supplied, reviewed model constants instead of private fitted values.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
@@ -190,7 +190,7 @@
       "classification": "split",
       "destination_paths": [".agents/skills/lean-prover/tools/sample-targets.py"],
       "rationale": "Retain generic stratified sampling while removing private fit targets and host/corpus cost constants.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {
@@ -262,7 +262,7 @@
       "classification": "split",
       "destination_paths": [".claude/settings.json"],
       "rationale": "Retain only relative sibling access; remove absolute paths, broad command grants, and implicit MCP enablement.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -274,7 +274,7 @@
       "classification": "compatibility_notice",
       "destination_paths": [".claude/skills/lean-inspector", ".claude/skills/lean-prover"],
       "rationale": "Replace one directory symlink with documented per-skill symlinks so Claude and canonical .agents skill discovery remain explicit.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -286,7 +286,7 @@
       "classification": "split",
       "destination_paths": [".codex/config.toml"],
       "rationale": "Keep only the pinned project MCP registration; sibling permissions move to a previewed machine-local profile.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -334,7 +334,7 @@
       "classification": "split",
       "destination_paths": [".github/workflows/ci.yml", "scripts/check.sh"],
       "rationale": "Reauthor the workflow around Creme's own cross-platform static gate instead of copying Elanc's private job topology.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -346,7 +346,7 @@
       "classification": "split",
       "destination_paths": [".gitignore"],
       "rationale": "Carry forward relevant scratch and host-local exclusions while adding Creme-specific generated state.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -358,7 +358,7 @@
       "classification": "split",
       "destination_paths": [".mcp.json"],
       "rationale": "Retain the pinned Claude project MCP server with explicit stdio shape and public-safe descriptions.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -370,7 +370,7 @@
       "classification": "split",
       "destination_paths": ["AGENTS.md", "docs/guides/execution.md"],
       "rationale": "Extract generic workflow into Creme while leaving Jaune/Blanc doctrine and concrete goal state in their owning repositories.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -382,7 +382,7 @@
       "classification": "compatibility_notice",
       "destination_paths": ["CLAUDE.md"],
       "rationale": "Retain the one-line Claude import contract; the destination differs only in trailing whitespace and is therefore not claimed as an exact copy.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -394,7 +394,7 @@
       "classification": "split",
       "destination_paths": ["AGENTS.md", "README.md", "docs/client-discovery.md", "docs/migration.md"],
       "rationale": "The launch-root and setup concepts move into canonical instructions and client discovery; Elanc branding and private layout prose do not.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -406,7 +406,7 @@
       "classification": "split",
       "destination_paths": ["AGENTS.md", "docs/client-discovery.md", "acceptance/client-discovery.md", "docs/migration.md", "scripts/tests/test_client_surface.py", "scripts/tests/test_permission_is_not_discovery.py"],
       "rationale": "Reuse the permission-is-not-discovery and launch-root lessons, with fresh public client evidence and no private host instructions.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -442,7 +442,7 @@
       "classification": "split",
       "destination_paths": ["AGENTS.md", "README.md", "docs/client-discovery.md", "docs/host-profile.md", "docs/migration.md", "creme/cli.py", "scripts/creme"],
       "rationale": "Preserve reviewed setup concepts through a portable CLI and public launch guidance; do not copy machine-local paths or implicit global mutations.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -454,7 +454,7 @@
       "classification": "split",
       "destination_paths": ["creme/semaphore.py", "creme/cli.py", "docs/capabilities.md", "docs/guides/execution.md", "scripts/tests/test_semaphore.py"],
       "rationale": "Reimplement the reconciled lease/manual-lock semantics behind a portable Creme capability instead of installing a host-global script.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -466,7 +466,7 @@
       "classification": "split",
       "destination_paths": ["creme/adapters/darwin.py", "creme/adapters/linux.py", "creme/cli.py", "docs/capabilities.md", "scripts/tests/test_adapters.py"],
       "rationale": "Move telemetry behind OS adapters and add explicit Linux behavior rather than preserving a macOS-only host-global script.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -478,7 +478,7 @@
       "classification": "split",
       "destination_paths": ["creme/reclaim.py", "creme/adapters/darwin.py", "creme/cli.py", "docs/capabilities.md", "scripts/tests/test_reclaim.py"],
       "rationale": "Preserve current ownership-proof and frozen-plan safeguards in a testable capability boundary; do not use the stale installed helper as source.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -490,7 +490,7 @@
       "classification": "split",
       "destination_paths": ["creme/doctor.py", "creme/profile.py", "creme/adapters/darwin.py", "creme/cli.py", "docs/host-profile.md", "scripts/tests/test_adapters.py", "scripts/tests/test_doctor.py", "scripts/tests/test_profile.py"],
       "rationale": "Generalize private Elanc diagnostics into Creme launch-root, sibling, adapter, and host-profile checks.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -502,7 +502,7 @@
       "classification": "split",
       "destination_paths": ["creme/doctor.py", "creme/profile.py", "scripts/tests/test_doctor.py", "scripts/tests/test_profile.py"],
       "rationale": "Its behavioral cases informed the portable implementation; Elanc-name and private-layout assertions are not copied.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "behavior-reexpressed-public-tests-present-final-parity-review-pending"
     },
     {
@@ -514,7 +514,7 @@
       "classification": "split",
       "destination_paths": ["creme/semaphore.py", "scripts/tests/test_semaphore.py"],
       "rationale": "The current lease/manual-lock behavioral contract informed the portable implementation; tests are reauthored around the package surface.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "behavior-reexpressed-public-tests-present-final-parity-review-pending"
     },
     {
@@ -526,7 +526,7 @@
       "classification": "split",
       "destination_paths": ["scripts/versions.json"],
       "rationale": "Keep public tool pins and supported-platform facts while removing private repository/path assumptions.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "none"
     },
     {
@@ -538,7 +538,7 @@
       "classification": "split",
       "destination_paths": ["AGENTS.md", "README.md", ".gitignore", ".claude/settings.json", ".codex/config.toml", ".mcp.json", ".agents/mcp_config.json", ".github/workflows/ci.yml", "docs/architecture.md", "docs/capabilities.md", "docs/client-discovery.md", "docs/guides/execution.md", "docs/host-profile.md", "docs/migration.md", "acceptance/client-discovery.md", "config/host-profile.schema.json", "config/host-profile.example.json", "creme/adapters/__init__.py", "creme/adapters/base.py", "creme/adapters/darwin.py", "creme/adapters/linux.py", "creme/doctor.py", "creme/profile.py", "creme/cli.py", "scripts/check.sh", "scripts/creme", "scripts/versions.json", "scripts/tests/test_adapters.py", "scripts/tests/test_client_surface.py", "scripts/tests/test_doctor.py", "scripts/tests/test_permission_is_not_discovery.py", "scripts/tests/test_profile.py", "scripts/tests/test_semaphore.py"],
       "rationale": "The private goal supplies reviewed product boundaries and acceptance requirements; reusable outcomes are implemented without publishing the goal or making it a runtime dependency.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "remain-private-goal-not-runtime-dependency"
     },
     {
@@ -550,7 +550,7 @@
       "classification": "split",
       "destination_paths": ["AGENTS.md", "docs/capabilities.md", "docs/guides/execution.md", "docs/host-profile.md", "config/host-profile.schema.json", "config/host-profile.example.json", "creme/adapters/base.py", "creme/adapters/darwin.py", "creme/adapters/linux.py", "creme/profile.py"],
       "rationale": "Incorporate reviewed Tier A/B lessons by content; client-local memory, histories, credentials, and opaque state are explicitly not migrated.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "durable-reviewed-input-only-client-memory-not-migrated"
     },
     {
@@ -562,7 +562,7 @@
       "classification": "split",
       "destination_paths": ["AGENTS.md", "docs/guides/goal.md", "docs/guides/execution.md"],
       "rationale": "Extract reusable goal identity, readiness, evidence, and completion rules; concrete Plans goals remain in a configured goal store.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "remain-private-concrete-goals-not-runtime-dependency"
     },
     {
@@ -574,7 +574,7 @@
       "classification": "split",
       "destination_paths": ["AGENTS.md", "docs/guides/execution.md", "creme/semaphore.py", "scripts/tests/test_semaphore.py"],
       "rationale": "Extract bounded delegation, evidence, checkpoint, and host-resource discipline while keeping portfolio state and concrete lead records private.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "remain-private-concrete-state-not-runtime-dependency"
     },
     {
@@ -586,7 +586,7 @@
       "classification": "split",
       "destination_paths": ["AGENTS.md", "docs/guides/lean-edit-loops.md", ".agents/skills/lean-prover/SKILL.md", ".agents/skills/lean-prover/tools/README.md", ".agents/skills/lean-prover/tools/check-fidelity.py", ".agents/skills/lean-prover/tools/mk-prefix.py", ".agents/skills/lean-prover/tools/quadrant-bench.py", ".agents/skills/lean-prover/tools/rule.py"],
       "rationale": "Move the durable verdict-first edit-loop method into concise instructions and tools; dated measurements and private evidence stay non-runtime provenance.",
-      "license_disposition": "publication-blocked-pending-user-selected-license",
+      "license_disposition": "owner-approved-mit-license-recorded",
       "transitive_evidence_disposition": "reviewed-private-evidence-not-copied"
     },
     {

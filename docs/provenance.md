@@ -17,8 +17,10 @@ is part of the extraction.
 Elanc was clean during the census. Plans had unrelated modified and untracked
 work, so every recorded Plans digest was computed from `git show` at the pinned
 ref, never from the working tree. A Git author census found one author identity
-across the selected Elanc history and selected Plans paths. That is useful
-ownership evidence but is not a license grant.
+across the selected Elanc history and selected Plans paths. The owner approved
+publication of the existing Creme commit identity
+`skbaek <seulkeebaek@gmail.com>` on 2026-08-31. That is useful ownership
+evidence; the separate MIT grant below supplies permission.
 
 Creme's reviewed history begins with `ec0972b` and the self-hosting spine; it
 does not share or merge the private source histories. Exact provenance is
@@ -90,16 +92,17 @@ as non-migrated.
 
 ## License disposition
 
-Publication is blocked pending the user's license selection. Neither pinned
-source snapshot contains a tracked `LICENSE`, `LICENCE`, `COPYING`, or `NOTICE`
-file. A targeted source scan also found no SPDX identifier, copyright notice,
-or license-grant header in the inventoried paths. The single observed Git author
-identity is provenance evidence only and cannot substitute for permission.
+Creme is licensed under the tracked MIT `LICENSE`. On 2026-08-31 the repository
+owner explicitly selected MIT and confirmed that the grant covers both the
+four byte-exact Elanc copies and every derived or re-expressed Elanc/Plans
+artifact inventoried in the manifest.
 
-Before the first public push occurs, the user must select and record Creme's
-license and confirm that it covers both the exact moves and the derived content
-in the manifest. Until then, the machine ledger's status remains
-`publication-blocked-pending-user-selected-license`.
+Neither pinned source snapshot contains a tracked `LICENSE`, `LICENCE`,
+`COPYING`, or `NOTICE` file. A targeted source scan also found no SPDX
+identifier, copyright notice, or license-grant header in the inventoried
+paths. The explicit owner grant closes that absence without implying that the
+private repositories themselves are public or generally licensed. The machine
+ledger records `owner-approved-mit-license-recorded` for carried content.
 
 ## Public repository state
 
@@ -109,7 +112,8 @@ repository permissions used for the sibling public projects. A read-only API
 check found the repository public and empty, with no default branch. The local
 canonical checkout records it as `origin`; no Creme history has been pushed.
 Repository creation is therefore closed, while license recording and the first
-public push remain distinct open gates.
+public push remain distinct gates. License recording and publication authority
+are now closed; exact-candidate review still precedes the first push.
 
 ## Reproduction commands
 
@@ -155,7 +159,8 @@ dispositions.
 
 ## Remaining decisions
 
-- **Blocking:** select and record the public license.
+- **Publication:** run the exact-candidate review, then perform and verify the
+  owner-authorized first push.
 - **Migration:** the default-branch notices and preserved shared-checkout
   overlay are installed; retain the stale-state recovery copy until the dirty
   Plans checkout is eventually reconciled by its owner.

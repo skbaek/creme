@@ -11,8 +11,9 @@ Creme v0.1 supports macOS and Linux. Linux deliberately has fewer optional
 host capabilities; an explicit `UNAVAILABLE` is a supported result.
 
 > Publication is not complete yet. The owner has created the empty public
-> repository at `https://github.com/skbaek/creme`; the license grant must be
-> recorded before the first public push.
+> repository at `https://github.com/skbaek/creme`, approved the first push, and
+> licensed Creme under the [MIT License](LICENSE). Exact and derived source
+> provenance is recorded separately; final review precedes publication.
 
 ## Blank-host setup
 

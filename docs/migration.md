@@ -17,13 +17,14 @@ Migration is staged:
 4. update Jaune/Blanc onboarding and current private references;
 5. replace old active entry points with concise compatibility notices;
 6. independently audit one exact candidate and its full public history;
-7. after owner approval, record the selected license and make the first public
-   push to the already-created public remote.
+7. record the owner-approved MIT license, review the exact candidate, and make
+   the authorized first public push to the already-created public remote.
 
 The repository-authority activation through step 5 is complete: Jaune and
 Blanc point enhanced agent work at Creme, and Elanc's active client surfaces
-fail closed with a deprecation notice. Publication remains a separate state;
-the empty public remote does not make the unlicensed local candidate public.
+fail closed with a deprecation notice. The owner approved MIT licensing and
+the first push on 2026-08-31. Publication remains a separate state until the
+reviewed history is actually pushed to the public remote.
 
 Historical documents remain historical. A compatibility notice must fail
 informatively on wrong-root use and point to Creme; it must not keep a second

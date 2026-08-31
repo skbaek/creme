@@ -13,13 +13,14 @@ Classification means:
 - **retire** — the source is intentionally not carried forward;
 - **compatibility notice** — only a client/path compatibility contract survives.
 
-License `L1` means publication is blocked pending the user's public-license
-selection. `L0` means the source was not copied and has no Creme license impact.
-Evidence `E1` means private transitive evidence was reviewed but is neither
-copied nor required at runtime; `E2` marks reviewed behavioral input with
-public tests present but final named-case parity review pending; `E0` means no
-transitive evidence is needed. These codes are expansions of, not substitutes
-for, the machine ledger.
+License `L1` means the owner approved the carried content under Creme's tracked
+MIT License on 2026-08-31; it covers both byte-exact copies and derived or
+re-expressed material. `L0` means the source was not copied and has no Creme
+license impact. Evidence `E1` means private transitive evidence was reviewed
+but is neither copied nor required at runtime; `E2` marks reviewed behavioral
+input with public tests present but final named-case parity review pending;
+`E0` means no transitive evidence is needed. These codes are expansions of,
+not substitutes for, the machine ledger.
 
 ## Elanc
 

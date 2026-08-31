@@ -9,8 +9,8 @@ Latest exact code candidate exercised:
 
 The merge was the explicit pre-public exception authorized by the goal. At
 that checkpoint no remote existed and nothing had been pushed. The owner later
-created the empty public `skbaek/creme` repository; the first push remains
-blocked on the recorded license grant.
+created the empty public `skbaek/creme` repository and, on 2026-08-31, approved
+the MIT license and first push. Exact-candidate review still precedes that push.
 
 ## Fresh Codex task
 

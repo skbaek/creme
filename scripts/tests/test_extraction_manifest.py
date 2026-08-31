@@ -21,6 +21,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "scripts/extraction-manifest.json"
+LICENSE = ROOT / "LICENSE"
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 
@@ -32,7 +33,7 @@ RELATIONSHIPS = {
     "derived-compatibility-shim",
 }
 LICENSE_DISPOSITIONS = {
-    "publication-blocked-pending-user-selected-license",
+    "owner-approved-mit-license-recorded",
     "not-copied-no-creme-license-impact",
 }
 EVIDENCE_DISPOSITIONS = {
@@ -126,7 +127,7 @@ class ExtractionManifestTest(unittest.TestCase):
         )
         self.assertEqual(
             license_disposition["status"],
-            "publication-blocked-pending-user-selected-license",
+            "owner-approved-mit-license-recorded",
         )
         self.assertTrue(license_disposition["evidence"].strip())
         self.assertTrue(license_disposition["required_action"].strip())
@@ -182,7 +183,7 @@ class ExtractionManifestTest(unittest.TestCase):
                     self.assertTrue(source["destination_paths"])
                     self.assertEqual(
                         source["license_disposition"],
-                        "publication-blocked-pending-user-selected-license",
+                        "owner-approved-mit-license-recorded",
                     )
                 else:
                     self.assertFalse(source["destination_paths"])
@@ -192,6 +193,12 @@ class ExtractionManifestTest(unittest.TestCase):
                     )
 
         self.assertEqual(source_links, artifact_links)
+
+    def test_owner_approved_mit_license_is_tracked(self) -> None:
+        text = LICENSE.read_text(encoding="utf-8")
+        self.assertIn("MIT License", text)
+        self.assertIn("Copyright (c) 2026 skbaek", text)
+        self.assertIn("Permission is hereby granted, free of charge", text)
 
     def test_artifact_destinations_are_unique_present_and_safe(self) -> None:
         artifacts = self.manifest["artifacts"]

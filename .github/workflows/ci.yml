@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   portable:
     strategy:
@@ -18,3 +21,52 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: ./scripts/check.sh
+
+  linux-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Creme
+        uses: actions/checkout@v4
+        with:
+          path: workspace/creme
+      - name: Check out Jaune
+        uses: actions/checkout@v4
+        with:
+          repository: skbaek/jaune
+          path: workspace/jaune
+      - name: Check out Blanc
+        uses: actions/checkout@v4
+        with:
+          repository: skbaek/blanc
+          path: workspace/blanc
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Exercise fresh Linux sibling layout
+        working-directory: workspace/creme
+        shell: bash
+        run: |
+          set -euo pipefail
+          export XDG_STATE_HOME="$RUNNER_TEMP/creme-state"
+          python3 -m creme platform
+          python3 -m creme init --workspace-root ..
+          python3 -m creme init --workspace-root .. --write
+          python3 -m creme validate-profile
+          python3 -m creme doctor --workspace-root .. --json
+          python3 -m creme telemetry
+          python3 -m creme tempdir --create --prefix creme-ci-
+          python3 -m creme cache-copy config "$RUNNER_TEMP/creme-cache-copy"
+          python3 -m creme cache-copy config "$RUNNER_TEMP/creme-cache-copy" --execute
+          diff -r config "$RUNNER_TEMP/creme-cache-copy"
+          python3 -m creme semaphore soft-acquire creme-linux-ci --note "Linux runtime acceptance"
+          python3 -m creme semaphore status
+          python3 -m creme semaphore soft-release creme-linux-ci
+          set +e
+          python3 -m creme reclaim --dry-run > "$RUNNER_TEMP/creme-reclaim.json"
+          reclaim_status=$?
+          set -e
+          test "$reclaim_status" -eq 2
+          grep -q '"status": "UNAVAILABLE"' "$RUNNER_TEMP/creme-reclaim.json"
+          grep -q 'restart the client' "$RUNNER_TEMP/creme-reclaim.json"
+          ./scripts/check.sh
+          test -z "$(git status --short)"

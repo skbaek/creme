@@ -5,7 +5,11 @@ Status: open pending a conventional Linux host and public Ubuntu CI.
 The portable suite contains forced Linux selection, unsupported-capability,
 wrong-OS executable, profile, copy-preview, semaphore, client, and public-path
 controls. `.github/workflows/ci.yml` defines Python 3.9 and 3.12 jobs on
-`ubuntu-latest` and `macos-latest`.
+`ubuntu-latest` and `macos-latest`, plus a fresh Ubuntu sibling-layout job that
+checks out public Jaune and Blanc and exercises platform detection, profile
+preview/write/validation, doctor, telemetry, temporary-directory creation,
+reflink-or-copy, semaphore acquire/status/release, structured unavailable
+reclamation, the portable suite, and final repository cleanliness.
 
 These static/unit controls are not a substitute for C7. The release candidate
 still needs, on a fresh Linux checkout with no private Plans/Elanc and no prior
@@ -29,5 +33,6 @@ conservative, temporary creation succeeds, cache copy uses reflink-auto or the
 portable fallback, and reclamation clearly directs the user to restart the
 client. Then run the documented sibling Lean/MCP edit and cheap gate.
 
-No Linux parity or acceptance claim is made until that evidence and the public
-Ubuntu workflow exist on the exact candidate.
+No Linux parity or full acceptance claim is made until the public Ubuntu jobs
+pass on the exact candidate and the separate conventional-host/client evidence
+above is recorded.

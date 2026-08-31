@@ -162,8 +162,37 @@ The live host profile is `.creme/host-profile.json` and is ignored by Git. Use
 may report an optional capability as `UNAVAILABLE` on Linux; that is supported
 when the capability is not required by the chosen gate.
 
-Codex users who need sibling writes should preview and then explicitly install
-the generated least-privilege profile:
+### Codex desktop app
+
+Launching the ChatGPT desktop app from Spotlight, the Dock, or Finder is fine;
+the important launch root is the local project selected inside Codex. Follow
+the official [Projects and chats](https://learn.chatgpt.com/docs/projects)
+workflow:
+
+1. Add a local project for `~/creme`, or open its project menu and choose
+   **Edit project** if it already exists.
+2. Choose **Add folder** and attach `~/creme`, `~/jaune`, and `~/blanc`.
+3. Choose **Make primary** for `~/creme`.
+4. Start each contract task from that Creme project.
+
+The primary folder is the default working directory and the automatic discovery
+root for `AGENTS.md`, skills, and project `config.toml`. Jaune and Blanc remain
+secondary folders: they are available to search, read, and edit without
+becoming competing discovery roots. An owner who needs the private goal store
+may attach `~/plans` as another secondary folder after completing the
+public-only acceptance run; public contributors and that acceptance run omit
+Plans.
+
+Before trusting the project, confirm that the displayed working directory is
+`~/creme` and review the pinned Lean MCP server. A projectless task, or a
+project whose primary folder is Jaune or Blanc, does not exercise Creme's
+client contract. Opening a file from another task also does not change that
+task's project root.
+
+### Codex CLI
+
+Codex CLI users who need sibling writes should preview and then explicitly
+install the generated least-privilege profile:
 
 ```sh
 cd ~/creme
@@ -176,6 +205,10 @@ codex --profile creme
 Review the preview before `--write`. Permission-profile syntax is beta; compare
 the generated file with the installed client's current documentation. Creme
 does not edit the user's main Codex configuration.
+
+The CLI alternative to the desktop project is to start Codex with
+`cd ~/creme && codex --profile creme`; the directory where the CLI starts is its
+project.
 
 Claude Code users launch `claude` from `~/creme`, accept that exact workspace
 when prompted, and review the pinned `lean-lsp-mcp` project server before

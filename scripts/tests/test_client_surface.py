@@ -156,6 +156,16 @@ class ClientSurfaceTest(unittest.TestCase):
             "blanc/blob/main/scripts/GATES.md",
         ):
             self.assertIn(authority, setup)
+        for desktop_project_step in (
+            "Edit project",
+            "Add folder",
+            "Make primary",
+            "secondary folders",
+            "https://learn.chatgpt.com/docs/projects",
+        ):
+            self.assertIn(desktop_project_step, setup)
+        self.assertIn("project whose primary folder is Jaune or Blanc", setup)
+        self.assertIn("public-only acceptance run", setup)
         self.assertIn("Plans is not the method authority", setup)
         self.assertNotIn("~/elanc", setup)
         self.assertNotIn("/" + "Users" + "/", setup)

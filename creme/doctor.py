@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from .adapters import Adapter, get_adapter
+from .host_wrappers import default_output_dir, render_host_wrappers, wrapper_install_issues
 from .profile import DEFAULT_RELATIVE_PROFILE, ProfileValidation, effective_policy, load
 
 
@@ -179,6 +181,37 @@ def check_client_surface(root: Path) -> list[Check]:
     return checks
 
 
+def check_host_wrappers(root: Path, output_dir: Optional[Path] = None) -> list[Check]:
+    directory = (output_dir or default_output_dir()).expanduser().resolve()
+    rendered = render_host_wrappers(root)
+    present = [
+        name for name in rendered
+        if os.path.lexists(directory / name)
+    ]
+    if not present:
+        return [Check(
+            "client: host wrappers",
+            STATUS_WARN,
+            f"not installed in {directory}; direct Creme capability commands remain canonical",
+        )]
+    issues = wrapper_install_issues(root, directory)
+    if issues:
+        command = (
+            "python3 -m creme host-wrappers --output-dir "
+            f"{shlex.quote(str(directory))} --write --replace"
+        )
+        return [Check(
+            "client: host wrappers",
+            STATUS_FAIL,
+            f"invalid install: {issues}; review a fresh preview, then run `{command}`",
+        )]
+    return [Check(
+        "client: host wrappers",
+        STATUS_OK,
+        f"all {len(rendered)} delegates match {root / 'scripts' / 'creme'}",
+    )]
+
+
 def _runtime_files(root: Path) -> Iterable[Path]:
     for relative in ("creme", ".codex", ".claude", ".agents", "scripts"):
         base = root / relative
@@ -248,6 +281,7 @@ def run_doctor(
     checks.extend(check_sibling("jaune", workspace / jaune_name, "github.com/skbaek/jaune"))
     checks.extend(check_sibling("blanc", workspace / blanc_name, "github.com/skbaek/blanc"))
     checks.extend(check_client_surface(root))
+    checks.extend(check_host_wrappers(root))
     checks.extend(check_public_runtime_boundary(root))
     facts = selected.static_facts()
     checks.append(Check(

@@ -18,6 +18,13 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 Shared code does not invoke another OS's command as a fallback. An unavailable
 telemetry sample never proves a host is quiet or under pressure.
 
+The capability CLI is the sole implementation entry point. A Codex client that
+needs stable approved executable paths may generate user-local delegates with
+`python3 -m creme host-wrappers`. Those files only dispatch to the canonical
+checkout's `scripts/creme`; they do not copy semaphore state logic, telemetry,
+or reclamation policy. Preview is read-only, writing requires an explicit
+output directory, and replacement requires `--replace`.
+
 Optimized cache copies run into a randomly named, Creme-owned staging
 directory beside the requested destination. A failed clone or reflink attempt
 cannot occupy the destination and therefore falls back to the portable copy.

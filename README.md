@@ -57,6 +57,19 @@ directory after reviewing the project MCP prompt. Both clients must be
 launched with Creme as the project/current directory. Merely granting sibling
 filesystem access does not load Creme's instructions, skills, or MCP config.
 
+Codex installations that authorize stable executable paths can also install
+thin delegates for Creme's host capabilities. Preview the exact files first:
+
+```sh
+python3 -m creme host-wrappers --output-dir ~/.codex/bin
+python3 -m creme host-wrappers --output-dir ~/.codex/bin --write
+```
+
+The generated files contain no capability implementation; each delegates to
+this checkout's `scripts/creme`. Regenerate them after moving the checkout.
+Use `--replace` only after reviewing a changed preview. If any of the three
+known paths exists, `doctor` requires the complete installed set to match.
+
 Before real work, read [AGENTS.md](AGENTS.md), the appropriate sibling's
 `scripts/GATES.md`, and [the execution guide](docs/guides/execution.md).
 New goal documents use [the public goal-writing guide](docs/guides/goal.md),
@@ -69,6 +82,7 @@ Client discovery and its negative control are documented in
 ```sh
 python3 -m creme --help
 python3 -m creme doctor --json
+python3 -m creme host-wrappers --output-dir ~/.codex/bin
 python3 -m creme telemetry
 python3 -m creme semaphore status
 python3 -m creme tempdir

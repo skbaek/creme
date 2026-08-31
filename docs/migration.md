@@ -32,5 +32,21 @@ Historical documents remain historical. A compatibility notice must fail
 informatively on wrong-root use and point to Creme; it must not keep a second
 copy of operational policy alive.
 
+User-local approved helper paths require a separate cutover because they are
+outside every repository. A copied pre-Creme helper is not a compatibility
+shim: it can retain obsolete state paths and logic. From the canonical Creme
+checkout, preview and then replace all three with generated delegates:
+
+```sh
+python3 -m creme host-wrappers --output-dir ~/.codex/bin
+python3 -m creme host-wrappers --output-dir ~/.codex/bin --write --replace
+python3 -m creme doctor
+```
+
+The delegates execute Creme's current capability CLI. `doctor` treats an
+absent set as optional, but rejects a partial, stale, linked, or non-executable
+install so a repository migration cannot silently leave active host behavior
+behind.
+
 Creme is optional for building Jaune or Blanc. Users who do not want the
 enhanced agent workflow continue to clone and build either library normally.

@@ -210,6 +210,29 @@ The CLI alternative to the desktop project is to start Codex with
 `cd ~/creme && codex --profile creme`; the directory where the CLI starts is its
 project.
 
+### Codex host-capability delegates
+
+Some Codex installations authorize a stable executable path for host
+operations that the project sandbox cannot perform directly. Creme can create
+three user-local delegates for that boundary: semaphore, telemetry, and Lean
+reclamation. They contain no copied host logic and always execute the current
+checkout's capability CLI.
+
+Preview the complete contents and destinations before the first write:
+
+```sh
+cd ~/creme
+python3 -m creme host-wrappers --output-dir ~/.codex/bin
+python3 -m creme host-wrappers --output-dir ~/.codex/bin --write
+```
+
+If those paths already contain an older install, compare the preview and use
+`--replace` only after review. The installer refuses implicit destinations and
+existing files. It writes all three files mode `0700` through same-directory
+temporary files. Relocating Creme changes their target, so regenerate them
+from the canonical checkout. `doctor` warns when none are installed and fails
+when it finds a partial, stale, linked, or non-executable set.
+
 Claude Code users launch `claude` from `~/creme`, accept that exact workspace
 when prompted, and review the pinned `lean-lsp-mcp` project server before
 approving it. The relative sibling access in `.claude/settings.json` does not

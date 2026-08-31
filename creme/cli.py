@@ -11,6 +11,11 @@ from . import __version__
 from .adapters import get_adapter
 from .doctor import exit_code as doctor_exit_code
 from .doctor import run_doctor
+from .host_wrappers import (
+    default_output_dir as default_host_wrapper_output_dir,
+    install_host_wrappers,
+    render_host_wrappers,
+)
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import semaphore
 
@@ -249,6 +254,44 @@ def cmd_client_profile(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_host_wrappers(arguments: argparse.Namespace) -> int:
+    output = (
+        Path(arguments.output_dir).expanduser().resolve()
+        if arguments.output_dir
+        else default_host_wrapper_output_dir().resolve()
+    )
+    rendered = render_host_wrappers(ROOT)
+    if not arguments.write:
+        _json({
+            "status": "PREVIEW",
+            "detail": "review these delegates, then rerun with --write",
+            "creme_root": str(ROOT),
+            "output_dir": str(output),
+            "wrappers": {
+                str(output / name): content for name, content in rendered.items()
+            },
+        })
+        return 0
+    if not arguments.output_dir:
+        _json({
+            "status": "REFUSED",
+            "detail": "--output-dir is required with --write; Creme never chooses or overwrites user executables implicitly",
+        })
+        return 1
+    try:
+        written = install_host_wrappers(ROOT, output, replace=arguments.replace)
+    except OSError as exc:
+        _json({"status": "REFUSED", "detail": str(exc)})
+        return 1
+    _json({
+        "status": "OK",
+        "detail": "reviewed host capability delegates written",
+        "creme_root": str(ROOT),
+        "paths": [str(path) for path in written],
+    })
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="python3 -m creme")
     root.add_argument("--version", action="version", version=__version__)
@@ -324,6 +367,15 @@ def parser() -> argparse.ArgumentParser:
     client.add_argument("--write", action="store_true")
     client.add_argument("--replace", action="store_true")
     client.set_defaults(func=cmd_client_profile)
+
+    wrappers = commands.add_parser(
+        "host-wrappers",
+        help="preview or install stable Codex delegates for Creme host capabilities",
+    )
+    wrappers.add_argument("--output-dir")
+    wrappers.add_argument("--write", action="store_true")
+    wrappers.add_argument("--replace", action="store_true")
+    wrappers.set_defaults(func=cmd_host_wrappers)
     return root
 
 

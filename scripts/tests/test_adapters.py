@@ -45,6 +45,32 @@ class AdapterTest(unittest.TestCase):
         for token in ("memory_pressure", "vm_stat", "launchctl", "dscacheutil", "/Applications/"):
             self.assertNotIn(token, source)
 
+    @mock.patch("creme.adapters.linux.os.getppid", return_value=12)
+    @mock.patch("creme.adapters.linux.os.getuid", return_value=1001)
+    @mock.patch("creme.adapters.linux.LinuxAdapter._run")
+    def test_linux_reclaim_dry_run_uses_only_same_user_client_tree(self, run, _uid, _ppid):
+        run.return_value = subprocess.CompletedProcess([], 0, stdout="""\
+10 1 1001 100 S Mon Jan 1 00:00:00 2024 /usr/lib/chatgpt/resources/codex app-server
+11 10 1001 10 S Mon Jan 1 00:00:01 2024 /bin/bash
+12 11 1001 10 S Mon Jan 1 00:00:02 2024 python3 -m creme reclaim --dry-run
+20 10 1001 300 S Mon Jan 1 00:01:00 2024 /tool/lake serve
+21 20 1001 200 S Mon Jan 1 00:01:01 2024 /tool/lean --server
+22 20 1001 0 Z Mon Jan 1 00:01:02 2024 /tool/lean --worker
+30 10 1002 400 S Mon Jan 1 00:02:00 2024 /tool/lake serve
+31 30 1002 300 S Mon Jan 1 00:02:01 2024 /tool/lean --server
+""")
+        result = LinuxAdapter().reclaim(["--dry-run"])
+        self.assertEqual(result.status, "OK")
+        self.assertEqual([row["pid"] for row in result.data["owned"]], [20, 21])
+        self.assertEqual(result.data["termination_order"], [21, 20])
+        self.assertEqual(result.data["foreign_left_alone"], [])
+
+    @mock.patch("creme.adapters.linux.LinuxAdapter._run")
+    def test_linux_reclaim_rejects_duplicate_options_without_snapshot(self, run):
+        result = LinuxAdapter().reclaim(["--dry-run", "--dry-run"])
+        self.assertEqual(result.status, "REFUSED")
+        run.assert_not_called()
+
     def test_cache_copy_preview_never_mutates(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "src"

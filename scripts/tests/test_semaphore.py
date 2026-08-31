@@ -87,6 +87,29 @@ class SemaphoreTest(unittest.TestCase):
         self.assertFalse(semaphore.acquire("soft", semaphore.MANUAL_LABEL, "x")[0])
         self.assertFalse(semaphore.release("soft", semaphore.MANUAL_LABEL)[0])
 
+    def test_ignored_local_config_selects_a_writable_state_root(self):
+        config = Path(self.tmp.name) / "semaphore-dir"
+        selected = Path(self.tmp.name) / "state"
+        config.write_text(f"{selected}\n", encoding="utf-8")
+        with mock.patch.object(semaphore, "LOCAL_CONFIG_PATH", config):
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": "/unused"}, clear=True):
+                self.assertEqual(semaphore.state_root(), selected)
+
+    def test_environment_override_wins_over_local_config(self):
+        config = Path(self.tmp.name) / "semaphore-dir"
+        config.write_text("/configured/state\n", encoding="utf-8")
+        with mock.patch.object(semaphore, "LOCAL_CONFIG_PATH", config):
+            with mock.patch.dict(os.environ, {"CREME_SEMAPHORE_DIR": "/environment/state"}, clear=True):
+                self.assertEqual(semaphore.state_root(), Path("/environment/state"))
+
+    def test_invalid_local_config_fails_closed(self):
+        config = Path(self.tmp.name) / "semaphore-dir"
+        config.write_text("relative/path\n", encoding="utf-8")
+        with mock.patch.object(semaphore, "LOCAL_CONFIG_PATH", config):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with self.assertRaises(semaphore.SemaphoreError):
+                    semaphore.state_root()
+
 
 if __name__ == "__main__":
     unittest.main()

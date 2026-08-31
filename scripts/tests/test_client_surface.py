@@ -171,6 +171,37 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertNotIn("/" + "Users" + "/", setup)
         self.assertNotRegex(setup, r"/home/[^/]+/")
 
+    def test_goal_guide_keeps_model_effort_contract(self) -> None:
+        guide = (ROOT / "docs/guides/goal.md").read_text(encoding="utf-8")
+        for required_concept in (
+            "Recommended lead configuration",
+            "required but advisory",
+            "The six-selector model",
+            "The intelligence ceiling",
+            "not a sixth intelligence rung",
+            "automatic multi-agent orchestration",
+            "Ultra: Max reasoning with automatic task delegation",
+            "recheck its effective lead effort at launch",
+            "client-visible model name",
+            "https://learn.chatgpt.com/docs/models",
+            "https://developers.openai.com/api/docs/guides/latest-model",
+        ):
+            self.assertIn(required_concept, guide)
+        self.assertNotIn(
+            "Extra-High-class lead reasoning plus automatic", guide
+        )
+        for model in ("Sol", "Terra", "Luna", "Fable", "Opus"):
+            self.assertIn(model, guide)
+        for selector in (
+            "Light",
+            "Medium",
+            "High",
+            "Extra High",
+            "Max",
+            "Ultra",
+        ):
+            self.assertIn(selector, guide)
+
     def test_generated_codex_profile_escapes_legal_hostile_paths(self) -> None:
         workspace = Path('/tmp/work"space\\line\nnext')
         rendered = render_codex_profile(workspace)

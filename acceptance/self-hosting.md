@@ -61,10 +61,10 @@ surface in the current trusted client. The owner explicitly authorized the
 repository authority transition after the completed Beacon deposit work was
 merged. The reconciled default branches were then verified and published:
 
-| Repository | Activated `main` | Transition evidence |
+| Repository | Activation commit / tree | Transition evidence |
 |---|---|---|
-| Elanc | `82967098a55fd2e08c88ffd6fb55431a72ecfe95` | compatibility surface is fail-closed; legacy MCP, skills, Claude agents, and Codex rules are inactive |
-| Plans | `3ee039b99dc89d89285ec77f0b272ef98ca038fc` | reusable workflow guides point to Creme; Plans retains private goals, state, reports, and evidence |
+| Elanc | `a6640f4e470f447fd4df0e3ac40104f2533c76a9` | compatibility surface is fail-closed; legacy MCP, skills, Claude agents, and Codex rules are inactive; live macOS probe tests skip on Linux CI |
+| Plans | default merge `3ee039b99dc89d89285ec77f0b272ef98ca038fc` | reusable workflow guides point to Creme; Plans retains private goals, state, reports, and evidence; later Plans-only ledger commits record the transition |
 | Jaune | `ae1b7d51f79205a15fc946034b4fb18085dcddad` | onboarding and gate catalogue use Creme coordination while Jaune retains proof authority |
 | Blanc | `c4795430427b4c1a0eec9f01d9c277728ca69613` | Beacon-complete main plus Creme portability changes; the exact candidate passed `GATES OK: 47 rows, 47 executed, 0 reused from valid evidence, 2633.8s` |
 

@@ -10,6 +10,10 @@ Read the goal and relevant authorities in full. Confirm stable goal identity,
 `ready` status, explicit completion criteria, current repository commits,
 dirty-tree ownership, and open user decisions. Create per-goal branches and
 worktrees; never repurpose shared main clones or overwrite unrelated changes.
+A worktree for the repository at `PATH` belongs in `PATH/.worktrees/<goal>`,
+ignored by that repository. Keeping it inside the repository it belongs to
+assumes nothing about the surrounding layout and needs no access beyond the
+repository already in use.
 
 Write a compact state brief for multi-session work. It should name exact
 commits, owned paths, last green evidence, active packets, open decisions, and

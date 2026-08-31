@@ -32,7 +32,11 @@ of choosing the convenient source.
    access. Do not work around a real permission boundary.
 2. Read `docs/guides/execution.md` for substantial work and the named goal in
    full. A goal must have stable identity and status `ready`.
-3. Use per-goal worktrees. Shared main clones stay on their default branches.
+3. Use per-goal worktrees. A worktree for the repository at `PATH` belongs
+   in `PATH/.worktrees/<goal>`, which assumes nothing about the layout above
+   that repository and needs no write access outside it; add `/.worktrees/`
+   to that repository's `.gitignore`. Shared main clones stay on their
+   default branches.
 4. Read Jaune's or Blanc's `scripts/GATES.md` before editing or testing there.
 5. For Blanc, follow `docs/COMMON_API.md` and `docs/PROOF_RECIPES.md` in the
    Blanc repository. Generic-shaped definitions, lemmas, tactics, and instances

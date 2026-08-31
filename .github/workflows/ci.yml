@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   portable:
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -24,6 +25,7 @@ jobs:
 
   linux-runtime:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check out Creme
         uses: actions/checkout@v4
@@ -33,11 +35,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: skbaek/jaune
+          ref: ae1b7d51f79205a15fc946034b4fb18085dcddad
           path: workspace/jaune
       - name: Check out Blanc
         uses: actions/checkout@v4
         with:
           repository: skbaek/blanc
+          ref: 18ca2b4310688465300378067b3a76f9bfadf4a5
           path: workspace/blanc
       - uses: actions/setup-python@v5
         with:

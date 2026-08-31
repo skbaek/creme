@@ -48,5 +48,23 @@ absent set as optional, but rejects a partial, stale, linked, or non-executable
 install so a repository migration cannot silently leave active host behavior
 behind.
 
+## Neutral semaphore cutover
+
+Creme now tracks one client-neutral semaphore launcher at
+`.semaphore/semaphore`. Fresh installations create ignored private state at
+`.semaphore/state/`. Existing installations remain on the former XDG/user-local
+state until the owner deliberately runs:
+
+```sh
+~/.codex/bin/codex-host-semaphore migrate-state
+```
+
+The compatibility delegate is used for cutover because it already has access
+to both locations on Codex hosts. Migration locks both roots, validates and
+copies active holds, activates the neutral state, and retains the complete old
+state directory. It neither removes the old delegate nor declares the legacy
+files safe to delete. Sessions using the delegate path subsequently load the
+current Creme code and coordinate through the activated neutral state.
+
 Creme is optional for building Jaune or Blanc. Users who do not want the
 enhanced agent workflow continue to clone and build either library normally.

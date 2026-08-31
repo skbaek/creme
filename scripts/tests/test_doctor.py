@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 
 from creme.adapters.base import Adapter
-from creme.doctor import STATUS_FAIL, STATUS_OK, check_launch_root, check_public_runtime_boundary
+from creme.doctor import (
+    STATUS_FAIL,
+    STATUS_OK,
+    check_launch_root,
+    check_neutral_semaphore,
+    check_public_runtime_boundary,
+)
 
 
 class DoctorTest(unittest.TestCase):
@@ -30,6 +36,26 @@ class DoctorTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         checks = check_public_runtime_boundary(root)
         self.assertTrue(all(check.status == STATUS_OK for check in checks), checks)
+
+    def test_neutral_semaphore_interface_is_complete(self):
+        root = Path(__file__).resolve().parents[2]
+        checks = check_neutral_semaphore(root)
+        self.assertEqual(checks[0].status, STATUS_OK, checks)
+
+    def test_neutral_semaphore_check_rejects_unignored_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launcher = root / ".semaphore" / "semaphore"
+            launcher.parent.mkdir()
+            launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+            launcher.chmod(0o700)
+            (launcher.parent / "README.md").write_text("protocol\n", encoding="utf-8")
+            (root / ".gitignore").write_text("", encoding="utf-8")
+
+            checks = check_neutral_semaphore(root)
+
+            self.assertEqual(checks[0].status, STATUS_FAIL)
+            self.assertIn("not ignored", checks[0].detail)
 
 
 if __name__ == "__main__":

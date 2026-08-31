@@ -210,13 +210,41 @@ The CLI alternative to the desktop project is to start Codex with
 `cd ~/creme && codex --profile creme`; the directory where the CLI starts is its
 project.
 
-### Codex host-capability delegates
+### Shared host semaphore
+
+All local clients and humans use the tracked neutral launcher:
+
+```sh
+cd ~/creme
+./.semaphore/semaphore status
+```
+
+On a fresh installation this creates private runtime state under the ignored
+`.semaphore/state/` directory. Never copy the launcher into a goal worktree or
+edit the state files directly.
+
+An upgraded installation with legacy state deliberately continues using it
+until an explicit cutover. After deploying the neutral launcher, preserve the
+old files and run this once from a trusted human shell or the existing approved
+Codex delegate:
+
+```sh
+~/.codex/bin/codex-host-semaphore migrate-state
+```
+
+The command copies validated live holds into `.semaphore/state` while holding
+both mutexes. It does not delete or rewrite the legacy state, and the old
+delegate remains usable by sessions that still reference its path.
+
+### Legacy Codex host-capability delegates
 
 Some Codex installations authorize a stable executable path for host
 operations that the project sandbox cannot perform directly. Creme can create
 three user-local delegates for that boundary: semaphore, telemetry, and Lean
 reclamation. They contain no copied host logic and always execute the current
-checkout's capability CLI.
+checkout's capability CLI. The semaphore delegate is retained for compatibility
+during the neutral migration; new cross-client instructions use the tracked
+launcher above.
 
 Preview the complete contents and destinations before the first write:
 

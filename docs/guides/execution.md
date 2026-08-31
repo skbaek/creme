@@ -37,16 +37,20 @@ merged without overlapping authority.
   hold and verify the host is quiet.
 
 ```sh
-python3 -m creme semaphore soft-acquire GOAL --note "build"
-python3 -m creme semaphore renew GOAL
-python3 -m creme semaphore soft-release GOAL
-python3 -m creme semaphore hard-acquire GOAL --note "timing control"
-python3 -m creme semaphore hard-release GOAL
+~/creme/.semaphore/semaphore soft-acquire GOAL --note "build"
+~/creme/.semaphore/semaphore renew GOAL
+~/creme/.semaphore/semaphore soft-release GOAL
+~/creme/.semaphore/semaphore hard-acquire GOAL --note "timing control"
+~/creme/.semaphore/semaphore hard-release GOAL
 ```
 
-On a Codex host where the sandbox denies the direct command, first require
-`python3 -m creme doctor` to validate the installed delegates, then substitute
-the exact stable path without changing the action or arguments:
+The launcher is tracked in the canonical Creme checkout and is shared by Codex,
+Claude Code, other local agents, and humans. Always use the canonical launcher,
+not a copy inside a goal worktree; linked worktrees resolve back to its single
+ignored `.semaphore/state` directory.
+
+Existing installations may retain the following Codex delegate while live
+sessions still reference it:
 
 ```sh
 ~/.codex/bin/codex-host-semaphore soft-acquire GOAL --note "build"
@@ -55,8 +59,19 @@ the exact stable path without changing the action or arguments:
 ```
 
 The delegate is an approval boundary, not another semaphore implementation.
-Never use one that `doctor` reports as partial or stale. Preview and regenerate
-the full set with `python3 -m creme host-wrappers` rather than copying a helper.
+It dispatches into the same current implementation and, after state migration,
+the same neutral state. Never use one that `doctor` reports as partial or stale.
+Do not remove the delegate or legacy state merely because migration succeeded;
+their eventual retirement is a separate, owner-reviewed cleanup.
+
+On an upgraded host, `migrate-state` copies validated live holds under the old
+and new mutexes, activates `.semaphore/state`, and leaves the legacy files
+untouched. Run it once from a trusted human shell or the still-approved legacy
+delegate after the neutral-semaphore change is deployed:
+
+```sh
+~/.codex/bin/codex-host-semaphore migrate-state
+```
 
 On limited hosts, run one heavy operation at a time and checkpoint first.
 Missing telemetry is not a pressure signal. Never edit semaphore state or use

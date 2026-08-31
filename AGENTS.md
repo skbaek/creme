@@ -86,17 +86,21 @@ directly. Use:
 ```sh
 python3 -m creme platform
 python3 -m creme telemetry
-python3 -m creme semaphore status
+~/creme/.semaphore/semaphore status
 python3 -m creme reclaim --dry-run
 python3 -m creme reclaim --wind-down GOAL
 ```
 
-If the client sandbox denies a host operation, use only a generated delegate
-that `python3 -m creme doctor` reports as current:
+The tracked `.semaphore/semaphore` launcher is the client-neutral coordination
+entry point for Codex, Claude Code, future local agents, and humans. Invoke the
+canonical `~/creme` launcher even while working in a per-goal worktree; it
+resolves every worktree to the same ignored `.semaphore/state` directory.
+
+If the client sandbox denies telemetry or reclamation, use only a generated
+legacy delegate that `python3 -m creme doctor` reports as current:
 
 ```sh
 ~/.codex/bin/codex-host-telemetry
-~/.codex/bin/codex-host-semaphore status
 ~/.codex/bin/codex-reclaim-lean --dry-run
 ~/.codex/bin/codex-reclaim-lean --wind-down GOAL
 ```
@@ -104,6 +108,9 @@ that `python3 -m creme doctor` reports as current:
 These stable approval targets dispatch back into the canonical Creme checkout.
 Never use a copied standalone helper or a delegate that `doctor` marks stale;
 preview and regenerate the complete set with `python3 -m creme host-wrappers`.
+The existing `codex-host-semaphore` delegate remains a supported compatibility
+path during the neutral-state migration and must not be removed while old
+sessions may still reference it.
 
 The capability contract and limited-mode results are in
 `docs/capabilities.md`. A missing capability is not permission to run another

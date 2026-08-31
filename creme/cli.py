@@ -197,6 +197,8 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
         return _sem_result(*semaphore.manual_acquire(arguments.note))
     if action == "manual-release":
         return _sem_result(*semaphore.manual_release())
+    if action == "migrate-state":
+        return _sem_result(*semaphore.migrate_legacy_state())
     return _sem_result(False, f"unknown action: {action}")
 
 
@@ -373,6 +375,10 @@ def parser() -> argparse.ArgumentParser:
     manual = sem_commands.add_parser("manual-acquire")
     manual.add_argument("--note", default="human using another macOS account")
     sem_commands.add_parser("manual-release")
+    sem_commands.add_parser(
+        "migrate-state",
+        help="copy legacy host state into .semaphore/state without deleting the legacy files",
+    )
     sem.set_defaults(func=cmd_semaphore)
 
     client = commands.add_parser("client-profile", help="preview a machine-local Codex sibling-access profile")

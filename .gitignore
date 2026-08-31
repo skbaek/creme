@@ -11,3 +11,6 @@ acceptance/local/
 
 # Per-goal Git worktrees; see AGENTS.md.
 /.worktrees/
+
+# Host-local semaphore state; the launcher and documentation remain tracked.
+/.semaphore/state/

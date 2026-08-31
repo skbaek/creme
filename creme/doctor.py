@@ -181,6 +181,30 @@ def check_client_surface(root: Path) -> list[Check]:
     return checks
 
 
+def check_neutral_semaphore(root: Path) -> list[Check]:
+    launcher = root / ".semaphore" / "semaphore"
+    readme = root / ".semaphore" / "README.md"
+    ignore = root / ".gitignore"
+    issues = []
+    if not launcher.is_file():
+        issues.append("launcher missing")
+    elif not os.access(launcher, os.X_OK):
+        issues.append("launcher not executable")
+    if not readme.is_file():
+        issues.append("protocol documentation missing")
+    try:
+        ignored = "/.semaphore/state/" in ignore.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        ignored = False
+    if not ignored:
+        issues.append("runtime state is not ignored")
+    return [Check(
+        "client: neutral semaphore",
+        STATUS_FAIL if issues else STATUS_OK,
+        f"invalid interface: {issues}" if issues else str(launcher),
+    )]
+
+
 def check_host_wrappers(root: Path, output_dir: Optional[Path] = None) -> list[Check]:
     directory = (output_dir or default_output_dir()).expanduser().resolve()
     rendered = render_host_wrappers(root)
@@ -281,6 +305,7 @@ def run_doctor(
     checks.extend(check_sibling("jaune", workspace / jaune_name, "github.com/skbaek/jaune"))
     checks.extend(check_sibling("blanc", workspace / blanc_name, "github.com/skbaek/blanc"))
     checks.extend(check_client_surface(root))
+    checks.extend(check_neutral_semaphore(root))
     checks.extend(check_host_wrappers(root))
     checks.extend(check_public_runtime_boundary(root))
     facts = selected.static_facts()

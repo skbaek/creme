@@ -19,6 +19,7 @@ DEFAULT_LEASE_SECONDS = 1800
 MAX_LEASE_SECONDS = 14400
 MANUAL_LABEL = "manual-macos-session"
 MANUAL_GRACE_SECONDS = 300
+NEUTRAL_STATE_RELATIVE = Path(".semaphore/state")
 HOLD_KEYS = {
     "label", "pid", "uid", "note", "manual",
     "acquired_at", "renewed_at", "lease_seconds",
@@ -37,14 +38,57 @@ def _iso(timestamp: Optional[float] = None) -> str:
     return datetime.fromtimestamp(timestamp or _now(), timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def state_root() -> Path:
-    override = os.environ.get("CREME_SEMAPHORE_DIR")
-    if override:
-        return Path(override).expanduser()
+def canonical_creme_root(module_root: Optional[Path] = None) -> Path:
+    """Return the shared checkout root, including from a linked worktree."""
+    root = (module_root or Path(__file__).resolve().parents[1]).resolve()
+    git_marker = root / ".git"
+    if git_marker.is_dir() or not git_marker.is_file():
+        return root
+    try:
+        marker = git_marker.read_text(encoding="utf-8").strip()
+        prefix = "gitdir: "
+        if not marker.startswith(prefix):
+            raise ValueError("worktree .git file has an unexpected shape")
+        git_dir = Path(marker[len(prefix):])
+        if not git_dir.is_absolute():
+            git_dir = git_marker.parent / git_dir
+        common_reference = (git_dir.resolve() / "commondir").read_text(encoding="utf-8").strip()
+        common_dir = Path(common_reference)
+        if not common_dir.is_absolute():
+            common_dir = git_dir / common_dir
+        return common_dir.resolve().parent
+    except (OSError, ValueError) as exc:
+        raise SemaphoreError(f"cannot resolve canonical Creme root: {exc}")
+
+
+def neutral_state_root() -> Path:
+    return canonical_creme_root() / NEUTRAL_STATE_RELATIVE
+
+
+def legacy_state_root() -> Path:
     state_home = os.environ.get("XDG_STATE_HOME")
     if state_home:
         return Path(state_home).expanduser() / "creme" / "host-semaphore"
     return Path.home() / ".local" / "state" / "creme" / "host-semaphore"
+
+
+def _has_runtime_state(root: Path) -> bool:
+    return any((root / name).exists() for name in ("state.json", "mutex", "log.jsonl"))
+
+
+def _select_state_root(neutral: Path, legacy: Path) -> Path:
+    if (neutral / "state.json").exists():
+        return neutral
+    if _has_runtime_state(legacy):
+        return legacy
+    return neutral
+
+
+def state_root() -> Path:
+    override = os.environ.get("CREME_SEMAPHORE_DIR")
+    if override:
+        return Path(override).expanduser()
+    return _select_state_root(neutral_state_root(), legacy_state_root())
 
 
 def _empty_state() -> dict[str, Any]:
@@ -94,8 +138,7 @@ def _validate(state: Any) -> dict[str, Any]:
 
 
 @contextmanager
-def locked_state() -> Iterator[tuple[Path, dict[str, Any]]]:
-    root = state_root()
+def _locked_root(root: Path) -> Iterator[None]:
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         root.chmod(0o700)
@@ -105,15 +148,37 @@ def locked_state() -> Iterator[tuple[Path, dict[str, Any]]]:
     with mutex.open("a+", encoding="utf-8") as lock:
         os.fchmod(lock.fileno(), 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def _load_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return _empty_state()
+    try:
+        return _validate(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, SemaphoreError) as exc:
+        raise SemaphoreError(f"refusing to replace corrupt semaphore state: {exc}")
+
+
+@contextmanager
+def locked_state() -> Iterator[tuple[Path, dict[str, Any]]]:
+    root = state_root()
+    override = os.environ.get("CREME_SEMAPHORE_DIR")
+    legacy = legacy_state_root()
+    if not override and root == legacy:
+        # A migration may activate neutral state while this invocation waits on
+        # the legacy mutex. Re-check under that mutex instead of writing a stale
+        # post-migration update back into the retained legacy copy.
+        with _locked_root(root):
+            refreshed = state_root()
+            if refreshed == root:
+                path = root / "state.json"
+                yield path, _load_state(path)
+                return
+        root = refreshed
+    with _locked_root(root):
         path = root / "state.json"
-        if path.exists():
-            try:
-                state = _validate(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError, SemaphoreError) as exc:
-                raise SemaphoreError(f"refusing to replace corrupt semaphore state: {exc}")
-        else:
-            state = _empty_state()
-        yield path, state
+        yield path, _load_state(path)
 
 
 def _save(path: Path, state: dict[str, Any]) -> None:
@@ -132,16 +197,54 @@ def _save(path: Path, state: dict[str, Any]) -> None:
             os.unlink(temporary)
 
 
-def _log(action: str, label: str, verdict: str, detail: str) -> None:
+def _log_to(root: Path, action: str, label: str, verdict: str, detail: str) -> None:
     record = {
         "time": _iso(), "action": action, "label": label,
         "verdict": verdict, "detail": detail,
     }
-    path = state_root() / "log.jsonl"
+    path = root / "log.jsonl"
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     os.fchmod(fd, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _log(action: str, label: str, verdict: str, detail: str) -> None:
+    _log_to(state_root(), action, label, verdict, detail)
+
+
+def migrate_legacy_state(
+    neutral_root: Optional[Path] = None,
+    legacy_root: Optional[Path] = None,
+) -> tuple[bool, str]:
+    """Copy the legacy state into Creme without removing the legacy files."""
+    if os.environ.get("CREME_SEMAPHORE_DIR") and neutral_root is None and legacy_root is None:
+        return False, "state migration is unavailable while CREME_SEMAPHORE_DIR is set"
+    neutral = (neutral_root or neutral_state_root()).expanduser().resolve()
+    legacy = (legacy_root or legacy_state_root()).expanduser().resolve()
+    if neutral == legacy:
+        return False, "neutral and legacy state paths are identical"
+
+    neutral_path = neutral / "state.json"
+    if neutral_path.exists():
+        with _locked_root(neutral):
+            _load_state(neutral_path)
+        return True, f"neutral state already active at {neutral}; legacy state retained at {legacy}"
+
+    with _locked_root(legacy):
+        with _locked_root(neutral):
+            if neutral_path.exists():
+                _load_state(neutral_path)
+                return True, f"neutral state already active at {neutral}; legacy state retained at {legacy}"
+            legacy_state = _load_state(legacy / "state.json")
+            _save(neutral_path, legacy_state)
+
+    detail = f"neutral state activated at {neutral}; legacy state retained at {legacy}"
+    try:
+        _log_to(neutral, "migrate-state", "host-semaphore", "OK", detail)
+    except OSError:
+        detail += "; audit log write failed"
+    return True, detail
 
 
 def _hold(label: str, note: str, lease: int, manual: bool = False) -> dict[str, Any]:

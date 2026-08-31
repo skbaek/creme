@@ -57,8 +57,19 @@ directory after reviewing the project MCP prompt. Both clients must be
 launched with Creme as the project/current directory. Merely granting sibling
 filesystem access does not load Creme's instructions, skills, or MCP config.
 
-Codex installations that authorize stable executable paths can also install
-thin delegates for Creme's host capabilities. Preview the exact files first:
+All supported local agents and humans share the tracked semaphore launcher:
+
+```sh
+./.semaphore/semaphore status
+```
+
+Fresh hosts keep its private runtime state in ignored `.semaphore/state/`.
+Upgraded hosts retain and use legacy state until the explicit, non-destructive
+`migrate-state` cutover documented in [the setup guide](docs/setup.md).
+
+Codex installations that authorize stable executable paths can also retain or
+install thin compatibility delegates for Creme's host capabilities. Preview the
+exact files first:
 
 ```sh
 python3 -m creme host-wrappers --output-dir ~/.codex/bin
@@ -84,7 +95,7 @@ python3 -m creme --help
 python3 -m creme doctor --json
 python3 -m creme host-wrappers --output-dir ~/.codex/bin
 python3 -m creme telemetry
-python3 -m creme semaphore status
+./.semaphore/semaphore status
 python3 -m creme tempdir
 python3 -m creme cache-copy SOURCE DESTINATION
 python3 -m creme reclaim --dry-run

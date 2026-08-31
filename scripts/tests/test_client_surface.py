@@ -70,6 +70,17 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertNotIn("enableAllProjectMcpServers", settings)
         self.assertNotIn("allow", permissions)
 
+    def test_host_semaphore_has_one_tracked_client_neutral_entry_point(self) -> None:
+        launcher = ROOT / ".semaphore" / "semaphore"
+        self.assertTrue(launcher.is_file())
+        self.assertTrue(launcher.stat().st_mode & stat.S_IXUSR)
+        text = launcher.read_text(encoding="utf-8")
+        self.assertIn('main(["semaphore", *sys.argv[1:]])', text)
+        self.assertNotIn(".codex", text)
+        self.assertNotIn(".claude", text)
+        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("/.semaphore/state/", ignored)
+
     def test_mcp_surfaces_have_one_matching_pinned_server(self) -> None:
         claude = _json(".mcp.json")
         antigravity = _json(".agents/mcp_config.json")

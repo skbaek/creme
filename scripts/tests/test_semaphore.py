@@ -39,6 +39,108 @@ class SemaphoreTest(unittest.TestCase):
         hold["renewed_at"] = 1
         path.write_text(json.dumps(data), encoding="utf-8")
 
+    def test_linked_worktree_resolves_the_canonical_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            canonical = temporary / "creme"
+            worktree = temporary / "elsewhere" / "goal"
+            git_dir = canonical / ".git" / "worktrees" / "goal"
+            git_dir.mkdir(parents=True)
+            worktree.mkdir(parents=True)
+            (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+            (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+
+            self.assertEqual(semaphore.canonical_creme_root(worktree), canonical.resolve())
+
+    def test_state_selection_keeps_existing_install_on_legacy_until_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            neutral = temporary / "creme" / ".semaphore" / "state"
+            legacy = temporary / "legacy"
+
+            self.assertEqual(semaphore._select_state_root(neutral, legacy), neutral)
+            legacy.mkdir()
+            (legacy / "mutex").touch()
+            self.assertEqual(semaphore._select_state_root(neutral, legacy), legacy)
+            neutral.mkdir(parents=True)
+            (neutral / "state.json").write_text(
+                json.dumps(semaphore._empty_state()), encoding="utf-8"
+            )
+            self.assertEqual(semaphore._select_state_root(neutral, legacy), neutral)
+
+    def test_migration_copies_live_holds_and_retains_legacy_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            neutral = temporary / "creme" / ".semaphore" / "state"
+            legacy = temporary / "legacy"
+            with mock.patch.dict(os.environ, {"CREME_SEMAPHORE_DIR": str(legacy)}):
+                self.assertTrue(semaphore.acquire("soft", "live", "existing session")[0])
+            legacy_before = (legacy / "state.json").read_bytes()
+
+            ok, detail = semaphore.migrate_legacy_state(neutral, legacy)
+
+            self.assertTrue(ok, detail)
+            self.assertIn("legacy state retained", detail)
+            self.assertEqual((legacy / "state.json").read_bytes(), legacy_before)
+            migrated = semaphore._load_state(neutral / "state.json")
+            self.assertEqual([item["label"] for item in migrated["soft"]], ["live"])
+            self.assertTrue((neutral / "log.jsonl").is_file())
+
+    def test_migration_refuses_to_replace_corrupt_neutral_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            neutral = temporary / "neutral"
+            legacy = temporary / "legacy"
+            neutral.mkdir()
+            (neutral / "state.json").write_text("not-json", encoding="utf-8")
+            before = (neutral / "state.json").read_bytes()
+
+            with self.assertRaises(semaphore.SemaphoreError):
+                semaphore.migrate_legacy_state(neutral, legacy)
+
+            self.assertEqual((neutral / "state.json").read_bytes(), before)
+
+    def test_repeated_migration_ignores_retained_legacy_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            neutral = temporary / "neutral"
+            legacy = temporary / "legacy"
+            neutral.mkdir()
+            legacy.mkdir()
+            expected = semaphore._empty_state()
+            (neutral / "state.json").write_text(json.dumps(expected), encoding="utf-8")
+            (legacy / "state.json").write_text("retained legacy drift", encoding="utf-8")
+
+            ok, detail = semaphore.migrate_legacy_state(neutral, legacy)
+
+            self.assertTrue(ok, detail)
+            self.assertIn("already active", detail)
+            self.assertEqual(semaphore._load_state(neutral / "state.json"), expected)
+            self.assertEqual(
+                (legacy / "state.json").read_text(encoding="utf-8"),
+                "retained legacy drift",
+            )
+
+    def test_waiter_reselects_neutral_state_after_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            neutral = temporary / "neutral"
+            legacy = temporary / "legacy"
+            neutral.mkdir()
+            (neutral / "state.json").write_text(
+                json.dumps(semaphore._empty_state()), encoding="utf-8"
+            )
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with mock.patch.object(
+                    semaphore, "state_root", side_effect=[legacy, neutral]
+                ):
+                    with mock.patch.object(
+                        semaphore, "legacy_state_root", return_value=legacy
+                    ):
+                        with semaphore.locked_state() as (path, state):
+                            self.assertEqual(path, neutral / "state.json")
+                            self.assertEqual(state, semaphore._empty_state())
+
     def test_xy_interleaving_and_conversion(self):
         self.assertTrue(semaphore.acquire("soft", "X", "build")[0])
         self.assertTrue(semaphore.acquire("soft", "Y", "build")[0])

@@ -87,6 +87,81 @@ class SemaphoreTest(unittest.TestCase):
         self.assertFalse(semaphore.acquire("soft", semaphore.MANUAL_LABEL, "x")[0])
         self.assertFalse(semaphore.release("soft", semaphore.MANUAL_LABEL)[0])
 
+    def test_cleanup_success_releases_soft_hold(self):
+        self.assertTrue(semaphore.acquire("soft", "goal", "proof")[0])
+        cleanup = mock.Mock(return_value=(True, "clean"))
+
+        self.assertEqual(
+            semaphore.release_after_cleanup("goal", cleanup),
+            (True, "cleanup verified and soft hold released"),
+        )
+        cleanup.assert_called_once_with()
+        self.assertEqual(semaphore.snapshot()["soft"], [])
+
+    def test_cleanup_success_releases_hard_hold(self):
+        self.assertTrue(semaphore.acquire("hard", "goal", "timing")[0])
+
+        self.assertTrue(
+            semaphore.release_after_cleanup("goal", lambda: (True, "clean"))[0]
+        )
+        self.assertIsNone(semaphore.snapshot()["hard"])
+
+    def test_cleanup_failure_preserves_matching_hold(self):
+        self.assertTrue(semaphore.acquire("soft", "goal", "proof")[0])
+
+        ok, detail = semaphore.release_after_cleanup(
+            "goal", lambda: (False, "server survived")
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("hold retained", detail)
+        self.assertEqual(semaphore.snapshot()["soft"][0]["label"], "goal")
+
+    def test_cleanup_exception_preserves_matching_hold(self):
+        self.assertTrue(semaphore.acquire("soft", "goal", "proof")[0])
+
+        ok, detail = semaphore.release_after_cleanup(
+            "goal", mock.Mock(side_effect=RuntimeError("fixture"))
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("hold retained", detail)
+        self.assertEqual(semaphore.snapshot()["soft"][0]["label"], "goal")
+
+    def test_other_hold_blocks_cleanup_before_callback(self):
+        self.assertTrue(semaphore.acquire("soft", "goal", "proof")[0])
+        self.assertTrue(semaphore.acquire("soft", "other", "build")[0])
+        cleanup = mock.Mock(return_value=(True, "clean"))
+
+        ok, detail = semaphore.release_after_cleanup("goal", cleanup)
+
+        self.assertFalse(ok)
+        self.assertIn("other", detail)
+        cleanup.assert_not_called()
+        self.assertEqual(
+            [item["label"] for item in semaphore.snapshot()["soft"]],
+            ["goal", "other"],
+        )
+
+    def test_cleanup_is_idempotent_after_matching_hold_was_released(self):
+        self.assertEqual(
+            semaphore.release_after_cleanup("goal", lambda: (True, "clean")),
+            (True, "cleanup verified; no matching hold remained"),
+        )
+        self.assertEqual(semaphore.snapshot(), semaphore._empty_state())
+
+    def test_successful_state_change_is_not_misreported_when_audit_log_fails(self):
+        self.assertTrue(semaphore.acquire("soft", "goal", "proof")[0])
+
+        with mock.patch("creme.semaphore._log", side_effect=OSError("fixture")):
+            ok, detail = semaphore.release_after_cleanup(
+                "goal", lambda: (True, "clean")
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("audit log write failed", detail)
+        self.assertEqual(semaphore.snapshot()["soft"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,9 @@ requires re-deriving protocol assumptions.
 
 Make the smallest real-file edit, inspect the resulting goal and diagnostics,
 run the relevant cheap repository gate, and confirm source/artifact freshness.
-Remove scratch outputs and release holds. Reclaim a retained server only at a
-coherent boundary and only through `python3 -m creme reclaim`; if the capability
-is unavailable, restart the client instead.
+Remove scratch outputs. Ordinary hold releases may retain a useful server at an
+intermediate boundary. Before pause, restart, transfer, or completion, use
+`python3 -m creme reclaim --wind-down GOAL`; this verifies that owned servers
+are gone before releasing the goal hold. A bare release is not teardown
+evidence. If reclamation is unavailable, keep the hold, checkpoint, and restart
+the client instead.

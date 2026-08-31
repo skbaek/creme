@@ -88,6 +88,7 @@ python3 -m creme platform
 python3 -m creme telemetry
 python3 -m creme semaphore status
 python3 -m creme reclaim --dry-run
+python3 -m creme reclaim --wind-down GOAL
 ```
 
 If the client sandbox denies a host operation, use only a generated delegate
@@ -97,6 +98,7 @@ that `python3 -m creme doctor` reports as current:
 ~/.codex/bin/codex-host-telemetry
 ~/.codex/bin/codex-host-semaphore status
 ~/.codex/bin/codex-reclaim-lean --dry-run
+~/.codex/bin/codex-reclaim-lean --wind-down GOAL
 ```
 
 These stable approval targets dispatch back into the canonical Creme checkout.
@@ -112,6 +114,13 @@ Coordinate memory-heavy Lean work with the host semaphore described in
 `docs/guides/execution.md`: builds and elaboration use a soft hold; timing,
 whole-tree, and mutation work use the exclusive hard hold. Never edit semaphore
 state, use a bare `kill`, or treat a quiet-looking snapshot as a lease.
+
+Any task that opened a Lean MCP server must run `reclaim --wind-down GOAL`
+before yielding to a requested pause or restart, transferring the task, or
+reporting completion. The command verifies reclamation before atomically
+releasing that goal's hold. A bare soft/hard release is an intermediate
+operation, not wind-down evidence; never claim the task is safe or idle after
+Lean work unless wind-down reports `OK`.
 
 ## Git and completion
 

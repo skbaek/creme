@@ -88,6 +88,7 @@ python3 -m creme semaphore status
 python3 -m creme tempdir
 python3 -m creme cache-copy SOURCE DESTINATION
 python3 -m creme reclaim --dry-run
+python3 -m creme reclaim --wind-down GOAL
 python3 -m unittest discover -s scripts/tests -v
 ```
 

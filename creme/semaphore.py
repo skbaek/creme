@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from .adapters import Adapter, get_adapter
 
@@ -238,6 +238,63 @@ def release(kind: str, label: str) -> tuple[bool, str]:
         _save(path, state)
     _log(f"{kind}-release", label, "OK", "released")
     return True, f"{kind} hold released"
+
+
+def release_after_cleanup(
+    label: str,
+    cleanup: Callable[[], tuple[bool, str]],
+) -> tuple[bool, str]:
+    """Run verified cleanup and release ``label`` without an acquisition race.
+
+    The semaphore mutex stays held while ``cleanup`` runs.  This is deliberately
+    reserved for task wind-down: ordinary releases must remain fast and must not
+    discard a useful language-server cache at an intermediate boundary.
+    """
+    if not label or label == MANUAL_LABEL:
+        return False, "reserved or empty label"
+    with locked_state() as (path, state):
+        holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
+        other_labels = [item["label"] for item in holds if item["label"] != label]
+        if other_labels:
+            detail = "other holds block task wind-down: " + ", ".join(other_labels)
+            _log("wind-down", label, "REFUSED", detail)
+            return False, detail
+        try:
+            cleaned, cleanup_detail = cleanup()
+        except Exception:
+            detail = "cleanup raised an exception; matching hold retained"
+            _log("wind-down", label, "REFUSED", detail)
+            return False, detail
+        if not cleaned:
+            detail = f"cleanup not verified; matching hold retained: {cleanup_detail}"
+            _log("wind-down", label, "REFUSED", detail)
+            return False, detail
+
+        released = None
+        if state["hard"] and state["hard"]["label"] == label:
+            state["hard"] = None
+            released = "hard"
+        else:
+            before = len(state["soft"])
+            state["soft"] = [item for item in state["soft"] if item["label"] != label]
+            if len(state["soft"]) != before:
+                released = "soft"
+        if released:
+            _save(path, state)
+
+    detail = (
+        f"cleanup verified and {released} hold released"
+        if released
+        else "cleanup verified; no matching hold remained"
+    )
+    try:
+        _log("wind-down", label, "OK", detail)
+    except OSError:
+        # Cleanup and the atomic state update have already succeeded.  A log
+        # failure must not misreport the hold as retained or invite a retry
+        # that races with a newly acquired hold.
+        detail += "; audit log write failed"
+    return True, detail
 
 
 def renew(label: str, lease: int = DEFAULT_LEASE_SECONDS) -> tuple[bool, str]:

@@ -18,6 +18,7 @@ from .host_wrappers import (
 )
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import semaphore
+from .task_wind_down import wind_down
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -150,6 +151,18 @@ def cmd_cache_copy(arguments: argparse.Namespace) -> int:
 
 
 def cmd_reclaim(arguments: argparse.Namespace) -> int:
+    wind_down_label = getattr(arguments, "wind_down", None)
+    if wind_down_label is not None:
+        if arguments.hard_pressure or arguments.dry_run:
+            _json({
+                "capability": "task_wind_down",
+                "status": "REFUSED",
+                "detail": "--wind-down cannot be combined with --dry-run or --hard-pressure",
+            })
+            return 2
+        result = wind_down(wind_down_label, get_adapter())
+        _json(result.to_dict())
+        return 0 if result.status == "OK" else 2
     options = []
     if arguments.hard_pressure:
         options.append("--hard-pressure")
@@ -337,6 +350,7 @@ def parser() -> argparse.ArgumentParser:
     reclaim = commands.add_parser("reclaim", help="ownership-verifying Lean-server reclamation")
     reclaim.add_argument("--dry-run", action="store_true")
     reclaim.add_argument("--hard-pressure", action="store_true")
+    reclaim.add_argument("--wind-down", metavar="GOAL")
     reclaim.set_defaults(func=cmd_reclaim)
 
     sem = commands.add_parser("semaphore", help="atomic cross-session host coordination")

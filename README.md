@@ -10,10 +10,10 @@ and retain authority over their own APIs, proofs, and gates.
 Creme v0.1 supports macOS and Linux. Linux deliberately has fewer optional
 host capabilities; an explicit `UNAVAILABLE` is a supported result.
 
-> Publication is not complete yet. The owner has created the empty public
-> repository at `https://github.com/skbaek/creme`, approved the first push, and
-> licensed Creme under the [MIT License](LICENSE). Exact and derived source
-> provenance is recorded separately; final review precedes publication.
+> Public `main` is available at `https://github.com/skbaek/creme` under the
+> [MIT License](LICENSE). The first public macOS/Ubuntu matrix and fresh Ubuntu
+> sibling-layout runtime run passed. Fresh client and conventional-Linux
+> acceptance remain explicit v0.1 release gates.
 
 ## Blank-host setup
 

@@ -9,8 +9,9 @@ Latest exact code candidate exercised:
 
 The merge was the explicit pre-public exception authorized by the goal. At
 that checkpoint no remote existed and nothing had been pushed. The owner later
-created the empty public `skbaek/creme` repository and, on 2026-08-31, approved
-the MIT license and first push. Exact-candidate review still precedes that push.
+created public `skbaek/creme`, approved MIT and the first push, and exact
+reviewed commit `d2bd6ea` became public `main`. Initial public CI and actual
+public three-repository clone/onboarding checks passed.
 
 ## Fresh Codex task
 
@@ -136,5 +137,5 @@ Creme is therefore the active repository control plane for new agent-assisted
 work. New sessions must launch from the Creme root, not Elanc or Plans. This
 activation does **not** close full v0.1 self-hosting acceptance: a fresh Codex
 trust/approval ceremony and representative edit, a fresh Claude Code run, the
-owner-authorized first push, public-only clean-room evidence, and conventional
-Linux acceptance remain open.
+client-mediated public-only edit evidence, and conventional Linux acceptance
+remain open.

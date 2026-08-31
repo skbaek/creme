@@ -1,46 +1,45 @@
-# Independent C12 review — pre-public follow-up
+# Independent C12 review — publication follow-up
 
 Review date: 2026-08-31 (Asia/Seoul)
 
 ## Exact scope and verdict
 
-An independent read-only reviewer audited exact Creme candidate
-`f4446b27ca4a8a1055f35c2241e35557cf287909`, including all 27 reachable
-commits and the new Ubuntu runtime workflow. The local integration tip then
-advanced to `d66db65d288884c2596b8db5bf547998e377704a`; its complete delta from
-the reviewed candidate only adds job timeouts and pins the Jaune/Blanc checkout
-inputs to the exact accepted commits. The lead verified that narrow diff and
-reran the then-current 52-test portable suite. The license-ledger test raises
-the candidate suite to 53 and requires a fresh exact-candidate run.
+An independent read-only reviewer audited exact licensed candidate
+`5619d297f530c83f2c39ba0bf74b44a32d2b96a5` and all 30 reachable commits.
+The review covered secrets, paths, private dependencies, licensing/provenance,
+modes and symlinks, global configuration safety, CI/platform claims,
+instruction consistency, and the failed post-Proxy edit disposition. It held
+publication only for four stale owner-gate sentences. Exact descendant
+`d2bd6ea29e306f5284b30a8b89470616bbad14b4` changed only those three
+acceptance documents (11 insertions, 11 deletions); the reviewer rechecked the
+delta and explicitly approved that exact commit for the first public push.
 
-**Verdict: BLOCKED; do not call C12 accepted until mandatory public-host/client
-gates close and the exact published candidate receives final review.** No new
-code/configuration security blocker was found. This report supersedes the stale
-working-tree copy of the earlier `df2c2b4` review; that earlier detailed review
-remains reachable in Git history.
+**Verdict: publication review ACCEPTED; full C12 remains BLOCKED until the
+mandatory client/Linux gates close and the exact final candidate receives the
+completion review.** No code/configuration security blocker was found.
 
 ## Blocking findings and retained gates
 
-### B1 — License grant (closed after this reviewed scope)
+### B1 — License grant (closed)
 
 The owner selected MIT on 2026-08-31 and explicitly applied it to both the four
 byte-exact Elanc copies and the derived/re-expressed private-source material.
-The current integration tree adds `LICENSE` and updates the normative manifest.
-This closes the decision gate but remains subject to the final independent
-review of the exact candidate containing those changes.
+The reviewed tree contains `LICENSE` and the updated normative manifest. The
+private provenance suite passed 7/7, including all source and exact-copy
+digests, destinations, symlinks, and the MIT-ledger assertion.
 
-### B2 — Public and fresh-client evidence is not yet complete
+### B2 — Public evidence partial; fresh-client evidence open
 
-The verified public `skbaek/creme` repository is empty and has no default
-branch, so public CI and actual public-only clones cannot yet exist. The new
-Ubuntu runtime job is statically coherent but has not run publicly.
+The reviewed commit is now public `main`. Public CI run `33355230556` passed
+all five jobs, including the fresh Ubuntu sibling-layout runtime job. An actual
+public-only three-repository clone also passed the 53-test suite and non-client
+onboarding matrix.
 
 Current-trusted-client Codex MCP liveness passes on Jaune `ae1b7d5` and Blanc
 `18ca2b4`. The ignored-user-config controls expose zero MCP tools, including an
 invocation-only trust override, so a genuine fresh Codex project
-registration/approval and representative edit remain open. Live Claude Code,
-public-only clean-room onboarding, and the separate fresh conventional Linux
-client/edit run also remain open.
+registration/approval and representative edit remain open. Live Claude Code
+and the separate fresh conventional Linux client/edit run also remain open.
 
 ### B3 — Owner dispositions (closed)
 
@@ -51,8 +50,8 @@ matches them exactly.
 
 ## Closed stale findings
 
-- The public remote now exists and is recorded honestly as empty. MIT licensing
-  and the first push are owner-approved; exact-candidate review precedes it.
+- The public remote exists, defaults to `main`, and contains the reviewed
+  history. MIT licensing, author disclosure, and the first push were approved.
 - Creme authority activation is complete. Elanc fails closed, Jaune/Blanc point
   enhanced agent work to Creme, and Plans owns concrete state rather than the
   reusable execution method.
@@ -74,9 +73,9 @@ matches them exactly.
   was found.
 - Post-`df2c2b4`, host-runtime Python and project client configuration are
   unchanged. Later executable behavior is limited to the reviewed CI workflow.
-- Four dangling blobs are unreachable and will not transfer in an ordinary
-  push. Commit history exposes the recorded author identity, whose publication
-  the owner approved on 2026-08-31.
+- Four dangling blobs observed before publication were unreachable and did not
+  transfer in the ordinary push. Commit history exposes the recorded author
+  identity, whose publication the owner approved on 2026-08-31.
 
 ## CI review
 
@@ -93,22 +92,21 @@ drift risk.
 ## Principal review commands
 
 ```sh
-git log --reverse --format=fuller f4446b2
-git rev-list --count f4446b2
-git ls-tree -r f4446b2
-git diff --stat --summary --name-status df2c2b4..f4446b2
-git diff --check df2c2b4..f4446b2
+git log --reverse --format=fuller 5619d29
+git rev-list --count 5619d29
+git ls-tree -r 5619d29
+git diff --stat --summary --name-status c663814..5619d29
+git diff --check c663814..5619d29
 git grep <secret/path/private-runtime patterns> <each reachable revision>
 git fsck --full --no-reflogs
 git log --all --summary
 sed <linux-runtime shell block> | bash -n
-git diff --check f4446b2..d66db65
+git diff --stat --name-status 5619d29..d2bd6ea
+git diff --check 5619d29..d2bd6ea
 ```
 
 ## Close condition
 
-After the first push, require successful public CI, actual public-only
-onboarding, fresh Codex and Claude Code matrices, conventional Linux
-acceptance, and one final independent history/secret/path/mode/claim review of
-the exact published candidate. Only that final review may change this verdict
-to accepted.
+Require fresh Codex and Claude Code matrices, conventional Linux acceptance,
+and one final independent history/secret/path/mode/claim review of the exact
+published candidate. Only that final review may change full C12 to accepted.

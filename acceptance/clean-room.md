@@ -1,9 +1,41 @@
-# Offline clean-room preflight
+# Clean-room acceptance
 
 Date: 2026-08-31 (Asia/Seoul)
 
-Status: **PASS as an offline packaging and onboarding precursor; not C9 public
-clean-room acceptance.**
+Status: **actual public clone/onboarding PASS; fresh-client/edit portion of C9
+remains open.**
+
+## Actual public-remote run
+
+An empty disposable parent received only ordinary HTTPS clones from the three
+actual public repositories. It contained no Elanc, Plans, inherited client
+home, or pre-existing project checkout.
+
+| Repository | Exact public commit |
+|---|---|
+| Creme | `d2bd6ea29e306f5284b30a8b89470616bbad14b4` |
+| Jaune | `ae1b7d51f79205a15fc946034b4fb18085dcddad` |
+| Blanc | `18ca2b4310688465300378067b3a76f9bfadf4a5` |
+
+All paths below are represented relative to `<public-root>`; no machine-private
+path is part of the public record.
+
+| Check | Verdict | Evidence |
+|---|---|---|
+| public cloneability | PASS | all three default branches cloned from their documented GitHub URLs; Creme defaulted to exact public `main` |
+| portable suite | PASS | `./scripts/check.sh`: 53 tests plus compile and working/committed-tree whitespace checks |
+| platform/init/profile | PASS | Darwin selected; preview wrote nothing; reviewed write produced the ignored profile; validation returned `VALID` |
+| root and sibling doctor | PASS | every check `OK`, including public origins, sibling access, standalone boundaries, MCP pin, Claude shims/skills, portable paths, and secret scan |
+| isolated Codex profile | PASS | preview followed by a write outside the client home; mode `0600`; no private-repository or secret content |
+| wrong-root control | PASS | invocation from Jaune exited 1 with `WRONG_ROOT`; sibling permission did not substitute for Creme discovery |
+| cache and semaphore | PASS | APFS-clone cache copy matched by recursive diff; one soft hold acquired, appeared live, and released cleanly |
+| repository hygiene | PASS | Creme, Jaune, and Blanc remained clean; generated host state was ignored |
+
+This proves actual public packaging and the non-client onboarding path. It does
+not claim a fresh Codex/Claude trust ceremony, MCP diagnostics, or a
+client-mediated Lean edit.
+
+## Earlier offline precursor
 
 The preflight began from an empty disposable parent containing no Elanc,
 Plans, client home, or pre-existing Creme checkout. Creme, Jaune, and Blanc
@@ -17,11 +49,10 @@ URLs solely so the doctor could exercise the published-origin contract.
 | Jaune | `92b2b1eca27a569942175c2647de2b41d7402765` |
 | Blanc | `162b84020f1462bc490e4f7793ce01cbf4807b1b` |
 
-This was deliberately **not** a network clone, did not prove that published
-Creme history is cloneable, and did not trigger public CI. Rewriting a
-disposable remote URL is a contract simulation, not publication evidence. The
-owner subsequently created the empty public repository, which still contains
-no candidate history.
+This earlier run was deliberately **not** a network clone. Rewriting a
+disposable remote URL was a contract simulation, not publication evidence; the
+actual public run above supersedes that limitation while preserving the
+precursor as historical migration evidence.
 
 ## Results
 
@@ -45,9 +76,8 @@ evidence contains no machine-private path.
 
 ## Gates still open
 
-C9 still requires three fresh clones from the actual public remotes after the
-owner-authorized first push. That run must also exercise a fresh client
-trust/approval ceremony, Lean MCP liveness, live Claude Code, and the
-representative sibling edits under the public-only layout. Public CI and
-conventional Linux acceptance remain separate mandatory gates; the owner has
-already approved the recorded macOS behavior differences.
+C9 still requires a fresh client trust/approval ceremony, Lean MCP liveness,
+live Claude Code, and representative sibling edits under the public-only
+layout. Public CI is green. Conventional Linux client/edit acceptance remains
+a separate mandatory gate; the owner has already approved the recorded macOS
+behavior differences.

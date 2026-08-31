@@ -23,8 +23,10 @@ Migration is staged:
 The repository-authority activation through step 5 is complete: Jaune and
 Blanc point enhanced agent work at Creme, and Elanc's active client surfaces
 fail closed with a deprecation notice. The owner approved MIT licensing and
-the first push on 2026-08-31. Publication remains a separate state until the
-reviewed history is actually pushed to the public remote.
+the first push on 2026-08-31. Reviewed commit `d2bd6ea` was published as
+Creme's public `main`; the initial public CI and three-repository clone/onboard
+checks passed. Full v0.1 acceptance still requires the documented fresh-client
+and conventional-Linux runs.
 
 Historical documents remain historical. A compatibility notice must fail
 informatively on wrong-root use and point to Creme; it must not keep a second

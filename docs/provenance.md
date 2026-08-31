@@ -108,12 +108,15 @@ ledger records `owner-approved-mit-license-recorded` for carried content.
 
 On 2026-08-31 the owner created
 `https://github.com/skbaek/creme` and granted the publication token the same
-repository permissions used for the sibling public projects. A read-only API
-check found the repository public and empty, with no default branch. The local
-canonical checkout records it as `origin`; no Creme history has been pushed.
-Repository creation is therefore closed, while license recording and the first
-public push remain distinct gates. License recording and publication authority
-are now closed; exact-candidate review still precedes the first push.
+repository permissions used for the sibling public projects. After independent
+pre-push review, commit `d2bd6ea29e306f5284b30a8b89470616bbad14b4`
+became the first public `main` tip and GitHub selected `main` as the default
+branch. Public CI [run `33355230556`](https://github.com/skbaek/creme/actions/runs/33355230556)
+passed the four-entry macOS/Ubuntu Python matrix and the fresh Ubuntu
+Jaune/Blanc sibling-layout runtime job. A separate
+empty-directory clone from all three actual public remotes also passed the
+53-test suite, initialization, profile validation, doctor, isolated client
+profile generation, cache copy, semaphore, wrong-root, and clean-tree checks.
 
 ## Reproduction commands
 
@@ -159,8 +162,8 @@ dispositions.
 
 ## Remaining decisions
 
-- **Publication:** run the exact-candidate review, then perform and verify the
-  owner-authorized first push.
+- **Release acceptance:** complete the fresh Codex and Claude Code matrices,
+  representative client edit, and conventional-Linux client/edit run.
 - **Migration:** the default-branch notices and preserved shared-checkout
   overlay are installed; retain the stale-state recovery copy until the dirty
   Plans checkout is eventually reconciled by its owner.

@@ -97,9 +97,9 @@ marked derived or compatibility-only, even where the semantic change is small.
 
 ## Cutover consequences
 
-Plans still has active, non-historical documents that name `guide/goal.md`,
-`guide/lead.md`, `guide/lean-edit-loops.md`, and in some cases Elanc as current
-authority. Those documents are not copied into Creme. C10 therefore remains a
-separate migration action: update live references or put concise compatibility
-notices at the old paths only after the self-hosting checkpoint. Historical
-evidence stays untouched.
+Plans remote `main`, Jaune, Blanc, and Elanc now contain the reviewed authority
+transition or compatibility surfaces. Those changes do not copy Plans goals or
+historical evidence into Creme. The shared local Plans checkout was
+intentionally left on its older dirty commit to preserve unrelated work; until
+its goal-owned compatibility paths are reconciled safely, it must not be
+treated as the operational control plane. Historical evidence stays untouched.

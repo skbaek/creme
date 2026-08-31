@@ -10,9 +10,9 @@ and retain authority over their own APIs, proofs, and gates.
 Creme v0.1 supports macOS and Linux. Linux deliberately has fewer optional
 host capabilities; an explicit `UNAVAILABLE` is a supported result.
 
-> Publication is not complete yet. The public Creme URL and license must be
-> selected by the owner before the first public push. The commands below use
-> `CREME_URL` until that decision is recorded.
+> Publication is not complete yet. The owner has created the empty public
+> repository at `https://github.com/skbaek/creme`; the license grant must be
+> recorded before the first public push.
 
 ## Blank-host setup
 
@@ -23,7 +23,7 @@ documented Lean/Lake toolchain.
 ```sh
 mkdir agent-workspace
 cd agent-workspace
-git clone "$CREME_URL" creme
+git clone https://github.com/skbaek/creme.git creme
 git clone https://github.com/skbaek/jaune.git jaune
 git clone https://github.com/skbaek/blanc.git blanc
 cd creme

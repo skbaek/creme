@@ -17,9 +17,11 @@ URLs solely so the doctor could exercise the published-origin contract.
 | Jaune | `92b2b1eca27a569942175c2647de2b41d7402765` |
 | Blanc | `162b84020f1462bc490e4f7793ce01cbf4807b1b` |
 
-This was deliberately **not** a network clone, did not prove that a public
-Creme repository exists, and did not trigger public CI. Rewriting a disposable
-remote URL is a contract simulation, not publication evidence.
+This was deliberately **not** a network clone, did not prove that published
+Creme history is cloneable, and did not trigger public CI. Rewriting a
+disposable remote URL is a contract simulation, not publication evidence. The
+owner subsequently created the empty public repository, which still contains
+no candidate history.
 
 ## Results
 
@@ -44,7 +46,7 @@ evidence contains no machine-private path.
 ## Gates still open
 
 C9 still requires three fresh clones from the actual public remotes after the
-owner approves the license, repository creation, and first push. That run must
+owner approves the license and the first push. That run must
 also exercise a fresh client trust/approval ceremony, Lean MCP liveness, live
 Claude Code, and the representative sibling edits under the public-only
 layout. Public CI, conventional Linux acceptance, and the owner decision on

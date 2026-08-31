@@ -7,8 +7,10 @@ Pre-public local `main` merge: `10e1b96cca71230b13ade9371ad64a82543d4cfa`
 Latest exact code candidate exercised:
 `df2c2b431f3a67438a1eca8ff4f743f0c585c148`
 
-The merge was the explicit pre-public exception authorized by the goal. No
-remote exists and nothing was pushed.
+The merge was the explicit pre-public exception authorized by the goal. At
+that checkpoint no remote existed and nothing had been pushed. The owner later
+created the empty public `skbaek/creme` repository; the first push remains
+blocked on the recorded license grant.
 
 ## Fresh Codex task
 
@@ -54,6 +56,30 @@ host-exclusive semaphore; starting a Lean environment would have violated host
 coordination. Direct disposable Jaune/Blanc CLI edits are separately recorded
 in `acceptance/macos.md` and do not satisfy this MCP row.
 
+## Post-Proxy trusted-client MCP liveness
+
+After Proxy Pair publication, ephemeral Codex task
+`01a055c2-4f29-7b73-934c-c1137b267b61` launched from exact root
+`<workspace>/creme` at Creme
+`2c4511e272e3d7cddd07a7d5156777e7f856f938`, with explicit read-only access
+to Jaune `ae1b7d51f79205a15fc946034b4fb18085dcddad` and Blanc
+`18ca2b4310688465300378067b3a76f9bfadf4a5`. The client was Codex CLI
+0.151.0-alpha.7.1 using the current trusted configuration; it did not build or
+edit either sibling.
+
+The task invoked the registered `lean-lsp-mcp` server directly. Required
+`lean_diagnostic_messages` calls succeeded for both
+`Jaune/Basic.lean` and `Blanc/Basic.lean`, each returning `success: true`,
+`timed_out: false`, an empty diagnostics list, and no failed dependencies.
+Ordinary read-only outline/declaration calls also succeeded on both siblings.
+The task was stopped after these required checks when it began optional extra
+probing; that interruption does not qualify any incomplete optional probe as
+acceptance evidence.
+
+This closes current-trusted-client MCP liveness on the post-Proxy target. It
+does not close the fresh-user trust/approval ceremony, Claude Code, or the
+client-mediated representative edit required by the full clean-room matrix.
+
 ## Authority verdict
 
 The exact candidate is self-discovering in Codex and registers its 22-tool MCP
@@ -94,7 +120,7 @@ post-Proxy client-mediated edit.
 
 Creme is therefore the active repository control plane for new agent-assisted
 work. New sessions must launch from the Creme root, not Elanc or Plans. This
-activation does **not** close full v0.1 self-hosting acceptance: a fresh
-post-transition Codex trust/MCP invocation, a fresh Claude Code run, public
-repository and license gates, public-only clean-room evidence, and conventional
-Linux acceptance remain open.
+activation does **not** close full v0.1 self-hosting acceptance: a fresh Codex
+trust/approval ceremony and representative edit, a fresh Claude Code run, the
+license and first-public-push gates, public-only clean-room evidence, and
+conventional Linux acceptance remain open.

@@ -95,10 +95,20 @@ file. A targeted source scan also found no SPDX identifier, copyright notice,
 or license-grant header in the inventoried paths. The single observed Git author
 identity is provenance evidence only and cannot substitute for permission.
 
-Before a public remote is created or the first public push occurs, the user
-must select and record Creme's license and confirm that it covers both the exact
-moves and the derived content in the manifest. Until then, the machine ledger's
-status remains `publication-blocked-pending-user-selected-license`.
+Before the first public push occurs, the user must select and record Creme's
+license and confirm that it covers both the exact moves and the derived content
+in the manifest. Until then, the machine ledger's status remains
+`publication-blocked-pending-user-selected-license`.
+
+## Public repository state
+
+On 2026-08-31 the owner created
+`https://github.com/skbaek/creme` and granted the publication token the same
+repository permissions used for the sibling public projects. A read-only API
+check found the repository public and empty, with no default branch. The local
+canonical checkout records it as `origin`; no Creme history has been pushed.
+Repository creation is therefore closed, while license recording and the first
+public push remain distinct open gates.
 
 ## Reproduction commands
 

@@ -20,7 +20,7 @@ those static facts and validated `VALID`; no live profile is tracked.
 | temp directory | `python3 -m creme tempdir --create --prefix creme-acceptance-` | PASS, valid Darwin runtime temp root |
 | semaphore X/Y | two soft holds; hard refused; release X; Y converts to hard; release | PASS, expected refusal and transitions |
 | wrong root | doctor invoked from Jaune with Creme on `PYTHONPATH` | PASS negative control, exit 1 with `WRONG_ROOT` |
-| fresh Codex discovery | see `acceptance/self-hosting.md` | PASS for exact-root discovery and trusted-client registration; MCP invocation remains open |
+| Codex discovery and trusted MCP | see `acceptance/self-hosting.md` | PASS for exact-root discovery and current-trusted-client MCP diagnostics on Jaune `ae1b7d5` and Blanc `18ca2b4`; fresh trust ceremony and representative edit remain open |
 | fresh Claude discovery | installed Desktop app was detected, but desktop was locked | OPEN |
 
 ## Representative sibling edits

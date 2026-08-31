@@ -40,6 +40,20 @@ python3 -m creme semaphore hard-acquire GOAL --note "timing control"
 python3 -m creme semaphore hard-release GOAL
 ```
 
+On a Codex host where the sandbox denies the direct command, first require
+`python3 -m creme doctor` to validate the installed delegates, then substitute
+the exact stable path without changing the action or arguments:
+
+```sh
+~/.codex/bin/codex-host-semaphore soft-acquire GOAL --note "build"
+~/.codex/bin/codex-host-semaphore renew GOAL
+~/.codex/bin/codex-host-semaphore soft-release GOAL
+```
+
+The delegate is an approval boundary, not another semaphore implementation.
+Never use one that `doctor` reports as partial or stale. Preview and regenerate
+the full set with `python3 -m creme host-wrappers` rather than copying a helper.
+
 On limited hosts, run one heavy operation at a time and checkpoint first.
 Missing telemetry is not a pressure signal. Never edit semaphore state or use
 a bare process kill.

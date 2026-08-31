@@ -86,6 +86,19 @@ python3 -m creme semaphore status
 python3 -m creme reclaim --dry-run
 ```
 
+If the client sandbox denies a host operation, use only a generated delegate
+that `python3 -m creme doctor` reports as current:
+
+```sh
+~/.codex/bin/codex-host-telemetry
+~/.codex/bin/codex-host-semaphore status
+~/.codex/bin/codex-reclaim-lean --dry-run
+```
+
+These stable approval targets dispatch back into the canonical Creme checkout.
+Never use a copied standalone helper or a delegate that `doctor` marks stale;
+preview and regenerate the complete set with `python3 -m creme host-wrappers`.
+
 The capability contract and limited-mode results are in
 `docs/capabilities.md`. A missing capability is not permission to run another
 OS's command. Missing telemetry reduces concurrency and strengthens

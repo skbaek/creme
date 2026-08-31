@@ -1,266 +1,114 @@
-# Independent C12 review
+# Independent C12 review — pre-public follow-up
 
 Review date: 2026-08-31 (Asia/Seoul)
 
-## Exact candidate and verdict
+## Exact scope and verdict
 
-The final audited candidate is local Creme `main` at
-`df2c2b431f3a67438a1eca8ff4f743f0c585c148`, tree
-`8198f5885730c930009e2d9881be026e36602977`. The goal branch at
-`dcf5353e472695d0ceadea42119a157487289b1b` has the same tree; the diff is
-empty. Report commit `23905937526d72db9a8fabbb322db883c31e9a06` and
-lead-authored acceptance commit `845918e1426466512b1748e07a729dcb5f672e05`
-are evidence-only descendants of `dcf5353`: they change only files under
-`acceptance/` and do not change the audited code/configuration tree.
+An independent read-only reviewer audited exact Creme candidate
+`f4446b27ca4a8a1055f35c2241e35557cf287909`, including all 27 reachable
+commits and the new Ubuntu runtime workflow. The local integration tip then
+advanced to `d66db65d288884c2596b8db5bf547998e377704a`; its complete delta from
+the reviewed candidate only adds job timeouts and pins the Jaune/Blanc checkout
+inputs to the exact accepted commits. The lead verified that narrow diff and
+reran the 52-test portable suite.
 
-The initial review audited code candidate
-`c8df90ffde564d82d2d46bbe7df0d5600c6b2911`. The final history adds the
-lead-authored acceptance evidence at `9fd74d6`, this independent report at
-`d23d665`, cache-copy remediation at `3624f50`, profile/semaphore/tooling
-hardening at `dcf5353`, and merge `df2c2b4`. The complete diff and reachable
-history of that integrated candidate were re-reviewed in the bounded final
-follow-up. The later `2390593` report and `845918e` acceptance descendants were
-separately checked for evidence-only scope; neither changes the code candidate.
+**Verdict: BLOCKED; do not call C12 accepted or publish until the license and
+mandatory public-host/client gates close.** No new code/configuration security
+blocker was found. This report supersedes the stale working-tree copy of the
+earlier `df2c2b4` review; that earlier detailed review remains reachable in Git
+history.
 
-**Verdict: BLOCKED; do not publish or call C12 closed.** The candidate has no
-detected credential or tracked personal-path leak, the complete cheap suite
-passes, and the earlier code-level B6 finding is closed. The license,
-public-remote/CI/clean-room, clean-client trust/MCP-liveness, Claude, Linux,
-macOS owner-approval, and authority-transition gates all remain open.
+## Blocking findings and retained gates
 
-## Blocking findings
+### B1 — No license grant
 
-### B1 — No license grant; exact and derived private-source material is present
+No reachable revision contains `LICENSE`, `LICENCE`, `COPYING`, `NOTICE`, an
+SPDX identifier, or another license grant. Four byte-exact Elanc copies and the
+derived/re-expressed private-source material remain correctly inventoried.
+Repository creation and publication-token permission do not supply a grant.
+The owner must select the license and explicitly apply it to both exact and
+derived material before the first push.
 
-No reachable Creme revision contains `LICENSE`, `LICENCE`, `COPYING`, or
-`NOTICE`, and no SPDX or copyright/license-grant header was found. The ledger
-identifies four byte-exact Elanc copies and many derived artifacts. Both pinned
-private source snapshots are themselves recorded as lacking a license grant.
-`docs/provenance.md` and `scripts/extraction-manifest.json` correctly say
-publication is blocked pending the owner's license selection; that disclosure
-does not supply permission to publish. C1 and C12 remain blocked.
+### B2 — Public and fresh-client evidence is not yet complete
 
-The provenance structure and every recorded source digest were independently
-checked against local Git objects at Elanc
-`629f7f4bb545d5f8aee7cd2b4cabfd240ae904ab` and Plans
-`59f58a81e33ff50fd1c955b1e1468ae42253f916`; all six manifest tests passed.
-This validates the ledger, not the missing license.
+The verified public `skbaek/creme` repository is empty and has no default
+branch, so public CI and actual public-only clones cannot yet exist. The new
+Ubuntu runtime job is statically coherent but has not run publicly.
 
-### B2 — No public remote, public Ubuntu run, or public clean-room clone exists
+Current-trusted-client Codex MCP liveness passes on Jaune `ae1b7d5` and Blanc
+`18ca2b4`. The ignored-user-config controls expose zero MCP tools, including an
+invocation-only trust override, so a genuine fresh Codex project
+registration/approval and representative edit remain open. Live Claude Code,
+public-only clean-room onboarding, and the separate fresh conventional Linux
+client/edit run also remain open.
 
-`git remote -v` is empty. A workflow definition exists for `ubuntu-latest` and
-`macos-latest` on Python 3.9/3.12, but there is no public remote on which it
-could have run and no run URL/status is recorded. Consequently a stranger
-cannot execute the documented `git clone "$CREME_URL" creme`, and the required
-public-only clean-room world cannot yet exist. This blocks C1, C7, C9, C11, and
-the publication aspect of C12. Remote creation, public visibility, and first
-push remain owner actions.
+### B3 — Owner dispositions remain open
 
-### B3 — Required client acceptance is incomplete, including Claude
+The owner has not yet recorded approval of the four named macOS
+safety/portability changes or the Git author name/email disclosure in public
+history. These are release decisions, not code defects, but they block the
+corresponding C6/C12 claims.
 
-`acceptance/client-discovery.md` is now partially filled, and the exact-
-candidate Codex CLI rechecks record discovery of the Creme root instructions,
-both project skills, and both sibling repositories. The current trusted client
-also exposes the expected 22 named Creme MCP tools. No MCP tool was invoked,
-however, so this is registration evidence rather than an MCP-liveness result.
-The `--ignore-user-config` control exposes zero MCP tools and is explicitly a
-failed clean-client registration control: its fail-closed behavior is useful,
-but it does not satisfy fresh-client trust, approval, registration, or
-liveness. Claude remains explicitly `OPEN`; no fresh Claude Creme-root session
-has demonstrated instructions, both skills, MCP approval/liveness, sibling
-access, wrong-root controls, and a representative edit.
-`acceptance/self-hosting.md` therefore correctly keeps the bootstrap Plans/
-Elanc control plane active and does not deprecate Elanc. C2, C9, C11, C13, and
-C12 remain blocked.
+## Closed stale findings
 
-The committed static Claude/Codex model is not itself the problem. Current
-official documentation supports `@AGENTS.md`, project `.mcp.json`, project
-skill directories and directory symlinks, workspace trust, Codex project
-configuration, and the distinction between sibling file access and project
-configuration discovery. Static documentation agreement cannot replace the
-required live acceptance.
+- The public remote now exists and is recorded honestly as empty; the first
+  push remains separately blocked on license.
+- Creme authority activation is complete. Elanc fails closed, Jaune/Blanc point
+  enhanced agent work to Creme, and Plans owns concrete state rather than the
+  reusable execution method.
+- The preserved dirty shared Plans checkout now has only its clean
+  compatibility paths and goal-owned Creme state/report synchronized as a
+  working-tree overlay. Its branch/index and unrelated work were not moved.
+- Post-Proxy current-trust MCP diagnostics were actually invoked and passed;
+  they are not misrepresented as a fresh trust ceremony or edit.
 
-### B4 — Linux safety acceptance and Ubuntu evidence are explicitly open
+## Public-surface and history review
 
-`acceptance/linux.md` says `Status: open pending a conventional Linux host and
-public Ubuntu CI`. The local forced-adapter tests are useful negative controls,
-but no conventional Linux run on the exact candidate records platform facts,
-temp/copy behavior, structured `UNAVAILABLE` results, fresh client behavior,
-or a sibling Lean/MCP edit. A workflow matrix is not evidence of a workflow
-run. C7, C11, and C12 remain blocked; no Linux parity claim is accepted.
+- No high-confidence credential, private key, assigned secret, personal
+  `/Users/...` or `/home/...` path was found in any reachable snapshot.
+- Runtime/configuration has no Elanc or Plans dependency. Their names occur in
+  provenance, migration, optional-goal wording, acceptance status, or
+  private-path rejection tests.
+- Only the original three executables and two relative in-repository Claude
+  skill symlinks exist. No post-review executable, symlink, or file-mode change
+  was found.
+- Post-`df2c2b4`, host-runtime Python and project client configuration are
+  unchanged. Later executable behavior is limited to the reviewed CI workflow.
+- Four dangling blobs are unreachable and will not transfer in an ordinary
+  push. Commit history exposes the recorded author identity; owner awareness is
+  retained as an explicit publication gate.
 
-### B5 — macOS preservation still awaits the named owner decision
+## CI review
 
-The lead-authored evidence-only update records the exact `df2c2b4` candidate,
-52 passing cheap-suite tests, live host capabilities, representative Jaune/
-Blanc edits, and a passing staged-copy smoke using the selected APFS clone
-path with matching bytes and no owned stage left behind. It also records the
-Codex discovery and trusted-client registration results described in B3, but
-not an MCP invocation or successful clean-client registration. The material
-behavior differences still require owner approval before they become the final
-v0.1 preservation claim, and Claude remains open. That keeps C6 open even
-though the recorded macOS technical checks pass.
+The workflow grants only `contents: read`. Its nested Creme/Jaune/Blanc layout,
+working directory, shell block, expected Linux reclamation failure check, and
+final clean-tree assertion are coherent. It invokes no Darwin-only command.
+Candidate `d66db65` pins Jaune
+`ae1b7d51f79205a15fc946034b4fb18085dcddad` and Blanc
+`18ca2b4310688465300378067b3a76f9bfadf4a5`, closing the reviewer's
+non-blocking reproducibility note. GitHub Actions dependencies still follow
+mutable maintained major tags; this is a disclosed non-blocking supply-chain
+drift risk.
 
-## Closed finding in the final follow-up
+## Principal review commands
 
-### B6 — CLOSED: cache-copy failures are structured and staged safely
+```sh
+git log --reverse --format=fuller f4446b2
+git rev-list --count f4446b2
+git ls-tree -r f4446b2
+git diff --stat --summary --name-status df2c2b4..f4446b2
+git diff --check df2c2b4..f4446b2
+git grep <secret/path/private-runtime patterns> <each reachable revision>
+git fsck --full --no-reflogs
+git log --all --summary
+sed <linux-runtime shell block> | bash -n
+git diff --check f4446b2..d66db65
+```
 
-Commit `3624f50115a3c41bb249b08df79a31947da3a71c` closes the original
-code-level blocker. Portable recursive-copy `OSError` now returns structured
-`ERROR` and retains any caller-destination partial for inspection. Darwin clone
-and Linux reflink attempts run in a random Creme-owned staging directory beside
-the requested destination; failed optimized attempts cannot occupy the caller's
-destination, complete stages are rechecked and atomically published, and the
-owned stage is cleaned without deleting unproven caller data.
+## Close condition
 
-Four focused failure tests passed on the final tree: portable copy failure with
-a retained partial destination; Darwin partial-clone fallback; Linux partial-
-reflink fallback; and combined Darwin clone/fallback failure returning
-structured `ERROR`. The full suite includes those cases. This closes B6 as a
-code finding; it does not substitute for the still-blocked conventional Linux,
-public CI, or clean-room acceptance gates.
-
-## Non-blocking findings and residual risks
-
-- No high-confidence AWS, GitHub, OpenAI, Anthropic, Google, Slack, private-key,
-  credential-bearing URL, or generic assigned-secret pattern was found in any
-  reachable snapshot. No tracked `.env`, credential store, client database,
-  memory, or session history exists.
-- No tracked current personal/absolute host path was found. Historical commits
-  contain the macOS home-root token only as a test regex, not a user path. Elanc,
-  Plans, and installed-helper names occur in provenance, migration, and honest
-  acceptance statements; runtime/configuration files do not reach those
-  repositories. Commit metadata does contain the author's public-facing name
-  and Gmail address; the owner should knowingly accept that identity disclosure
-  before publishing history.
-- The only executable files are the exact-copy executable
-  `.agents/skills/lean-prover/tools/check-drift.py` plus the intended entry
-  points `scripts/check.sh` and `scripts/creme`. The exact-copy source is also
-  mode `100755`. No later executable/type change was found. The only symlinks
-  are the two relative per-skill Claude links; both resolve inside Creme and
-  match the manifest. Current Claude documentation explicitly supports a skill
-  entry that is a symlink to another directory.
-- OS-specific executable literals are confined to `creme/adapters/`.
-  Non-adapter subprocesses invoke portable/project tools (`git`, `lake`, the
-  Python interpreter, or a caller-supplied command). Commit `dcf5353` corrected
-  `procmon.py` to describe Darwin `ps -axo`, Linux `ps -eo`, and adapter
-  dispatch rather than implying one Darwin-shaped command on every platform.
-- The generated Codex profile grants write access to exactly the three reviewed
-  workspace roots and explicitly grants their `.git` directories, with network
-  limited to three GitHub domains. Those are consequential permissions, but
-  they match the documented coordinated-editing scope, are preview-first, and
-  are not installed implicitly. Current Codex documentation confirms that
-  extending `:workspace` does not itself make `.git` writable and that network
-  domain rules require the proxy feature, so these settings are deliberate.
-- Commit `dcf5353` closed the two generated-profile hardening notes. TOML keys
-  now use JSON-compatible basic-string escaping, including hostile legal paths,
-  and profile installation uses `mkstemp`, fsync, atomic replace, mode `0600`,
-  and failure cleanup. Both behaviors have focused tests.
-- The same commit closed the semaphore hardening notes. It validates the exact
-  hold schema and field types/ranges/relationships before use, preserves
-  corrupt bytes, forces the state directory to `0700`, and forces mutex, state,
-  and log files to `0600`. Focused malformed-hold and permission tests pass.
-- The in-place benchmark risk remains intrinsic, but `dcf5353` now documents it
-  prominently in both the tool and its README and requires a clean disposable
-  worktree. A kill can still leave only that disposable worktree dirty.
-- GitHub Actions dependencies use mutable major tags (`actions/checkout@v4`,
-  `actions/setup-python@v5`) rather than immutable commit SHAs. This is common
-  but leaves avoidable CI supply-chain drift. The previously vacuous clean-CI
-  whitespace check is fixed: `scripts/check.sh` now checks the committed tree
-  against Git's empty tree as well as checking working-tree changes.
-- `git fsck --full --no-reflogs` found four dangling blobs and no reachable
-  corruption. `git count-objects -v` also reports an empty worktree-admin
-  `refs` directory as garbage. Neither is reachable from a branch and neither
-  would be transferred by an ordinary push, but the repository owner may prune
-  local unreachable objects after retaining anything intentionally recoverable.
-
-## Authority and claim review
-
-The committed authority split is internally coherent: Creme owns reusable
-workflow/client/host coordination; Jaune and Blanc retain their gate catalogues
-and technical doctrine; concrete goal state remains optional and external.
-Jaune/Blanc remain build-independent. Current references to private sources are
-provenance or explicit migration/acceptance status, not runtime dependencies.
-
-The tree does not falsely claim Linux feature parity and explicitly documents
-`UNAVAILABLE` behavior. It does, however, describe Creme as the public launch
-root while the publication notice says publication is incomplete, and the
-self-hosting record says the live goal still uses bootstrap Plans/Elanc
-authority. Those statements are compatible only as a staged target/current
-state distinction. Until Claude, public remote, license, clean-room, Linux, and
-deprecation gates close, documentation must continue to preserve that
-distinction and must not present C1-C13 as complete.
-
-## Commands and verdicts
-
-No repository content was mutated except the required creation of this report
-and its eventual report-only commit; tests used disposable temporary roots and
-the configured temporary bytecode prefix. No Lean command, client, build,
-dependency fetch, remote mutation, or network mutation was run.
-
-- `git rev-parse dcf5353^{tree} 2390593^{tree} 845918e^{tree} main^{tree}` and
-  the corresponding scoped diffs -> `dcf5353` and audited main `df2c2b4`
-  share code-candidate tree `8198f5885730c930009e2d9881be026e36602977`;
-  `2390593` changes only `acceptance/independent-review.md`, while `845918e`
-  changes only `acceptance/client-discovery.md`, `acceptance/macos.md`, and
-  `acceptance/self-hosting.md`.
-- `git show 2390593` and `git show 845918e` -> both descendants are
-  evidence-only; no code, configuration, executable, symlink, dependency,
-  workflow, permission, or runtime behavior changed. Per the bounded final
-  attestation, no suite was rerun for these evidence-only diffs.
-- `git show 3624f50`, `git show dcf5353`, and full
-  `git diff c8df90f..df2c2b4` inspection -> integrated changes limited to the
-  recorded acceptance/report, cache-copy remediation, and reviewed hardening;
-  no unexplained executable, symlink, dependency, or client-surface addition.
-- `git ls-files`, `git ls-files -s`, full reads of all 65 tracked paths, and
-  JSON enumeration of every manifest source/artifact -> complete current-tree
-  inventory; only three `100755` entries and two in-repository `120000` links.
-- `git log --all --graph --decorate --oneline`, `git for-each-ref`,
-  `git rev-list --objects --all`, per-revision `git grep`, and
-  `git fsck --full --no-reflogs` -> all reachable refs/history inspected; no
-  high-confidence secret or personal path; four unreachable dangling blobs.
-- Per-revision license/SPDX enumeration -> no license/grant in any reachable
-  revision.
-- Candidate `git grep` for personal/private paths and Elanc/Plans/helper names
-  -> only ledger, migration, acceptance, or test-pattern references; no runtime
-  dependency.
-- Candidate subprocess/platform-literal enumeration plus manual reachability
-  review -> OS commands confined to adapters; generic `git`/`lake`/Python and
-  caller commands outside them.
-- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v` with the four named
-  cache-copy failure methods -> PASS, 4/4 focused tests.
-- `./scripts/check.sh` under Python 3.9.6 -> PASS, 52/52 unit tests; compileall,
-  working-tree whitespace, and complete committed-tree whitespace checks PASS.
-- `CREME_PROVENANCE_ELANC_ROOT="$ELANC_ROOT"
-  CREME_PROVENANCE_PLANS_ROOT="$PLANS_ROOT" python3 -m unittest
-  scripts.tests.test_extraction_manifest -v` -> PASS, 6/6 including every
-  pinned local source digest. `ELANC_ROOT` and `PLANS_ROOT` were reviewer-local
-  paths and are deliberately not recorded in the public report.
-- Final malformed-semaphore and file-mode tests -> PASS; the earlier incomplete
-  hold now raises `SemaphoreError` without replacing its bytes, and generated
-  state artifacts have the documented private modes.
-- `git remote -v` -> no output; public remote gate open.
-
-Current client-claim review used official documentation only:
-
-- Codex: `https://learn.chatgpt.com/docs/agent-configuration/agents-md`,
-  `https://learn.chatgpt.com/docs/config-file/config-basic`,
-  `https://learn.chatgpt.com/docs/config-file/config-advanced`, and
-  `https://learn.chatgpt.com/docs/permissions`.
-- Claude Code: `https://code.claude.com/docs/en/memory`,
-  `https://code.claude.com/docs/en/settings`,
-  `https://code.claude.com/docs/en/skills`,
-  `https://code.claude.com/docs/en/mcp`, and
-  `https://code.claude.com/docs/en/permissions`.
-
-## Close conditions
-
-Do not change this verdict to accepted until, on one exact integrated
-candidate: the owner-selected license is committed and provenance compatibility
-is approved; the owner-approved public remote exists; public Ubuntu CI and a
-fresh conventional Linux run pass; fresh Codex and Claude sessions complete
-the full discovery/MCP/sibling/wrong-root/edit matrix; public-only clean-room
-onboarding passes; the macOS behavior differences are owner-approved; the
-Elanc authority transition is actually completed and Elanc is deprecated or
-archival; and a final history/secret/mode/path diff review after those changes
-finds no new blocker.
+After license recording and first push, require successful public CI, actual
+public-only onboarding, fresh Codex and Claude Code matrices, conventional
+Linux acceptance, macOS/identity owner dispositions, and one final independent
+history/secret/path/mode/claim review of the exact published candidate. Only
+that final review may change this verdict to accepted.

@@ -153,7 +153,7 @@ Do not alter the real client home or global settings during this control.
 | --- | --- | --- |
 | Client version recorded | CLI 0.151.0-alpha.7.1 | Desktop 1.34493.1; CLI absent |
 | Exact Creme commit recorded | `2c4511e272e3d7cddd07a7d5156777e7f856f938` for latest trusted-client liveness | OPEN |
-| CWD/project is Creme | PASS, three ephemeral tasks | OPEN; desktop locked |
+| CWD/project is Creme | PASS, four ephemeral tasks | OPEN; desktop locked |
 | Root instructions observed | PASS | OPEN |
 | `lean-inspector` observed and invoked | PASS in current trusted client | OPEN |
 | `lean-prover` observed | PASS | OPEN |
@@ -163,7 +163,7 @@ Do not alter the real client home or global settings during this control.
 | Blanc ordinary read succeeded | PASS | OPEN |
 | Wrong-root control omitted Creme discovery | synthetic PASS; live client matrix OPEN | OPEN |
 | Synthetic access-without-discovery control passed | PASS | PASS static fixture only |
-| Trust and approvals explicitly recorded | current trust is not clean-room evidence | OPEN |
+| Trust and approvals explicitly recorded | OPEN; ignored-user-config plus an invocation-only trust override still exposed zero MCP tools | OPEN |
 
 Task identifiers, the two Codex configuration controls, and the later direct
 MCP task are recorded in `acceptance/self-hosting.md`. This table is

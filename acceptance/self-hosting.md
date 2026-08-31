@@ -80,6 +80,20 @@ This closes current-trusted-client MCP liveness on the post-Proxy target. It
 does not close the fresh-user trust/approval ceremony, Claude Code, or the
 client-mediated representative edit required by the full clean-room matrix.
 
+## Ignored-user-config trust control
+
+Ephemeral Codex task `01a055d7-b0c4-74a2-b517-e614d566409c` launched at exact
+Creme `d66db65d288884c2596b8db5bf547998e377704a` with user configuration
+ignored and an invocation-only trust override for the reviewed Creme root. It
+correctly loaded the Creme instruction marker and `lean-inspector` skill, but
+exposed no callable MCP tool. It therefore made neither requested sibling
+diagnostic call, and no MCP-liveness claim is taken from it.
+
+This is a fail-closed negative control. It shows that an ephemeral trust
+override is not a substitute for the client's genuine fresh project
+registration/approval path; no persisted trust, user configuration, or client
+database was modified.
+
 ## Authority verdict
 
 The exact candidate is self-discovering in Codex and registers its 22-tool MCP

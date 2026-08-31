@@ -67,12 +67,13 @@ commands are confined to adapters. The public runtime has no Elanc or Plans
 dependency. Provenance documentation necessarily names those repositories but
 does not make them executable inputs.
 
-Plans still contains active, non-historical documents that point at
-`guide/goal.md`, `guide/lead.md`, `guide/lean-edit-loops.md`, and sometimes
-Elanc. The census found references in Plans `AGENTS.md` and current goal,
-portfolio, proposal, and backlog documents, not just archives. Those references
-must be updated or supported by concise compatibility notices at cutover. They
-are not copied into Creme, and historical records are not rewritten.
+Plans remote `main` now makes `AGENTS.md` and the three reusable guide paths
+concise Creme compatibility notices; Elanc's active client/configuration
+surfaces likewise fail closed. The older shared Plans checkout was deliberately
+not moved because it contains unrelated work. Its clean compatibility paths and
+goal-owned Creme state/report are synchronized as a working-tree overlay, while
+its branch/index and unrelated dirty paths remain untouched. Historical records
+are not rewritten and none of these private paths is copied into Creme.
 
 The edit-loop guide cites five private evidence inputs recorded in the
 manifest: the controlled edit-loop experiments, the ceiling disposition
@@ -155,8 +156,9 @@ dispositions.
 ## Remaining decisions
 
 - **Blocking:** select and record the public license.
-- **Migration:** update active private references or install compatibility
-  notices after self-hosting is proven; do not edit historical evidence.
+- **Migration:** the default-branch notices and preserved shared-checkout
+  overlay are installed; retain the stale-state recovery copy until the dirty
+  Plans checkout is eventually reconciled by its owner.
 - **Behavioral coverage:** the Elanc doctor and semaphore tests are classified
   as reexpressed behavioral inputs. Their public counterparts exist, but final
   integration should compare named edge cases before declaring C6 closed.

@@ -74,6 +74,24 @@ Jaune hygiene/integrity plus its 1,780-job build, and the Plans content/whitespa
 checks also passed. The dirty and divergent shared Plans checkout was not
 moved; only its verified remote default branch advanced.
 
+## Post-activation downstream integration
+
+Proxy Pair subsequently reconciled onto the activated Blanc base
+`c4795430427b4c1a0eec9f01d9c277728ca69613` and advanced public Blanc `main`
+to `18ca2b4310688465300378067b3a76f9bfadf4a5`. Its merge commit
+`76c9863dcc28b002b55ab6456d76a1cab1a8e9e0` has exact parents Proxy
+`1c54d09601766a0710e87cf2672a32a22d95098c` and Creme
+`c4795430427b4c1a0eec9f01d9c277728ca69613`; the descendant `18ca2b4`
+changes only the claim-gate verdict. The ordered post-merge close passed 52
+rows, with 3 executed and 49 reused from fingerprint-valid evidence, and both
+integration reviews accepted the result.
+
+The remaining fresh-client/MCP and representative-edit acceptance therefore
+uses Blanc `18ca2b4` (or a later reviewed `main` descendant) as its minimum
+target and records the exact commit actually exercised. The earlier `162b840`
+direct-CLI smoke remains migration evidence; it is not silently reused as the
+post-Proxy client-mediated edit.
+
 Creme is therefore the active repository control plane for new agent-assisted
 work. New sessions must launch from the Creme root, not Elanc or Plans. This
 activation does **not** close full v0.1 self-hosting acceptance: a fresh

@@ -39,6 +39,14 @@ or mutate user/global configuration.
 5. The sibling diagnostic fixtures and ordinary readable canary files are
    identified before launching a client.
 
+For the post-activation run, record the actual sibling commits before launch.
+The minimum reviewed Blanc target is public `main` at
+`18ca2b4310688465300378067b3a76f9bfadf4a5`, which contains both the Creme
+authority transition and the reconciled Proxy Pair integration. A later
+reviewed `main` descendant is acceptable only when its exact identity is
+recorded. Earlier direct-CLI evidence at the pre-merge onboarding branch does
+not satisfy the remaining client-mediated representative edit.
+
 ## Codex positive control
 
 ```sh

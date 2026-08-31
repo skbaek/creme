@@ -43,6 +43,12 @@ then applied and the exact command passed. This is prerequisite evidence, not
 a suppressed failure. Both cache copies selected APFS clone; no tracked source
 or build dependency was changed.
 
+These direct-CLI edits predate the default-branch transition and are preserved
+as migration evidence. The still-open fresh Codex/Claude MCP acceptance must
+repeat the representative Blanc edit against exact public `main`
+`18ca2b4310688465300378067b3a76f9bfadf4a5` (or a later reviewed descendant),
+which includes Creme followed by the reconciled Proxy Pair integration.
+
 All disposable cache/semaphore/temp directories and sibling smoke worktrees
 were removed after their contents and state transitions were verified. No live
 global client config or client database was mutated.

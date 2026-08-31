@@ -57,9 +57,26 @@ in `acceptance/macos.md` and do not satisfy this MCP row.
 ## Authority verdict
 
 The exact candidate is self-discovering in Codex and registers its 22-tool MCP
-surface in the current trusted client. The full C2
-authority transition remains open because a fresh Claude Code session has not
-yet run and the locked macOS desktop prevented controlled use of the installed
-Claude Code Desktop app. Clean-client MCP approval/liveness is also open. Until
-those checks complete, this goal continues to use its bootstrap Plans/Elanc
-authority and does not declare Elanc deprecated.
+surface in the current trusted client. The owner explicitly authorized the
+repository authority transition after the completed Beacon deposit work was
+merged. The reconciled default branches were then verified and published:
+
+| Repository | Activated `main` | Transition evidence |
+|---|---|---|
+| Elanc | `82967098a55fd2e08c88ffd6fb55431a72ecfe95` | compatibility surface is fail-closed; legacy MCP, skills, Claude agents, and Codex rules are inactive |
+| Plans | `3ee039b99dc89d89285ec77f0b272ef98ca038fc` | reusable workflow guides point to Creme; Plans retains private goals, state, reports, and evidence |
+| Jaune | `ae1b7d51f79205a15fc946034b4fb18085dcddad` | onboarding and gate catalogue use Creme coordination while Jaune retains proof authority |
+| Blanc | `c4795430427b4c1a0eec9f01d9c277728ca69613` | Beacon-complete main plus Creme portability changes; the exact candidate passed `GATES OK: 47 rows, 47 executed, 0 reused from valid evidence, 2633.8s` |
+
+The Blanc reconciliation preserved Beacon's two-regime, four-mutant model gate
+and used Creme's capability-selected cache-copy wording. Elanc's 32 tests,
+Jaune hygiene/integrity plus its 1,780-job build, and the Plans content/whitespace
+checks also passed. The dirty and divergent shared Plans checkout was not
+moved; only its verified remote default branch advanced.
+
+Creme is therefore the active repository control plane for new agent-assisted
+work. New sessions must launch from the Creme root, not Elanc or Plans. This
+activation does **not** close full v0.1 self-hosting acceptance: a fresh
+post-transition Codex trust/MCP invocation, a fresh Claude Code run, public
+repository and license gates, public-only clean-room evidence, and conventional
+Linux acceptance remain open.

@@ -67,9 +67,9 @@ Fresh hosts keep its private runtime state in ignored `.semaphore/state/`.
 Upgraded hosts retain and use legacy state until the explicit, non-destructive
 `migrate-state` cutover documented in [the setup guide](docs/setup.md).
 
-Codex installations that authorize stable executable paths can also retain or
-install thin compatibility delegates for Creme's host capabilities. Preview the
-exact files first:
+Codex installations that authorize stable executable paths can install thin
+delegates for telemetry and Lean reclamation. Semaphore coordination always
+uses the tracked client-neutral launcher. Preview the exact files first:
 
 ```sh
 python3 -m creme host-wrappers --output-dir ~/.codex/bin
@@ -78,8 +78,8 @@ python3 -m creme host-wrappers --output-dir ~/.codex/bin --write
 
 The generated files contain no capability implementation; each delegates to
 this checkout's `scripts/creme`. Regenerate them after moving the checkout.
-Use `--replace` only after reviewing a changed preview. If any of the three
-known paths exists, `doctor` requires the complete installed set to match.
+Use `--replace` only after reviewing a changed preview. If either generated
+path exists, `doctor` requires the complete installed set to match.
 
 Before real work, read [AGENTS.md](AGENTS.md), the appropriate sibling's
 `scripts/GATES.md`, and [the execution guide](docs/guides/execution.md).

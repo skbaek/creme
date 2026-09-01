@@ -16,6 +16,5 @@ migration:
 ```
 
 Migration copies validated holds under both mutexes and leaves the legacy state
-untouched. The existing `~/.codex/bin/codex-host-semaphore` delegate is also
-retained during the compatibility period and follows the newly active state
-after the canonical checkout is updated.
+untouched. Retire any pre-neutral delegate and legacy state only after every
+session launched before the cutover has wound down.

@@ -41,8 +41,8 @@ retained as an explicitly experimental surface until live discovery is proven.
 Host memory coordination has one additional client-neutral surface:
 `.semaphore/semaphore`. Its implementation remains in the Creme package, while
 its ignored state is anchored to the canonical checkout rather than any linked
-goal worktree. User-local Codex delegates remain compatibility shims, not a
-second implementation or state authority.
+goal worktree. User-local Codex delegates cover host-only telemetry and
+reclamation; they are not a second implementation or state authority.
 
 See [client discovery](client-discovery.md) for current official discovery
 semantics and the permission-is-not-discovery negative control.

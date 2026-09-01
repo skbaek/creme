@@ -19,6 +19,15 @@ from creme.host_wrappers import (
 
 
 class HostWrappersTest(unittest.TestCase):
+    def test_wrapper_set_excludes_the_client_neutral_semaphore(self) -> None:
+        self.assertEqual(
+            WRAPPER_COMMANDS,
+            (
+                ("codex-host-telemetry", "telemetry"),
+                ("codex-reclaim-lean", "reclaim"),
+            ),
+        )
+
     def test_rendered_wrappers_are_thin_delegates(self) -> None:
         root = Path("/portable/workspace/creme")
         rendered = render_host_wrappers(root)

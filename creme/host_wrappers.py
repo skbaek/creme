@@ -7,7 +7,6 @@ from pathlib import Path
 
 
 WRAPPER_COMMANDS = (
-    ("codex-host-semaphore", "semaphore"),
     ("codex-host-telemetry", "telemetry"),
     ("codex-reclaim-lean", "reclaim"),
 )

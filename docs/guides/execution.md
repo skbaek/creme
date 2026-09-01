@@ -49,29 +49,17 @@ Claude Code, other local agents, and humans. Always use the canonical launcher,
 not a copy inside a goal worktree; linked worktrees resolve back to its single
 ignored `.semaphore/state` directory.
 
-Existing installations may retain the following Codex delegate while live
-sessions still reference it:
-
-```sh
-~/.codex/bin/codex-host-semaphore soft-acquire GOAL --note "build"
-~/.codex/bin/codex-host-semaphore renew GOAL
-~/.codex/bin/codex-host-semaphore soft-release GOAL
-```
-
-The delegate is an approval boundary, not another semaphore implementation.
-It dispatches into the same current implementation and, after state migration,
-the same neutral state. Never use one that `doctor` reports as partial or stale.
-Do not remove the delegate or legacy state merely because migration succeeded;
-their eventual retirement is a separate, owner-reviewed cleanup.
-
 On an upgraded host, `migrate-state` copies validated live holds under the old
 and new mutexes, activates `.semaphore/state`, and leaves the legacy files
-untouched. Run it once from a trusted human shell or the still-approved legacy
-delegate after the neutral-semaphore change is deployed:
+untouched. Run it once from a trusted human shell after the neutral-semaphore
+change is deployed:
 
 ```sh
-~/.codex/bin/codex-host-semaphore migrate-state
+~/creme/.semaphore/semaphore migrate-state
 ```
+
+Retire any pre-neutral delegate and legacy state only after every session
+launched before the cutover has wound down.
 
 On limited hosts, run one heavy operation at a time and checkpoint first.
 Missing telemetry is not a pressure signal. Never edit semaphore state or use

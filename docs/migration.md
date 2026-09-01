@@ -35,7 +35,8 @@ copy of operational policy alive.
 User-local approved helper paths require a separate cutover because they are
 outside every repository. A copied pre-Creme helper is not a compatibility
 shim: it can retain obsolete state paths and logic. From the canonical Creme
-checkout, preview and then replace all three with generated delegates:
+checkout, preview and then replace the telemetry and reclamation helpers with
+generated delegates:
 
 ```sh
 python3 -m creme host-wrappers --output-dir ~/.codex/bin
@@ -56,15 +57,14 @@ Creme now tracks one client-neutral semaphore launcher at
 state until the owner deliberately runs:
 
 ```sh
-~/.codex/bin/codex-host-semaphore migrate-state
+~/creme/.semaphore/semaphore migrate-state
 ```
 
-The compatibility delegate is used for cutover because it already has access
-to both locations on Codex hosts. Migration locks both roots, validates and
-copies active holds, activates the neutral state, and retains the complete old
-state directory. It neither removes the old delegate nor declares the legacy
-files safe to delete. Sessions using the delegate path subsequently load the
-current Creme code and coordinate through the activated neutral state.
+Migration locks both roots, validates and copies active holds, activates the
+neutral state, and retains the complete old state directory. It does not
+declare a pre-neutral delegate or the legacy files safe to delete. Retire them
+only after every session launched before the cutover has wound down. Current
+`host-wrappers` output does not install a semaphore delegate.
 
 Creme is optional for building Jaune or Blanc. Users who do not want the
 enhanced agent workflow continue to clone and build either library normally.

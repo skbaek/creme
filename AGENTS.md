@@ -101,7 +101,7 @@ canonical `~/creme` launcher even while working in a per-goal worktree; it
 resolves every worktree to the same ignored `.semaphore/state` directory.
 
 If the client sandbox denies telemetry or reclamation, use only a generated
-legacy delegate that `python3 -m creme doctor` reports as current:
+host delegate that `python3 -m creme doctor` reports as current:
 
 ```sh
 ~/.codex/bin/codex-host-telemetry
@@ -112,9 +112,6 @@ legacy delegate that `python3 -m creme doctor` reports as current:
 These stable approval targets dispatch back into the canonical Creme checkout.
 Never use a copied standalone helper or a delegate that `doctor` marks stale;
 preview and regenerate the complete set with `python3 -m creme host-wrappers`.
-The existing `codex-host-semaphore` delegate remains a supported compatibility
-path during the neutral-state migration and must not be removed while old
-sessions may still reference it.
 
 The capability contract and limited-mode results are in
 `docs/capabilities.md`. A missing capability is not permission to run another

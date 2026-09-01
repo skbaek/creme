@@ -425,7 +425,7 @@ def parser() -> argparse.ArgumentParser:
 
     wrappers = commands.add_parser(
         "host-wrappers",
-        help="preview or install stable Codex delegates for Creme host capabilities",
+        help="preview or install stable Codex delegates for telemetry and reclamation",
     )
     wrappers.add_argument("--output-dir")
     wrappers.add_argument("--write", action="store_true")

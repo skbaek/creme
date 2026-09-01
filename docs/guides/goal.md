@@ -24,6 +24,13 @@ semantics. Use `active` while a live execution owns the goal, `blocked` only at
 a genuine impasse, and `complete` only when every mandatory outcome has
 evidence on the exact delivered candidate.
 
+For a repository with content-addressed gate evidence, write checkpoint and
+merge-candidate closure as a **complete content-valid manifest**: every
+catalogue row is freshly green or has successful evidence with an identical
+verdict-relevant identity. Require all-fresh execution only when freshness is
+itself an acceptance subject; routine draft pushes should run the affected set
+and required cheap invariants without inheriting a blanket freshness claim.
+
 ## Recommended lead configuration
 
 Every substantial goal gives a best-guess starting configuration for its

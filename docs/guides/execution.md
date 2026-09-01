@@ -106,6 +106,13 @@ worktree under test and record exact command, exit status, relevant terminal
 verdict, and commit. Do not weaken gates, baselines, manifests, budgets,
 timeouts, allowlists, or generated artifacts to obtain green.
 
+When a repository's gate catalogue defines content-addressed verdict reuse, a
+checkpoint or merge candidate owes a **complete content-valid manifest**: each
+catalogue row is freshly green or is backed by successful evidence with an
+identical verdict-relevant identity. A routine draft push does not become an
+all-fresh campaign merely because it is a push. Use an explicitly fresh run
+when freshness itself is the subject under test or the named goal requires it.
+
 For a non-vacuity or enforcement claim, show all three controls: the surrounding
 tree still works, the control fails at the intended boundary, and removing only
 that control restores green. Use disposable worktrees for destructive
@@ -125,5 +132,7 @@ coherent unit. Record what was verified rather than relying on client memory.
 Completion is a condition-to-evidence proof on one exact candidate, not a
 completed task list. Re-run drift-prone checks, close independent review
 findings, account for compatibility paths, and report branch/worktree/push
-state. If a user-owned publication, license, or protected-merge gate remains,
-the goal remains open.
+state. Where the repository supports it, the verification evidence is a
+complete content-valid manifest rather than a claim that every body happened
+to re-execute. If a user-owned publication, license, or protected-merge gate
+remains, the goal remains open.

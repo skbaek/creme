@@ -2,16 +2,80 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from .base import Adapter, CapabilityResult
+from ..reclaim import Process, build_plan
 
 
 class LinuxAdapter(Adapter):
     system = "Linux"
-    optional_capabilities = ("reflink_copy",)
+    optional_capabilities = ("reflink_copy", "lean_reclaim")
+    client_pattern = re.compile(
+        r"^(?:\S*/)?(?:ChatGPT|codex|claude|codex-code-mode-host|codex-linux-sandbox)(?:\s|$)",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _run(argv: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+    def platform_identity(self, machine: str | None = None) -> CapabilityResult:
+        detected = (machine or platform.machine()).strip().lower()
+        if detected in {"x86_64", "amd64"}:
+            canonical_machine = "x86_64"
+            uv_platform = "linux-x86_64-gnu"
+        elif detected in {"aarch64", "arm64"}:
+            canonical_machine = "arm64"
+            uv_platform = "linux-aarch64-gnu"
+        else:
+            return self.result(
+                "platform_identity", "UNAVAILABLE",
+                f"unsupported Linux machine architecture: {detected or '<empty>'}",
+            )
+        key = f"linux-{canonical_machine}"
+        return self.result(
+            "platform_identity", "OK", f"canonical platform identity is {key}",
+            {
+                "key": key,
+                "system": self.system,
+                "machine": canonical_machine,
+                "uv_platform": uv_platform,
+            },
+        )
+
+    def python_runtime(
+        self,
+        version: str,
+        machine: str | None = None,
+    ) -> CapabilityResult:
+        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+            return self.result(
+                "python_runtime", "REFUSED",
+                "Python version must be an exact major.minor.patch value",
+            )
+        identity = self.platform_identity(machine)
+        if identity.status != "OK" or not identity.data:
+            return self.result("python_runtime", "UNAVAILABLE", identity.detail)
+        series = version.rsplit(".", 1)[0]
+        uv_platform = identity.data["uv_platform"]
+        alias = f"~/.local/share/uv/python/cpython-{series}-{uv_platform}"
+        base = f"~/.local/share/uv/python/cpython-{version}-{uv_platform}"
+        return self.result(
+            "python_runtime", "OK",
+            f"native CPython {version} identity for {identity.data['key']}",
+            {
+                "platform_key": identity.data["key"],
+                "implementation": "CPython",
+                "version": version,
+                "uv_alias_prefix": alias,
+                "uv_base_prefix": base,
+            },
+        )
 
     @staticmethod
     def _meminfo() -> dict[str, int]:
@@ -41,7 +105,7 @@ class LinuxAdapter(Adapter):
         try:
             memory = self._meminfo()
             processes = subprocess.run(
-                ["ps", "-eo", "pid=,ppid=,rss=,comm="],
+                ["ps", "-eo", "pid=,ppid=,rss=,stat=,comm="],
                 capture_output=True, text=True, timeout=10,
             )
             swap_used_kib = 0
@@ -62,10 +126,12 @@ class LinuxAdapter(Adapter):
         lean = []
         largest = []
         for line in processes.stdout.splitlines():
-            fields = line.split(maxsplit=3)
-            if len(fields) != 4:
+            fields = line.split(maxsplit=4)
+            if len(fields) != 5:
                 continue
-            pid, ppid, rss_text, command = fields
+            pid, ppid, rss_text, state, command = fields
+            if state.startswith("Z"):
+                continue
             try:
                 rss = int(rss_text)
             except ValueError:
@@ -91,7 +157,7 @@ class LinuxAdapter(Adapter):
     def process_snapshot(self) -> CapabilityResult:
         try:
             processes = subprocess.run(
-                ["ps", "-eo", "pid=,ppid=,rss=,comm="],
+                ["ps", "-eo", "pid=,ppid=,rss=,stat=,comm="],
                 capture_output=True, text=True, timeout=10,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -100,13 +166,13 @@ class LinuxAdapter(Adapter):
             return self.result("process_snapshot", "UNAVAILABLE", "Linux ps snapshot failed")
         rows = []
         for line in processes.stdout.splitlines():
-            fields = line.split(maxsplit=3)
-            if len(fields) != 4:
+            fields = line.split(maxsplit=4)
+            if len(fields) != 5 or fields[3].startswith("Z"):
                 continue
             try:
                 rows.append({
                     "pid": int(fields[0]), "ppid": int(fields[1]),
-                    "rss_kib": int(fields[2]), "command": Path(fields[3]).name,
+                    "rss_kib": int(fields[2]), "command": Path(fields[4]).name,
                 })
             except ValueError:
                 continue
@@ -152,3 +218,117 @@ class LinuxAdapter(Adapter):
             unavailable_detail="reflink copy unavailable",
             optimized_copy=reflink,
         )
+
+    def reclaim(self, arguments: list[str]) -> CapabilityResult:
+        allowed = {"--dry-run", "--hard-pressure"}
+        if set(arguments) - allowed or len(arguments) != len(set(arguments)):
+            return self.result(
+                "lean_reclaim", "REFUSED", "unsupported or duplicate reclaim option"
+            )
+        dry_run = "--dry-run" in arguments
+        hard_pressure = "--hard-pressure" in arguments
+        try:
+            snapshot = self._run([
+                "/bin/ps", "-eo", "pid=,ppid=,uid=,rss=,stat=,lstart=,args=",
+            ])
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self.result("lean_reclaim", "UNAVAILABLE", str(exc))
+        if snapshot.returncode:
+            return self.result("lean_reclaim", "UNAVAILABLE", "process snapshot failed")
+        owner_uid = os.getuid()
+        table: dict[int, Process] = {}
+        for line in snapshot.stdout.splitlines():
+            fields = line.split(None, 10)
+            if len(fields) != 11 or fields[4].startswith("Z"):
+                continue
+            try:
+                pid, ppid, uid, rss = map(int, fields[:4])
+            except ValueError:
+                continue
+            if uid != owner_uid:
+                continue
+            table[pid] = Process(pid, ppid, rss, " ".join(fields[5:10]), fields[10])
+        plan = build_plan(
+            table,
+            os.getppid(),
+            lambda process: bool(self.client_pattern.search(process.command)),
+            hard_pressure,
+        )
+        public: dict[str, object] = {
+            "mode": "hard-pressure" if hard_pressure else "ordinary",
+            "dry_run": dry_run,
+            "owned": [
+                {"pid": pid, "rss_kib": table[pid].rss_kib, "kind": table[pid].kind}
+                for pid in plan.owned
+            ],
+            "foreign_left_alone": [
+                {"pid": pid, "rss_kib": table[pid].rss_kib, "kind": table[pid].kind}
+                for pid in plan.foreign
+            ],
+            "protected_roots": list(plan.protected_roots),
+            "termination_order": list(plan.targets),
+        }
+        if dry_run or not plan.targets:
+            detail = (
+                "dry-run frozen plan"
+                if dry_run
+                else "nothing proven safe and owned to reclaim"
+            )
+            return self.result("lean_reclaim", "OK", detail, public)
+
+        def same_instance(pid: int) -> bool:
+            try:
+                current = self._run([
+                    "/bin/ps", "-p", str(pid), "-o", "uid=,stat=,lstart=,args=",
+                ])
+            except (OSError, subprocess.SubprocessError):
+                return False
+            fields = current.stdout.strip().split(None, 7)
+            try:
+                current_uid = int(fields[0])
+            except (IndexError, ValueError):
+                return False
+            return (
+                current.returncode == 0
+                and len(fields) == 8
+                and current_uid == owner_uid
+                and not fields[1].startswith("Z")
+                and " ".join(fields[2:7]) == table[pid].started
+                and fields[7] == table[pid].command
+            )
+
+        live = [pid for pid in plan.targets if same_instance(pid)]
+        for pid in live:
+            try:
+                os.kill(pid, 15)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return self.result(
+                    "lean_reclaim", "REFUSED",
+                    "SIGTERM failed; stopped without widening target set", public,
+                )
+        time.sleep(2)
+        remaining = [pid for pid in plan.targets if same_instance(pid)]
+        for pid in remaining:
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return self.result(
+                    "lean_reclaim", "REFUSED",
+                    "SIGKILL failed for a proven target", public,
+                )
+        time.sleep(1)
+        survivors = [pid for pid in plan.targets if same_instance(pid)]
+        public["sigterm_count"] = len(live)
+        public["sigkill_count"] = len(remaining)
+        public["survivors"] = survivors
+        status = "OK" if not survivors and not plan.protected_roots else "REFUSED"
+        detail = (
+            "reclamation completed"
+            if status == "OK"
+            else "partial or surviving subtree; restart the client"
+        )
+        return self.result("lean_reclaim", status, detail, public)

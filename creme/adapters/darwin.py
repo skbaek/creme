@@ -25,6 +25,59 @@ class DarwinAdapter(Adapter):
     def _run(argv: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
+    def platform_identity(self, machine: str | None = None) -> CapabilityResult:
+        detected = (machine or platform.machine()).strip().lower()
+        if detected in {"arm64", "aarch64"}:
+            canonical_machine = "arm64"
+            uv_platform = "macos-aarch64-none"
+        elif detected in {"x86_64", "amd64"}:
+            canonical_machine = "x86_64"
+            uv_platform = "macos-x86_64-none"
+        else:
+            return self.result(
+                "platform_identity", "UNAVAILABLE",
+                f"unsupported Darwin machine architecture: {detected or '<empty>'}",
+            )
+        key = f"macos-{canonical_machine}"
+        return self.result(
+            "platform_identity", "OK", f"canonical platform identity is {key}",
+            {
+                "key": key,
+                "system": self.system,
+                "machine": canonical_machine,
+                "uv_platform": uv_platform,
+            },
+        )
+
+    def python_runtime(
+        self,
+        version: str,
+        machine: str | None = None,
+    ) -> CapabilityResult:
+        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+            return self.result(
+                "python_runtime", "REFUSED",
+                "Python version must be an exact major.minor.patch value",
+            )
+        identity = self.platform_identity(machine)
+        if identity.status != "OK" or not identity.data:
+            return self.result("python_runtime", "UNAVAILABLE", identity.detail)
+        series = version.rsplit(".", 1)[0]
+        uv_platform = identity.data["uv_platform"]
+        alias = f"~/.local/share/uv/python/cpython-{series}-{uv_platform}"
+        base = f"~/.local/share/uv/python/cpython-{version}-{uv_platform}"
+        return self.result(
+            "python_runtime", "OK",
+            f"native CPython {version} identity for {identity.data['key']}",
+            {
+                "platform_key": identity.data["key"],
+                "implementation": "CPython",
+                "version": version,
+                "uv_alias_prefix": alias,
+                "uv_base_prefix": base,
+            },
+        )
+
     def static_facts(self) -> CapabilityResult:
         try:
             memory = self._run(["/usr/sbin/sysctl", "-n", "hw.memsize"])

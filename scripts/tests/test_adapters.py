@@ -19,12 +19,55 @@ class AdapterTest(unittest.TestCase):
         self.assertIsInstance(get_adapter("Linux"), LinuxAdapter)
         self.assertEqual(get_adapter("Plan9").system, "Plan9")
 
+    def test_native_platform_keys_normalize_os_architecture_aliases(self):
+        darwin = DarwinAdapter().platform_identity("aarch64")
+        linux = LinuxAdapter().platform_identity("amd64")
+        self.assertEqual(darwin.status, "OK")
+        self.assertEqual(darwin.data["key"], "macos-arm64")
+        self.assertEqual(darwin.data["machine"], "arm64")
+        self.assertEqual(linux.status, "OK")
+        self.assertEqual(linux.data["key"], "linux-x86_64")
+        self.assertEqual(linux.data["machine"], "x86_64")
+
+    def test_native_python_identity_is_os_specific_and_home_relative(self):
+        darwin = DarwinAdapter().python_runtime("3.11.9", "arm64")
+        linux = LinuxAdapter().python_runtime("3.11.9", "x86_64")
+        self.assertEqual(darwin.status, "OK")
+        self.assertEqual(linux.status, "OK")
+        self.assertEqual(darwin.data["platform_key"], "macos-arm64")
+        self.assertEqual(linux.data["platform_key"], "linux-x86_64")
+        self.assertEqual(
+            darwin.data["uv_base_prefix"],
+            "~/.local/share/uv/python/cpython-3.11.9-macos-aarch64-none",
+        )
+        self.assertEqual(
+            linux.data["uv_base_prefix"],
+            "~/.local/share/uv/python/cpython-3.11.9-linux-x86_64-gnu",
+        )
+        for result in (darwin, linux):
+            self.assertTrue(result.data["uv_alias_prefix"].startswith("~/"))
+            self.assertTrue(result.data["uv_base_prefix"].startswith("~/"))
+            self.assertNotIn("/Users/", result.data["uv_base_prefix"])
+            self.assertNotIn("/home/", result.data["uv_base_prefix"])
+
+    def test_native_python_identity_fails_closed(self):
+        self.assertEqual(
+            LinuxAdapter().python_runtime("3.11", "x86_64").status,
+            "REFUSED",
+        )
+        self.assertEqual(
+            DarwinAdapter().platform_identity("mips64").status,
+            "UNAVAILABLE",
+        )
+
     def test_unsupported_never_falls_through_to_another_os(self):
         adapter = get_adapter("Plan9")
         self.assertEqual(adapter.telemetry().status, "UNAVAILABLE")
         self.assertEqual(adapter.process_snapshot().status, "UNAVAILABLE")
         self.assertEqual(adapter.reclaim([]).status, "UNAVAILABLE")
         self.assertEqual(adapter.gui_sessions(1).status, "UNAVAILABLE")
+        self.assertEqual(adapter.platform_identity().status, "UNAVAILABLE")
+        self.assertEqual(adapter.python_runtime("3.11.9").status, "UNAVAILABLE")
 
     def test_shared_modules_do_not_name_platform_executables(self):
         root = Path(__file__).resolve().parents[2] / "creme"
@@ -44,6 +87,34 @@ class AdapterTest(unittest.TestCase):
         source = inspect.getsource(LinuxAdapter)
         for token in ("memory_pressure", "vm_stat", "launchctl", "dscacheutil", "/Applications/"):
             self.assertNotIn(token, source)
+
+    @mock.patch("creme.adapters.linux.os.getppid", return_value=12)
+    @mock.patch("creme.adapters.linux.os.getuid", return_value=1001)
+    @mock.patch("creme.adapters.linux.LinuxAdapter._run")
+    def test_linux_reclaim_dry_run_uses_only_same_user_client_tree(
+        self, run, _uid, _ppid
+    ):
+        run.return_value = subprocess.CompletedProcess([], 0, stdout="""\
+10 1 1001 100 S Mon Jan 1 00:00:00 2024 /usr/lib/chatgpt/resources/codex app-server
+11 10 1001 10 S Mon Jan 1 00:00:01 2024 /bin/bash
+12 11 1001 10 S Mon Jan 1 00:00:02 2024 python3 -m creme reclaim --dry-run
+20 10 1001 300 S Mon Jan 1 00:01:00 2024 /tool/lake serve
+21 20 1001 200 S Mon Jan 1 00:01:01 2024 /tool/lean --server
+22 20 1001 0 Z Mon Jan 1 00:01:02 2024 /tool/lean --worker
+30 10 1002 400 S Mon Jan 1 00:02:00 2024 /tool/lake serve
+31 30 1002 300 S Mon Jan 1 00:02:01 2024 /tool/lean --server
+""")
+        result = LinuxAdapter().reclaim(["--dry-run"])
+        self.assertEqual(result.status, "OK")
+        self.assertEqual([row["pid"] for row in result.data["owned"]], [20, 21])
+        self.assertEqual(result.data["termination_order"], [21, 20])
+        self.assertEqual(result.data["foreign_left_alone"], [])
+
+    @mock.patch("creme.adapters.linux.LinuxAdapter._run")
+    def test_linux_reclaim_rejects_duplicate_options_without_snapshot(self, run):
+        result = LinuxAdapter().reclaim(["--dry-run", "--dry-run"])
+        self.assertEqual(result.status, "REFUSED")
+        run.assert_not_called()
 
     def test_cache_copy_preview_never_mutates(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -54,14 +54,22 @@ def _profile_path(text: Optional[str]) -> Path:
 def cmd_platform(arguments: argparse.Namespace) -> int:
     adapter = get_adapter()
     facts = adapter.static_facts()
+    identity = adapter.platform_identity()
     _json({
         "adapter": adapter.system,
         "status": facts.status,
         "detail": facts.detail,
         "facts": facts.data,
+        "platform_identity": identity.to_dict(),
         "optional_capabilities": list(adapter.optional_capabilities),
     })
-    return 0 if facts.status == "OK" else 1
+    return 0 if facts.status == "OK" and identity.status == "OK" else 1
+
+
+def cmd_python_runtime(arguments: argparse.Namespace) -> int:
+    result = get_adapter().python_runtime(arguments.version)
+    _json(result.to_dict())
+    return 0 if result.status == "OK" else 2
 
 
 def cmd_init(arguments: argparse.Namespace) -> int:
@@ -314,6 +322,13 @@ def parser() -> argparse.ArgumentParser:
 
     platform_parser = commands.add_parser("platform", help="report the selected OS adapter and static facts")
     platform_parser.set_defaults(func=cmd_platform)
+
+    python_runtime = commands.add_parser(
+        "python-runtime",
+        help="report the native uv-managed CPython identity for this platform",
+    )
+    python_runtime.add_argument("version", help="exact major.minor.patch version")
+    python_runtime.set_defaults(func=cmd_python_runtime)
 
     init_parser = commands.add_parser("init", help="preview or write the ignored host profile")
     init_parser.add_argument("--profile")

@@ -8,15 +8,25 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 | Capability | macOS | Linux | Safe limited behavior |
 |---|---|---|---|
 | static facts | sysctl with portable runtime fallback | `/proc/meminfo` and portable runtime facts | host profile stays missing/limited; one heavy worker |
+| native platform identity | normalized `macos-<arch>` key and uv platform tag | normalized `linux-<arch>` key and uv platform tag | unsupported architecture is `UNAVAILABLE` |
+| managed Python identity | home-relative native uv alias/base prefixes | home-relative native uv alias/base prefixes | malformed version is `REFUSED`; nothing is installed |
 | telemetry | `memory_pressure`, swap sysctl, process snapshot | `/proc` plus `ps` | no pressure inference; reduce concurrency |
 | semaphore core | portable locked JSON state | portable locked JSON state | expired holds continue blocking |
 | manual GUI hold | local-user and launchd GUI-domain checks | `UNAVAILABLE` | explicit manual coordination outside Creme |
-| Lean reclaim | frozen Darwin process snapshot and signals | `UNAVAILABLE` | restart the client |
+| Lean reclaim | frozen process snapshot and signals | frozen same-user process snapshot and signals | restart the client |
 | cache copy | APFS clone, then recursive-copy fallback | reflink-auto, then recursive-copy fallback | portable recursive copy |
 | temporary root | `TMPDIR` or runtime temp directory | `TMPDIR` or runtime temp directory | `UNAVAILABLE` if no writable root exists |
 
 Shared code does not invoke another OS's command as a fallback. An unavailable
 telemetry sample never proves a host is quiet or under pressure.
+
+`python3 -m creme platform` reports the canonical platform key alongside the
+static host facts. `python3 -m creme python-runtime 3.11.9` reports the native,
+home-relative uv alias and exact-version base prefix for that key. The latter
+is identity and setup guidance only: it performs no installation, does not
+inspect an ambient virtual environment, and never emits a particular user's
+absolute home path. Repository-owned gates independently validate the runtime
+they consume.
 
 The capability CLI is the sole implementation. The tracked
 `.semaphore/semaphore` launcher is its client-neutral semaphore entry point;
@@ -38,11 +48,17 @@ it is safe to delete.
 
 ## Reclamation safety
 
-Ordinary macOS reclamation selects only Lean server candidates that share the
+Ordinary macOS and Linux reclamation selects only Lean server candidates that share the
 deepest non-init ancestor with the invoking agent and have a recognized agent
 client above that ancestor. The complete descendant closure is frozen before
 any action. A non-server descendant protects the whole root in ordinary mode.
 The explicit `--hard-pressure` mode includes that frozen closure.
+
+Linux discovery excludes every process whose real UID differs from the
+invoking user before ownership is evaluated. Defunct processes are excluded
+from Linux activity and reclaim plans because they execute nothing and can be
+reaped only by their parent. Revalidation checks UID and non-zombie state in
+addition to the frozen start time and command.
 
 Immediately before each signal the adapter checks the PID's start time and
 full command against the snapshot, preventing PID reuse from widening the

@@ -343,6 +343,24 @@ in Jaune's source ledger; system Python is not a substitute. Blanc's generated
 names the direct and external inputs for every gate. Resolve a goal's gate set
 first, then provision the corresponding inputs.
 
+For Blanc's BPO2 current-mainnet lane, record the host's native identity before
+creating or checking the target virtual environment:
+
+```sh
+cd ~/creme
+python3 -m creme platform
+python3 -m creme python-runtime 3.11.9
+```
+
+The second command is a read-only identity calculation. It reports the
+home-relative uv alias and exact-version base prefix selected by Creme's macOS
+or Linux adapter; it neither installs Python nor writes configuration. Use the
+native result for the host. In particular, do not create a Linux symlink with a
+macOS runtime name (or the reverse) to satisfy a repository gate. Blanc's
+current-mainnet profile and runtime lock independently bind the corresponding
+platform key, interpreter, entrypoint, package tree, and standard-library
+closure.
+
 ## 8. Verify the client workflow
 
 After both builds pass, launch the selected client from `~/creme` and confirm:

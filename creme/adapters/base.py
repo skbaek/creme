@@ -45,6 +45,22 @@ class Adapter:
             f"unsupported operating system: {self.system}",
         )
 
+    def platform_identity(self, machine: Optional[str] = None) -> CapabilityResult:
+        return self.result(
+            "platform_identity", "UNAVAILABLE",
+            f"no canonical platform identity is defined for {self.system}",
+        )
+
+    def python_runtime(
+        self,
+        version: str,
+        machine: Optional[str] = None,
+    ) -> CapabilityResult:
+        return self.result(
+            "python_runtime", "UNAVAILABLE",
+            f"no native managed-Python identity is defined for {self.system}",
+        )
+
     def telemetry(self) -> CapabilityResult:
         return self.result(
             "telemetry", "UNAVAILABLE",

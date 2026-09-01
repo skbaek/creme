@@ -73,6 +73,13 @@ class GuidanceTest(unittest.TestCase):
             self.assertEqual(load(link).status, "INVALID")
             self.assertEqual(load(root).status, "INVALID")
 
+    def test_unreadable_metadata_fails_closed(self):
+        path = Path("/inaccessible/host-guidance.md")
+        with mock.patch.object(Path, "lstat", side_effect=PermissionError("denied")):
+            checked = load(path)
+        self.assertEqual(checked.status, "INVALID")
+        self.assertIn("metadata could not be read", checked.detail)
+
 
 if __name__ == "__main__":
     unittest.main()

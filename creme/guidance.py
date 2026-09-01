@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -26,11 +27,15 @@ def default_path(module_root: Path) -> Path:
 
 
 def load(path: Path) -> GuidanceValidation:
-    if path.is_symlink():
-        return GuidanceValidation("INVALID", f"host guidance must not be a symlink: {path}")
-    if not path.exists():
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
         return GuidanceValidation("MISSING", f"host guidance not found: {path}")
-    if not path.is_file():
+    except OSError as exc:
+        return GuidanceValidation("INVALID", f"host guidance metadata could not be read: {exc}")
+    if stat.S_ISLNK(mode):
+        return GuidanceValidation("INVALID", f"host guidance must not be a symlink: {path}")
+    if not stat.S_ISREG(mode):
         return GuidanceValidation("INVALID", f"host guidance is not a regular file: {path}")
     try:
         raw = path.read_bytes()

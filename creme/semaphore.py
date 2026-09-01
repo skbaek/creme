@@ -19,6 +19,7 @@ DEFAULT_LEASE_SECONDS = 1800
 MAX_LEASE_SECONDS = 14400
 MANUAL_LABEL = "manual-macos-session"
 MANUAL_GRACE_SECONDS = 300
+LOCAL_CONFIG_PATH = Path(__file__).resolve().parents[1] / ".creme" / "semaphore-dir"
 HOLD_KEYS = {
     "label", "pid", "uid", "note", "manual",
     "acquired_at", "renewed_at", "lease_seconds",
@@ -41,6 +42,18 @@ def state_root() -> Path:
     override = os.environ.get("CREME_SEMAPHORE_DIR")
     if override:
         return Path(override).expanduser()
+    if LOCAL_CONFIG_PATH.exists():
+        try:
+            raw = LOCAL_CONFIG_PATH.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise SemaphoreError(f"cannot read local semaphore directory config: {exc}")
+        lines = raw.splitlines()
+        if len(lines) != 1 or not lines[0].strip() or "\x00" in lines[0]:
+            raise SemaphoreError("local semaphore directory config must contain one non-empty path")
+        selected = Path(lines[0].strip()).expanduser()
+        if not selected.is_absolute():
+            raise SemaphoreError("local semaphore directory config must contain an absolute path")
+        return selected
     state_home = os.environ.get("XDG_STATE_HOME")
     if state_home:
         return Path(state_home).expanduser() / "creme" / "host-semaphore"

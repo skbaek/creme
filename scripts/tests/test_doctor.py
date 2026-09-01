@@ -5,7 +5,14 @@ import unittest
 from pathlib import Path
 
 from creme.adapters.base import Adapter
-from creme.doctor import STATUS_FAIL, STATUS_OK, check_launch_root, check_public_runtime_boundary
+from creme.doctor import (
+    STATUS_FAIL,
+    STATUS_OK,
+    STATUS_WARN,
+    check_host_guidance,
+    check_launch_root,
+    check_public_runtime_boundary,
+)
 
 
 class DoctorTest(unittest.TestCase):
@@ -30,6 +37,15 @@ class DoctorTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         checks = check_public_runtime_boundary(root)
         self.assertTrue(all(check.status == STATUS_OK for check in checks), checks)
+
+    def test_host_guidance_is_optional_but_invalid_content_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "host-guidance.md"
+            self.assertEqual(check_host_guidance(path)[0].status, STATUS_WARN)
+            path.write_text("\n", encoding="utf-8")
+            self.assertEqual(check_host_guidance(path)[0].status, STATUS_FAIL)
+            path.write_text("# Local safety\n\nDo not run the unsafe command.\n", encoding="utf-8")
+            self.assertEqual(check_host_guidance(path)[0].status, STATUS_OK)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from .adapters import Adapter, get_adapter
+from .guidance import DEFAULT_RELATIVE_GUIDANCE, load as load_guidance
 from .profile import DEFAULT_RELATIVE_PROFILE, ProfileValidation, effective_policy, load
 
 
@@ -75,6 +76,19 @@ def check_profile(path: Path, adapter: Adapter) -> tuple[list[Check], ProfileVal
     if validated.status == "MISSING":
         detail += "; conservative defaults are active until `python3 -m creme init --write` is reviewed"
     return [Check("host profile", status, f"{validated.status}: {detail}")], validated
+
+
+def check_host_guidance(path: Path) -> list[Check]:
+    checked = load_guidance(path)
+    if checked.status == "OK":
+        return [Check(
+            "host guidance",
+            STATUS_OK,
+            f"{checked.detail}; read with `python3 -m creme host-guidance`",
+        )]
+    if checked.status == "MISSING":
+        return [Check("host guidance", STATUS_WARN, checked.detail)]
+    return [Check("host guidance", STATUS_FAIL, checked.detail)]
 
 
 def _tracked_top_names(repo: Path) -> set[str]:
@@ -236,6 +250,9 @@ def run_doctor(
     checks = check_launch_root(root, cwd)
     profile_checks, validated = check_profile(path, selected)
     checks.extend(profile_checks)
+    guidance_path = root / DEFAULT_RELATIVE_GUIDANCE
+    guidance = load_guidance(guidance_path)
+    checks.extend(check_host_guidance(guidance_path))
     profile = validated.profile if validated.status in {"VALID", "LIMITED"} else None
     if workspace_root:
         workspace = workspace_root.expanduser().resolve()
@@ -258,7 +275,7 @@ def run_doctor(
     context = {
         "root": str(root), "workspace_root": str(workspace),
         "profile": validated.status, "platform": selected.system,
-        "effective_policy": policy,
+        "effective_policy": policy, "host_guidance": guidance.status,
     }
     return checks, context
 

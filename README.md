@@ -69,6 +69,7 @@ Client discovery and its negative control are documented in
 ```sh
 python3 -m creme --help
 python3 -m creme doctor --json
+python3 -m creme host-guidance
 python3 -m creme telemetry
 python3 -m creme semaphore status
 python3 -m creme tempdir

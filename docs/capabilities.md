@@ -11,7 +11,7 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 | telemetry | `memory_pressure`, swap sysctl, process snapshot | `/proc` plus `ps` | no pressure inference; reduce concurrency |
 | semaphore core | portable locked JSON state | portable locked JSON state | expired holds continue blocking |
 | manual GUI hold | local-user and launchd GUI-domain checks | `UNAVAILABLE` | explicit manual coordination outside Creme |
-| Lean reclaim | frozen Darwin process snapshot and signals | `UNAVAILABLE` | restart the client |
+| Lean reclaim | frozen process snapshot and signals | frozen same-user process snapshot and signals | restart the client |
 | cache copy | APFS clone, then recursive-copy fallback | reflink-auto, then recursive-copy fallback | portable recursive copy |
 | temporary root | `TMPDIR` or runtime temp directory | `TMPDIR` or runtime temp directory | `UNAVAILABLE` if no writable root exists |
 
@@ -28,11 +28,17 @@ it is safe to delete.
 
 ## Reclamation safety
 
-Ordinary macOS reclamation selects only Lean server candidates that share the
+Ordinary macOS and Linux reclamation selects only Lean server candidates that share the
 deepest non-init ancestor with the invoking agent and have a recognized agent
 client above that ancestor. The complete descendant closure is frozen before
 any action. A non-server descendant protects the whole root in ordinary mode.
 The explicit `--hard-pressure` mode includes that frozen closure.
+
+Linux discovery excludes every process whose real UID differs from the
+invoking user before ownership is evaluated. Defunct processes are excluded
+from Linux activity and reclaim plans because they execute nothing and can be
+reaped only by their parent. Revalidation checks UID and non-zombie state in
+addition to the frozen start time and command.
 
 Immediately before each signal the adapter checks the PID's start time and
 full command against the snapshot, preventing PID reuse from widening the
@@ -48,3 +54,11 @@ also require a successful other-GUI-session scan. Corrupt state is reported
 and never reset automatically, including shape-correct objects with malformed
 hold fields. The state directory is mode `0700`; its mutex, state, and log are
 mode `0600` so free-form hold notes are not exposed to other local users.
+
+The default root is `$XDG_STATE_HOME/creme/host-semaphore`, or
+`~/.local/state/creme/host-semaphore` when XDG state is unset. A managed host
+whose home-state directory is read-only may place one absolute path in the
+ignored `.creme/semaphore-dir` file. `CREME_SEMAPHORE_DIR` remains the
+highest-precedence explicit override. An unreadable, empty, multiline, or
+relative local configuration fails closed rather than silently splitting the
+cross-session semaphore.

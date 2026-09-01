@@ -11,6 +11,8 @@ from . import __version__
 from .adapters import get_adapter
 from .doctor import exit_code as doctor_exit_code
 from .doctor import run_doctor
+from .guidance import default_path as default_guidance_path
+from .guidance import load as load_guidance
 from .host_wrappers import (
     default_output_dir as default_host_wrapper_output_dir,
     install_host_wrappers,
@@ -104,6 +106,18 @@ def cmd_validate_profile(arguments: argparse.Namespace) -> int:
     checked = load(_profile_path(arguments.profile), get_adapter())
     _json({"status": checked.status, "detail": checked.detail, "profile": checked.profile})
     return 0 if checked.status in {"VALID", "LIMITED"} else 1
+
+
+def cmd_host_guidance(arguments: argparse.Namespace) -> int:
+    path = default_guidance_path(ROOT)
+    checked = load_guidance(path)
+    _json({
+        "status": checked.status,
+        "detail": checked.detail,
+        "path": str(path),
+        "guidance": checked.content,
+    })
+    return 0 if checked.status in {"OK", "MISSING"} else 1
 
 
 def cmd_doctor(arguments: argparse.Namespace) -> int:
@@ -340,6 +354,12 @@ def parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate-profile")
     validate.add_argument("--profile")
     validate.set_defaults(func=cmd_validate_profile)
+
+    guidance = commands.add_parser(
+        "host-guidance",
+        help="read validated ignored machine-local safety guidance",
+    )
+    guidance.set_defaults(func=cmd_host_guidance)
 
     doctor = commands.add_parser("doctor", help="read-only launch, client, sibling, and host diagnostics")
     doctor.add_argument("--profile")

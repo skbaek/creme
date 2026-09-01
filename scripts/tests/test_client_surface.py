@@ -157,6 +157,7 @@ class ClientSurfaceTest(unittest.TestCase):
             "python3 -m creme init",
             "python3 -m creme validate-profile",
             "python3 -m creme doctor",
+            "python3 -m creme host-guidance",
             "lake build",
         ):
             self.assertIn(command, setup)

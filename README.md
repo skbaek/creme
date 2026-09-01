@@ -93,6 +93,7 @@ Client discovery and its negative control are documented in
 ```sh
 python3 -m creme --help
 python3 -m creme doctor --json
+python3 -m creme host-guidance
 python3 -m creme host-wrappers --output-dir ~/.codex/bin
 python3 -m creme telemetry
 python3 -m creme python-runtime 3.11.9

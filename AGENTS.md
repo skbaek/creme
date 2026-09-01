@@ -9,7 +9,11 @@ not load these instructions, skills, or MCP configuration.
 
 The default layout is one parent directory containing `creme/`, `jaune/`, and
 `blanc/`. An ignored host profile may select another layout. Run
-`python3 -m creme doctor` before relying on it.
+`python3 -m creme doctor` before relying on it. Then run
+`python3 -m creme host-guidance`. If machine-local guidance is present, read
+it in full before any Lean elaboration, build, timing run, or mutation
+campaign; its safety constraints govern how repository-prescribed gates run on
+this host.
 
 - Creme owns reusable agent workflow, client shims, host capabilities, and the
   goal-execution method.
@@ -128,6 +132,11 @@ reporting completion. The command verifies reclamation before atomically
 releasing that goal's hold. A bare soft/hard release is an intermediate
 operation, not wind-down evidence; never claim the task is safe or idle after
 Lean work unless wind-down reports `OK`.
+
+The ignored `.creme/host-guidance.md` records hazards and safe command paths
+learned on this particular machine. It does not change Jaune or Blanc pass
+criteria. If it marks a raw command unsafe, use its local safe wrapper while
+preserving the gate's authoritative final command and verdict.
 
 ## Git and completion
 

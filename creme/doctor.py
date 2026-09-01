@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from .adapters import Adapter, get_adapter
+from .guidance import GuidanceValidation
+from .guidance import default_path as default_guidance_path
+from .guidance import load as load_guidance
 from .host_wrappers import default_output_dir, render_host_wrappers, wrapper_install_issues
 from .profile import DEFAULT_RELATIVE_PROFILE, ProfileValidation, effective_policy, load
 
@@ -77,6 +80,21 @@ def check_profile(path: Path, adapter: Adapter) -> tuple[list[Check], ProfileVal
     if validated.status == "MISSING":
         detail += "; conservative defaults are active until `python3 -m creme init --write` is reviewed"
     return [Check("host profile", status, f"{validated.status}: {detail}")], validated
+
+
+def check_host_guidance(path: Path) -> tuple[list[Check], GuidanceValidation]:
+    checked = load_guidance(path)
+    if checked.status == "OK":
+        checks = [Check(
+            "host guidance",
+            STATUS_OK,
+            f"{checked.detail}; read with `python3 -m creme host-guidance`",
+        )]
+    elif checked.status == "MISSING":
+        checks = [Check("host guidance", STATUS_WARN, checked.detail)]
+    else:
+        checks = [Check("host guidance", STATUS_FAIL, checked.detail)]
+    return checks, checked
 
 
 def _tracked_top_names(repo: Path) -> set[str]:
@@ -293,6 +311,8 @@ def run_doctor(
     checks = check_launch_root(root, cwd)
     profile_checks, validated = check_profile(path, selected)
     checks.extend(profile_checks)
+    guidance_checks, guidance = check_host_guidance(default_guidance_path(root))
+    checks.extend(guidance_checks)
     profile = validated.profile if validated.status in {"VALID", "LIMITED"} else None
     if workspace_root:
         workspace = workspace_root.expanduser().resolve()
@@ -317,7 +337,7 @@ def run_doctor(
     context = {
         "root": str(root), "workspace_root": str(workspace),
         "profile": validated.status, "platform": selected.system,
-        "effective_policy": policy,
+        "effective_policy": policy, "host_guidance": guidance.status,
     }
     return checks, context
 

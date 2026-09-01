@@ -33,3 +33,25 @@ not commit a live profile or use one machine's values as public baselines.
 `workspace.root` identifies the parent of the sibling checkouts.
 `workspace.goal_store` may name a private goal location or remain null. No
 Creme runtime path requires that store to exist.
+
+## Local host guidance
+
+Machine-specific operational findings that do not fit the static JSON profile
+live in the optional ignored `.creme/host-guidance.md` file. This includes a
+reproduced resource hazard, measured bounds, and the local wrapper that safely
+runs an otherwise authoritative repository command. It must not contain
+credentials, transient pressure snapshots presented as durable facts, or
+changes to a sibling repository's pass criteria.
+
+Every Creme-root agent run checks this file through:
+
+```sh
+python3 -m creme doctor
+python3 -m creme host-guidance
+```
+
+`MISSING` is supported on a host with no local findings. A symlink,
+non-regular file, invalid UTF-8, NUL-containing, empty, or oversized guidance
+file fails the doctor check. The 64-KiB ceiling keeps this safety layer
+reviewable. `AGENTS.md` requires agents to read valid local guidance before
+host-intensive work.

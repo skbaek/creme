@@ -6,7 +6,7 @@ Creme has three configuration tiers and one repository boundary.
 |---|---|---|
 | Shared | instructions, goal/lead method, evidence discipline, skills, capability calls | platform binaries, personal paths, live pressure values |
 | OS adapter | canonical platform/runtime identity, process discovery, telemetry, temporary/copy optimization, GUI-session checks | host thresholds disguised as universal facts |
-| Ignored host profile | detected static facts, derived policy, explicit user overrides, workspace layout | credentials, live pressure, repository doctrine |
+| Ignored host state | detected static facts, derived policy, explicit user overrides, workspace layout, measured machine hazards and local safe command paths | credentials, live pressure snapshots, repository doctrine or pass criteria |
 
 The precedence chain is: command-line override, host override, OS-derived
 default, conservative shared default. Missing information is never invented.

@@ -154,6 +154,7 @@ python3 -m creme init --workspace-root ..
 python3 -m creme init --workspace-root .. --write
 python3 -m creme validate-profile
 python3 -m creme doctor --workspace-root ..
+python3 -m creme host-guidance
 ./scripts/check.sh
 ```
 
@@ -161,6 +162,10 @@ The live host profile is `.creme/host-profile.json` and is ignored by Git. Use
 `--replace` only after reviewing a changed host fingerprint or policy. `doctor`
 may report an optional capability as `UNAVAILABLE` on Linux; that is supported
 when the capability is not required by the chosen gate.
+
+`host-guidance` prints reviewed machine-local safety findings stored in the
+ignored `.creme/host-guidance.md`. Read and obey them before the first Lean
+build. `MISSING` means this host has no recorded local finding yet.
 
 ### Codex desktop app
 

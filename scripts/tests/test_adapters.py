@@ -126,6 +126,22 @@ class AdapterTest(unittest.TestCase):
             self.assertEqual(result.status, "PREVIEW")
             self.assertFalse(destination.exists())
 
+    def test_optimized_cache_copy_invalid_inputs_do_not_recurse(self):
+        for adapter in (DarwinAdapter(), LinuxAdapter()):
+            with self.subTest(adapter=adapter.system), tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / "src"
+                destination = Path(tmp) / "dst"
+
+                missing = adapter.copy_cache(source, destination, False)
+                self.assertEqual(missing.status, "ERROR")
+                self.assertIn("source is not a directory", missing.detail)
+
+                source.mkdir()
+                destination.mkdir()
+                existing = adapter.copy_cache(source, destination, False)
+                self.assertEqual(existing.status, "ERROR")
+                self.assertIn("destination already exists", existing.detail)
+
     @mock.patch("creme.adapters.base.shutil.copytree")
     def test_portable_copy_failure_is_structured_and_retains_partial(self, copytree):
         with tempfile.TemporaryDirectory() as tmp:

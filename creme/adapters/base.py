@@ -154,7 +154,10 @@ class Adapter:
         optimized_copy: Callable[[Path], bool],
     ) -> CapabilityResult:
         if not source.is_dir() or destination.exists():
-            return self.copy_cache(source, destination, execute)
+            # Bypass the platform override: both optimized adapters enter this
+            # helper from their own `copy_cache`, so dynamic dispatch here
+            # would recurse instead of returning the portable validation error.
+            return Adapter.copy_cache(self, source, destination, execute)
         preview_data = {
             "source": str(source),
             "destination": str(destination),

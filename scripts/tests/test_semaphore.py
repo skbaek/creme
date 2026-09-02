@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import stat
 import tempfile
@@ -47,6 +48,25 @@ class HeadroomAdapter(Adapter):
         return self.result("human_gui_sessions", "OK", "fixture", {"sessions": []})
 
 
+def concurrent_admit_worker(state_directory, label, start, results):
+    os.environ["CREME_SEMAPHORE_DIR"] = state_directory
+    start.wait(5)
+    result = semaphore.adaptive_acquire(
+        label,
+        "concurrent large proof",
+        memory_gib=8,
+        adapter=HeadroomAdapter(free_percent=80, total_gib=24),
+        policy={
+            "task_memory_gib": 8,
+            "heavy_workers": 2,
+            "light_workers": 4,
+            "physical_memory_gib": 24.0,
+            "profile_status": "VALID",
+        },
+    )
+    results.put((label, *result))
+
+
 class SemaphoreTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -59,6 +79,7 @@ class SemaphoreTest(unittest.TestCase):
             "physical_memory_gib": 32.0,
             "profile_status": "VALID",
         }
+        self.runtime_admission_policy = semaphore._runtime_admission_policy
         patcher = mock.patch.dict(os.environ, {"CREME_SEMAPHORE_DIR": self.tmp.name}, clear=False)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -93,6 +114,17 @@ class SemaphoreTest(unittest.TestCase):
             (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
 
             self.assertEqual(semaphore.canonical_creme_root(worktree), canonical.resolve())
+
+    def test_missing_profile_forces_conservative_worker_policy(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "creme.semaphore.canonical_creme_root", return_value=Path(tmp)
+        ):
+            policy = self.runtime_admission_policy(HeadroomAdapter(total_gib=32))
+
+        self.assertEqual(policy["profile_status"], "MISSING")
+        self.assertEqual(policy["task_memory_gib"], 2)
+        self.assertEqual(policy["heavy_workers"], 1)
+        self.assertEqual(policy["physical_memory_gib"], 32.0)
 
     def test_state_selection_keeps_existing_install_on_legacy_until_migration(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,6 +295,33 @@ class SemaphoreTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("DEFER_FOR_HARD", detail)
         self.assertIn("peak reservations", detail)
+
+    def test_cross_process_admission_race_is_atomic(self):
+        context = multiprocessing.get_context("spawn")
+        start = context.Event()
+        results = context.Queue()
+        workers = [
+            context.Process(
+                target=concurrent_admit_worker,
+                args=(self.tmp.name, label, start, results),
+            )
+            for label in ("concurrent-a", "concurrent-b")
+        ]
+        for worker in workers:
+            worker.start()
+        start.set()
+        outcomes = [results.get(timeout=10) for _ in workers]
+        for worker in workers:
+            worker.join(timeout=10)
+            self.assertEqual(worker.exitcode, 0)
+
+        admitted = [outcome for outcome in outcomes if outcome[1]]
+        deferred = [outcome for outcome in outcomes if not outcome[1]]
+        self.assertEqual(len(admitted), 1, outcomes)
+        self.assertIn("ADMITTED_SOFT", admitted[0][2])
+        self.assertEqual(len(deferred), 1, outcomes)
+        self.assertIn("DEFER_FOR_HARD", deferred[0][2])
+        self.assertEqual(len(semaphore.snapshot()["soft"]), 1)
 
     def test_low_memory_refuses_even_exclusive_start(self):
         adapter = HeadroomAdapter(free_percent=12, total_gib=24)

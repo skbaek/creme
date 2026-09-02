@@ -384,7 +384,7 @@ def cmd_lean_mcp(arguments: argparse.Namespace) -> int:
 
 
 def cmd_lake_build(arguments: argparse.Namespace) -> int:
-    options = argparse.ArgumentParser(prog=f"python3 -m creme lake-build {arguments.goal}")
+    options = argparse.ArgumentParser(prog=f"~/creme/scripts/creme lake-build {arguments.goal}")
     options.add_argument("--memory-gib", type=_positive, default=DEFAULT_MEMORY_GIB)
     options.add_argument(
         "--contention",

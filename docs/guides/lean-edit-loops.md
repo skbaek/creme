@@ -15,7 +15,7 @@ environment can be proven faithful.
 There is one compilation owner. When diagnostics report stale imports, do not
 ask the language server or MCP to build: `lean_build` and the shelling proof
 profiler are deliberately absent.
-From the goal worktree, probe the narrow target with `python3 -m creme
+From the goal worktree, probe the narrow target with `~/creme/scripts/creme
 lake-build GOAL --probe -- TARGET`; on exit 3, run the same narrow target
 through the admitted wrapper, restart the server, and recheck the exact goal
 and diagnostics. Use the repository catalogue's full target at a green

@@ -494,7 +494,7 @@ def lake_guard_main(argv: list[str]) -> int:
 
     reason = f"unowned or unknown lake invocation: {' '.join(args)}"
     _guard_event(cwd=cwd, args=args, exit_code=GUARD_REFUSAL_EXIT, rewritten=False, reason=reason)
-    print(f"creme lake guard: {reason}; use `python3 -m creme lake-build ...` for builds", file=os.sys.stderr)
+    print(f"creme lake guard: {reason}; use `~/creme/scripts/creme lake-build ...` for builds", file=os.sys.stderr)
     return GUARD_REFUSAL_EXIT
 
 

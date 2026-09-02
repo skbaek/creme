@@ -156,8 +156,8 @@ This is an enforced client/agent boundary, not a claim that an interactive
 human shell cannot execute an absolute toolchain binary:
 
 ```sh
-python3 -m creme lake-build GOAL --probe -- Narrow.Target
-python3 -m creme lake-build GOAL --memory-gib 8 --contention sensitive -- Narrow.Target
+~/creme/scripts/creme lake-build GOAL --probe -- Narrow.Target
+~/creme/scripts/creme lake-build GOAL --memory-gib 8 --contention sensitive -- Narrow.Target
 ```
 
 Probe first. Exit 0 means the selected artifacts are current; exit 3 means

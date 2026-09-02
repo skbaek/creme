@@ -15,7 +15,7 @@ description: Inspects Lean 4 proof states, term goals, diagnostics, declarations
    output. Follow it there rather than restating it.
    If diagnostics say `Imports are out of date`, the guarded server will not
    build them and `lean_build` is intentionally unavailable. From the goal
-   worktree, run `python3 -m creme lake-build GOAL --probe -- TARGET`; exit 3
+   worktree, run `~/creme/scripts/creme lake-build GOAL --probe -- TARGET`; exit 3
    means stale. Run that narrow target through the same command without
    `--probe`, restart the server, and inspect again. Use the repository's full
    target only at checkpoints and only through this admitted wrapper; never

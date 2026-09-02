@@ -31,7 +31,7 @@ The guarded server and owned build wrapper are separate capabilities. The
 server may inspect current artifacts but cannot create or download them: its
 `setup-file` calls are forced to `--no-build --no-cache`; MCP `lean_build` and
 the shelling `lean_profile_proof` profiler are disabled; and MCP startup cache
-retrieval is suppressed. `python3 -m creme
+retrieval is suppressed. `~/creme/scripts/creme
 lake-build` is the only supported agent shell build entry point; the policy
 prohibits bypassing it with an absolute toolchain Lake. The wrapper obtains adaptive admission before
 spawning Lake, records measurements in ignored local state, and releases after

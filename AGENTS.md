@@ -51,7 +51,7 @@ of choosing the convenient source.
 Use the `lean-inspector` skill for proof-state analysis and `lean-prover` when
 writing, finishing, or repairing a proof. Skills live in `.agents/skills/`.
 There is one compilation owner: probe and build only through
-`python3 -m creme lake-build GOAL -- <narrow-targets>`, never through bare
+`~/creme/scripts/creme lake-build GOAL -- <narrow-targets>`, never through bare
 `lake build` or the removed MCP `lean_build`/`lean_profile_proof` tools. Keep narrow targets in the
 proof loop, build the catalogue-required full target at checkpoints, and
 restart the Lean server after a coordinated build.

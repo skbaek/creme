@@ -22,6 +22,23 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class BuildOwnershipTest(unittest.TestCase):
+    def test_canonical_creme_launcher_binds_system_python(self) -> None:
+        self.assertEqual((ROOT / "scripts" / "creme").read_text().splitlines()[0], "#!/usr/bin/python3")
+
+    def test_build_guidance_uses_canonical_launcher_from_sibling_worktrees(self) -> None:
+        surfaces = (
+            ROOT / "AGENTS.md",
+            ROOT / "docs" / "guides" / "execution.md",
+            ROOT / "docs" / "guides" / "lean-edit-loops.md",
+            ROOT / ".agents" / "skills" / "lean-inspector" / "SKILL.md",
+            ROOT / ".agents" / "skills" / "lean-prover" / "SKILL.md",
+        )
+        for surface in surfaces:
+            text = surface.read_text(encoding="utf-8")
+            self.assertNotIn("python3 -m creme lake-build", text, surface)
+            self.assertNotIn("python3 -m creme\nlake-build", text, surface)
+            self.assertIn("~/creme/scripts/creme lake-build", text.replace("\n", " "), surface)
+
     def test_doctor_validates_every_client_surface(self) -> None:
         checks = check_client_surface(ROOT)
         by_name = {check.name: check for check in checks}

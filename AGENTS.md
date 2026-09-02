@@ -146,6 +146,12 @@ releasing that goal's hold. A bare soft/hard release is an intermediate
 operation, not wind-down evidence; never claim the task is safe or idle after
 Lean work unless wind-down reports `OK`.
 
+Wind-down is scoped to the configured Jaune/Blanc `.worktrees/GOAL` roots.
+Other goal labels may remain while it reclaims and releases only the caller's
+work. An unresolved worktree or uninspectable same-client Lean candidate fails
+closed before signalling; never bypass that refusal with another owner's
+release or a bare kill.
+
 The ignored `.creme/host-guidance.md` records hazards and safe command paths
 learned on this particular machine. It does not change Jaune or Blanc pass
 criteria. If it marks a raw command unsafe, use its local safe wrapper while

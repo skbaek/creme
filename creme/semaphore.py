@@ -716,19 +716,23 @@ def adaptive_release(label: str) -> tuple[bool, str]:
 def release_after_cleanup(
     label: str,
     cleanup: Callable[[], tuple[bool, str]],
+    *,
+    goal_scoped: bool = False,
 ) -> tuple[bool, str]:
     """Run verified cleanup and release ``label`` without an acquisition race.
 
     The semaphore mutex stays held while ``cleanup`` runs.  This is deliberately
     reserved for task wind-down: ordinary releases must remain fast and must not
-    discard a useful language-server cache at an intermediate boundary.
+    discard a useful language-server cache at an intermediate boundary. Other
+    holds may coexist only when the caller has established a validated per-goal
+    worktree scope for both cleanup and verification.
     """
     if not label or label == MANUAL_LABEL:
         return False, "reserved or empty label"
     with locked_state() as (path, state):
         holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
         other_labels = [item["label"] for item in holds if item["label"] != label]
-        if other_labels:
+        if other_labels and not goal_scoped:
             detail = "other holds block task wind-down: " + ", ".join(other_labels)
             _log("wind-down", label, "REFUSED", detail)
             return False, detail

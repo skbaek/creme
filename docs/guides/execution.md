@@ -119,14 +119,20 @@ installed delegates, use the existing reclamation delegate:
 ~/.codex/bin/codex-reclaim-lean --wind-down GOAL
 ```
 
-Wind-down holds the semaphore mutex across its full transaction. It refuses to
-start while another label or a manual session holds the host; performs ordinary
-ownership-verifying reclamation, never hard-pressure reclamation; verifies with
-a fresh dry-run that no owned or protected Lean roots remain; and only then
-removes the goal's soft or hard hold. Any unavailable scan, protected root,
-survivor, failed verification, or semaphore state-write failure leaves the matching
-hold intact. The operation is idempotent when the goal already has no hold and
-the process scan is clear.
+Wind-down resolves the goal's real Jaune/Blanc `.worktrees/GOAL` roots from the
+validated host layout and holds the semaphore mutex across its full
+transaction. Other labels may remain: the adapter samples the current working
+directory of every same-client Lean candidate and signals only processes inside
+the caller's resolved goal worktrees. Processes in another goal worktree remain
+foreign and their holds are untouched. If any same-client candidate's working
+directory is uninspectable, no process is signalled. Wind-down performs
+ordinary reclamation, never hard-pressure reclamation; verifies with a fresh
+goal-scoped dry-run that no owned or protected Lean roots remain; and only then
+removes the caller's soft or hard hold. A missing or ambiguous worktree scope,
+unavailable scan, protected root, survivor, failed verification, or semaphore
+state-write failure leaves the matching hold intact. The operation is
+idempotent when the goal already has no hold and its scoped process scan is
+clear.
 
 Ordinary `soft-release` and `hard-release` remain valid at intermediate
 boundaries where retaining an MCP cache is intentional. They are not evidence

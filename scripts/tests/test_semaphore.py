@@ -559,6 +559,24 @@ class SemaphoreTest(unittest.TestCase):
             ["goal", "other"],
         )
 
+    def test_goal_scoped_cleanup_releases_only_matching_hold(self):
+        self.assertTrue(semaphore.acquire("soft", "goal", "proof")[0])
+        self.assertTrue(semaphore.acquire("soft", "other", "build")[0])
+        cleanup = mock.Mock(return_value=(True, "goal worktree clear"))
+
+        ok, detail = semaphore.release_after_cleanup(
+            "goal",
+            cleanup,
+            goal_scoped=True,
+        )
+
+        self.assertTrue(ok, detail)
+        cleanup.assert_called_once_with()
+        self.assertEqual(
+            [item["label"] for item in semaphore.snapshot()["soft"]],
+            ["other"],
+        )
+
     def test_cleanup_is_idempotent_after_matching_hold_was_released(self):
         self.assertEqual(
             semaphore.release_after_cleanup("goal", lambda: (True, "clean")),

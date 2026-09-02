@@ -25,6 +25,11 @@ runs. On `YIELD_HEAVY` or `DRAIN_HEAVY` renewal, start no further heavy step:
 checkpoint, wind down, and run light work. Explicit soft/hard commands remain
 for compatibility but use the same pressure guard.
 
+Wind-down is goal-scoped: it resolves configured `.worktrees/GOAL` roots,
+reclaims only Lean candidates whose cwd is inside those roots, verifies that
+scope, and releases only the matching label. Other soft holders may wind down
+in any order; an uninspectable candidate fails closed before signalling.
+
 Existing installations keep using the legacy state directory until an explicit
 migration:
 

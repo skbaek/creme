@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
-from creme.reclaim import Process, build_plan
+from creme.reclaim import (
+    Process,
+    build_plan,
+    parse_reclaim_arguments,
+    process_in_scope,
+)
 
 
 def proc(pid, ppid, command, rss=10):
@@ -54,6 +60,37 @@ class ReclaimPlanTest(unittest.TestCase):
         plan = build_plan(table, 41, self.is_client)
         self.assertEqual(plan.owned, ())
         self.assertEqual(plan.targets, ())
+
+    def test_goal_scope_separates_sibling_roots_in_one_client_tree(self):
+        table = self.tree()
+        goal_root = Path("/workspace/blanc/.worktrees/goal")
+        table[20] = Process(**{**table[20].__dict__, "cwd": str(goal_root)})
+        table[21] = Process(**{**table[21].__dict__, "cwd": str(goal_root)})
+        table[22] = Process(**{**table[22].__dict__, "cwd": str(goal_root)})
+        table[40] = proc(40, 11, "/tool/lake serve")
+        table[41] = proc(41, 40, "/tool/lean --server")
+        other_root = "/workspace/blanc/.worktrees/other"
+        table[40] = Process(**{**table[40].__dict__, "cwd": other_root})
+        table[41] = Process(**{**table[41].__dict__, "cwd": other_root})
+
+        plan = build_plan(
+            table,
+            12,
+            self.is_client,
+            candidate_scope=lambda process: process_in_scope(process, (goal_root,)),
+        )
+
+        self.assertEqual(plan.owned, (20, 21, 22))
+        self.assertEqual(plan.foreign, (31, 40, 41))
+        self.assertEqual(plan.targets, (22, 21, 20))
+
+    def test_scoped_hard_pressure_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "cannot use hard-pressure"):
+            parse_reclaim_arguments([
+                "--hard-pressure",
+                "--scope-root",
+                "/workspace/blanc/.worktrees/goal",
+            ])
 
     def test_public_kind_does_not_expose_arguments(self):
         table = self.tree()

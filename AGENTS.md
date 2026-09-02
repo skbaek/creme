@@ -89,8 +89,10 @@ directly. Use:
 
 ```sh
 python3 -m creme platform
+python3 -m creme memory-headroom
 python3 -m creme telemetry
 ~/creme/.semaphore/semaphore status
+~/creme/.semaphore/semaphore adaptive-acquire GOAL --note "proof loop" --memory-gib 8
 python3 -m creme reclaim --dry-run
 python3 -m creme reclaim --wind-down GOAL
 ```
@@ -115,13 +117,27 @@ preview and regenerate the complete set with `python3 -m creme host-wrappers`.
 
 The capability contract and limited-mode results are in
 `docs/capabilities.md`. A missing capability is not permission to run another
-OS's command. Missing telemetry reduces concurrency and strengthens
-checkpointing; it is not evidence that the host is under pressure.
+OS's command. Full telemetry may be unavailable while the narrower aggregate
+memory-headroom probe still works. If headroom itself is unavailable, adaptive
+admission serializes heavy work under a hard hold; it does not infer pressure.
 
-Coordinate memory-heavy Lean work with the host semaphore described in
-`docs/guides/execution.md`: builds and elaboration use a soft hold; timing,
-whole-tree, and mutation work use the exclusive hard hold. Never edit semaphore
-state, use a bare `kill`, or treat a quiet-looking snapshot as a lease.
+Coordinate every memory-heavy Lean unit with the adaptive semaphore described
+in `docs/guides/execution.md`. Supply a conservative whole-GiB peak estimate.
+Use `contention=sensitive` for cold or unexpectedly broad rebuilds, multiple
+Lean workers, known memory spikes, and any operation whose concurrency could
+make the host unresponsive even when results remain valid; use `exclusive` for
+timing, whole-tree, and mutation work. The decision may admit soft, admit hard,
+or refuse with `DEFER_FOR_HARD`/`LIGHT_ONLY`. Never downgrade it. On refusal,
+reorder the queue and do light work rather than polling or starting the command
+uncoordinated.
+
+Run `semaphore renew GOAL` before each further heavy unit and at least every
+five minutes in an interactive proof session. `YIELD_HEAVY` gives the older
+soft holder priority; `DRAIN_HEAVY` means start no further Lean action,
+checkpoint, and wind down. Classify a long indivisible command conservatively
+before it starts because renewal cannot interrupt an already-running command.
+Never edit semaphore state, use a bare `kill`, or treat a quiet-looking
+snapshot as a lease.
 
 Any task that opened a Lean MCP server must run `reclaim --wind-down GOAL`
 before yielding to a requested pause or restart, transferring the task, or

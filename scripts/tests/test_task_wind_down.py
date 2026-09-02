@@ -23,6 +23,18 @@ class FakeAdapter(Adapter):
         return self.results.pop(0)
 
 
+class AdmissionAdapter(Adapter):
+    system = "FixtureOS"
+
+    def memory_headroom(self):
+        return self.result("memory_headroom", "OK", "fixture", {
+            "memory_free_percent": 80,
+            "memory_available_bytes": 24 * 1024 ** 3,
+            "physical_memory_bytes": 32 * 1024 ** 3,
+            "swap_used_mib": 0,
+        })
+
+
 def result(adapter, status="OK", *, owned=None, protected=None, survivors=None):
     data = {
         "owned": [] if owned is None else owned,
@@ -44,6 +56,23 @@ class TaskWindDownTest(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        adapter_patcher = mock.patch(
+            "creme.semaphore.get_adapter", return_value=AdmissionAdapter()
+        )
+        adapter_patcher.start()
+        self.addCleanup(adapter_patcher.stop)
+        policy_patcher = mock.patch(
+            "creme.semaphore._runtime_admission_policy",
+            return_value={
+                "task_memory_gib": 2,
+                "heavy_workers": 4,
+                "light_workers": 4,
+                "physical_memory_gib": 32.0,
+                "profile_status": "VALID",
+            },
+        )
+        policy_patcher.start()
+        self.addCleanup(policy_patcher.stop)
 
     def adapter_with(self, *specs):
         adapter = FakeAdapter([])

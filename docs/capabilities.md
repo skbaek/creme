@@ -10,15 +10,24 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 | static facts | sysctl with portable runtime fallback | `/proc/meminfo` and portable runtime facts | host profile stays missing/limited; one heavy worker |
 | native platform identity | normalized `macos-<arch>` key and uv platform tag | normalized `linux-<arch>` key and uv platform tag | unsupported architecture is `UNAVAILABLE` |
 | managed Python identity | home-relative native uv alias/base prefixes | home-relative native uv alias/base prefixes | malformed version is `REFUSED`; nothing is installed |
-| telemetry | `memory_pressure`, swap sysctl, process snapshot | `/proc` plus `ps` | no pressure inference; reduce concurrency |
-| semaphore core | portable locked JSON state | portable locked JSON state | expired holds continue blocking |
+| memory headroom | `memory_pressure`; swap when permitted | `/proc/meminfo`; swap when readable | no soft admission; serialize one hard task |
+| telemetry | headroom plus process snapshot | headroom plus `ps` | no process attribution; headroom may still be usable |
+| semaphore core | locked state plus adaptive admission | locked state plus adaptive admission | one hard task; expired holds continue blocking |
 | manual GUI hold | local-user and launchd GUI-domain checks | `UNAVAILABLE` | explicit manual coordination outside Creme |
 | Lean reclaim | frozen process snapshot and signals | frozen same-user process snapshot and signals | restart the client |
 | cache copy | APFS clone, then recursive-copy fallback | reflink-auto, then recursive-copy fallback | portable recursive copy |
 | temporary root | `TMPDIR` or runtime temp directory | `TMPDIR` or runtime temp directory | `UNAVAILABLE` if no writable root exists |
 
 Shared code does not invoke another OS's command as a fallback. An unavailable
-telemetry sample never proves a host is quiet or under pressure.
+telemetry sample never proves a host is quiet or under pressure. Aggregate
+`memory_headroom` is deliberately narrower: it omits process enumeration so an
+agent sandbox that denies `ps` can still enforce live admission. Swap is useful
+diagnostic context but may remain allocated after pressure recovers, so an
+absolute swap value alone is not an admission verdict.
+
+`python3 -m creme memory-headroom` exposes that narrow sample for planning and
+diagnosis. `adaptive-acquire` re-samples it under the semaphore mutex; a prior
+read-only sample is informative but cannot authorize a later heavy start.
 
 `python3 -m creme platform` reports the canonical platform key alongside the
 static host facts. `python3 -m creme python-runtime 3.11.9` reports the native,
@@ -80,6 +89,37 @@ also require a successful other-GUI-session scan. Corrupt state is reported
 and never reset automatically, including shape-correct objects with malformed
 hold fields. The state directory is mode `0700`; its mutex, state, and log are
 mode `0600` so free-form hold notes are not exposed to other local users.
+
+Adaptive acquisition samples aggregate headroom while holding the same mutex
+that protects the hold transition, then chooses soft, hard, or refusal. The
+portable safety floor reserves the greater of 25% physical memory or 2 GiB
+(capped at half of very small hosts) for the desktop, clients, and estimation
+error. Each declared peak is charged a 25% margin. The host profile's
+`heavy_workers` remains an upper bound, while simultaneous charged peaks must
+also fit the remaining budget. A `sensitive` or `exclusive` request is hard
+even if concurrent execution would be semantically valid.
+
+New heavy work is refused below 20% free memory or when its charged peak plus
+the usability reserve does not fit live availability. If aggregate headroom is
+unavailable, adaptive acquisition allows only one hard holder. A manual human
+session blocks adaptive heavy work and makes existing agent holders yield on
+their next renewal. Explicit soft/hard acquisition passes through the same
+live check and is not an escape hatch.
+
+Renewal re-samples headroom. Below 30% with multiple soft holders—or whenever
+the recorded worker count/peak reservations already exceed the current safe
+budget—every non-priority holder is told to yield. The oldest live coherent
+unit retains priority; an expired hold does not outrank a live heartbeat.
+Below 20%, all holders are told to drain and no lease is renewed. These
+verdicts do not kill a command already in progress; the execution contract
+requires agents to renew between heavy units, classify indivisible spikes as
+sensitive before launch, checkpoint, and wind down on `YIELD_HEAVY` or
+`DRAIN_HEAVY`.
+
+Admission metadata is encoded additively in the existing private note field so
+live schema-v1 holds and pre-update launchers remain structurally compatible.
+Legacy holds receive the current profile's default peak estimate. Status hides
+the encoding and reports the decoded estimate and contention class.
 
 Fresh installations store mutex, state, and audit log under the canonical
 checkout's ignored `.semaphore/state/`. Linked Git worktrees resolve through

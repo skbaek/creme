@@ -12,8 +12,33 @@ from creme import semaphore
 from creme.adapters.base import Adapter
 
 
-class QuietAdapter(Adapter):
+class HeadroomAdapter(Adapter):
     system = "Linux"
+
+    def __init__(self, free_percent=80, total_gib=32, available=True):
+        self.free_percent = free_percent
+        self.total_gib = total_gib
+        self.available = available
+
+    def static_facts(self):
+        return self.result("static_facts", "OK", "fixture", {
+            "system": self.system,
+            "machine": "fixture",
+            "logical_cores": 8,
+            "physical_memory_bytes": self.total_gib * 1024 ** 3,
+        })
+
+    def memory_headroom(self):
+        if not self.available:
+            return self.result("memory_headroom", "UNAVAILABLE", "fixture unavailable")
+        return self.result("memory_headroom", "OK", "fixture", {
+            "memory_free_percent": self.free_percent,
+            "memory_available_bytes": int(
+                self.total_gib * 1024 ** 3 * self.free_percent / 100
+            ),
+            "physical_memory_bytes": self.total_gib * 1024 ** 3,
+            "swap_used_mib": 0,
+        })
 
     def quiet_host(self):
         return self.result("quiet_host", "OK", "fixture quiet")
@@ -26,9 +51,26 @@ class SemaphoreTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.adapter = HeadroomAdapter()
+        self.policy = {
+            "task_memory_gib": 2,
+            "heavy_workers": 4,
+            "light_workers": 4,
+            "physical_memory_gib": 32.0,
+            "profile_status": "VALID",
+        }
         patcher = mock.patch.dict(os.environ, {"CREME_SEMAPHORE_DIR": self.tmp.name}, clear=False)
         patcher.start()
         self.addCleanup(patcher.stop)
+        adapter_patcher = mock.patch("creme.semaphore.get_adapter", return_value=self.adapter)
+        adapter_patcher.start()
+        self.addCleanup(adapter_patcher.stop)
+        policy_patcher = mock.patch(
+            "creme.semaphore._runtime_admission_policy",
+            return_value=self.policy,
+        )
+        policy_patcher.start()
+        self.addCleanup(policy_patcher.stop)
 
     def expire(self, label):
         path = Path(self.tmp.name) / "state.json"
@@ -156,8 +198,221 @@ class SemaphoreTest(unittest.TestCase):
         semaphore.acquire("soft", "old", "work", 1)
         self.expire("old")
         self.assertFalse(semaphore.acquire("hard", "new", "timing")[0])
-        self.assertTrue(semaphore.break_expired("old", "orphaned", QuietAdapter())[0])
+        self.assertTrue(semaphore.break_expired("old", "orphaned", HeadroomAdapter())[0])
         self.assertTrue(semaphore.acquire("hard", "new", "timing")[0])
+
+    def test_adaptive_acquire_chooses_soft_when_parallel_budget_fits(self):
+        ok, detail = semaphore.adaptive_acquire("goal", "proof", memory_gib=2)
+
+        self.assertTrue(ok, detail)
+        self.assertIn("ADMITTED_SOFT", detail)
+        state = semaphore.snapshot()
+        self.assertEqual(state["soft"][0]["label"], "goal")
+        note, memory_gib, contention = semaphore._decode_admission_note(
+            state["soft"][0]["note"], 8
+        )
+        self.assertEqual((note, memory_gib, contention), ("proof", 2, "tolerant"))
+
+    def test_contention_sensitive_work_chooses_hard(self):
+        ok, detail = semaphore.adaptive_acquire(
+            "goal", "cold rebuild", memory_gib=4, contention="sensitive"
+        )
+
+        self.assertTrue(ok, detail)
+        self.assertIn("ADMITTED_HARD", detail)
+        self.assertEqual(semaphore.snapshot()["hard"]["label"], "goal")
+
+    def test_adaptive_release_handles_both_selected_hold_kinds(self):
+        self.assertTrue(semaphore.adaptive_acquire("soft", "proof")[0])
+        self.assertEqual(
+            semaphore.adaptive_release("soft"),
+            (True, "soft hold released"),
+        )
+        self.assertTrue(semaphore.adaptive_acquire(
+            "hard", "broad build", contention="sensitive"
+        )[0])
+        self.assertEqual(
+            semaphore.adaptive_release("hard"),
+            (True, "hard hold released"),
+        )
+        self.assertEqual(semaphore.snapshot(), semaphore._empty_state())
+
+    def test_contention_sensitive_work_defers_for_existing_soft_hold(self):
+        self.assertTrue(semaphore.adaptive_acquire("older", "proof", memory_gib=2)[0])
+
+        ok, detail = semaphore.adaptive_acquire(
+            "goal", "cold rebuild", memory_gib=4, contention="sensitive"
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("DEFER_FOR_HARD", detail)
+        self.assertIn("run light work", detail)
+        self.assertEqual([item["label"] for item in semaphore.snapshot()["soft"]], ["older"])
+
+    def test_parallel_peak_budget_promotes_second_large_task_to_deferred_hard(self):
+        policy = {**self.policy, "task_memory_gib": 8, "heavy_workers": 3, "physical_memory_gib": 24.0}
+        adapter = HeadroomAdapter(free_percent=80, total_gib=24)
+        self.assertTrue(semaphore.adaptive_acquire(
+            "first", "large proof", memory_gib=8, adapter=adapter, policy=policy
+        )[0])
+
+        ok, detail = semaphore.adaptive_acquire(
+            "second", "large proof", memory_gib=8, adapter=adapter, policy=policy
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("DEFER_FOR_HARD", detail)
+        self.assertIn("peak reservations", detail)
+
+    def test_low_memory_refuses_even_exclusive_start(self):
+        adapter = HeadroomAdapter(free_percent=12, total_gib=24)
+
+        ok, detail = semaphore.adaptive_acquire(
+            "goal", "proof", contention="exclusive", adapter=adapter, policy=self.policy
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("LIGHT_ONLY", detail)
+        self.assertEqual(semaphore.snapshot(), semaphore._empty_state())
+
+    def test_unavailable_headroom_serializes_one_adaptive_task(self):
+        unavailable = HeadroomAdapter(available=False)
+
+        first_ok, first_detail = semaphore.adaptive_acquire(
+            "first", "proof", adapter=unavailable, policy=self.policy
+        )
+        second_ok, second_detail = semaphore.adaptive_acquire(
+            "second", "proof", adapter=unavailable, policy=self.policy
+        )
+
+        self.assertTrue(first_ok, first_detail)
+        self.assertIn("ADMITTED_HARD", first_detail)
+        self.assertFalse(second_ok)
+        self.assertIn("DEFER_HEAVY", second_detail)
+
+    def test_explicit_soft_acquire_cannot_bypass_low_memory(self):
+        ok, detail = semaphore.acquire(
+            "soft",
+            "goal",
+            "proof",
+            adapter=HeadroomAdapter(free_percent=10),
+            policy=self.policy,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("LIGHT_ONLY", detail)
+
+    def test_explicit_hard_acquire_cannot_bypass_low_memory(self):
+        ok, detail = semaphore.acquire(
+            "hard",
+            "goal",
+            "timing",
+            adapter=HeadroomAdapter(free_percent=10),
+            policy=self.policy,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("LIGHT_ONLY", detail)
+
+    def test_renew_drains_at_low_memory(self):
+        self.assertTrue(semaphore.adaptive_acquire("goal", "proof")[0])
+
+        ok, detail = semaphore.renew(
+            "goal", adapter=HeadroomAdapter(free_percent=18)
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("DRAIN_HEAVY", detail)
+
+    def test_newer_soft_holder_yields_first_under_contention(self):
+        self.assertTrue(semaphore.adaptive_acquire("older", "proof")[0])
+        self.assertTrue(semaphore.adaptive_acquire("newer", "proof")[0])
+        pressure = HeadroomAdapter(free_percent=25)
+
+        newer_ok, newer_detail = semaphore.renew("newer", adapter=pressure)
+        older_ok, older_detail = semaphore.renew("older", adapter=pressure)
+
+        self.assertFalse(newer_ok)
+        self.assertIn("YIELD_HEAVY", newer_detail)
+        self.assertIn("older", newer_detail)
+        self.assertTrue(older_ok, older_detail)
+
+    def test_unavailable_renewal_headroom_yields_newer_soft_holder(self):
+        self.assertTrue(semaphore.adaptive_acquire("older", "proof")[0])
+        self.assertTrue(semaphore.adaptive_acquire("newer", "proof")[0])
+
+        ok, detail = semaphore.renew(
+            "newer", adapter=HeadroomAdapter(available=False)
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("YIELD_HEAVY", detail)
+
+    def test_renew_proactively_serializes_overcommitted_peak_reservations(self):
+        permissive = {**self.policy, "physical_memory_gib": 64.0}
+        strict = {**self.policy, "physical_memory_gib": 24.0}
+        adapter = HeadroomAdapter(free_percent=80, total_gib=24)
+        self.assertTrue(semaphore.adaptive_acquire(
+            "older", "large proof", memory_gib=8, policy=permissive
+        )[0])
+        self.assertTrue(semaphore.adaptive_acquire(
+            "newer", "large proof", memory_gib=8, policy=permissive
+        )[0])
+
+        ok, detail = semaphore.renew("newer", adapter=adapter, policy=strict)
+
+        self.assertFalse(ok)
+        self.assertIn("YIELD_HEAVY", detail)
+        self.assertIn("peak reservations", detail)
+
+    def test_expired_hold_does_not_take_renewal_priority_from_live_holder(self):
+        self.assertTrue(semaphore.adaptive_acquire("expired", "proof")[0])
+        self.assertTrue(semaphore.adaptive_acquire("live", "proof")[0])
+        self.expire("expired")
+
+        ok, detail = semaphore.renew(
+            "live", adapter=HeadroomAdapter(free_percent=25), policy=self.policy
+        )
+
+        self.assertTrue(ok, detail)
+        self.assertIn("CONTINUE_HEAVY", detail)
+
+    def test_manual_human_hold_blocks_adaptive_heavy_work(self):
+        with semaphore.locked_state() as (path, state):
+            state["soft"].append(
+                semaphore._hold(
+                    semaphore.MANUAL_LABEL,
+                    "human active",
+                    semaphore.MANUAL_GRACE_SECONDS,
+                    manual=True,
+                )
+            )
+            semaphore._save(path, state)
+
+        ok, detail = semaphore.adaptive_acquire("goal", "proof")
+
+        self.assertFalse(ok)
+        self.assertIn("LIGHT_ONLY", detail)
+        self.assertIn("human-session", detail)
+
+    def test_manual_human_hold_makes_existing_heavy_holder_yield(self):
+        self.assertTrue(semaphore.adaptive_acquire("goal", "proof")[0])
+        with semaphore.locked_state() as (path, state):
+            state["soft"].append(
+                semaphore._hold(
+                    semaphore.MANUAL_LABEL,
+                    "human active",
+                    semaphore.MANUAL_GRACE_SECONDS,
+                    manual=True,
+                )
+            )
+            semaphore._save(path, state)
+
+        ok, detail = semaphore.renew("goal")
+
+        self.assertFalse(ok)
+        self.assertIn("YIELD_HEAVY", detail)
+        self.assertIn("human-session", detail)
 
     def test_corrupt_state_is_not_replaced(self):
         path = Path(self.tmp.name) / "state.json"

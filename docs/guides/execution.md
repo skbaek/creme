@@ -31,18 +31,53 @@ merged without overlapping authority.
 ## Resource classes
 
 - Light: inventories, docs, static scans, link checks, and unit tests without
-  Lean elaboration. No hold.
-- Elaboration: Lean MCP sessions, builds, and compiling gates. Take a soft hold.
-- Exclusive: timing, whole-tree sweeps, and mutation campaigns. Take the hard
-  hold and verify the host is quiet.
+  Lean elaboration. No hold; prefer this class while heavy work is deferred.
+- Elaboration: ordinary Lean MCP steps, focused builds, and compiling gates.
+  Request adaptive admission with a conservative peak-memory estimate. It may
+  grant a soft or hard hold.
+- Contention-sensitive: cold or unexpectedly broad rebuilds, commands that
+  create multiple Lean workers, previously observed spikes, and long
+  indivisible work that could make the interactive host unusable under
+  contention. Request `sensitive`; correctness under contention does not make
+  soft coordination wise.
+- Exclusive: timing, whole-tree sweeps, and mutation campaigns. Request
+  `exclusive` and verify the host is quiet when the repository gate requires
+  that stronger condition.
 
 ```sh
-~/creme/.semaphore/semaphore soft-acquire GOAL --note "build"
+~/creme/.semaphore/semaphore adaptive-acquire GOAL \
+  --note "focused proof loop" --memory-gib 4 --contention tolerant
+~/creme/.semaphore/semaphore adaptive-acquire GOAL \
+  --note "cold or broad rebuild" --memory-gib 10 --contention sensitive
+~/creme/.semaphore/semaphore adaptive-acquire GOAL \
+  --note "timing control" --memory-gib 8 --contention exclusive
 ~/creme/.semaphore/semaphore renew GOAL
-~/creme/.semaphore/semaphore soft-release GOAL
-~/creme/.semaphore/semaphore hard-acquire GOAL --note "timing control"
-~/creme/.semaphore/semaphore hard-release GOAL
+~/creme/.semaphore/semaphore release GOAL
 ```
+
+`ADMITTED_SOFT` and `ADMITTED_HARD` authorize the named heavy unit.
+`DEFER_FOR_HARD` means another hold or the parallel peak budget makes
+serialization safer; `LIGHT_ONLY` means current headroom cannot preserve the
+host usability reserve. Do not retry in a loop. Reorder independent light
+work, wait for an existing heavy unit to wind down, or split the planned work.
+The explicit `soft-acquire` and `hard-acquire` compatibility commands are also
+pressure-gated; they cannot bypass a low-memory refusal. `release` removes
+whichever hold kind adaptive admission selected. Explicit soft/hard releases
+remain available for compatibility.
+
+`python3 -m creme memory-headroom` is a read-only planning sample. It can
+justify moving light packets ahead of heavy ones, but only `adaptive-acquire`
+re-samples under the mutex and authorizes a heavy start.
+
+Renewal is both a lease heartbeat and an in-session pressure check. Call it
+before the next elaboration/build unit and at least every five minutes during
+an interactive MCP session. Under moderate pressure—or when recorded worker
+count/peak reservations are already unsafe—non-priority soft holders receive
+`YIELD_HEAVY`, leaving the oldest live coherent unit priority. At the drain
+threshold every holder receives `DRAIN_HEAVY`. In either case, launch no new
+heavy action: checkpoint, wind down, and move to light work. A long command
+that cannot reach a renewal boundary belongs in the sensitive class before it
+starts.
 
 The launcher is tracked in the canonical Creme checkout and is shared by Codex,
 Claude Code, other local agents, and humans. Always use the canonical launcher,
@@ -61,9 +96,11 @@ change is deployed:
 Retire any pre-neutral delegate and legacy state only after every session
 launched before the cutover has wound down.
 
-On limited hosts, run one heavy operation at a time and checkpoint first.
-Missing telemetry is not a pressure signal. Never edit semaphore state or use
-a bare process kill.
+On limited hosts, adaptive admission uses one hard heavy operation at a time
+and asks for frequent checkpoints. Missing full telemetry is not a pressure
+signal, and the aggregate headroom probe is intentionally independent of
+process discovery. Missing headroom forces serialization rather than an
+optimistic soft hold. Never edit semaphore state or use a bare process kill.
 
 ## Wind down Lean work
 

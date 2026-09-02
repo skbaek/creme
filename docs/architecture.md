@@ -5,7 +5,7 @@ Creme has three configuration tiers and one repository boundary.
 | Tier | Owns | Must not own |
 |---|---|---|
 | Shared | instructions, goal/lead method, evidence discipline, skills, capability calls | platform binaries, personal paths, live pressure values |
-| OS adapter | canonical platform/runtime identity, process discovery, telemetry, temporary/copy optimization, GUI-session checks | host thresholds disguised as universal facts |
+| OS adapter | canonical platform/runtime identity, aggregate memory sampling, process discovery, telemetry, temporary/copy optimization, GUI-session checks | host thresholds disguised as universal facts |
 | Ignored host state | detected static facts, derived policy, explicit user overrides, workspace layout, measured machine hazards and local safe command paths | credentials, live pressure snapshots, repository doctrine or pass criteria |
 
 The precedence chain is: command-line override, host override, OS-derived
@@ -42,7 +42,11 @@ Host memory coordination has one additional client-neutral surface:
 `.semaphore/semaphore`. Its implementation remains in the Creme package, while
 its ignored state is anchored to the canonical checkout rather than any linked
 goal worktree. User-local Codex delegates cover host-only telemetry and
-reclamation; they are not a second implementation or state authority.
+reclamation; they are not a second implementation or state authority. The
+tracked launcher performs adaptive admission from the process-free aggregate
+headroom capability, so a denied process snapshot does not disable the memory
+floor. Admission thresholds live in shared coordination policy, not in an OS
+adapter or a transient host profile sample.
 
 See [client discovery](client-discovery.md) for current official discovery
 semantics and the permission-is-not-discovery negative control.

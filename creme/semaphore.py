@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from .adapters import Adapter, get_adapter
+from .profile import DEFAULT_RELATIVE_PROFILE, effective_policy, load as load_profile
 
 
 SCHEMA_VERSION = 1
@@ -19,7 +20,15 @@ DEFAULT_LEASE_SECONDS = 1800
 MAX_LEASE_SECONDS = 14400
 MANUAL_LABEL = "manual-macos-session"
 MANUAL_GRACE_SECONDS = 300
+ADAPTIVE_LEASE_SECONDS = 600
 NEUTRAL_STATE_RELATIVE = Path(".semaphore/state")
+ADMISSION_NOTE_PREFIX = "@creme-admission:"
+ADMISSION_CONTENTION = {"tolerant", "sensitive", "exclusive"}
+ADMISSION_PEAK_MULTIPLIER = 1.25
+ADMISSION_RESERVE_FRACTION = 0.25
+ADMISSION_MIN_RESERVE_GIB = 2.0
+ADMISSION_DRAIN_PERCENT = 20
+ADMISSION_CONTENTION_PERCENT = 30
 HOLD_KEYS = {
     "label", "pid", "uid", "note", "manual",
     "acquired_at", "renewed_at", "lease_seconds",
@@ -247,13 +256,268 @@ def migrate_legacy_state(
     return True, detail
 
 
-def _hold(label: str, note: str, lease: int, manual: bool = False) -> dict[str, Any]:
+def _encode_admission_note(note: str, memory_gib: int, contention: str) -> str:
+    metadata = json.dumps(
+        {"contention": contention, "memory_gib": memory_gib},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"{ADMISSION_NOTE_PREFIX}{metadata} {note}"
+
+
+def _decode_admission_note(
+    note: str,
+    default_memory_gib: int,
+) -> tuple[str, int, str]:
+    """Read additive admission metadata while preserving schema-v1 state.
+
+    Holds are shared with sessions that may still be running the pre-admission
+    launcher. Encoding the reservation in the existing free-form note keeps
+    those sessions fail-closed and avoids an in-place state-schema cutover.
+    """
+    if not note.startswith(ADMISSION_NOTE_PREFIX):
+        return note, default_memory_gib, "legacy"
+    encoded, separator, user_note = note[len(ADMISSION_NOTE_PREFIX):].partition(" ")
+    if not separator:
+        return note, default_memory_gib, "legacy"
+    try:
+        metadata = json.loads(encoded)
+    except json.JSONDecodeError:
+        return note, default_memory_gib, "legacy"
+    if not isinstance(metadata, dict) or set(metadata) != {"contention", "memory_gib"}:
+        return note, default_memory_gib, "legacy"
+    memory_gib = metadata.get("memory_gib")
+    contention = metadata.get("contention")
+    if (
+        not isinstance(memory_gib, int)
+        or isinstance(memory_gib, bool)
+        or memory_gib < 1
+        or contention not in ADMISSION_CONTENTION
+    ):
+        return note, default_memory_gib, "legacy"
+    return user_note, memory_gib, str(contention)
+
+
+def _runtime_admission_policy(adapter: Adapter) -> dict[str, Any]:
+    checked = load_profile(
+        canonical_creme_root() / DEFAULT_RELATIVE_PROFILE,
+        adapter,
+    )
+    if checked.status in {"VALID", "LIMITED"} and checked.profile:
+        values = effective_policy(checked.profile, adapter)
+        facts = checked.profile.get("facts", {})
+    else:
+        # A missing, invalid, or stale profile must not silently recover the
+        # more permissive OS-derived worker count.
+        values = {"task_memory_gib": 2, "heavy_workers": 1, "light_workers": 1}
+        facts_result = adapter.static_facts()
+        facts = facts_result.data if facts_result.status == "OK" and facts_result.data else {}
+    physical_bytes = facts.get("physical_memory_bytes")
+    physical_gib = (
+        float(physical_bytes) / (1024 ** 3)
+        if isinstance(physical_bytes, int) and not isinstance(physical_bytes, bool)
+        else None
+    )
+    return {
+        **values,
+        "physical_memory_gib": physical_gib,
+        "profile_status": checked.status,
+    }
+
+
+def _reserve_gib(total_gib: Optional[float]) -> Optional[float]:
+    if total_gib is None:
+        return None
+    return min(
+        total_gib / 2,
+        max(ADMISSION_MIN_RESERVE_GIB, total_gib * ADMISSION_RESERVE_FRACTION),
+    )
+
+
+def _charged_memory_gib(memory_gib: int) -> int:
+    return max(1, math.ceil(memory_gib * ADMISSION_PEAK_MULTIPLIER))
+
+
+def _headroom_values(
+    sample: Any,
+    configured_total_gib: Optional[float],
+) -> tuple[Optional[int], Optional[float], Optional[float]]:
+    if sample.status != "OK" or not sample.data:
+        return None, None, configured_total_gib
+    free = sample.data.get("memory_free_percent")
+    if isinstance(free, bool) or not isinstance(free, (int, float)) or not 0 <= free <= 100:
+        return None, None, configured_total_gib
+    total_bytes = sample.data.get("physical_memory_bytes")
+    total_gib = configured_total_gib
+    if isinstance(total_bytes, int) and not isinstance(total_bytes, bool) and total_bytes > 0:
+        total_gib = total_bytes / (1024 ** 3)
+    available_bytes = sample.data.get("memory_available_bytes")
+    if isinstance(available_bytes, int) and not isinstance(available_bytes, bool) and available_bytes >= 0:
+        available_gib = available_bytes / (1024 ** 3)
+    elif total_gib is not None:
+        available_gib = total_gib * float(free) / 100
+    else:
+        available_gib = None
+    return int(free), available_gib, total_gib
+
+
+def _hold_reservation(hold: dict[str, Any], default_memory_gib: int) -> int:
+    _, memory_gib, _ = _decode_admission_note(hold["note"], default_memory_gib)
+    return _charged_memory_gib(memory_gib)
+
+
+def _admission_decision(
+    state: dict[str, Any],
+    requested_kind: str,
+    label: str,
+    memory_gib: int,
+    contention: str,
+    adapter: Adapter,
+    policy: dict[str, Any],
+) -> tuple[bool, Optional[str], str, str]:
+    hard = state["hard"]
+    matching_soft = [item for item in state["soft"] if item["label"] == label]
+    other_soft = [item for item in state["soft"] if item["label"] != label]
+    if hard and hard["label"] != label:
+        detail = f"hard hold {hard['label']} blocks acquisition; run light work until it releases"
+        return False, None, "DEFER_HEAVY", detail
+    if hard and hard["label"] == label:
+        return False, None, "ALREADY_HELD", "label already owns the hard hold; use renew"
+    if matching_soft and requested_kind != "hard":
+        return False, None, "ALREADY_HELD", "label already owns a soft hold; use renew"
+    if any(item.get("manual") for item in other_soft):
+        return (
+            False,
+            None,
+            "LIGHT_ONLY",
+            "a manual human-session hold is active; run light work until it is released",
+        )
+    if requested_kind == "hard" and other_soft:
+        labels = ", ".join(item["label"] for item in other_soft)
+        return False, None, "DEFER_FOR_HARD", f"soft holds block hard acquisition: {labels}"
+
+    converting = requested_kind == "hard" and bool(matching_soft)
+    sample = adapter.memory_headroom()
+    configured_total = policy.get("physical_memory_gib")
+    if isinstance(configured_total, bool) or not isinstance(configured_total, (int, float)):
+        configured_total = None
+    free_percent, available_gib, total_gib = _headroom_values(sample, configured_total)
+    reserve_gib = _reserve_gib(total_gib)
+    charged_gib = _charged_memory_gib(memory_gib)
+    requires_hard = requested_kind == "hard" or contention != "tolerant"
+    reasons = []
+
+    if not converting and free_percent is not None and free_percent < ADMISSION_DRAIN_PERCENT:
+        return (
+            False,
+            None,
+            "LIGHT_ONLY",
+            f"available memory is {free_percent}% (<{ADMISSION_DRAIN_PERCENT}%); "
+            "do not start heavy work; checkpoint or wind down heavy sessions and run light work",
+        )
+
+    if not converting and free_percent is None:
+        requires_hard = True
+        reasons.append(f"memory headroom unavailable ({sample.detail}); limited mode serializes heavy work")
+
+    if not converting and reserve_gib is not None:
+        capacity_gib = max(0.0, float(total_gib) - reserve_gib)
+        if charged_gib > capacity_gib:
+            return (
+                False,
+                None,
+                "LIGHT_ONLY",
+                f"{memory_gib} GiB estimate charges {charged_gib} GiB with peak margin, "
+                f"exceeding the {capacity_gib:.1f} GiB heavy-work budget; split or reduce the task",
+            )
+        if available_gib is not None and available_gib < charged_gib + reserve_gib:
+            decision = "DEFER_FOR_HARD" if other_soft else "LIGHT_ONLY"
+            action = (
+                "wait for current heavy holds to wind down, then acquire hard"
+                if other_soft
+                else "wait for memory to recover and run light work"
+            )
+            return (
+                False,
+                None,
+                decision,
+                f"{available_gib:.1f} GiB is available but this task needs {charged_gib} GiB "
+                f"plus a {reserve_gib:.1f} GiB usability reserve; {action}",
+            )
+
+        active_reservations = sum(
+            _hold_reservation(item, int(policy["task_memory_gib"]))
+            for item in other_soft
+            if not item.get("manual")
+        )
+        if active_reservations + charged_gib > capacity_gib:
+            requires_hard = True
+            reasons.append(
+                f"parallel peak reservations would charge {active_reservations + charged_gib} GiB "
+                f"against a {capacity_gib:.1f} GiB budget"
+            )
+
+    active_workers = sum(not item.get("manual") for item in other_soft)
+    if active_workers >= int(policy["heavy_workers"]):
+        requires_hard = True
+        reasons.append(
+            f"{active_workers} soft heavy worker(s) already meet the configured limit "
+            f"of {policy['heavy_workers']}"
+        )
+
+    if contention != "tolerant":
+        reasons.append(f"contention={contention} requires host exclusivity")
+
+    if requested_kind == "soft" and requires_hard:
+        decision = "DEFER_FOR_HARD" if other_soft else "USE_HARD"
+        action = (
+            "run light work until the other holds release, then acquire hard"
+            if other_soft
+            else "use hard acquisition for this task"
+        )
+        return False, None, decision, "; ".join(reasons + [action])
+
+    selected_kind = "hard" if requires_hard else "soft"
+    if selected_kind == "hard" and other_soft:
+        labels = ", ".join(item["label"] for item in other_soft)
+        return (
+            False,
+            None,
+            "DEFER_FOR_HARD",
+            "; ".join(reasons + [f"soft holds still active: {labels}; run light work first"]),
+        )
+
+    headroom = (
+        f"headroom={free_percent}%" if free_percent is not None else "headroom=unavailable"
+    )
+    rationale = "; ".join(reasons) if reasons else "parallel admission fits the live and reserved budgets"
+    return (
+        True,
+        selected_kind,
+        f"ADMITTED_{selected_kind.upper()}",
+        f"{headroom}; memory={memory_gib} GiB (charged={charged_gib} GiB); {rationale}",
+    )
+
+
+def _hold(
+    label: str,
+    note: str,
+    lease: int,
+    manual: bool = False,
+    *,
+    memory_gib: Optional[int] = None,
+    contention: str = "tolerant",
+) -> dict[str, Any]:
     now = _now()
     return {
         "label": label,
         "pid": os.getpid(),
         "uid": os.getuid(),
-        "note": note,
+        "note": (
+            note
+            if manual or memory_gib is None
+            else _encode_admission_note(note, memory_gib, contention)
+        ),
         "manual": manual,
         "acquired_at": now,
         "renewed_at": now,
@@ -273,54 +537,141 @@ def snapshot() -> dict[str, Any]:
 def status_text() -> str:
     state = snapshot()
     now = _now()
+    try:
+        default_memory_gib = int(_runtime_admission_policy(get_adapter())["task_memory_gib"])
+    except (KeyError, OSError, SemaphoreError, ValueError):
+        default_memory_gib = 2
     lines = []
     hard = state["hard"]
     if hard:
         state_word = "expired-blocking" if _expired(hard, now) else "live"
-        lines.append(f"hard: {hard['label']} ({state_word}) pid={hard['pid']} note={hard['note']!r}")
+        note, memory_gib, contention = _decode_admission_note(hard["note"], default_memory_gib)
+        lines.append(
+            f"hard: {hard['label']} ({state_word}) pid={hard['pid']} "
+            f"memory={memory_gib}GiB contention={contention} note={note!r}"
+        )
     else:
         lines.append("hard: free")
     lines.append(f"soft (S={len(state['soft'])}):")
     for hold in state["soft"]:
         state_word = "expired-blocking" if _expired(hold, now) else "live"
-        lines.append(f"  {hold['label']} ({state_word}) pid={hold['pid']} note={hold['note']!r}")
+        note, memory_gib, contention = _decode_admission_note(hold["note"], default_memory_gib)
+        lines.append(
+            f"  {hold['label']} ({state_word}) pid={hold['pid']} "
+            f"memory={memory_gib}GiB contention={contention} note={note!r}"
+        )
     if not state["soft"]:
         lines.append("  none")
     return "\n".join(lines)
 
 
-def acquire(kind: str, label: str, note: str, lease: int = DEFAULT_LEASE_SECONDS) -> tuple[bool, str]:
+def _admit(
+    requested_kind: str,
+    label: str,
+    note: str,
+    lease: int,
+    *,
+    memory_gib: Optional[int],
+    contention: str,
+    adapter: Optional[Adapter],
+    policy: Optional[dict[str, Any]],
+) -> tuple[bool, str]:
     if not label or label == MANUAL_LABEL:
         return False, "reserved or empty label"
     if lease < 1 or lease > MAX_LEASE_SECONDS:
         return False, f"lease must be 1..{MAX_LEASE_SECONDS} seconds"
+    if contention not in ADMISSION_CONTENTION:
+        return False, f"unknown contention class: {contention}"
+    selected = adapter or get_adapter()
+    selected_policy = policy or _runtime_admission_policy(selected)
+    requested_memory = memory_gib if memory_gib is not None else int(selected_policy["task_memory_gib"])
+    if (
+        not isinstance(requested_memory, int)
+        or isinstance(requested_memory, bool)
+        or requested_memory < 1
+    ):
+        return False, "memory estimate must be a positive whole number of GiB"
     with locked_state() as (path, state):
-        if state["hard"] and state["hard"]["label"] != label:
-            detail = f"hard hold {state['hard']['label']} blocks acquisition"
-            _log(f"{kind}-acquire", label, "REFUSED", detail)
-            return False, detail
-        matching_soft = [item for item in state["soft"] if item["label"] == label]
-        other_soft = [item for item in state["soft"] if item["label"] != label]
-        if kind == "soft":
-            if state["hard"]:
-                return False, "label already owns the hard hold; release it before soft acquisition"
-            if matching_soft:
-                return False, "label already owns a soft hold; use renew"
-            state["soft"].append(_hold(label, note, lease))
-        elif kind == "hard":
-            if other_soft:
-                detail = "soft holds block hard acquisition: " + ", ".join(item["label"] for item in other_soft)
-                _log("hard-acquire", label, "REFUSED", detail)
-                return False, detail
-            if state["hard"]:
-                return False, "label already owns the hard hold; use renew"
-            state["soft"] = []
-            state["hard"] = _hold(label, note, lease)
+        admitted, selected_kind, decision, detail = _admission_decision(
+            state,
+            requested_kind,
+            label,
+            requested_memory,
+            contention,
+            selected,
+            selected_policy,
+        )
+        if not admitted or selected_kind is None:
+            _log(f"{requested_kind}-acquire", label, "REFUSED", f"{decision}: {detail}")
+            return False, f"{decision} — {detail}"
+        if selected_kind == "soft":
+            state["soft"].append(
+                _hold(
+                    label,
+                    note,
+                    lease,
+                    memory_gib=requested_memory,
+                    contention=contention,
+                )
+            )
         else:
-            return False, f"unknown hold kind: {kind}"
+            state["soft"] = []
+            state["hard"] = _hold(
+                label,
+                note,
+                lease,
+                memory_gib=requested_memory,
+                contention=contention,
+            )
         _save(path, state)
-    _log(f"{kind}-acquire", label, "OK", note)
-    return True, f"{kind} hold acquired"
+    _log(f"{requested_kind}-acquire", label, "OK", f"{decision}: {detail}")
+    return True, f"{decision} — {detail}"
+
+
+def acquire(
+    kind: str,
+    label: str,
+    note: str,
+    lease: int = DEFAULT_LEASE_SECONDS,
+    *,
+    memory_gib: Optional[int] = None,
+    adapter: Optional[Adapter] = None,
+    policy: Optional[dict[str, Any]] = None,
+) -> tuple[bool, str]:
+    if kind not in {"soft", "hard"}:
+        return False, f"unknown hold kind: {kind}"
+    return _admit(
+        kind,
+        label,
+        note,
+        lease,
+        memory_gib=memory_gib,
+        contention="exclusive" if kind == "hard" else "tolerant",
+        adapter=adapter,
+        policy=policy,
+    )
+
+
+def adaptive_acquire(
+    label: str,
+    note: str,
+    lease: int = ADAPTIVE_LEASE_SECONDS,
+    *,
+    memory_gib: Optional[int] = None,
+    contention: str = "tolerant",
+    adapter: Optional[Adapter] = None,
+    policy: Optional[dict[str, Any]] = None,
+) -> tuple[bool, str]:
+    return _admit(
+        "adaptive",
+        label,
+        note,
+        lease,
+        memory_gib=memory_gib,
+        contention=contention,
+        adapter=adapter,
+        policy=policy,
+    )
 
 
 def release(kind: str, label: str) -> tuple[bool, str]:
@@ -341,6 +692,25 @@ def release(kind: str, label: str) -> tuple[bool, str]:
         _save(path, state)
     _log(f"{kind}-release", label, "OK", "released")
     return True, f"{kind} hold released"
+
+
+def adaptive_release(label: str) -> tuple[bool, str]:
+    """Release the matching agent hold without guessing adaptive hold kind."""
+    if not label or label == MANUAL_LABEL:
+        return False, "reserved or empty label"
+    with locked_state() as (path, state):
+        if state["hard"] and state["hard"]["label"] == label:
+            state["hard"] = None
+            released = "hard"
+        else:
+            before = len(state["soft"])
+            state["soft"] = [item for item in state["soft"] if item["label"] != label]
+            if len(state["soft"]) == before:
+                return False, "matching agent hold not found"
+            released = "soft"
+        _save(path, state)
+    _log("adaptive-release", label, "OK", f"{released} hold released")
+    return True, f"{released} hold released"
 
 
 def release_after_cleanup(
@@ -400,21 +770,99 @@ def release_after_cleanup(
     return True, detail
 
 
-def renew(label: str, lease: int = DEFAULT_LEASE_SECONDS) -> tuple[bool, str]:
+def renew(
+    label: str,
+    lease: int = DEFAULT_LEASE_SECONDS,
+    *,
+    adapter: Optional[Adapter] = None,
+    policy: Optional[dict[str, Any]] = None,
+) -> tuple[bool, str]:
     if label == MANUAL_LABEL:
         return False, "manual hold has no heartbeat"
     if lease < 1 or lease > MAX_LEASE_SECONDS:
         return False, f"lease must be 1..{MAX_LEASE_SECONDS} seconds"
+    selected = adapter or get_adapter()
+    selected_policy = policy or _runtime_admission_policy(selected)
     with locked_state() as (path, state):
         candidates = ([state["hard"]] if state["hard"] else []) + state["soft"]
         hold = next((item for item in candidates if item["label"] == label), None)
         if hold is None:
             return False, "hold not found"
+        sample = selected.memory_headroom()
+        configured_total = selected_policy.get("physical_memory_gib")
+        if isinstance(configured_total, bool) or not isinstance(configured_total, (int, float)):
+            configured_total = None
+        free_percent, _, total_gib = _headroom_values(sample, configured_total)
+        soft = sorted(
+            (item for item in state["soft"] if not item.get("manual")),
+            key=lambda item: (item["acquired_at"], item["label"]),
+        )
+        manual_active = any(item.get("manual") for item in state["soft"])
+        live_soft = [item for item in soft if not _expired(item)]
+        priority_pool = live_soft or soft
+        priority_label = priority_pool[0]["label"] if priority_pool else None
+        over_worker_limit = len(soft) > int(selected_policy["heavy_workers"])
+        reserve_gib = _reserve_gib(total_gib)
+        over_reservation_budget = False
+        if reserve_gib is not None and total_gib is not None:
+            charged = sum(
+                _hold_reservation(item, int(selected_policy["task_memory_gib"]))
+                for item in soft
+            )
+            over_reservation_budget = charged > max(0.0, total_gib - reserve_gib)
+        if free_percent is not None and free_percent < ADMISSION_DRAIN_PERCENT:
+            detail = (
+                f"DRAIN_HEAVY — available memory is {free_percent}% "
+                f"(<{ADMISSION_DRAIN_PERCENT}%); do not launch another heavy step; "
+                "checkpoint, wind down, and run light work"
+            )
+            _log("renew", label, "REFUSED", detail)
+            return False, detail
+        if manual_active:
+            detail = (
+                "YIELD_HEAVY — a manual human-session hold is active; checkpoint, "
+                "wind down, and run light work"
+            )
+            _log("renew", label, "REFUSED", detail)
+            return False, detail
+        pressure_requires_serialization = (
+            len(soft) > 1
+            and (free_percent is None or free_percent < ADMISSION_CONTENTION_PERCENT)
+        )
+        budget_requires_serialization = over_worker_limit or over_reservation_budget
+        if label != priority_label and (
+            pressure_requires_serialization or budget_requires_serialization
+        ):
+            pressure = (
+                f"available memory is {free_percent}%"
+                if free_percent is not None
+                else f"memory headroom is unavailable ({sample.detail})"
+            )
+            budget = []
+            if over_worker_limit:
+                budget.append(
+                    f"{len(soft)} holders exceed worker limit {selected_policy['heavy_workers']}"
+                )
+            if over_reservation_budget:
+                budget.append("parallel peak reservations exceed the safe budget")
+            trigger = "; ".join([pressure, *budget])
+            detail = (
+                f"YIELD_HEAVY — {trigger}; priority hold {priority_label} keeps the next "
+                "coherent unit; checkpoint, wind down, and run light work"
+            )
+            _log("renew", label, "REFUSED", detail)
+            return False, detail
         hold["renewed_at"] = _now()
         hold["lease_seconds"] = lease
         _save(path, state)
-    _log("renew", label, "OK", f"lease={lease}")
-    return True, "hold renewed"
+    pressure = (
+        f"headroom={free_percent}%"
+        if free_percent is not None
+        else f"headroom unavailable ({sample.detail}); checkpoint frequently"
+    )
+    detail = f"CONTINUE_HEAVY — hold renewed; {pressure}"
+    _log("renew", label, "OK", f"lease={lease}; {detail}")
+    return True, detail
 
 
 def manual_acquire(note: str = "human using another macOS account") -> tuple[bool, str]:

@@ -29,6 +29,11 @@ Policy keys are `task_memory_gib`, `heavy_workers`, and `light_workers`.
 Explicit CLI values win over host overrides, then recorded policy, then OS
 defaults, then shared conservative defaults. Profile generation is local; do
 not commit a live profile or use one machine's values as public baselines.
+Adaptive admission uses `task_memory_gib` as the default declared peak and
+`heavy_workers` as a ceiling, then tightens both with live aggregate headroom,
+a usability reserve, and simultaneous peak reservations. An agent may provide
+a larger conservative `--memory-gib` estimate for one operation; that dynamic
+intent is stored with the private hold, not persisted as a host fact.
 
 `workspace.root` identifies the parent of the sibling checkouts.
 `workspace.goal_store` may name a private goal location or remain null. No

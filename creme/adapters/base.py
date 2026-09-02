@@ -67,6 +67,19 @@ class Adapter:
             f"telemetry is not implemented for {self.system}",
         )
 
+    def memory_headroom(self) -> CapabilityResult:
+        """Sample admission-critical memory state without process discovery.
+
+        Process enumeration is commonly denied inside an agent sandbox even
+        when the operating system's aggregate memory counters remain readable.
+        Heavy-work admission therefore uses this narrower capability instead
+        of treating a failed process snapshot as an unknown memory state.
+        """
+        return self.result(
+            "memory_headroom", "UNAVAILABLE",
+            f"memory headroom is not implemented for {self.system}",
+        )
+
     def quiet_host(self) -> CapabilityResult:
         return self.result(
             "quiet_host", "UNAVAILABLE",

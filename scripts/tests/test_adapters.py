@@ -11,9 +11,23 @@ from creme.adapters import get_adapter
 from creme.adapters.base import Adapter
 from creme.adapters.darwin import DarwinAdapter
 from creme.adapters.linux import LinuxAdapter
+from creme.cli import cmd_memory_headroom
 
 
 class AdapterTest(unittest.TestCase):
+    def test_memory_headroom_cli_emits_narrow_capability(self):
+        adapter = Adapter()
+        result = adapter.result(
+            "memory_headroom", "OK", "fixture", {"memory_free_percent": 50}
+        )
+        with mock.patch("creme.cli.get_adapter", return_value=adapter), mock.patch.object(
+            adapter, "memory_headroom", return_value=result
+        ), mock.patch("creme.cli._json") as emit:
+            exit_status = cmd_memory_headroom(mock.Mock())
+
+        self.assertEqual(exit_status, 0)
+        self.assertEqual(emit.call_args.args[0]["capability"], "memory_headroom")
+
     def test_forced_selection(self):
         self.assertIsInstance(get_adapter("Darwin"), DarwinAdapter)
         self.assertIsInstance(get_adapter("Linux"), LinuxAdapter)
@@ -63,6 +77,7 @@ class AdapterTest(unittest.TestCase):
     def test_unsupported_never_falls_through_to_another_os(self):
         adapter = get_adapter("Plan9")
         self.assertEqual(adapter.telemetry().status, "UNAVAILABLE")
+        self.assertEqual(adapter.memory_headroom().status, "UNAVAILABLE")
         self.assertEqual(adapter.process_snapshot().status, "UNAVAILABLE")
         self.assertEqual(adapter.reclaim([]).status, "UNAVAILABLE")
         self.assertEqual(adapter.gui_sessions(1).status, "UNAVAILABLE")
@@ -222,6 +237,48 @@ class AdapterTest(unittest.TestCase):
     def test_darwin_failure_is_unavailable(self, run):
         run.side_effect = OSError("blocked")
         self.assertEqual(DarwinAdapter().telemetry().status, "UNAVAILABLE")
+
+    @mock.patch("creme.adapters.darwin.DarwinAdapter._run")
+    def test_darwin_headroom_survives_denied_swap_and_avoids_process_scan(self, run):
+        pressure = subprocess.CompletedProcess(
+            ["memory_pressure"],
+            0,
+            stdout=(
+                "The system has 25769803776 (1572864 pages with a page size of 16384).\n"
+                "System-wide memory free percentage: 19%\n"
+            ),
+        )
+        denied_swap = subprocess.CompletedProcess(
+            ["sysctl"], 1, stdout="", stderr="Operation not permitted"
+        )
+        run.side_effect = [pressure, denied_swap]
+
+        result = DarwinAdapter().memory_headroom()
+
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(result.data["memory_free_percent"], 19)
+        self.assertEqual(result.data["physical_memory_bytes"], 25769803776)
+        self.assertIsNone(result.data["swap_used_mib"])
+        self.assertEqual(run.call_count, 2)
+        self.assertNotIn("ps", " ".join(run.call_args_list[-1].args[0]))
+
+    @mock.patch("creme.adapters.linux.LinuxAdapter._meminfo")
+    def test_linux_headroom_uses_proc_memory_without_process_scan(self, meminfo):
+        meminfo.return_value = {"MemTotal": 16 * 1024 ** 2, "MemAvailable": 4 * 1024 ** 2}
+        swaps = mock.mock_open(
+            read_data="Filename Type Size Used Priority\n/swap file 1000 512 -2\n"
+        )
+
+        with mock.patch("builtins.open", swaps), mock.patch(
+            "creme.adapters.linux.subprocess.run"
+        ) as run:
+            result = LinuxAdapter().memory_headroom()
+
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(result.data["memory_free_percent"], 25)
+        self.assertEqual(result.data["memory_available_bytes"], 4 * 1024 ** 3)
+        self.assertEqual(result.data["swap_used_mib"], 0.5)
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

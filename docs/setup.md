@@ -222,11 +222,17 @@ All local clients and humans use the tracked neutral launcher:
 ```sh
 cd ~/creme
 ./.semaphore/semaphore status
+./.semaphore/semaphore adaptive-acquire GOAL \
+  --note "focused proof loop" --memory-gib 4 --contention tolerant
 ```
 
 On a fresh installation this creates private runtime state under the ignored
 `.semaphore/state/` directory. Never copy the launcher into a goal worktree or
-edit the state files directly.
+edit the state files directly. Adaptive acquisition may grant soft, grant hard,
+or direct the agent to run light work until memory/other holds recover. Agents
+renew between heavy units; `YIELD_HEAVY` and `DRAIN_HEAVY` mean checkpoint and
+wind down rather than beginning another Lean action. See the execution guide
+for classification and peak-estimation rules.
 
 An upgraded installation with legacy state deliberately continues using it
 until an explicit cutover. After deploying the neutral launcher, preserve the

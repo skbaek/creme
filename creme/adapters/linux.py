@@ -101,27 +101,56 @@ class LinuxAdapter(Adapter):
         }
         return self.result("static_facts", "OK", "static Linux facts detected", data)
 
-    def telemetry(self) -> CapabilityResult:
+    def memory_headroom(self) -> CapabilityResult:
         try:
             memory = self._meminfo()
-            processes = subprocess.run(
-                ["ps", "-eo", "pid=,ppid=,rss=,stat=,comm="],
-                capture_output=True, text=True, timeout=10,
+        except (OSError, ValueError) as exc:
+            return self.result("memory_headroom", "UNAVAILABLE", str(exc))
+        total = memory.get("MemTotal")
+        available = memory.get("MemAvailable")
+        if not total or available is None:
+            return self.result(
+                "memory_headroom", "UNAVAILABLE",
+                "MemTotal or MemAvailable is unavailable",
             )
-            swap_used_kib = 0
+        swap_used_kib = None
+        try:
+            sampled_swap = 0
             with open("/proc/swaps", encoding="utf-8") as swaps:
                 next(swaps, None)
                 for line in swaps:
                     fields = line.split()
                     if len(fields) >= 4:
-                        swap_used_kib += int(fields[3])
-        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                        sampled_swap += int(fields[3])
+            swap_used_kib = sampled_swap
+        except (OSError, ValueError):
+            pass
+        free_pct = int(available * 100 / total)
+        return self.result(
+            "memory_headroom", "OK", "Linux aggregate memory headroom sampled",
+            {
+                "memory_free_percent": free_pct,
+                "memory_available_bytes": available * 1024,
+                "physical_memory_bytes": total * 1024,
+                "swap_used_mib": (
+                    swap_used_kib / 1024 if swap_used_kib is not None else None
+                ),
+            },
+        )
+
+    def telemetry(self) -> CapabilityResult:
+        headroom = self.memory_headroom()
+        if headroom.status != "OK" or not headroom.data:
+            return self.result("telemetry", "UNAVAILABLE", headroom.detail)
+        try:
+            processes = subprocess.run(
+                ["ps", "-eo", "pid=,ppid=,rss=,stat=,comm="],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
             return self.result("telemetry", "UNAVAILABLE", str(exc))
         if processes.returncode:
             return self.result("telemetry", "UNAVAILABLE", "ps failed")
-        total = memory.get("MemTotal")
-        available = memory.get("MemAvailable")
-        free_pct = int(available * 100 / total) if total and available is not None else None
         clients = {"codex": 0, "claude": 0}
         lean = []
         largest = []
@@ -146,8 +175,7 @@ class LinuxAdapter(Adapter):
             largest.append({"pid": int(pid), "ppid": int(ppid), "rss_kib": rss, "command": base})
         largest.sort(key=lambda row: row["rss_kib"], reverse=True)
         data = {
-            "memory_free_percent": free_pct,
-            "swap_used_mib": swap_used_kib / 1024,
+            **headroom.data,
             "client_family_rss_kib": {**clients, "total": sum(clients.values())},
             "lean_processes": lean,
             "largest_processes": largest[:15],

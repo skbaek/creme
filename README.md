@@ -95,9 +95,11 @@ python3 -m creme --help
 python3 -m creme doctor --json
 python3 -m creme host-guidance
 python3 -m creme host-wrappers --output-dir ~/.codex/bin
+python3 -m creme memory-headroom
 python3 -m creme telemetry
 python3 -m creme python-runtime 3.11.9
 ./.semaphore/semaphore status
+./.semaphore/semaphore adaptive-acquire GOAL --note "proof loop" --memory-gib 4
 python3 -m creme tempdir
 python3 -m creme cache-copy SOURCE DESTINATION
 python3 -m creme reclaim --dry-run

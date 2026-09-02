@@ -104,22 +104,58 @@ class DarwinAdapter(Adapter):
             detail += " with portable sysconf fallbacks"
         return self.result("static_facts", "OK", detail, data)
 
-    def telemetry(self) -> CapabilityResult:
+    def memory_headroom(self) -> CapabilityResult:
         try:
             pressure = self._run(["/usr/bin/memory_pressure", "-Q"])
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self.result("memory_headroom", "UNAVAILABLE", str(exc))
+        if pressure.returncode:
+            return self.result("memory_headroom", "UNAVAILABLE", "Darwin memory-pressure probe failed")
+        free_match = re.search(r"free percentage:\s*(\d+)%", pressure.stdout)
+        total_match = re.search(r"system has\s+(\d+)", pressure.stdout, re.IGNORECASE)
+        if free_match is None:
+            return self.result(
+                "memory_headroom", "UNAVAILABLE",
+                "Darwin memory-pressure output did not contain free percentage",
+            )
+        free_pct = int(free_match.group(1))
+        total_bytes = int(total_match.group(1)) if total_match else None
+        used_mib = None
+        swap_detail = "swap unavailable"
+        try:
             swap = self._run(["/usr/sbin/sysctl", "-n", "vm.swapusage"])
+        except (OSError, subprocess.SubprocessError):
+            swap = None
+        if swap is not None and swap.returncode == 0:
+            swap_match = re.search(r"used\s*=\s*([0-9.]+)([MG])", swap.stdout)
+            if swap_match:
+                value = float(swap_match.group(1))
+                used_mib = value * (1024 if swap_match.group(2) == "G" else 1)
+                swap_detail = "swap sampled"
+        data = {
+            "memory_free_percent": free_pct,
+            "memory_available_bytes": (
+                int(total_bytes * free_pct / 100) if total_bytes is not None else None
+            ),
+            "physical_memory_bytes": total_bytes,
+            "swap_used_mib": used_mib,
+        }
+        return self.result(
+            "memory_headroom", "OK",
+            f"Darwin aggregate memory headroom sampled; {swap_detail}",
+            data,
+        )
+
+    def telemetry(self) -> CapabilityResult:
+        headroom = self.memory_headroom()
+        if headroom.status != "OK" or not headroom.data:
+            return self.result("telemetry", "UNAVAILABLE", headroom.detail)
+        try:
             processes = self._run(["/bin/ps", "-axo", "pid=,ppid=,rss=,comm="])
         except (OSError, subprocess.SubprocessError) as exc:
             return self.result("telemetry", "UNAVAILABLE", str(exc))
-        if pressure.returncode or swap.returncode or processes.returncode:
-            return self.result("telemetry", "UNAVAILABLE", "one or more read-only Darwin probes failed")
-        free_match = re.search(r"free percentage:\s*(\d+)%", pressure.stdout)
-        swap_match = re.search(r"used\s*=\s*([0-9.]+)([MG])", swap.stdout)
-        free_pct = int(free_match.group(1)) if free_match else None
-        used_mib = None
-        if swap_match:
-            value = float(swap_match.group(1))
-            used_mib = value * (1024 if swap_match.group(2) == "G" else 1)
+        if processes.returncode:
+            return self.result("telemetry", "UNAVAILABLE", "Darwin process snapshot failed")
         clients = {"codex": 0, "claude": 0}
         lean = []
         largest = []
@@ -141,8 +177,7 @@ class DarwinAdapter(Adapter):
             largest.append({"pid": int(pid), "ppid": int(ppid), "rss_kib": rss, "command": Path(command).name})
         largest.sort(key=lambda row: row["rss_kib"], reverse=True)
         data = {
-            "memory_free_percent": free_pct,
-            "swap_used_mib": used_mib,
+            **headroom.data,
             "client_family_rss_kib": {**clients, "total": sum(clients.values())},
             "lean_processes": lean,
             "largest_processes": largest[:15],

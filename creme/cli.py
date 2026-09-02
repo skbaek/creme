@@ -148,6 +148,12 @@ def cmd_telemetry(arguments: argparse.Namespace) -> int:
     return 0 if result.status == "OK" else 2
 
 
+def cmd_memory_headroom(arguments: argparse.Namespace) -> int:
+    result = get_adapter().memory_headroom()
+    _json(result.to_dict())
+    return 0 if result.status == "OK" else 2
+
+
 def cmd_tempdir(arguments: argparse.Namespace) -> int:
     adapter = get_adapter()
     root = adapter.temp_root()
@@ -207,10 +213,26 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
         return 0
     if action in {"soft-acquire", "hard-acquire"}:
         kind = action.split("-", 1)[0]
-        return _sem_result(*semaphore.acquire(kind, arguments.label, arguments.note, arguments.lease))
+        return _sem_result(*semaphore.acquire(
+            kind,
+            arguments.label,
+            arguments.note,
+            arguments.lease,
+            memory_gib=arguments.memory_gib,
+        ))
+    if action == "adaptive-acquire":
+        return _sem_result(*semaphore.adaptive_acquire(
+            arguments.label,
+            arguments.note,
+            arguments.lease,
+            memory_gib=arguments.memory_gib,
+            contention=arguments.contention,
+        ))
     if action in {"soft-release", "hard-release"}:
         kind = action.split("-", 1)[0]
         return _sem_result(*semaphore.release(kind, arguments.label))
+    if action == "release":
+        return _sem_result(*semaphore.adaptive_release(arguments.label))
     if action == "renew":
         return _sem_result(*semaphore.renew(arguments.label, arguments.lease))
     if action == "break":
@@ -373,6 +395,12 @@ def parser() -> argparse.ArgumentParser:
     telemetry = commands.add_parser("telemetry", help="sample dynamic host state through the selected adapter")
     telemetry.set_defaults(func=cmd_telemetry)
 
+    headroom = commands.add_parser(
+        "memory-headroom",
+        help="sample aggregate memory admission state without process discovery",
+    )
+    headroom.set_defaults(func=cmd_memory_headroom)
+
     temporary = commands.add_parser("tempdir", help="preview or create a portable temporary directory")
     temporary.add_argument("--create", action="store_true")
     temporary.add_argument("--prefix", default="creme-")
@@ -398,9 +426,41 @@ def parser() -> argparse.ArgumentParser:
         item.add_argument("label")
         item.add_argument("--note", required=True)
         item.add_argument("--lease", type=int, default=semaphore.DEFAULT_LEASE_SECONDS)
+        item.add_argument(
+            "--memory-gib",
+            type=_positive,
+            help="conservative whole-GiB peak estimate; defaults to the host policy",
+        )
+    adaptive = sem_commands.add_parser(
+        "adaptive-acquire",
+        help="atomically choose soft, hard, or deferred heavy work from live headroom",
+    )
+    adaptive.add_argument("label")
+    adaptive.add_argument("--note", required=True)
+    adaptive.add_argument(
+        "--memory-gib",
+        type=_positive,
+        help="conservative whole-GiB peak estimate; defaults to the host policy",
+    )
+    adaptive.add_argument(
+        "--contention",
+        choices=sorted(semaphore.ADMISSION_CONTENTION),
+        default="tolerant",
+        help="use sensitive for bursty/unknown work and exclusive for authoritative runs",
+    )
+    adaptive.add_argument(
+        "--lease",
+        type=int,
+        default=semaphore.ADAPTIVE_LEASE_SECONDS,
+    )
     for name in ("soft-release", "hard-release"):
         item = sem_commands.add_parser(name)
         item.add_argument("label")
+    adaptive_release = sem_commands.add_parser(
+        "release",
+        help="release whichever hold kind adaptive acquisition selected",
+    )
+    adaptive_release.add_argument("label")
     renew = sem_commands.add_parser("renew")
     renew.add_argument("label")
     renew.add_argument("--lease", type=int, default=semaphore.DEFAULT_LEASE_SECONDS)

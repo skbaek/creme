@@ -228,6 +228,30 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertIn("only then", normalized_execution)
         self.assertIn("leaves the matching hold intact", normalized_execution)
 
+    def test_adaptive_memory_admission_is_part_of_the_agent_contract(self) -> None:
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        execution = (ROOT / "docs/guides/execution.md").read_text(encoding="utf-8")
+        capabilities = (ROOT / "docs/capabilities.md").read_text(encoding="utf-8")
+
+        for text in (agents, execution):
+            for concept in (
+                "adaptive-acquire",
+                "DEFER_FOR_HARD",
+                "LIGHT_ONLY",
+                "YIELD_HEAVY",
+                "DRAIN_HEAVY",
+                "light work",
+            ):
+                self.assertIn(concept, text)
+        for concept in (
+            "memory_headroom",
+            "25% physical memory",
+            "25% margin",
+            "one hard holder",
+            "process enumeration",
+        ):
+            self.assertIn(concept, capabilities)
+
     def test_generated_codex_profile_escapes_legal_hostile_paths(self) -> None:
         workspace = Path('/tmp/work"space\\line\nnext')
         rendered = render_codex_profile(workspace)

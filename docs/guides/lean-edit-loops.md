@@ -12,6 +12,14 @@ tested is explicitly command-line behavior. Use a fabricated prefix only when
 repeated whole-module work is genuinely expensive and the target's preserved
 environment can be proven faithful.
 
+Before opening or advancing an elaborating loop, obtain adaptive admission
+with an honest peak estimate. Renew before each next proof attempt or build
+boundary and at least every five minutes. `YIELD_HEAVY` or `DRAIN_HEAVY` ends
+the heavy loop at the current safe boundary: checkpoint, wind down, then work
+on non-elaborating inventory, prose, or static analysis. A cold/broad rebuild
+or indivisible spike is contention-sensitive and should request a hard hold
+before it starts.
+
 The `lean-prover` skill carries the operational proof workflow. Its tools live
 under `.agents/skills/lean-prover/tools/`.
 

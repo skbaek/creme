@@ -8,6 +8,23 @@ launcher and this protocol note are tracked. Every supported invocation
 resolves linked Git worktrees back to the canonical Creme checkout, so all
 sessions coordinate through one host state.
 
+Heavy work uses adaptive admission rather than assuming every elaboration can
+share the host safely:
+
+```sh
+~/creme/.semaphore/semaphore adaptive-acquire GOAL \
+  --note "focused proof loop" --memory-gib 4 --contention tolerant
+~/creme/.semaphore/semaphore renew GOAL
+~/creme/.semaphore/semaphore release GOAL
+```
+
+The result is `ADMITTED_SOFT`, `ADMITTED_HARD`, `DEFER_FOR_HARD`, or
+`LIGHT_ONLY`. `sensitive` requests serialize work whose peak or broad rebuild
+shape makes contention unwise; `exclusive` is for authoritative exclusive
+runs. On `YIELD_HEAVY` or `DRAIN_HEAVY` renewal, start no further heavy step:
+checkpoint, wind down, and run light work. Explicit soft/hard commands remain
+for compatibility but use the same pressure guard.
+
 Existing installations keep using the legacy state directory until an explicit
 migration:
 

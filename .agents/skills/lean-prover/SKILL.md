@@ -15,6 +15,15 @@ exception: a control whose subject is the tooling itself).
 - Query `lean_goal` at the start of the target tactic or `sorry`. Lines and
   columns are 1-indexed.
 - For term-mode holes, use `lean_term_goal`.
+- If the guard surfaces `Imports are out of date`, keep compilation ownership
+  explicit: run `python3 -m creme lake-build GOAL --probe -- TARGET` from the
+  goal worktree. Exit 3 means stale; run the narrow target through the same
+  command without `--probe`, restart the server, then repeat the goal and
+  diagnostics checks. `lean_build` is intentionally unavailable and bare
+  `lake build` is prohibited. `lean_profile_proof` is also unavailable because
+  it shells to unowned compilation. Narrow targets belong in the loop; the
+  repository catalogue's full target belongs at green checkpoints and still
+  runs through the wrapper.
 
 ## 2. Explore without modifying the file
 

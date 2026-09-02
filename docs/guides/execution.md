@@ -149,6 +149,40 @@ worktree under test and record exact command, exit status, relevant terminal
 verdict, and commit. Do not weaken gates, baselines, manifests, budgets,
 timeouts, allowlists, or generated artifacts to obtain green.
 
+### One compilation owner
+
+Every agent-started Lake build has one goal owner and starts through Creme.
+This is an enforced client/agent boundary, not a claim that an interactive
+human shell cannot execute an absolute toolchain binary:
+
+```sh
+python3 -m creme lake-build GOAL --probe -- Narrow.Target
+python3 -m creme lake-build GOAL --memory-gib 8 --contention sensitive -- Narrow.Target
+```
+
+Probe first. Exit 0 means the selected artifacts are current; exit 3 means
+stale and authorizes no work by itself. The second command requests adaptive
+admission, applies `nice -n 10` and the calibrated `LEAN_NUM_THREADS`, records
+the ignored host-local ledger, and releases its hold. Use the narrowest target
+that can falsify the current edit inside the loop and the repository
+catalogue's full target at checkpoints. Restart the Lean server after the
+coordinated build so its workers see the new artifacts. Bare `lake build`, MCP
+`lean_build`, `lean_profile_proof` (which shells to `lake env lean`),
+language-server dependency builds, and startup cache downloads are not
+compilation owners and are refused or disabled.
+
+The server guard rewrites every `lake setup-file` to include `--no-build
+--no-cache`; stale imports therefore remain an explicit `Imports are out of
+date` diagnostic. A refusal is a request for an owner to probe, classify, and
+run the wrapper, never permission for a tool to build automatically.
+
+Build artifacts and verdicts may be reused by identity rather than location
+when the identity covers every verdict-relevant input, the object is immutable
+once written, and reuse remains within one host, user, and toolchain. Symlinks
+to mutable state and remote or cross-host stores do not satisfy that trust
+boundary. The build ledger uses Lake input hashes only to measure duplicate
+elaboration; it is performance state and never gate evidence.
+
 When a repository's gate catalogue defines content-addressed verdict reuse, a
 checkpoint or merge candidate owes a **complete content-valid manifest**: each
 catalogue row is freshly green or is backed by successful evidence with an

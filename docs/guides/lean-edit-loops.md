@@ -12,6 +12,16 @@ tested is explicitly command-line behavior. Use a fabricated prefix only when
 repeated whole-module work is genuinely expensive and the target's preserved
 environment can be proven faithful.
 
+There is one compilation owner. When diagnostics report stale imports, do not
+ask the language server or MCP to build: `lean_build` and the shelling proof
+profiler are deliberately absent.
+From the goal worktree, probe the narrow target with `python3 -m creme
+lake-build GOAL --probe -- TARGET`; on exit 3, run the same narrow target
+through the admitted wrapper, restart the server, and recheck the exact goal
+and diagnostics. Use the repository catalogue's full target at a green
+checkpoint, also through the wrapper. Never use bare `lake build` in either
+loop.
+
 Before opening or advancing an elaborating loop, obtain adaptive admission
 with an honest peak estimate. Renew before each next proof attempt or build
 boundary and at least every five minutes. `YIELD_HEAVY` or `DRAIN_HEAVY` ends

@@ -1,9 +1,12 @@
 [mcp_servers.lean-lsp-mcp]
-command = "uvx"
-args = ["lean-lsp-mcp==0.26.1"]
+command = "/usr/bin/python3"
+args = ["-m", "creme", "lean-mcp", "--", "uvx", "lean-lsp-mcp==0.26.1"]
 required = true
 default_tools_approval_mode = "writes"
 
 [mcp_servers.lean-lsp-mcp.env]
 LEAN_LOG_LEVEL = "INFO"
+LEAN_MCP_DISABLED_TOOLS = "lean_build,lean_profile_proof"
+LEAN_LSP_MAX_OPEN_FILES = "2"
+LEAN_LSP_TEST_MODE = "1"
 LEAN_MCP_TOOL_DESCRIPTIONS = '''{"lean_multi_attempt":"Compare at least two genuinely uncertain proof candidates at one proof position without editing the file. Use only after inspecting the exact goal. If a closing lemma or tactic is already known, apply it directly and verify with lean_goal and lean_diagnostic_messages. Do not add filler snippets. Every submitted snippet is evaluated and may incur expensive elaboration."}'''

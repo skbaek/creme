@@ -15,6 +15,7 @@ from .guidance import default_path as default_guidance_path
 from .guidance import load as load_guidance
 from .host_wrappers import default_output_dir, render_host_wrappers, wrapper_install_issues
 from .profile import DEFAULT_RELATIVE_PROFILE, ProfileValidation, effective_policy, load
+from .semaphore import canonical_creme_root
 
 
 STATUS_OK = "ok"
@@ -144,6 +145,40 @@ def _extract_pin(text: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _load_mcp_surface(path: Path) -> dict[str, Any]:
+    """Parse the one MCP entry we own instead of accepting stray text tokens."""
+    if path.suffix == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        server = payload["mcpServers"]["lean-lsp-mcp"]
+        if not isinstance(server, dict):
+            raise ValueError("lean-lsp-mcp entry is not an object")
+        return server
+
+    section: Optional[str] = None
+    values: dict[str, dict[str, Any]] = {"server": {}, "env": {}}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            header = line[1:-1]
+            section = {
+                "mcp_servers.lean-lsp-mcp": "server",
+                "mcp_servers.lean-lsp-mcp.env": "env",
+            }.get(header)
+            continue
+        if section is None or "=" not in line:
+            continue
+        key, encoded = (piece.strip() for piece in line.split("=", 1))
+        if key not in {"command", "args", "LEAN_MCP_DISABLED_TOOLS", "LEAN_LSP_MAX_OPEN_FILES", "LEAN_LSP_TEST_MODE"}:
+            continue
+        try:
+            values[section][key] = json.loads(encoded)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid TOML value for {key}: {exc}") from exc
+    return {**values["server"], "env": values["env"]}
+
+
 def check_client_surface(root: Path) -> list[Check]:
     checks: list[Check] = []
     versions_path = root / "scripts" / "versions.json"
@@ -157,17 +192,64 @@ def check_client_surface(root: Path) -> list[Check]:
         root / ".mcp.json",
         root / ".agents" / "mcp_config.json",
     ]
-    pins = {}
+    pins: dict[str, Optional[str]] = {}
+    configs: dict[str, dict[str, Any]] = {}
+    parse_errors: dict[str, str] = {}
     for surface in surfaces:
+        relative = str(surface.relative_to(root))
         try:
-            pins[str(surface.relative_to(root))] = _extract_pin(surface.read_text(encoding="utf-8"))
-        except OSError:
-            pins[str(surface.relative_to(root))] = None
+            config = _load_mcp_surface(surface)
+            configs[relative] = config
+            args = config.get("args")
+            pins[relative] = _extract_pin(" ".join(args)) if isinstance(args, list) and all(isinstance(arg, str) for arg in args) else None
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            configs[relative] = {}
+            pins[relative] = None
+            parse_errors[relative] = str(exc)
     mismatches = {path: pin for path, pin in pins.items() if pin != expected_pin}
     checks.append(Check(
         "client: MCP pin",
         STATUS_FAIL if mismatches else STATUS_OK,
         f"expected {expected_pin}; mismatches={mismatches}" if mismatches else f"all shims pin {expected_pin}",
+    ))
+    expected_args = ["-m", "creme", "lean-mcp", "--", "uvx", f"lean-lsp-mcp=={expected_pin}"]
+    launcher_bad = [
+        path for path, config in configs.items()
+        if config.get("command") != "/usr/bin/python3" or config.get("args") != expected_args
+    ]
+    checks.append(Check(
+        "client: guarded MCP launcher",
+        STATUS_FAIL if launcher_bad else STATUS_OK,
+        f"unguarded shims={launcher_bad}; parse_errors={parse_errors}" if launcher_bad else "all shims launch through Creme's Lake guard",
+    ))
+    try:
+        from .build_ownership import trusted_uvx
+        uvx_detail = str(trusted_uvx())
+        uvx_status = STATUS_OK
+    except (OSError, RuntimeError) as exc:
+        uvx_detail = str(exc)
+        uvx_status = STATUS_FAIL
+    checks.append(Check("client: uvx identity", uvx_status, uvx_detail))
+    required_env = {
+        "LEAN_MCP_DISABLED_TOOLS": "lean_build,lean_profile_proof",
+        "LEAN_LSP_MAX_OPEN_FILES": "2",
+        "LEAN_LSP_TEST_MODE": "1",
+    }
+    env_bad: dict[str, list[str]] = {}
+    for path, config in configs.items():
+        env = config.get("env") if isinstance(config.get("env"), dict) else {}
+        missing = [
+            f"{key}={value}"
+            for key, value in required_env.items()
+            if env.get(key) != value
+        ]
+        if missing:
+            env_bad[path] = missing
+    checks.append(Check(
+        "client: Lean build ownership",
+        STATUS_FAIL if env_bad else STATUS_OK,
+        f"missing or invalid settings={env_bad}" if env_bad else
+        "lean_build and lean_profile_proof disabled, startup cache get suppressed, file workers capped at 2",
     ))
     claude = root / "CLAUDE.md"
     checks.append(Check(
@@ -307,7 +389,8 @@ def run_doctor(
     cli_overrides: Optional[dict[str, Optional[int]]] = None,
 ) -> tuple[list[Check], dict[str, Any]]:
     selected = adapter or get_adapter()
-    path = profile_path or root / DEFAULT_RELATIVE_PROFILE
+    shared_root = canonical_creme_root(root)
+    path = profile_path or shared_root / DEFAULT_RELATIVE_PROFILE
     checks = check_launch_root(root, cwd)
     profile_checks, validated = check_profile(path, selected)
     checks.extend(profile_checks)
@@ -326,7 +409,7 @@ def run_doctor(
     checks.extend(check_sibling("blanc", workspace / blanc_name, "github.com/skbaek/blanc"))
     checks.extend(check_client_surface(root))
     checks.extend(check_neutral_semaphore(root))
-    checks.extend(check_host_wrappers(root))
+    checks.extend(check_host_wrappers(shared_root))
     checks.extend(check_public_runtime_boundary(root))
     facts = selected.static_facts()
     checks.append(Check(

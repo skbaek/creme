@@ -23,6 +23,33 @@ The public files contain relative paths and reviewed version pins only. They do
 not contain credentials, approval databases, copied trust state, absolute home
 paths, or a user's global client configuration.
 
+## Guarded Lean MCP launch
+
+Every supported project shim launches the pinned MCP as `/usr/bin/python3 -m
+creme lean-mcp -- uvx lean-lsp-mcp==0.26.1`. Binding the initial interpreter
+to the host system path avoids a project-controlled `PATH`; generated guard
+launchers then bind the resolved running interpreter by identity. The nested
+`uvx` runner is likewise resolved only from reviewed non-writable installation
+paths, never from client or project `PATH`. The launcher prepends a Creme-owned
+`lake` guard without relying on either client's variable expansion or PATH
+ordering. The guard delegates `serve` to the toolchain Lake selected by Elan.
+It supplies Lake with an ignored toolchain facade whose `lean` proxy changes
+only the final server environment: `LAKE` points to the guard while the real
+Lean executable and sysroot are restored. Lake's own workspace environment,
+invalid-configuration fallback, and package `moreGlobalServerArgs` therefore
+remain authoritative.
+
+All shims set `LEAN_MCP_DISABLED_TOOLS=lean_build,lean_profile_proof`,
+`LEAN_LSP_MAX_OPEN_FILES=2`, and `LEAN_LSP_TEST_MODE=1`. A source audit of
+`lean-lsp-mcp==0.26.1` found the test-mode variable read only in
+`lean_lsp_mcp.client_utils._start_client`, where it becomes
+`prevent_cache_get=True` for `LeanLSPClient`; no other behavior is conditional
+on it. The proof profiler is also disabled because it shells out to `lake env
+lean` and is therefore a second unowned compilation route. Doctor validates
+the pin, launcher, and all three settings in every shim. The Antigravity
+surface stays configuration-compatible but remains
+outside acceptance support as described below.
+
 ## Codex discovery
 
 Codex constructs its instruction chain once when a run starts. It finds the

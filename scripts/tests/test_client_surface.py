@@ -45,9 +45,10 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertTrue(
             all(section.startswith("mcp_servers.lean-lsp-mcp") for section in sections)
         )
-        self.assertRegex(text, r'(?m)^command\s*=\s*"uvx"\s*$')
+        self.assertRegex(text, r'(?m)^command\s*=\s*"/usr/bin/python3"\s*$')
         self.assertRegex(
-            text, rf'(?m)^args\s*=\s*\["{re.escape(PINNED_MCP)}"\]\s*$'
+            text,
+            rf'(?m)^args\s*=\s*\["-m", "creme", "lean-mcp", "--", "uvx", "{re.escape(PINNED_MCP)}"\]\s*$',
         )
         self.assertRegex(text, r"(?m)^required\s*=\s*true\s*$")
         self.assertRegex(
@@ -93,8 +94,21 @@ class ClientSurfaceTest(unittest.TestCase):
             {key: value for key, value in claude_server.items() if key != "type"},
             antigravity_server,
         )
-        self.assertEqual(claude_server["command"], "uvx")
-        self.assertEqual(claude_server["args"], [PINNED_MCP])
+        self.assertEqual(claude_server["command"], "/usr/bin/python3")
+        self.assertEqual(
+            claude_server["args"],
+            ["-m", "creme", "lean-mcp", "--", "uvx", PINNED_MCP],
+        )
+        self.assertEqual(
+            {key: claude_server["env"][key] for key in (
+                "LEAN_MCP_DISABLED_TOOLS", "LEAN_LSP_MAX_OPEN_FILES", "LEAN_LSP_TEST_MODE"
+            )},
+            {
+                "LEAN_MCP_DISABLED_TOOLS": "lean_build,lean_profile_proof",
+                "LEAN_LSP_MAX_OPEN_FILES": "2",
+                "LEAN_LSP_TEST_MODE": "1",
+            },
+        )
 
         codex = (ROOT / ".codex/config.toml").read_text(encoding="utf-8")
         codex_descriptions = re.search(

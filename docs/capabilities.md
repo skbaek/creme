@@ -17,6 +17,8 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 | Lean reclaim | frozen process snapshot and signals | frozen same-user process snapshot and signals | restart the client |
 | cache copy | APFS clone, then recursive-copy fallback | reflink-auto, then recursive-copy fallback | portable recursive copy |
 | temporary root | `TMPDIR` or runtime temp directory | `TMPDIR` or runtime temp directory | `UNAVAILABLE` if no writable root exists |
+| guarded Lean server | toolchain-selected Lake with Creme `setup-file` guard | same | fail closed if Elan, the real toolchain, or the facade cannot be proved |
+| owned Lake build | adaptive admission, `nice`, thread cap, process sampling, ledger | same | refusal; bare or tool-initiated builds remain disabled |
 
 Shared code does not invoke another OS's command as a fallback. An unavailable
 telemetry sample never proves a host is quiet or under pressure. Aggregate
@@ -24,6 +26,18 @@ telemetry sample never proves a host is quiet or under pressure. Aggregate
 agent sandbox that denies `ps` can still enforce live admission. Swap is useful
 diagnostic context but may remain allocated after pressure recovers, so an
 absolute swap value alone is not an admission verdict.
+
+The guarded server and owned build wrapper are separate capabilities. The
+server may inspect current artifacts but cannot create or download them: its
+`setup-file` calls are forced to `--no-build --no-cache`; MCP `lean_build` and
+the shelling `lean_profile_proof` profiler are disabled; and MCP startup cache
+retrieval is suppressed. `python3 -m creme
+lake-build` is the only supported agent shell build entry point; the policy
+prohibits bypassing it with an absolute toolchain Lake. The wrapper obtains adaptive admission before
+spawning Lake, records measurements in ignored local state, and releases after
+the process ends. `python3 -m creme build-ledger --since 7d` summarizes that
+performance state. Neither the ledger nor language-server output is a gate
+verdict.
 
 `python3 -m creme memory-headroom` exposes that narrow sample for planning and
 diagnosis. `adaptive-acquire` re-samples it under the semaphore mutex; a prior

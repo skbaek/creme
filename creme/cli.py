@@ -21,6 +21,14 @@ from .host_wrappers import (
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import semaphore
 from .task_wind_down import wind_down
+from .build_ownership import (
+    DEFAULT_MEMORY_GIB,
+    DEFAULT_THREADS,
+    guarded_mcp_env,
+    ledger_rollup,
+    run_lake_build,
+    trusted_uvx,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +58,11 @@ def _toml_string(value: object) -> str:
 
 
 def _profile_path(text: Optional[str]) -> Path:
-    return Path(text).expanduser().resolve() if text else ROOT / DEFAULT_RELATIVE_PROFILE
+    return (
+        Path(text).expanduser().resolve()
+        if text
+        else semaphore.canonical_creme_root(ROOT) / DEFAULT_RELATIVE_PROFILE
+    )
 
 
 def cmd_platform(arguments: argparse.Namespace) -> int:
@@ -351,6 +363,59 @@ def cmd_host_wrappers(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_lean_mcp(arguments: argparse.Namespace) -> int:
+    command = list(arguments.mcp_command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        _json({"status": "REFUSED", "detail": "a pinned MCP command is required after --"})
+        return 2
+    if command[0] != "uvx":
+        _json({"status": "REFUSED", "detail": "the guarded MCP launcher requires the reviewed uvx runner"})
+        return 2
+    try:
+        runner = trusted_uvx()
+        env = guarded_mcp_env()
+    except (OSError, RuntimeError) as exc:
+        _json({"status": "REFUSED", "detail": str(exc)})
+        return 2
+    command[0] = str(runner)
+    os.execve(runner, command, env)
+
+
+def cmd_lake_build(arguments: argparse.Namespace) -> int:
+    options = argparse.ArgumentParser(prog=f"python3 -m creme lake-build {arguments.goal}")
+    options.add_argument("--memory-gib", type=_positive, default=DEFAULT_MEMORY_GIB)
+    options.add_argument(
+        "--contention",
+        choices=sorted(semaphore.ADMISSION_CONTENTION),
+        default="sensitive",
+    )
+    options.add_argument("--probe", action="store_true")
+    options.add_argument("targets", nargs=argparse.REMAINDER)
+    selected = options.parse_args(arguments.build_args)
+    targets = list(selected.targets)
+    if targets and targets[0] == "--":
+        targets = targets[1:]
+    return run_lake_build(
+        arguments.goal,
+        targets,
+        memory_gib=selected.memory_gib,
+        contention=selected.contention,
+        threads=DEFAULT_THREADS,
+        probe=selected.probe,
+    )
+
+
+def cmd_build_ledger(arguments: argparse.Namespace) -> int:
+    try:
+        _json(ledger_rollup(arguments.since))
+    except ValueError as exc:
+        _json({"status": "REFUSED", "detail": str(exc)})
+        return 2
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="python3 -m creme")
     root.add_argument("--version", action="version", version=__version__)
@@ -491,6 +556,28 @@ def parser() -> argparse.ArgumentParser:
     wrappers.add_argument("--write", action="store_true")
     wrappers.add_argument("--replace", action="store_true")
     wrappers.set_defaults(func=cmd_host_wrappers)
+
+    lean_mcp = commands.add_parser(
+        "lean-mcp",
+        help="launch the pinned Lean MCP with the fail-closed Lake guard",
+    )
+    lean_mcp.add_argument("mcp_command", nargs=argparse.REMAINDER)
+    lean_mcp.set_defaults(func=cmd_lean_mcp)
+
+    lake_build = commands.add_parser(
+        "lake-build",
+        help="run one admitted, classified, measured Lake build",
+    )
+    lake_build.add_argument("goal")
+    lake_build.add_argument("build_args", nargs=argparse.REMAINDER)
+    lake_build.set_defaults(func=cmd_lake_build)
+
+    build_ledger = commands.add_parser(
+        "build-ledger",
+        help="summarize ignored host-local Lean build ownership measurements",
+    )
+    build_ledger.add_argument("--since", default="7d")
+    build_ledger.set_defaults(func=cmd_build_ledger)
     return root
 
 

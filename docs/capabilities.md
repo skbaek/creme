@@ -74,11 +74,16 @@ target set. Foreign, orphaned, and ambiguous trees are left alone. Public
 output reports only PID, RSS, and process kind—never command arguments.
 
 `reclaim --wind-down GOAL` composes reclamation with semaphore release as a
-fail-closed task boundary. It holds the semaphore mutex, refuses other labels,
-runs ordinary reclamation, and requires a new dry-run to report no owned or
-protected roots before removing the named hold. It cannot be combined with
+fail-closed task boundary. It resolves real `.worktrees/GOAL` roots in the
+configured Jaune/Blanc repositories, holds the semaphore mutex, samples every
+same-client Lean candidate's current working directory, and runs ordinary
+reclamation only for candidates inside those roots. Other labels and their
+processes remain in place. Missing scope or any uninspectable candidate refuses
+before signalling. A new goal-scoped dry-run must report no owned or protected
+roots before only the matching hold is removed. It cannot be combined with
 `--dry-run` or `--hard-pressure`. Failure leaves the hold intact, and an already
-released hold is accepted only after the same two process checks succeed.
+released hold is accepted only after the same two scoped process checks
+succeed.
 
 ## Semaphore safety
 

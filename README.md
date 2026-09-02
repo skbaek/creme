@@ -109,7 +109,10 @@ python3 -m unittest discover -s scripts/tests -v
 
 Mutating commands are preview-first where practical. `cache-copy` needs
 `--execute`; reclamation proves same-client ancestry from a frozen process
-snapshot and refuses ambiguous subtrees.
+snapshot and refuses ambiguous subtrees. Task wind-down additionally scopes
+every candidate to the caller's configured `.worktrees/GOAL` roots, so
+concurrent goals can wind down independently without releasing or killing one
+another.
 
 ## Design and migration
 

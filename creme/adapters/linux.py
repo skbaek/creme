@@ -6,10 +6,16 @@ import re
 import shutil
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from .base import Adapter, CapabilityResult
-from ..reclaim import Process, build_plan
+from ..reclaim import (
+    Process,
+    build_plan,
+    parse_reclaim_arguments,
+    process_in_scope,
+)
 
 
 class LinuxAdapter(Adapter):
@@ -248,13 +254,12 @@ class LinuxAdapter(Adapter):
         )
 
     def reclaim(self, arguments: list[str]) -> CapabilityResult:
-        allowed = {"--dry-run", "--hard-pressure"}
-        if set(arguments) - allowed or len(arguments) != len(set(arguments)):
-            return self.result(
-                "lean_reclaim", "REFUSED", "unsupported or duplicate reclaim option"
-            )
-        dry_run = "--dry-run" in arguments
-        hard_pressure = "--hard-pressure" in arguments
+        try:
+            options = parse_reclaim_arguments(arguments)
+        except ValueError as exc:
+            return self.result("lean_reclaim", "REFUSED", str(exc))
+        dry_run = options.dry_run
+        hard_pressure = options.hard_pressure
         try:
             snapshot = self._run([
                 "/bin/ps", "-eo", "pid=,ppid=,uid=,rss=,stat=,lstart=,args=",
@@ -276,15 +281,47 @@ class LinuxAdapter(Adapter):
             if uid != owner_uid:
                 continue
             table[pid] = Process(pid, ppid, rss, " ".join(fields[5:10]), fields[10])
-        plan = build_plan(
+        invocation_parent = os.getppid()
+        unscoped = build_plan(
             table,
-            os.getppid(),
+            invocation_parent,
             lambda process: bool(self.client_pattern.search(process.command)),
             hard_pressure,
+        )
+        if options.scope_roots and unscoped.owned:
+            cwds: dict[int, str] = {}
+            for pid in unscoped.owned:
+                try:
+                    cwd = os.readlink(f"/proc/{pid}/cwd")
+                except OSError:
+                    continue
+                if cwd and not cwd.endswith(" (deleted)"):
+                    cwds[pid] = cwd
+            missing = [pid for pid in unscoped.owned if pid not in cwds]
+            if missing:
+                return self.result(
+                    "lean_reclaim", "UNAVAILABLE",
+                    "goal-scoped cwd ownership is incomplete; no process was signalled",
+                    {"unscoped_candidate_count": len(unscoped.owned)},
+                )
+            table = {
+                pid: replace(process, cwd=cwds.get(pid))
+                for pid, process in table.items()
+            }
+        plan = build_plan(
+            table,
+            invocation_parent,
+            lambda process: bool(self.client_pattern.search(process.command)),
+            hard_pressure,
+            (
+                (lambda process: process_in_scope(process, options.scope_roots))
+                if options.scope_roots else None
+            ),
         )
         public: dict[str, object] = {
             "mode": "hard-pressure" if hard_pressure else "ordinary",
             "dry_run": dry_run,
+            "scope_roots": [str(root) for root in options.scope_roots],
             "owned": [
                 {"pid": pid, "rss_kib": table[pid].rss_kib, "kind": table[pid].kind}
                 for pid in plan.owned

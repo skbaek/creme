@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional
 
 
@@ -19,6 +20,7 @@ class Process:
     rss_kib: int
     started: str
     command: str
+    cwd: Optional[str] = None
 
     @property
     def kind(self) -> str:
@@ -37,6 +39,62 @@ class ReclaimPlan:
     foreign: tuple[int, ...]
     protected_roots: tuple[int, ...]
     targets: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ReclaimOptions:
+    dry_run: bool
+    hard_pressure: bool
+    scope_roots: tuple[Path, ...]
+
+
+def parse_reclaim_arguments(arguments: list[str]) -> ReclaimOptions:
+    """Parse the adapter-private reclaim protocol without accepting ambiguity."""
+    dry_run = False
+    hard_pressure = False
+    scope_roots: list[Path] = []
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option == "--dry-run":
+            if dry_run:
+                raise ValueError("duplicate reclaim option: --dry-run")
+            dry_run = True
+        elif option == "--hard-pressure":
+            if hard_pressure:
+                raise ValueError("duplicate reclaim option: --hard-pressure")
+            hard_pressure = True
+        elif option == "--scope-root":
+            index += 1
+            if index >= len(arguments):
+                raise ValueError("--scope-root requires an absolute path")
+            raw = arguments[index]
+            root = Path(raw)
+            if not raw or not root.is_absolute():
+                raise ValueError("--scope-root requires an absolute path")
+            normalized = Path(os.path.normpath(raw))
+            if normalized in scope_roots:
+                raise ValueError("duplicate reclaim scope root")
+            scope_roots.append(normalized)
+        else:
+            raise ValueError(f"unsupported reclaim option: {option}")
+        index += 1
+    if hard_pressure and scope_roots:
+        raise ValueError("goal-scoped reclaim cannot use hard-pressure mode")
+    return ReclaimOptions(dry_run, hard_pressure, tuple(scope_roots))
+
+
+def process_in_scope(process: Process, roots: tuple[Path, ...]) -> bool:
+    if process.cwd is None:
+        return False
+    current = Path(os.path.normpath(process.cwd))
+    for root in roots:
+        try:
+            current.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def ancestry(table: dict[int, Process], pid: int) -> tuple[int, ...]:
@@ -93,6 +151,7 @@ def build_plan(
     invocation_parent: int,
     is_client: Callable[[Process], bool],
     hard_pressure: bool = False,
+    candidate_scope: Optional[Callable[[Process], bool]] = None,
 ) -> ReclaimPlan:
     """Return a frozen plan; an empty invocation ancestry refuses all ownership."""
     if not ancestry(table, invocation_parent):
@@ -102,6 +161,9 @@ def build_plan(
     foreign = []
     for process in table.values():
         if not is_candidate(process):
+            continue
+        if candidate_scope is not None and not candidate_scope(process):
+            foreign.append(process.pid)
             continue
         shared = _shared_ancestor(table, invocation_parent, process.pid)
         if shared is not None and _client_above(table, shared, is_client) is not None:

@@ -5,10 +5,16 @@ import platform
 import re
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from .base import Adapter, CapabilityResult
-from ..reclaim import Process, build_plan
+from ..reclaim import (
+    Process,
+    build_plan,
+    parse_reclaim_arguments,
+    process_in_scope,
+)
 
 
 class DarwinAdapter(Adapter):
@@ -278,11 +284,12 @@ class DarwinAdapter(Adapter):
         )
 
     def reclaim(self, arguments: list[str]) -> CapabilityResult:
-        allowed = {"--dry-run", "--hard-pressure"}
-        if set(arguments) - allowed or len(arguments) != len(set(arguments)):
-            return self.result("lean_reclaim", "REFUSED", "unsupported or duplicate reclaim option")
-        dry_run = "--dry-run" in arguments
-        hard_pressure = "--hard-pressure" in arguments
+        try:
+            options = parse_reclaim_arguments(arguments)
+        except ValueError as exc:
+            return self.result("lean_reclaim", "REFUSED", str(exc))
+        dry_run = options.dry_run
+        hard_pressure = options.hard_pressure
         try:
             snapshot = self._run([
                 "/bin/ps", "-axo", "pid=,ppid=,rss=,lstart=,command=",
@@ -301,15 +308,60 @@ class DarwinAdapter(Adapter):
             except ValueError:
                 continue
             table[pid] = Process(pid, ppid, rss, " ".join(fields[3:8]), fields[8])
-        plan = build_plan(
+        invocation_parent = os.getppid()
+        unscoped = build_plan(
             table,
-            os.getppid(),
+            invocation_parent,
             lambda process: bool(self.client_pattern.search(process.command)),
             hard_pressure,
+        )
+        if options.scope_roots and unscoped.owned:
+            try:
+                cwd_sample = self._run([
+                    "/usr/sbin/lsof", "-a", "-d", "cwd", "-Fn", "-p",
+                    ",".join(str(pid) for pid in unscoped.owned),
+                ])
+            except (OSError, subprocess.SubprocessError) as exc:
+                return self.result("lean_reclaim", "UNAVAILABLE", str(exc))
+            if cwd_sample.returncode:
+                return self.result(
+                    "lean_reclaim", "UNAVAILABLE",
+                    "goal-scoped cwd sampling failed; no process was signalled",
+                )
+            current_pid = None
+            cwds: dict[int, str] = {}
+            for line in cwd_sample.stdout.splitlines():
+                if line.startswith("p") and line[1:].isdigit():
+                    current_pid = int(line[1:])
+                elif line.startswith("n") and current_pid is not None:
+                    cwd = line[1:]
+                    if cwd and not cwd.endswith(" (deleted)"):
+                        cwds[current_pid] = cwd
+            missing = [pid for pid in unscoped.owned if pid not in cwds]
+            if missing:
+                return self.result(
+                    "lean_reclaim", "UNAVAILABLE",
+                    "goal-scoped cwd ownership is incomplete; no process was signalled",
+                    {"unscoped_candidate_count": len(unscoped.owned)},
+                )
+            table = {
+                pid: replace(process, cwd=cwds.get(pid))
+                for pid, process in table.items()
+            }
+        plan = build_plan(
+            table,
+            invocation_parent,
+            lambda process: bool(self.client_pattern.search(process.command)),
+            hard_pressure,
+            (
+                (lambda process: process_in_scope(process, options.scope_roots))
+                if options.scope_roots else None
+            ),
         )
         public = {
             "mode": "hard-pressure" if hard_pressure else "ordinary",
             "dry_run": dry_run,
+            "scope_roots": [str(root) for root in options.scope_roots],
             "owned": [{"pid": pid, "rss_kib": table[pid].rss_kib, "kind": table[pid].kind} for pid in plan.owned],
             "foreign_left_alone": [{"pid": pid, "rss_kib": table[pid].rss_kib, "kind": table[pid].kind} for pid in plan.foreign],
             "protected_roots": list(plan.protected_roots),

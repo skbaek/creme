@@ -131,6 +131,104 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(result.status, "REFUSED")
         run.assert_not_called()
 
+    @mock.patch("creme.adapters.linux.os.getppid", return_value=12)
+    @mock.patch("creme.adapters.linux.os.getuid", return_value=1001)
+    @mock.patch("creme.adapters.linux.os.readlink")
+    @mock.patch("creme.adapters.linux.LinuxAdapter._run")
+    def test_linux_goal_scope_leaves_sibling_worktree_processes_alone(
+        self, run, readlink, _uid, _ppid
+    ):
+        run.return_value = subprocess.CompletedProcess([], 0, stdout="""\
+10 1 1001 100 S Mon Jan 1 00:00:00 2024 /usr/lib/chatgpt/resources/codex app-server
+12 10 1001 10 S Mon Jan 1 00:00:02 2024 python3 -m creme reclaim --wind-down goal
+20 10 1001 300 S Mon Jan 1 00:01:00 2024 /tool/lake serve
+21 20 1001 200 S Mon Jan 1 00:01:01 2024 /tool/lean --server
+30 10 1001 400 S Mon Jan 1 00:02:00 2024 /tool/lake serve
+31 30 1001 300 S Mon Jan 1 00:02:01 2024 /tool/lean --server
+""")
+        goal = "/workspace/blanc/.worktrees/goal"
+        other = "/workspace/blanc/.worktrees/other"
+        readlink.side_effect = lambda name: (
+            goal if int(Path(name).parent.name) in {20, 21} else other
+        )
+
+        result = LinuxAdapter().reclaim([
+            "--dry-run", "--scope-root", goal,
+        ])
+
+        self.assertEqual(result.status, "OK")
+        self.assertEqual([row["pid"] for row in result.data["owned"]], [20, 21])
+        self.assertEqual(
+            [row["pid"] for row in result.data["foreign_left_alone"]],
+            [30, 31],
+        )
+        self.assertEqual(result.data["termination_order"], [21, 20])
+        self.assertEqual(result.data["scope_roots"], [goal])
+
+    @mock.patch("creme.adapters.linux.os.getppid", return_value=12)
+    @mock.patch("creme.adapters.linux.os.getuid", return_value=1001)
+    @mock.patch("creme.adapters.linux.os.readlink", side_effect=OSError("gone"))
+    @mock.patch("creme.adapters.linux.LinuxAdapter._run")
+    def test_linux_goal_scope_fails_closed_when_cwd_is_uninspectable(
+        self, run, _readlink, _uid, _ppid
+    ):
+        run.return_value = subprocess.CompletedProcess([], 0, stdout="""\
+10 1 1001 100 S Mon Jan 1 00:00:00 2024 /usr/lib/chatgpt/resources/codex app-server
+12 10 1001 10 S Mon Jan 1 00:00:02 2024 python3 -m creme reclaim --wind-down goal
+20 10 1001 300 S Mon Jan 1 00:01:00 2024 /tool/lake serve
+""")
+
+        result = LinuxAdapter().reclaim([
+            "--scope-root", "/workspace/blanc/.worktrees/goal",
+        ])
+
+        self.assertEqual(result.status, "UNAVAILABLE")
+        self.assertIn("cwd ownership is incomplete", result.detail)
+
+    @mock.patch("creme.adapters.darwin.os.getppid", return_value=12)
+    @mock.patch("creme.adapters.darwin.DarwinAdapter._run")
+    def test_darwin_goal_scope_leaves_sibling_worktree_processes_alone(
+        self, run, _ppid
+    ):
+        snapshot = subprocess.CompletedProcess([], 0, stdout="""\
+10 1 100 Mon Jan 1 00:00:00 2024 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+12 10 10 Mon Jan 1 00:00:02 2024 python3 -m creme reclaim --wind-down goal
+20 10 300 Mon Jan 1 00:01:00 2024 /tool/lake serve
+21 20 200 Mon Jan 1 00:01:01 2024 /tool/lean --server
+30 10 400 Mon Jan 1 00:02:00 2024 /tool/lake serve
+31 30 300 Mon Jan 1 00:02:01 2024 /tool/lean --server
+""")
+        goal = "/workspace/blanc/.worktrees/goal"
+        other = "/workspace/blanc/.worktrees/other"
+        cwd_sample = subprocess.CompletedProcess([], 0, stdout=f"""\
+p20
+fcwd
+n{goal}
+p21
+fcwd
+n{goal}
+p30
+fcwd
+n{other}
+p31
+fcwd
+n{other}
+""")
+        run.side_effect = [snapshot, cwd_sample]
+
+        result = DarwinAdapter().reclaim([
+            "--dry-run", "--scope-root", goal,
+        ])
+
+        self.assertEqual(result.status, "OK")
+        self.assertEqual([row["pid"] for row in result.data["owned"]], [20, 21])
+        self.assertEqual(
+            [row["pid"] for row in result.data["foreign_left_alone"]],
+            [30, 31],
+        )
+        self.assertEqual(result.data["termination_order"], [21, 20])
+        self.assertEqual(result.data["scope_roots"], [goal])
+
     def test_cache_copy_preview_never_mutates(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "src"

@@ -46,6 +46,22 @@ class ReclaimOptions:
     dry_run: bool
     hard_pressure: bool
     scope_roots: tuple[Path, ...]
+    only_pids: tuple[int, ...] = ()
+
+
+def parse_cpu_seconds(text: str) -> Optional[float]:
+    """Parse a BSD/GNU ``ps`` cumulative CPU field such as ``358:00.60``."""
+    parts = text.replace("-", ":").split(":")
+    if not parts or len(parts) > 4:
+        return None
+    try:
+        values = [float(part) for part in parts]
+    except ValueError:
+        return None
+    total = 0.0
+    for value in values:
+        total = total * 60 + value
+    return total
 
 
 def parse_reclaim_arguments(arguments: list[str]) -> ReclaimOptions:
@@ -53,6 +69,7 @@ def parse_reclaim_arguments(arguments: list[str]) -> ReclaimOptions:
     dry_run = False
     hard_pressure = False
     scope_roots: list[Path] = []
+    only_pids: list[int] = []
     index = 0
     while index < len(arguments):
         option = arguments[index]
@@ -64,6 +81,19 @@ def parse_reclaim_arguments(arguments: list[str]) -> ReclaimOptions:
             if hard_pressure:
                 raise ValueError("duplicate reclaim option: --hard-pressure")
             hard_pressure = True
+        elif option == "--only-pid":
+            index += 1
+            if index >= len(arguments):
+                raise ValueError("--only-pid requires a positive process id")
+            try:
+                pid = int(arguments[index])
+            except ValueError:
+                raise ValueError("--only-pid requires a positive process id") from None
+            if pid < 1:
+                raise ValueError("--only-pid requires a positive process id")
+            if pid in only_pids:
+                raise ValueError("duplicate reclaim pid")
+            only_pids.append(pid)
         elif option == "--scope-root":
             index += 1
             if index >= len(arguments):
@@ -81,7 +111,17 @@ def parse_reclaim_arguments(arguments: list[str]) -> ReclaimOptions:
         index += 1
     if hard_pressure and scope_roots:
         raise ValueError("goal-scoped reclaim cannot use hard-pressure mode")
-    return ReclaimOptions(dry_run, hard_pressure, tuple(scope_roots))
+    if hard_pressure and only_pids:
+        raise ValueError("pid-narrowed reclaim cannot use hard-pressure mode")
+    return ReclaimOptions(dry_run, hard_pressure, tuple(scope_roots), tuple(only_pids))
+
+
+def narrow_targets(targets: tuple[int, ...], only_pids: tuple[int, ...]) -> tuple[int, ...]:
+    """Restrict a proven target set; narrowing can never widen ownership."""
+    if not only_pids:
+        return targets
+    allowed = set(only_pids)
+    return tuple(pid for pid in targets if pid in allowed)
 
 
 def process_in_scope(process: Process, roots: tuple[Path, ...]) -> bool:

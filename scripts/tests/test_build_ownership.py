@@ -15,11 +15,13 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from creme import build_ownership as owned
+from creme.profile import ADMISSION_DEFAULTS
 from creme.cli import cmd_lake_build, cmd_lean_mcp
 from creme.doctor import STATUS_FAIL, STATUS_OK, check_client_surface
 
 
 ROOT = Path(__file__).resolve().parents[2]
+SETTINGS = dict(ADMISSION_DEFAULTS)
 
 
 @contextmanager
@@ -214,7 +216,10 @@ class BuildOwnershipTest(unittest.TestCase):
     def test_refused_admission_spawns_no_lake(self, resolve: Mock, goal_label: Mock, acquire: Mock, popen: Mock) -> None:
         acquire.return_value = (False, "DEFER_FOR_HARD — foreign hard hold")
         output = io.StringIO()
-        self.assertEqual(owned.run_lake_build("g", ["T"], stdout=output), 2)
+        self.assertEqual(
+            owned.run_lake_build("g", ["T"], contention="sensitive", memory_gib=8, stdout=output),
+            2,
+        )
         popen.assert_not_called()
         self.assertIn("REFUSED", output.getvalue())
 
@@ -225,7 +230,10 @@ class BuildOwnershipTest(unittest.TestCase):
     def test_probe_uses_no_build_without_admission(self, resolve: Mock, goal_label: Mock, run: Mock, append: Mock) -> None:
         run.return_value = SimpleNamespace(returncode=3, stdout="stale\n")
         output = io.StringIO()
-        self.assertEqual(owned.run_lake_build("g", ["T"], probe=True, stdout=output), 3)
+        self.assertEqual(
+            owned.run_lake_build("g", ["T"], probe=True, contention="sensitive", stdout=output),
+            3,
+        )
         self.assertIn("--no-build", run.call_args.args[0])
         self.assertEqual(append.call_args.args[0]["admission"], "NOT_REQUIRED_NO_BUILD")
         self.assertIn('"status": "STALE"', output.getvalue())
@@ -329,6 +337,186 @@ class BuildOwnershipTest(unittest.TestCase):
             memory_headroom=lambda: SimpleNamespace(data={"swap_used_mib": None})
         )):
             self.assertIsNone(owned._swap_gib())
+
+    # -- B2/B3: evidence classification and derived estimates ------------
+    def _measured(self, ledger: Path, *, peak_mib: float, targets=("T",),
+                  worktree="/w", toolchain="tc", manifest="mf", exit_code=0,
+                  time="2026-09-03T01:00:00Z") -> None:
+        _write_ledger(ledger, [(time, {
+            "kind": "build", "goal": "g", "targets": list(targets),
+            "command": ["lake", "build"], "exit": exit_code, "wall_seconds": 1.0,
+            "threads": 2, "probe": False, "admission": "ADMITTED_SOFT",
+            "contention": "tolerant", "modules_rebuilt": [], "modules_restored": [],
+            "module_hashes": {}, "module_seconds": {}, "worktree": worktree,
+            "peak_rss_mib": peak_mib, "toolchain_digest": toolchain,
+            "manifest_digest": manifest,
+        })])
+
+    def _classify(self, stale, **kwargs):
+        settings = dict(SETTINGS, **kwargs.pop("settings", {}))
+        with patch("creme.build_ownership.stale_module_count", return_value=(stale, "fixture")):
+            return owned.classify_contention(
+                Path("/w"), ["T"], Path("/lake"), settings, ("tc", "mf")
+            )
+
+    def test_a_warm_narrow_target_with_a_small_measured_peak_is_tolerant(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            self._measured(ledger, peak_mib=2048.0)
+            verdict, evidence = self._classify(3)
+        self.assertEqual(verdict, "tolerant")
+        self.assertEqual(evidence["measured_peak_gib"], 2.0)
+
+    def test_a_cold_worktree_without_measurement_stays_sensitive(self) -> None:
+        with _ledger_and_log() as (_ledger, _):
+            verdict, evidence = self._classify(3)
+        self.assertEqual(verdict, "sensitive")
+        self.assertIn("no successful measurement", evidence["reason"])
+
+    def test_a_changed_toolchain_or_manifest_digest_is_ignored_evidence(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            self._measured(ledger, peak_mib=2048.0, toolchain="other")
+            self.assertEqual(self._classify(3)[0], "sensitive")
+        with _ledger_and_log() as (ledger, _):
+            self._measured(ledger, peak_mib=2048.0, manifest="other")
+            self.assertEqual(self._classify(3)[0], "sensitive")
+
+    def test_a_stale_set_above_the_configured_count_stays_sensitive(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            self._measured(ledger, peak_mib=2048.0)
+            verdict, evidence = self._classify(9)
+        self.assertEqual(verdict, "sensitive")
+        self.assertIn("stale set is 9", evidence["reason"])
+
+    def test_a_large_measured_peak_stays_sensitive(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            self._measured(ledger, peak_mib=9000.0)
+            verdict, evidence = self._classify(2)
+        self.assertEqual(verdict, "sensitive")
+        self.assertIn("not below", evidence["reason"])
+
+    def test_an_unmeasurable_stale_set_stays_sensitive(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            self._measured(ledger, peak_mib=2048.0)
+            self.assertEqual(self._classify(None)[0], "sensitive")
+
+    def test_a_corrupt_ledger_stays_sensitive(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            ledger.write_text("{not json\n", encoding="utf-8")
+            self.assertEqual(self._classify(1)[0], "sensitive")
+
+    def test_a_full_target_is_never_auto_tolerant(self) -> None:
+        with _ledger_and_log() as (_ledger, _):
+            verdict, evidence = owned.classify_contention(
+                Path("/w"), [], Path("/lake"), SETTINGS, ("tc", "mf")
+            )
+        self.assertEqual(verdict, "sensitive")
+        self.assertIn("broad closure", evidence["reason"])
+
+    def test_the_estimate_comes_from_measured_peaks_plus_a_margin(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            self._measured(ledger, peak_mib=2560.0)
+            estimate, evidence = owned.derive_memory_gib(
+                Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8
+            )
+        self.assertEqual(estimate, 4)          # ceil(2.5) + 1
+        self.assertEqual(evidence["rows"], 1)
+        self.assertEqual(evidence["measured_peak_gib"], 2.5)
+
+    def test_the_estimate_falls_back_to_the_profile_default(self) -> None:
+        with _ledger_and_log() as (_ledger, _):
+            estimate, evidence = owned.derive_memory_gib(
+                Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8
+            )
+        self.assertEqual(estimate, 8)
+        self.assertIn("profile default", evidence["source"])
+
+    def test_the_estimate_never_falls_below_the_floor(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            self._measured(ledger, peak_mib=100.0)
+            estimate, _ = owned.derive_memory_gib(
+                Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8
+            )
+        self.assertEqual(estimate, 2)
+
+    def test_stale_set_parsing_counts_named_modules(self) -> None:
+        completed = SimpleNamespace(
+            returncode=3,
+            stdout="info: Blanc.A: package configuration is out of date\n"
+                   "Blanc.B: artifacts are out of date\n"
+                   "unrelated line\n",
+            stderr="",
+        )
+        with patch("creme.build_ownership.subprocess.run", return_value=completed):
+            count, detail = owned.stale_module_count(Path("/w"), ["T"], Path("/lake"))
+        self.assertEqual(count, 2, detail)
+        with patch("creme.build_ownership.subprocess.run",
+                   return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+            self.assertEqual(owned.stale_module_count(Path("/w"), ["T"], Path("/lake"))[0], 0)
+        with patch("creme.build_ownership.subprocess.run",
+                   return_value=SimpleNamespace(returncode=1, stdout="boom", stderr="")):
+            self.assertIsNone(owned.stale_module_count(Path("/w"), ["T"], Path("/lake"))[0])
+
+    # -- B6: the repeat-failure hint -------------------------------------
+    def test_repeat_fail_needs_a_recent_previous_failure_of_the_same_targets(self) -> None:
+        now = datetime(2026, 9, 3, 2, 0, tzinfo=timezone.utc)
+        with _ledger_and_log() as (ledger, _):
+            self._measured(ledger, peak_mib=10.0, exit_code=1,
+                           time="2026-09-03T01:58:00Z")
+            self.assertIn("REPEAT_FAIL", owned.repeat_failure(Path("/w"), ["T"], SETTINGS, now))
+        with _ledger_and_log() as (ledger, _):   # previous build succeeded
+            self._measured(ledger, peak_mib=10.0, exit_code=0,
+                           time="2026-09-03T01:58:00Z")
+            self.assertIsNone(owned.repeat_failure(Path("/w"), ["T"], SETTINGS, now))
+        with _ledger_and_log() as (ledger, _):   # first failure of these targets
+            self._measured(ledger, peak_mib=10.0, exit_code=1, targets=("OTHER",),
+                           time="2026-09-03T01:58:00Z")
+            self.assertIsNone(owned.repeat_failure(Path("/w"), ["T"], SETTINGS, now))
+        with _ledger_and_log() as (ledger, _):   # outside the repeat window
+            self._measured(ledger, peak_mib=10.0, exit_code=1,
+                           time="2026-09-03T01:30:00Z")
+            self.assertIsNone(owned.repeat_failure(Path("/w"), ["T"], SETTINGS, now))
+
+    # -- B7: sanctioned suffix worktrees ---------------------------------
+    def test_sanctioned_suffix_worktrees_belong_to_their_goal(self) -> None:
+        for suffix in ("control", "mutation", "rehearsal"):
+            self.assertEqual(owned.split_worktree_suffix(f"g-{suffix}"), ("g", suffix))
+        self.assertEqual(owned.split_worktree_suffix("g-foo"), ("g-foo", None))
+        self.assertEqual(owned.split_worktree_suffix("g"), ("g", None))
+
+    @patch("creme.build_ownership.resolve_tool")
+    def test_census_is_refused_outside_a_rehearsal_worktree(self, resolve: Mock) -> None:
+        output = io.StringIO()
+        with patch("creme.build_ownership._worktree_identity",
+                   return_value=(Path("/w/.worktrees/g"), "g")):
+            self.assertEqual(
+                owned.run_lake_build("g", ["T"], census=True, dependency="jaune", stdout=output),
+                2,
+            )
+        self.assertIn("GOAL-rehearsal", output.getvalue().replace("g-rehearsal", "GOAL-rehearsal"))
+        resolve.assert_not_called()
+
+    @patch("creme.build_ownership.resolve_tool")
+    def test_census_requires_a_named_dependency(self, resolve: Mock) -> None:
+        output = io.StringIO()
+        with patch("creme.build_ownership._worktree_identity",
+                   return_value=(Path("/w/.worktrees/g-rehearsal"), "g")):
+            self.assertEqual(owned.run_lake_build("g", ["T"], census=True, stdout=output), 2)
+        self.assertIn("--dependency", output.getvalue())
+        resolve.assert_not_called()
+
+    def test_a_dependency_that_stops_being_git_pinned_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "lake-manifest.json").write_text(json.dumps({
+                "packages": [{"name": "jaune", "type": "path", "dir": "../jaune"}]
+            }), encoding="utf-8")
+            revision, detail = owned._dependency_revision(worktree, "jaune")
+            self.assertIsNone(revision)
+            self.assertIn("no longer a Git-pinned package", detail)
+            (worktree / "lake-manifest.json").write_text(json.dumps({
+                "packages": [{"name": "jaune", "type": "git", "rev": "abc123"}]
+            }), encoding="utf-8")
+            self.assertEqual(owned._dependency_revision(worktree, "jaune")[0], "abc123")
 
     def test_rollup_survives_a_missing_semaphore_log(self) -> None:
         with _ledger_and_log() as (_, log):
@@ -512,7 +700,7 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
      patch('creme.build_ownership.guard_bin', return_value=Path({str(fake_bin)!r})), \\
      patch('creme.build_ownership.semaphore.adaptive_acquire', return_value=(True, 'ADMITTED_HARD')), \\
      patch('creme.build_ownership.semaphore.adaptive_release', side_effect=release):
-    raise SystemExit(owned.run_lake_build('g', ['T']))
+    raise SystemExit(owned.run_lake_build('g', ['T'], contention='sensitive', memory_gib=8))
 """
             env = os.environ.copy()
             env["CREME_BUILD_LEDGER"] = str(ledger)
@@ -596,7 +784,12 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
         ), patch("creme.build_ownership._swap_gib", side_effect=[1.0, 2.0]), patch(
             "creme.build_ownership.append_ledger", side_effect=ledger
         ):
-            self.assertEqual(owned.run_lake_build("g", ["T"], stdout=io.StringIO()), 0)
+            self.assertEqual(
+                owned.run_lake_build(
+                    "g", ["T"], contention="sensitive", memory_gib=8, stdout=io.StringIO()
+                ),
+                0,
+            )
         self.assertEqual(events, ["hash", "release", "ledger"])
         self.assertEqual(captured[0]["module_hashes"], {"M": "first"})
 

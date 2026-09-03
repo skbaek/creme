@@ -335,6 +335,29 @@ class BuildOwnershipTest(unittest.TestCase):
         self.assertEqual(goal["lockout_seconds"], 600.0)
         self.assertFalse(goal["lockout_open"])
 
+    def test_a_queued_admission_closes_a_lockout_and_an_enqueue_does_not(self) -> None:
+        with _ledger_and_log() as (_, log):
+            _write_log(log, [
+                ("2026-09-03T01:00:00Z", "adaptive-acquire", "g", "REFUSED", "DEFER_HEAVY: blocked"),
+                ("2026-09-03T01:00:05Z", "wait-enqueue", "g", "OK", "position=1"),
+                ("2026-09-03T01:05:00Z", "wait-acquire", "g", "OK", "ADMITTED_HARD: waited=295s"),
+            ])
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        goal = report["by_goal"]["g"]
+        self.assertFalse(goal["lockout_open"])
+        self.assertEqual(goal["lockout_seconds"], 300.0)
+        self.assertEqual(goal["admissions"], 1)
+
+    def test_a_wait_timeout_opens_a_lockout_like_any_other_refusal(self) -> None:
+        with _ledger_and_log() as (_, log):
+            _write_log(log, [
+                ("2026-09-03T01:00:00Z", "wait-acquire", "g", "REFUSED", "WAIT_TIMEOUT: no admission"),
+            ])
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        goal = report["by_goal"]["g"]
+        self.assertTrue(goal["lockout_open"])
+        self.assertEqual(goal["refusals"], {"WAIT_TIMEOUT": 1})
+
     def test_rollup_reports_an_unadmitted_refusal_as_open_not_zero(self) -> None:
         with _ledger_and_log() as (_, log):
             _write_log(log, [

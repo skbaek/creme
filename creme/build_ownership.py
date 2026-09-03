@@ -238,7 +238,9 @@ def _valid_ledger_row(row: Any) -> bool:
     return "renewals" not in row or _string_list(row["renewals"])
 
 
-ACQUIRE_ACTIONS = ("adaptive-acquire", "soft-acquire", "hard-acquire")
+# `wait-acquire` is the outcome of a queued request and decides a lock-out
+# exactly as a direct acquisition does. `wait-enqueue` is not a decision.
+ACQUIRE_ACTIONS = ("adaptive-acquire", "soft-acquire", "hard-acquire", "wait-acquire")
 _VERDICT_TOKEN = re.compile(r"^([A-Z][A-Z_]*):")
 
 

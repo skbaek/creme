@@ -12,6 +12,9 @@ from pathlib import Path
 from .base import Adapter, CapabilityResult
 from ..reclaim import (
     Process,
+    is_lean_worker as _is_lean_worker,
+    narrow_targets,
+    parse_cpu_seconds as _parse_cpu_seconds,
     build_plan,
     parse_reclaim_arguments,
     process_in_scope,
@@ -212,6 +215,60 @@ class LinuxAdapter(Adapter):
                 continue
         return self.result("process_snapshot", "OK", "Linux process snapshot sampled", {"processes": rows})
 
+    def _lean_worker_sample(self, ps_argv: list[str]) -> "CapabilityResult":
+        try:
+            sample = self._run(ps_argv)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self.result("lean_workers", "UNAVAILABLE", str(exc))
+        if sample.returncode:
+            return self.result("lean_workers", "UNAVAILABLE", "process snapshot failed")
+        table: dict[int, tuple[int, float, int, str]] = {}
+        for line in sample.stdout.splitlines():
+            fields = line.split(None, 4)
+            if len(fields) != 5:
+                continue
+            try:
+                pid, ppid, rss = int(fields[0]), int(fields[1]), int(fields[2])
+            except ValueError:
+                continue
+            cpu = _parse_cpu_seconds(fields[3])
+            if cpu is None:
+                continue
+            table[pid] = (ppid, cpu, rss, fields[4])
+
+        def ancestry(pid: int) -> list[dict[str, object]]:
+            chain: list[dict[str, object]] = []
+            seen = set()
+            current = table.get(pid, (0, 0.0, 0, ""))[0]
+            while current > 1 and current in table and current not in seen and len(chain) < 12:
+                seen.add(current)
+                chain.append({"pid": current, "command": table[current][3]})
+                current = table[current][0]
+            return chain
+
+        workers = [
+            {
+                "pid": pid,
+                "ppid": parent,
+                "rss_kib": rss,
+                "cpu_seconds": cpu,
+                "command": command,
+                "ancestry": ancestry(pid),
+            }
+            for pid, (parent, cpu, rss, command) in sorted(table.items())
+            if _is_lean_worker(command)
+        ]
+        return self.result(
+            "lean_workers", "OK",
+            f"{len(workers)} Lean worker(s) sampled",
+            {"workers": workers},
+        )
+
+    def lean_workers(self) -> "CapabilityResult":
+        return self._lean_worker_sample(
+            ["/bin/ps", "-axo", "pid=,ppid=,rss=,time=,command="]
+        )
+
     def quiet_host(self) -> CapabilityResult:
         sample = self.telemetry()
         if sample.status != "OK" or not sample.data:
@@ -318,9 +375,11 @@ class LinuxAdapter(Adapter):
                 if options.scope_roots else None
             ),
         )
+        plan = replace(plan, targets=narrow_targets(plan.targets, options.only_pids))
         public: dict[str, object] = {
             "mode": "hard-pressure" if hard_pressure else "ordinary",
             "dry_run": dry_run,
+            "only_pids": list(options.only_pids),
             "scope_roots": [str(root) for root in options.scope_roots],
             "owned": [
                 {"pid": pid, "rss_kib": table[pid].rss_kib, "kind": table[pid].kind}

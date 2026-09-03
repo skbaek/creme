@@ -41,6 +41,13 @@ def _positive(text: str) -> int:
     return value
 
 
+def _nonnegative(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be zero or a positive integer")
+    return value
+
+
 def _task_memory(text: str) -> int:
     value = _positive(text)
     if value > 8:
@@ -190,7 +197,81 @@ def cmd_cache_copy(arguments: argparse.Namespace) -> int:
     return 0 if result.status in {"OK", "PREVIEW"} else 1
 
 
+def cmd_idle_workers(arguments: argparse.Namespace) -> int:
+    """Reclaim the caller's own idle Lean workers; report everyone else's."""
+    adapter = get_adapter()
+    minimum_seconds = arguments.idle_workers * 60
+    signals = semaphore.refresh_signals(adapter)
+    report = signals["lean_workers"]
+    if report["status"] != "OK":
+        _json({
+            "capability": "idle_workers",
+            "status": report["status"],
+            "detail": f"Lean worker sampling unavailable: {report['detail']}",
+        })
+        return 2
+    ownership = adapter.reclaim(["--dry-run"])
+    if ownership.status != "OK" or not isinstance(ownership.data, dict):
+        _json({
+            "capability": "idle_workers",
+            "status": ownership.status,
+            "detail": f"ownership boundary unavailable: {ownership.detail}",
+        })
+        return 2
+    owned = {int(row["pid"]) for row in ownership.data.get("owned") or []}
+    eligible = [
+        worker for worker in report["idle_workers"]
+        if (worker["idle_seconds"] or 0) >= minimum_seconds
+    ]
+    targets = sorted(worker["pid"] for worker in eligible if worker["pid"] in owned)
+    foreign = [worker for worker in eligible if worker["pid"] not in owned]
+    observed = {
+        "capability": "idle_workers",
+        "minimum_idle_minutes": arguments.idle_workers,
+        "sampled_workers": len(report["workers"]),
+        "idle_workers": eligible,
+        "owned_targets": targets,
+        "reported_not_owned": [
+            {
+                "pid": worker["pid"],
+                "rss_gib": worker["rss_gib"],
+                "idle_seconds": round(worker["idle_seconds"] or 0.0, 1),
+                "owner": worker["owner"],
+                "owner_should_run": (
+                    "python3 -m creme reclaim --idle-workers "
+                    f"{arguments.idle_workers}"
+                ),
+            }
+            for worker in foreign
+        ],
+    }
+    if not targets:
+        _json({
+            **observed,
+            "status": "OK",
+            "detail": "no caller-owned Lean worker met the idleness threshold",
+        })
+        return 0
+    if arguments.dry_run:
+        _json({**observed, "status": "OK", "detail": "dry-run frozen idle-worker plan"})
+        return 0
+    result = adapter.reclaim(
+        [option for pid in targets for option in ("--only-pid", str(pid))]
+    )
+    _json({**observed, "status": result.status, "detail": result.detail, "reclaim": result.to_dict()})
+    return 0 if result.status == "OK" else 2
+
+
 def cmd_reclaim(arguments: argparse.Namespace) -> int:
+    if getattr(arguments, "idle_workers", None) is not None:
+        if arguments.hard_pressure or arguments.wind_down:
+            _json({
+                "capability": "idle_workers",
+                "status": "REFUSED",
+                "detail": "--idle-workers cannot be combined with --wind-down or --hard-pressure",
+            })
+            return 2
+        return cmd_idle_workers(arguments)
     wind_down_label = getattr(arguments, "wind_down", None)
     if wind_down_label is not None:
         if arguments.hard_pressure or arguments.dry_run:
@@ -239,6 +320,7 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
             arguments.lease,
             memory_gib=arguments.memory_gib,
             contention=arguments.contention,
+            wait_seconds=arguments.wait,
         ))
     if action in {"soft-release", "hard-release"}:
         kind = action.split("-", 1)[0]
@@ -385,13 +467,29 @@ def cmd_lean_mcp(arguments: argparse.Namespace) -> int:
 
 def cmd_lake_build(arguments: argparse.Namespace) -> int:
     options = argparse.ArgumentParser(prog=f"~/creme/scripts/creme lake-build {arguments.goal}")
-    options.add_argument("--memory-gib", type=_positive, default=DEFAULT_MEMORY_GIB)
+    options.add_argument(
+        "--memory-gib",
+        type=_positive,
+        help="conservative whole-GiB peak; derived from the ledger's measured peaks when omitted",
+    )
     options.add_argument(
         "--contention",
         choices=sorted(semaphore.ADMISSION_CONTENTION),
-        default="sensitive",
+        help="override the evidence class; omit to classify from the stale set and measured peaks",
+    )
+    options.add_argument(
+        "--wait",
+        type=_positive,
+        metavar="SECS",
+        help="queue this build and return when admitted, on WAIT_TIMEOUT, or on a verdict waiting cannot change",
     )
     options.add_argument("--probe", action="store_true")
+    options.add_argument(
+        "--census",
+        action="store_true",
+        help="update one Git-pinned dependency and rebuild the full target, exclusively, in a GOAL-rehearsal worktree",
+    )
+    options.add_argument("--dependency", metavar="NAME")
     options.add_argument("targets", nargs=argparse.REMAINDER)
     selected = options.parse_args(arguments.build_args)
     targets = list(selected.targets)
@@ -404,12 +502,15 @@ def cmd_lake_build(arguments: argparse.Namespace) -> int:
         contention=selected.contention,
         threads=DEFAULT_THREADS,
         probe=selected.probe,
+        wait_seconds=selected.wait,
+        census=selected.census,
+        dependency=selected.dependency,
     )
 
 
 def cmd_build_ledger(arguments: argparse.Namespace) -> int:
     try:
-        _json(ledger_rollup(arguments.since))
+        _json(ledger_rollup(arguments.since, arguments.until))
     except ValueError as exc:
         _json({"status": "REFUSED", "detail": str(exc)})
         return 2
@@ -481,6 +582,15 @@ def parser() -> argparse.ArgumentParser:
     reclaim.add_argument("--dry-run", action="store_true")
     reclaim.add_argument("--hard-pressure", action="store_true")
     reclaim.add_argument("--wind-down", metavar="GOAL")
+    reclaim.add_argument(
+        "--idle-workers",
+        type=_nonnegative,
+        metavar="MIN",
+        help=(
+            "terminate caller-owned lean --worker processes idle for more than MIN "
+            "minutes; every other idle worker is reported with its owner, never killed"
+        ),
+    )
     reclaim.set_defaults(func=cmd_reclaim)
 
     sem = commands.add_parser("semaphore", help="atomic cross-session host coordination")
@@ -517,6 +627,15 @@ def parser() -> argparse.ArgumentParser:
         "--lease",
         type=int,
         default=semaphore.ADAPTIVE_LEASE_SECONDS,
+    )
+    adaptive.add_argument(
+        "--wait",
+        type=_positive,
+        metavar="SECS",
+        help=(
+            "queue the request and return when it is admitted, when SECS elapses "
+            "(WAIT_TIMEOUT), or on a verdict waiting cannot change; never poll by hand"
+        ),
     )
     for name in ("soft-release", "hard-release"):
         item = sem_commands.add_parser(name)
@@ -576,7 +695,15 @@ def parser() -> argparse.ArgumentParser:
         "build-ledger",
         help="summarize ignored host-local Lean build ownership measurements",
     )
-    build_ledger.add_argument("--since", default="7d")
+    build_ledger.add_argument(
+        "--since",
+        default="7d",
+        help="duration such as 7d/24h/30m, or an absolute UTC instant such as 2026-09-03",
+    )
+    build_ledger.add_argument(
+        "--until",
+        help="optional absolute UTC instant closing the window, for a fixed baseline",
+    )
     build_ledger.set_defaults(func=cmd_build_ledger)
     return root
 

@@ -118,6 +118,38 @@ class TaskWindDownTest(unittest.TestCase):
 
         self.assertEqual(roots, (goal.resolve(),))
 
+    def test_scope_resolver_includes_sanctioned_disposable_worktrees(self):
+        """The build owner calls GOAL-control this goal's own; so must wind-down."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            creme = workspace / "creme"
+            creme.mkdir()
+            parent = workspace / "blanc" / ".worktrees"
+            made = []
+            for name in ("goal", "goal-control", "goal-mutation", "goal-rehearsal",
+                         "goal-foo", "othergoal"):
+                tree = parent / name
+                tree.mkdir(parents=True)
+                (tree / ".git").write_text("gitdir: fixture\n", encoding="utf-8")
+                made.append(tree)
+            with mock.patch(
+                "creme.task_wind_down.semaphore.canonical_creme_root",
+                return_value=creme,
+            ), mock.patch(
+                "creme.task_wind_down.load_profile",
+                return_value=ProfileValidation("MISSING", "fixture"),
+            ):
+                roots = _goal_worktree_roots("goal", Adapter())
+
+        self.assertEqual(
+            set(roots),
+            {(parent / name).resolve() for name in
+             ("goal", "goal-control", "goal-mutation", "goal-rehearsal")},
+        )
+        # An unknown suffix and another goal stay outside the scope.
+        self.assertNotIn((parent / "goal-foo").resolve(), roots)
+        self.assertNotIn((parent / "othergoal").resolve(), roots)
+
     def test_scope_resolver_rejects_path_shaped_label(self):
         with self.assertRaisesRegex(WorktreeScopeError, "safe worktree scope"):
             _goal_worktree_roots("../other", Adapter())

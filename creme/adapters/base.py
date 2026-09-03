@@ -92,6 +92,19 @@ class Adapter:
             f"process snapshots are not implemented for {self.system}",
         )
 
+    def lean_workers(self) -> CapabilityResult:
+        """Sample Lean language-server workers with cumulative CPU time.
+
+        Admission needs to know whether resident Lean memory is reclaimable
+        before it refuses a request for headroom.  Cumulative CPU seconds make
+        idleness measurable across calls without holding a sampling window
+        open, so `status` and `renew` stay fast.
+        """
+        return self.result(
+            "lean_workers", "UNAVAILABLE",
+            f"Lean worker sampling is not implemented for {self.system}",
+        )
+
     def gui_sessions(self, owner_uid: int) -> CapabilityResult:
         return self.result(
             "human_gui_sessions", "UNAVAILABLE",

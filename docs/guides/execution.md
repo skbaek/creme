@@ -44,6 +44,23 @@ merged without overlapping authority.
   `exclusive` and verify the host is quiet when the repository gate requires
   that stronger condition.
 
+Classify from what the unit actually does, not from the nearest example:
+
+| unit | class |
+|---|---|
+| fixture, static, link, schema, and other non-elaborating gates | light — no hold at all |
+| a unit test suite that does not elaborate Lean | light |
+| a warm narrow build whose stale set is small and whose measured peak is modest | `tolerant` |
+| a focused language-server proof loop | `tolerant` |
+| a cold worktree, an unmeasured target, or a broad closure | `sensitive` |
+| anything that creates several Lean workers, or a previously observed spike | `sensitive` |
+| a long indivisible command that cannot reach a renewal boundary | `sensitive` |
+| timing, whole-tree sweeps, mutation campaigns, dependency censuses | `exclusive` |
+
+A CPU-only gate does not need host exclusivity because it is slow. Holding one
+for twenty minutes at half a gibibyte locks out every proof session on the
+host for no safety benefit.
+
 ```sh
 ~/creme/.semaphore/semaphore adaptive-acquire GOAL \
   --note "focused proof loop" --memory-gib 4 --contention tolerant
@@ -51,6 +68,8 @@ merged without overlapping authority.
   --note "cold or broad rebuild" --memory-gib 10 --contention sensitive
 ~/creme/.semaphore/semaphore adaptive-acquire GOAL \
   --note "timing control" --memory-gib 8 --contention exclusive
+~/creme/.semaphore/semaphore adaptive-acquire GOAL \
+  --note "next proof unit" --memory-gib 4 --contention tolerant --wait 600
 ~/creme/.semaphore/semaphore renew GOAL
 ~/creme/.semaphore/semaphore release GOAL
 ```
@@ -64,6 +83,33 @@ The explicit `soft-acquire` and `hard-acquire` compatibility commands are also
 pressure-gated; they cannot bypass a low-memory refusal. `release` removes
 whichever hold kind adaptive admission selected. Explicit soft/hard releases
 remain available for compatibility.
+
+### Wait in one call; never poll by hand
+
+`--wait SECS` on `adaptive-acquire` and on `creme lake-build` queues the
+request under the same mutex and returns when it is admitted, when `SECS`
+elapses (`WAIT_TIMEOUT`, nonzero exit, no hold), or immediately on a verdict
+waiting cannot change — a manual human hold, the drain floor, or an estimate
+whose charged peak exceeds the whole heavy-work budget. Among the waiters that
+currently fit, the oldest goes first; a large request refused for headroom
+never blocks a smaller one behind it, and a waiter whose process dies is
+dropped. Waiting can only postpone a request. It never admits one past a
+floor, and it never changes a verdict you would have received without it.
+
+Never write a shell loop around `semaphore status`. A hand-rolled poll cannot
+hold a place in the queue, it spends a foreground turn per iteration, and the
+verdict it eventually reads is the one `--wait` would have returned. `status`
+is for looking at the host, not for waiting on it.
+
+A hold covers **one elaborating command**, not a whole gate script. Release
+between gates and reacquire — with `--wait` there is no race to lose by
+letting go. `status` and `renew` print `IDLE_HOLD` when a holder has had no
+`lake`, `lean`, or repository child process for two minutes, `STRANDED` with
+the exact wind-down command when a hold's process is gone and its lease has
+lapsed, and `IDLE_WORKERS` when reclaimable language-server memory is
+resident. A `LIGHT_ONLY` refusal for headroom names that memory and its owner;
+reclaim your own with `python3 -m creme reclaim --idle-workers MIN`, which
+reports every worker outside your ownership boundary instead of killing it.
 
 `python3 -m creme memory-headroom` is a read-only planning sample. It can
 justify moving light packets ahead of heavy ones, but only `adaptive-acquire`
@@ -157,7 +203,8 @@ human shell cannot execute an absolute toolchain binary:
 
 ```sh
 ~/creme/scripts/creme lake-build GOAL --probe -- Narrow.Target
-~/creme/scripts/creme lake-build GOAL --memory-gib 8 --contention sensitive -- Narrow.Target
+~/creme/scripts/creme lake-build GOAL --wait 600 -- Narrow.Target
+~/creme/scripts/creme lake-build GOAL --memory-gib 10 --contention sensitive --wait 600 -- Broad.Target
 ```
 
 Probe first. Exit 0 means the selected artifacts are current; exit 3 means
@@ -165,11 +212,51 @@ stale and authorizes no work by itself. The second command requests adaptive
 admission, applies `nice -n 10` and the calibrated `LEAN_NUM_THREADS`, records
 the ignored host-local ledger, and releases its hold. Use the narrowest target
 that can falsify the current edit inside the loop and the repository
-catalogue's full target at checkpoints. Restart the Lean server after the
-coordinated build so its workers see the new artifacts. Bare `lake build`, MCP
-`lean_build`, `lean_profile_proof` (which shells to `lake env lean`),
-language-server dependency builds, and startup cache downloads are not
-compilation owners and are refused or disabled.
+catalogue's full target at checkpoints. Bare `lake build`, MCP `lean_build`,
+`lean_profile_proof` (which shells to `lake env lean`), language-server
+dependency builds, and startup cache downloads are not compilation owners and
+are refused or disabled.
+
+**Let the wrapper classify.** Omit `--contention` and `--memory-gib` and it
+derives both from evidence: `tolerant` only when the probe's stale closure is
+small *and* the ledger holds a measured peak below the configured threshold
+for the same worktree, the same targets, and the same toolchain and Lake
+manifest digests. Anything missing, drifted, or unreadable keeps `sensitive`.
+State a class explicitly when you know something the ledger cannot — a cold
+worktree, a rebuild you expect to be broad, a command that will spawn several
+workers. The JSON records both the class you asked for and the class the
+evidence supports, so a disagreement is visible afterwards.
+
+On completion the wrapper lists the modules it rebuilt and tells you to
+restart the Lean server before trusting diagnostics in files that import them.
+Do that: a stale `.olean` from a neighbour's build is the usual reason an
+agent stops believing the language server.
+
+### The build is not a type-checker
+
+A wrapper build is for artifacts and boundaries. It is not how you find out
+whether an edit compiles.
+
+1. Make the edit.
+2. Run `lean_diagnostic_messages` on the edited file. It reports **every**
+   error in the file at once; a build reports the first one and stops.
+3. For a type mismatch, `lean_goal` at the tactic and `lean_hover_info` on the
+   symbol tell you what the two types actually are. Reading them is faster
+   than guessing and rebuilding.
+4. Build only when a module is registered or an import changes, when a
+   checkpoint or commit is due, or when the repository catalogue requires it.
+
+**A clean `lean_diagnostic_messages` pass on a file whose imports are current
+is loop evidence.** It does not need confirming with a build. If diagnostics
+say `Imports are out of date`, they are not current: probe, build the narrow
+target, restart the server, and read them again — that is the repair, not a
+reason to distrust the tool.
+
+When a build exits 1 and the previous build of the same targets also failed
+within the repeat window, the JSON carries `hint: REPEAT_FAIL` naming the
+diagnostics tool. It is a hint, never a refusal: the wrapper does not decide
+how you work. But two failing builds in a row on the same targets is the
+signature of using compilation to enumerate errors one at a time.
 
 The server guard rewrites every `lake setup-file` to include `--no-build
 --no-cache`; stale imports therefore remain an explicit `Imports are out of
@@ -194,6 +281,21 @@ For a non-vacuity or enforcement claim, show all three controls: the surrounding
 tree still works, the control fails at the intended boundary, and removing only
 that control restores green. Use disposable worktrees for destructive
 mutations. Preserve source artifacts and fail on stale generated output.
+
+A disposable tree for goal `GOAL` belongs at `.worktrees/GOAL-control`,
+`.worktrees/GOAL-mutation`, or `.worktrees/GOAL-rehearsal`; the build owner
+accepts those three suffixes as that goal's own and refuses any other. Never
+run a destructive mutation in the goal worktree because the owner would refuse
+the control tree. A dependency census — updating one Git-pinned Lake
+dependency and rebuilding the full target to see what moves — runs only in the
+rehearsal tree:
+
+```sh
+~/creme/scripts/creme lake-build GOAL --census --dependency jaune --wait 900 --
+```
+
+It takes host exclusivity, keeps the dependency Git-pinned, and records the
+resolved revision on its ledger row.
 
 Inspect the full diff and status, stage only owned paths, commit coherent green
 checkpoints, and push only an authorized non-protected branch. Never

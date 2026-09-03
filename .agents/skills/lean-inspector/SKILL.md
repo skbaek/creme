@@ -13,14 +13,20 @@ description: Inspects Lean 4 proof states, term goals, diagnostics, declarations
    `../../../docs/guides/lean-edit-loops.md`, which also carries the rule that no
    committed resource ceiling or boundary claim may rest on language-server
    output. Follow it there rather than restating it.
+   A clean `lean_diagnostic_messages` pass on a file whose imports are current
+   is loop evidence: report it as the verdict rather than asking for a build to
+   confirm it. Diagnostics cover the whole file at once, which a build does
+   not.
    If diagnostics say `Imports are out of date`, the guarded server will not
    build them and `lean_build` is intentionally unavailable. From the goal
    worktree, run `~/creme/scripts/creme lake-build GOAL --probe -- TARGET`; exit 3
    means stale. Run that narrow target through the same command without
-   `--probe`, restart the server, and inspect again. Use the repository's full
-   target only at checkpoints and only through this admitted wrapper; never
-   run bare `lake build`. `lean_profile_proof` is also absent because it shells
-   out to an unowned `lake env lean` compilation.
+   `--probe` (adding `--wait SECS` if another session holds the host, and
+   letting the wrapper choose the contention class and memory estimate),
+   restart the server, and inspect again. Use the repository's full target
+   only at checkpoints and only through this admitted wrapper; never run bare
+   `lake build`. `lean_profile_proof` is also absent because it shells out to
+   an unowned `lake env lean` compilation.
 3. Query the state without guessing:
    - Use `lean_goal` at the start of the relevant tactic or `sorry`.
    - Lines and columns are 1-indexed.

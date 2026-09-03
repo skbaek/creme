@@ -17,6 +17,30 @@ DYNAMIC_KEYS = {
     "free_disk", "free_disk_bytes", "memory_free", "memory_free_percent",
     "memory_pressure", "swap", "swap_used", "swap_used_mib", "process_rss",
 }
+# Scheduling tunables, not safety floors.  Each has a working default in code;
+# the profile may carry an optional `admission` object to retune one host.  The
+# key is omitted from a proposed profile so `init` output stays byte-identical
+# and pre-cutover launchers keep reading an untuned profile unchanged.
+ADMISSION_DEFAULTS = {
+    "tolerant_module_count": 8,
+    "tolerant_peak_gib": 4,
+    "estimate_margin_gib": 1,
+    "minimum_estimate_gib": 2,
+    "estimate_sample_rows": 5,
+    "idle_hold_seconds": 120,
+    "repeat_fail_seconds": 600,
+    "wait_poll_seconds": 3,
+}
+ADMISSION_RANGES = {
+    "tolerant_module_count": (1, 4096),
+    "tolerant_peak_gib": (1, 64),
+    "estimate_margin_gib": (0, 32),
+    "minimum_estimate_gib": (1, 32),
+    "estimate_sample_rows": (1, 200),
+    "idle_hold_seconds": (10, 86400),
+    "repeat_fail_seconds": (10, 86400),
+    "wait_poll_seconds": (2, 5),
+}
 
 
 @dataclass(frozen=True)
@@ -93,10 +117,24 @@ def validate_data(
     if not isinstance(data, dict):
         return ProfileValidation("INVALID", "profile root must be an object")
     required = {"schema_version", "fingerprint", "facts", "workspace", "policy", "overrides"}
-    if set(data) != required:
+    optional = {"admission"}
+    if set(data) - optional != required:
         missing = sorted(required - set(data))
-        extra = sorted(set(data) - required)
+        extra = sorted(set(data) - required - optional)
         return ProfileValidation("INVALID", f"profile keys differ; missing={missing}, extra={extra}")
+    admission = data.get("admission")
+    if admission is not None:
+        if not isinstance(admission, dict):
+            return ProfileValidation("INVALID", "admission must be an object")
+        unknown = sorted(set(admission) - set(ADMISSION_DEFAULTS))
+        if unknown:
+            return ProfileValidation("INVALID", f"unknown admission settings: {unknown}")
+        for key, value in admission.items():
+            low, high = ADMISSION_RANGES[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                return ProfileValidation(
+                    "INVALID", f"admission.{key} must be an integer in {low}..{high}"
+                )
     if data.get("schema_version") != SCHEMA_VERSION:
         return ProfileValidation("INVALID", f"unsupported schema_version: {data.get('schema_version')!r}")
     facts = data.get("facts")
@@ -193,3 +231,40 @@ def write_reviewed(path: Path, profile: dict[str, Any]) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def admission_settings(profile: Optional[dict[str, Any]]) -> dict[str, int]:
+    """Merge the host profile's optional scheduling tunables over the defaults.
+
+    These change *when* work is scheduled, never whether a safety floor holds.
+    An absent, malformed, or out-of-range value falls back to its default
+    rather than widening admission.
+    """
+    settings = dict(ADMISSION_DEFAULTS)
+    configured = (profile or {}).get("admission")
+    if not isinstance(configured, dict):
+        return settings
+    for key, value in configured.items():
+        if key not in ADMISSION_DEFAULTS:
+            continue
+        low, high = ADMISSION_RANGES[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            continue
+        settings[key] = value
+    return settings
+
+
+def load_admission_settings(
+    creme_root: Optional[Path] = None,
+    adapter: Optional[Adapter] = None,
+) -> dict[str, int]:
+    from . import semaphore
+
+    try:
+        root = creme_root or semaphore.canonical_creme_root()
+        checked = load(root / DEFAULT_RELATIVE_PROFILE, adapter or get_adapter())
+    except Exception:
+        # Scheduling tunables must never be able to break a build; the
+        # in-code defaults are the conservative values.
+        return dict(ADMISSION_DEFAULTS)
+    return admission_settings(checked.profile)

@@ -140,6 +140,43 @@ live schema-v1 holds and pre-update launchers remain structurally compatible.
 Legacy holds receive the current profile's default peak estimate. Status hides
 the encoding and reports the decoded estimate and contention class.
 
+### Waiting
+
+`--wait SECS` enqueues a request and polls internally under the same mutex,
+returning on admission, on `WAIT_TIMEOUT`, or immediately on a verdict waiting
+cannot change: a manual human hold, the drain floor, or a charged peak larger
+than the whole heavy-work budget. Each pass re-runs the identical admission
+decision against a fresh sample, so waiting can only postpone a request and
+never relaxes a floor, the usability reserve, the peak margin, or the worker
+limit. Among the waiters that currently fit, the oldest is admitted first; a
+waiter refused only for headroom does not delay a smaller one behind it, and a
+waiter whose process is gone or whose heartbeat has lapsed is dropped on the
+next pass. Waiting writes one log row when it enqueues and one when it is
+decided, never one per poll.
+
+The queue lives in `queue.json` beside the hold state, under the same mutex,
+rather than inside `state.json`: hold state validation rejects unknown keys, so
+a queue field there would make every pre-cutover launcher treat live state as
+corrupt. A malformed queue entry is skipped and reported; an unreadable queue
+file is preserved under a `queue.corrupt.*.json` name and waiting degrades to
+independent admission rather than blocking work. Queue entries carry a label,
+pid, uid, class, estimate, and timestamps — never a free-form note.
+
+### Idleness signals
+
+The same file records per-hold and per-worker idleness observations. A hold is
+reported `IDLE_HOLD` when it has had no `lake`, `lean`, or repository-owned
+child process for the configured interval, and `STRANDED` only when its
+process is gone, its owned tree has no Lean work, and its lease has lapsed —
+a command-line hold normally outlives the process that took it, so a missing
+pid alone means nothing. A Lean worker is called idle only by comparing
+cumulative CPU seconds between two observations: a worker seen once is never
+idle, and one that consumed more than a small share of the window is busy even
+if it is blocked. `reclaim --idle-workers MIN` narrows the existing
+ownership-verifying plan to those pids; narrowing can only shrink a proven
+target set, and every worker outside the caller's client ancestry or goal
+worktree is reported with its owner rather than signalled.
+
 Fresh installations store mutex, state, and audit log under the canonical
 checkout's ignored `.semaphore/state/`. Linked Git worktrees resolve through
 their common Git directory, so they cannot silently create per-goal semaphore

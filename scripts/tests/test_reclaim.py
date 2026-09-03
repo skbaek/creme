@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
+from creme import idle_workers
+from creme import reclaim
 from creme.reclaim import (
     Process,
     build_plan,
@@ -100,3 +103,97 @@ class ReclaimPlanTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IdleWorkerTest(unittest.TestCase):
+    """B4: idleness is measured, and the ownership boundary still decides."""
+
+    def worker(self, pid, cpu, rss_kib=2 * 1024 * 1024, ancestry=()):
+        return {
+            "pid": pid, "ppid": 1, "rss_kib": rss_kib, "cpu_seconds": cpu,
+            "command": "lean --worker", "ancestry": list(ancestry),
+        }
+
+    def test_a_worker_is_never_called_idle_on_first_sight(self):
+        observations, derived = idle_workers.update_observations(
+            [self.worker(10, 5.0)], {}, 1000.0
+        )
+        self.assertIsNone(derived[10]["idle_seconds"])
+        self.assertIsNone(observations["10"]["idle_since"])
+
+    def test_unchanged_cpu_between_samples_establishes_idleness(self):
+        first, _ = idle_workers.update_observations([self.worker(10, 5.0)], {}, 1000.0)
+        second, derived = idle_workers.update_observations(
+            [self.worker(10, 5.0)], first, 1600.0
+        )
+        self.assertEqual(derived[10]["cpu_percent"], 0.0)
+        self.assertEqual(derived[10]["idle_seconds"], 600.0)
+        # A third idle sample keeps the original idle start, not the last one.
+        _third, later = idle_workers.update_observations(
+            [self.worker(10, 5.0)], second, 1900.0
+        )
+        self.assertEqual(later[10]["idle_seconds"], 900.0)
+
+    def test_a_busy_worker_above_the_cpu_threshold_is_never_idle(self):
+        first, _ = idle_workers.update_observations([self.worker(10, 5.0)], {}, 1000.0)
+        _second, derived = idle_workers.update_observations(
+            [self.worker(10, 65.0)], first, 1100.0
+        )
+        self.assertEqual(derived[10]["cpu_percent"], 60.0)
+        self.assertIsNone(derived[10]["idle_seconds"])
+
+    def test_a_reused_pid_restarts_the_measurement(self):
+        first, _ = idle_workers.update_observations([self.worker(10, 500.0)], {}, 1000.0)
+        _second, derived = idle_workers.update_observations(
+            [self.worker(10, 1.0)], first, 1600.0
+        )
+        self.assertIsNone(derived[10]["idle_seconds"])
+
+    def test_only_caller_owned_idle_workers_become_targets(self):
+        workers = [self.worker(10, 1.0), self.worker(11, 1.0)]
+        derived = {10: {"idle_seconds": 900.0}, 11: {"idle_seconds": 900.0}}
+        targets, reported = idle_workers.select_reclaimable(workers, derived, {10}, 600.0)
+        self.assertEqual(targets, [10])
+        self.assertEqual(reported, [11])
+
+    def test_an_idle_worker_below_the_threshold_is_left_alone(self):
+        workers = [self.worker(10, 1.0)]
+        derived = {10: {"idle_seconds": 60.0}}
+        targets, reported = idle_workers.select_reclaimable(workers, derived, {10}, 600.0)
+        self.assertEqual((targets, reported), ([], []))
+
+    def test_owner_label_prefers_the_holding_goal_then_the_client(self):
+        pattern = re.compile(r"/(?:codex|claude)$|claude\.app/", re.IGNORECASE)
+        held = self.worker(10, 1.0, ancestry=[{"pid": 4, "command": "/usr/bin/claude"}])
+        self.assertEqual(idle_workers.owner_label(held, {4: "goal-a"}, pattern), "goal goal-a")
+        self.assertEqual(
+            idle_workers.owner_label(held, {}, pattern), "client claude pid 4"
+        )
+        # An executable path containing spaces still names the client family.
+        spaced = self.worker(11, 1.0, ancestry=[
+            {"pid": 5, "command": "/Users/a/Library/Application Support/Claude/claude.app/x --flag"},
+        ])
+        self.assertEqual(idle_workers.owner_label(spaced, {}, pattern), "client claude pid 5")
+        self.assertIn("unattributed", idle_workers.owner_label(self.worker(10, 1.0), {}, pattern))
+
+    def test_pid_narrowing_can_only_shrink_a_proven_target_set(self):
+        self.assertEqual(reclaim.narrow_targets((1, 2, 3), (2, 9)), (2,))
+        self.assertEqual(reclaim.narrow_targets((1, 2), ()), (1, 2))
+        self.assertEqual(reclaim.narrow_targets((), (5,)), ())
+
+    def test_pid_narrowing_is_refused_alongside_hard_pressure(self):
+        with self.assertRaises(ValueError):
+            reclaim.parse_reclaim_arguments(["--hard-pressure", "--only-pid", "5"])
+        with self.assertRaises(ValueError):
+            reclaim.parse_reclaim_arguments(["--only-pid", "0"])
+        with self.assertRaises(ValueError):
+            reclaim.parse_reclaim_arguments(["--only-pid", "5", "--only-pid", "5"])
+        self.assertEqual(
+            reclaim.parse_reclaim_arguments(["--only-pid", "7"]).only_pids, (7,)
+        )
+
+    def test_cpu_time_parsing_matches_ps_output(self):
+        self.assertAlmostEqual(reclaim.parse_cpu_seconds("358:00.60"), 21480.6)
+        self.assertAlmostEqual(reclaim.parse_cpu_seconds("0:01.30"), 1.3)
+        self.assertAlmostEqual(reclaim.parse_cpu_seconds("1:02:03"), 3723.0)
+        self.assertIsNone(reclaim.parse_cpu_seconds("nonsense"))

@@ -6,11 +6,13 @@ import math
 import os
 import tempfile
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, NamedTuple, Optional
 
+from . import idle_workers
 from .adapters import Adapter, get_adapter
 from .profile import DEFAULT_RELATIVE_PROFILE, effective_policy, load as load_profile
 
@@ -29,6 +31,16 @@ ADMISSION_RESERVE_FRACTION = 0.25
 ADMISSION_MIN_RESERVE_GIB = 2.0
 ADMISSION_DRAIN_PERCENT = 20
 ADMISSION_CONTENTION_PERCENT = 30
+QUEUE_NAME = "queue.json"
+QUEUE_SCHEMA_VERSION = 1
+WAIT_POLL_SECONDS = 3.0
+WAITER_STALE_SECONDS = 15.0
+MAX_WAIT_SECONDS = MAX_LEASE_SECONDS
+IDLE_HOLD_SECONDS = 120
+WAITER_KEYS = {
+    "id", "label", "pid", "uid", "contention",
+    "memory_gib", "enqueued_at", "heartbeat_at",
+}
 HOLD_KEYS = {
     "label", "pid", "uid", "note", "manual",
     "acquired_at", "renewed_at", "lease_seconds",
@@ -222,6 +234,57 @@ def _log(action: str, label: str, verdict: str, detail: str) -> None:
     _log_to(state_root(), action, label, verdict, detail)
 
 
+def log_path() -> Path:
+    return state_root() / "log.jsonl"
+
+
+def _valid_log_row(row: Any) -> bool:
+    return (
+        isinstance(row, dict)
+        and all(isinstance(row.get(key), str) for key in ("time", "action", "label", "verdict", "detail"))
+        and row["verdict"] in {"OK", "REFUSED"}
+    )
+
+
+def read_log(
+    since: datetime,
+    until: Optional[datetime] = None,
+) -> tuple[list[dict[str, Any]], int, str]:
+    """Return coordination rows in the window, corrupt-line count, and a status.
+
+    The audit log is append-only host state written by every client.  A
+    malformed line is skipped and counted rather than raised: a roll-up that
+    dies on one bad line cannot be used to compare a return watch against a
+    baseline.
+    """
+    path = log_path()
+    if not path.exists():
+        return [], 0, "MISSING"
+    rows: list[dict[str, Any]] = []
+    corrupt = 0
+    try:
+        with path.open(encoding="utf-8") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                    if not _valid_log_row(row):
+                        raise ValueError("unsupported row")
+                    when = datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
+                    if when.tzinfo is None:
+                        raise ValueError("naive timestamp")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    corrupt += 1
+                    continue
+                if when >= since and (until is None or when <= until):
+                    rows.append({**row, "when": when})
+    except OSError as exc:
+        return [], corrupt, f"UNREADABLE: {exc}"
+    rows.sort(key=lambda row: row["when"])
+    return rows, corrupt, "OK"
+
+
 def migrate_legacy_state(
     neutral_root: Optional[Path] = None,
     legacy_root: Optional[Path] = None,
@@ -254,6 +317,136 @@ def migrate_legacy_state(
     except OSError:
         detail += "; audit log write failed"
     return True, detail
+
+
+def queue_path(root: Optional[Path] = None) -> Path:
+    return (root or state_root()) / QUEUE_NAME
+
+
+def _empty_queue() -> dict[str, Any]:
+    return {
+        "schema_version": QUEUE_SCHEMA_VERSION,
+        "waiters": [],
+        "activity": {},
+        "workers": {},
+    }
+
+
+def _valid_waiter(entry: Any) -> bool:
+    if not isinstance(entry, dict) or set(entry) != WAITER_KEYS:
+        return False
+    if not isinstance(entry["id"], str) or not entry["id"]:
+        return False
+    if not isinstance(entry["label"], str) or not entry["label"]:
+        return False
+    if entry["contention"] not in ADMISSION_CONTENTION:
+        return False
+    for key in ("pid", "uid", "memory_gib"):
+        value = entry[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+    for key in ("enqueued_at", "heartbeat_at"):
+        value = entry[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        if not math.isfinite(value) or value <= 0:
+            return False
+    return entry["memory_gib"] >= 1 and entry["pid"] >= 1
+
+
+def _load_queue(root: Path) -> tuple[dict[str, Any], list[str]]:
+    """Read the waiting queue beside the holds, reporting what it had to drop.
+
+    The queue is scheduling state, never a safety verdict: an unreadable or
+    partly invalid queue degrades waiting to independent polling instead of
+    blocking work or rewriting the hold state that governs safety.  Nothing is
+    discarded silently — a wholly unreadable file is preserved under a
+    ``.corrupt`` name and the drop is reported.
+    """
+    path = queue_path(root)
+    notes: list[str] = []
+    if not path.exists():
+        return _empty_queue(), notes
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        preserved = path.with_suffix(f".corrupt.{int(_now())}.json")
+        try:
+            os.replace(path, preserved)
+            notes.append(f"unreadable queue preserved at {preserved.name}: {exc}")
+        except OSError:
+            notes.append(f"queue is unreadable and could not be preserved: {exc}")
+        return _empty_queue(), notes
+    if not isinstance(raw, dict) or raw.get("schema_version") != QUEUE_SCHEMA_VERSION:
+        notes.append("queue schema is unsupported; waiting proceeds without arrival order")
+        return _empty_queue(), notes
+    waiters = raw.get("waiters")
+    kept = [entry for entry in waiters if _valid_waiter(entry)] if isinstance(waiters, list) else []
+    dropped = (len(waiters) - len(kept)) if isinstance(waiters, list) else 0
+    if dropped:
+        notes.append(f"{dropped} malformed queue entr(y/ies) ignored")
+    activity = raw.get("activity")
+    if not isinstance(activity, dict):
+        activity = {}
+    clean_activity = {
+        str(key): float(value)
+        for key, value in activity.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    }
+    workers = raw.get("workers")
+    clean_workers = {
+        str(key): value
+        for key, value in (workers or {}).items()
+        if isinstance(workers, dict) and idle_workers._valid_observation(value)
+    }
+    return {
+        "schema_version": QUEUE_SCHEMA_VERSION,
+        "waiters": kept,
+        "activity": clean_activity,
+        "workers": clean_workers,
+    }, notes
+
+
+def _save_queue(root: Path, queue: dict[str, Any]) -> None:
+    path = queue_path(root)
+    fd, temporary = tempfile.mkstemp(prefix="queue-", suffix=".json", dir=str(path.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(queue, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Report liveness without claiming a foreign or unreadable pid is gone."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _prune_waiters(waiters: list[dict[str, Any]], now: float) -> tuple[list[dict[str, Any]], int]:
+    live = [
+        entry for entry in waiters
+        if _pid_alive(int(entry["pid"]))
+        and now - float(entry["heartbeat_at"]) <= WAITER_STALE_SECONDS
+    ]
+    return live, len(waiters) - len(live)
+
+
+def _ordered_waiters(waiters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(waiters, key=lambda entry: (float(entry["enqueued_at"]), str(entry["id"])))
 
 
 def _encode_admission_note(note: str, memory_gib: int, contention: str) -> str:
@@ -366,6 +559,20 @@ def _hold_reservation(hold: dict[str, Any], default_memory_gib: int) -> int:
     return _charged_memory_gib(memory_gib)
 
 
+class Decision(NamedTuple):
+    """One admission verdict plus whether waiting could still change it."""
+
+    admitted: bool
+    kind: Optional[str]
+    verdict: str
+    detail: str
+    waitable: bool
+
+
+def _refuse(verdict: str, detail: str, *, waitable: bool) -> Decision:
+    return Decision(False, None, verdict, detail, waitable)
+
+
 def _admission_decision(
     state: dict[str, Any],
     requested_kind: str,
@@ -374,30 +581,42 @@ def _admission_decision(
     contention: str,
     adapter: Adapter,
     policy: dict[str, Any],
-) -> tuple[bool, Optional[str], str, str]:
+    sample: Any = None,
+    idle_report: Optional[dict[str, Any]] = None,
+) -> Decision:
     hard = state["hard"]
     matching_soft = [item for item in state["soft"] if item["label"] == label]
     other_soft = [item for item in state["soft"] if item["label"] != label]
     if hard and hard["label"] != label:
         detail = f"hard hold {hard['label']} blocks acquisition; run light work until it releases"
-        return False, None, "DEFER_HEAVY", detail
+        return _refuse("DEFER_HEAVY", detail, waitable=True)
     if hard and hard["label"] == label:
-        return False, None, "ALREADY_HELD", "label already owns the hard hold; use renew"
+        return _refuse(
+            "ALREADY_HELD", "label already owns the hard hold; use renew", waitable=False
+        )
     if matching_soft and requested_kind != "hard":
-        return False, None, "ALREADY_HELD", "label already owns a soft hold; use renew"
+        return _refuse(
+            "ALREADY_HELD", "label already owns a soft hold; use renew", waitable=False
+        )
     if any(item.get("manual") for item in other_soft):
-        return (
-            False,
-            None,
+        # A human decides when a manual session hold ends.  Waiting on it would
+        # turn an immediate, actionable refusal into a silent stall.
+        return _refuse(
             "LIGHT_ONLY",
             "a manual human-session hold is active; run light work until it is released",
+            waitable=False,
         )
     if requested_kind == "hard" and other_soft:
         labels = ", ".join(item["label"] for item in other_soft)
-        return False, None, "DEFER_FOR_HARD", f"soft holds block hard acquisition: {labels}"
+        return _refuse(
+            "DEFER_FOR_HARD", f"soft holds block hard acquisition: {labels}", waitable=True
+        )
 
     converting = requested_kind == "hard" and bool(matching_soft)
-    sample = adapter.memory_headroom()
+    # A queue pass evaluates every waiter against one sample so arrival order
+    # is decided from a single view of the host, not a drifting one.
+    if sample is None:
+        sample = adapter.memory_headroom()
     configured_total = policy.get("physical_memory_gib")
     if isinstance(configured_total, bool) or not isinstance(configured_total, (int, float)):
         configured_total = None
@@ -408,12 +627,11 @@ def _admission_decision(
     reasons = []
 
     if not converting and free_percent is not None and free_percent < ADMISSION_DRAIN_PERCENT:
-        return (
-            False,
-            None,
+        return _refuse(
             "LIGHT_ONLY",
             f"available memory is {free_percent}% (<{ADMISSION_DRAIN_PERCENT}%); "
             "do not start heavy work; checkpoint or wind down heavy sessions and run light work",
+            waitable=False,
         )
 
     if not converting and free_percent is None:
@@ -423,12 +641,12 @@ def _admission_decision(
     if not converting and reserve_gib is not None:
         capacity_gib = max(0.0, float(total_gib) - reserve_gib)
         if charged_gib > capacity_gib:
-            return (
-                False,
-                None,
+            # No amount of waiting shrinks the request below the host budget.
+            return _refuse(
                 "LIGHT_ONLY",
                 f"{memory_gib} GiB estimate charges {charged_gib} GiB with peak margin, "
                 f"exceeding the {capacity_gib:.1f} GiB heavy-work budget; split or reduce the task",
+                waitable=False,
             )
         if available_gib is not None and available_gib < charged_gib + reserve_gib:
             decision = "DEFER_FOR_HARD" if other_soft else "LIGHT_ONLY"
@@ -437,12 +655,12 @@ def _admission_decision(
                 if other_soft
                 else "wait for memory to recover and run light work"
             )
-            return (
-                False,
-                None,
+            return _refuse(
                 decision,
                 f"{available_gib:.1f} GiB is available but this task needs {charged_gib} GiB "
-                f"plus a {reserve_gib:.1f} GiB usability reserve; {action}",
+                f"plus a {reserve_gib:.1f} GiB usability reserve; {action}"
+                + _reclaimable_note(idle_report),
+                waitable=True,
             )
 
         active_reservations = sum(
@@ -475,27 +693,40 @@ def _admission_decision(
             if other_soft
             else "use hard acquisition for this task"
         )
-        return False, None, decision, "; ".join(reasons + [action])
+        return _refuse(decision, "; ".join(reasons + [action]), waitable=True)
 
     selected_kind = "hard" if requires_hard else "soft"
     if selected_kind == "hard" and other_soft:
         labels = ", ".join(item["label"] for item in other_soft)
-        return (
-            False,
-            None,
+        return _refuse(
             "DEFER_FOR_HARD",
             "; ".join(reasons + [f"soft holds still active: {labels}; run light work first"]),
+            waitable=True,
         )
 
     headroom = (
         f"headroom={free_percent}%" if free_percent is not None else "headroom=unavailable"
     )
     rationale = "; ".join(reasons) if reasons else "parallel admission fits the live and reserved budgets"
-    return (
+    return Decision(
         True,
         selected_kind,
         f"ADMITTED_{selected_kind.upper()}",
         f"{headroom}; memory={memory_gib} GiB (charged={charged_gib} GiB); {rationale}",
+        True,
+    )
+
+
+def _reclaimable_note(report: Optional[dict[str, Any]]) -> str:
+    """Name reclaimable language-server memory instead of refusing blind."""
+    idle = (report or {}).get("idle_workers") or []
+    if not idle:
+        return ""
+    owners = ", ".join((report or {}).get("owners") or []) or "unattributed"
+    return (
+        f"; {(report or {}).get('idle_rss_gib')} GiB sits in {len(idle)} idle "
+        f"lean --worker process(es) owned by {owners} — that owner can free it with "
+        "`python3 -m creme reclaim --idle-workers MIN`"
     )
 
 
@@ -529,16 +760,211 @@ def _expired(hold: dict[str, Any], now: Optional[float] = None) -> bool:
     return (now or _now()) > float(hold["renewed_at"]) + int(hold["lease_seconds"])
 
 
+def _descendant_commands(pid: int, adapter: Adapter) -> Optional[list[str]]:
+    """Return the command lines of ``pid``'s descendants, or None if unreadable."""
+    result = adapter.process_snapshot()
+    if result.status != "OK" or not isinstance(result.data, dict):
+        return None
+    rows = result.data.get("processes")
+    if not isinstance(rows, list):
+        return None
+    table: dict[int, tuple[int, str]] = {}
+    for row in rows:
+        try:
+            table[int(row["pid"])] = (int(row["ppid"]), str(row["command"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    found = {pid}
+    changed = True
+    while changed:
+        changed = False
+        for child, (parent, _) in table.items():
+            if parent in found and child not in found:
+                found.add(child)
+                changed = True
+    return [table[child][1] for child in found if child != pid and child in table]
+
+
+def _hold_is_working(
+    hold: dict[str, Any],
+    adapter: Adapter,
+    scope_roots: tuple[Path, ...] = (),
+) -> Optional[bool]:
+    """Is this holder running an elaborating or repository child right now?
+
+    None means the host could not be inspected; an uninspectable holder is
+    never reported idle.
+    """
+    commands = _descendant_commands(int(hold["pid"]), adapter)
+    if commands is None:
+        return None
+    roots = [str(root) for root in scope_roots]
+    for command in commands:
+        name = os.path.basename(command.split(None, 1)[0] if command else "")
+        if name in {"lake", "lean"} or "lean" in command.split(None, 1)[0]:
+            return True
+        if any(root in command for root in roots):
+            return True
+    return False
+
+
+def _goal_scope_roots(label: str, adapter: Adapter) -> tuple[Path, ...]:
+    from .task_wind_down import WorktreeScopeError, _goal_worktree_roots
+
+    try:
+        return _goal_worktree_roots(label, adapter)
+    except (OSError, WorktreeScopeError):
+        return ()
+
+
+def _refresh_signals(
+    root: Path,
+    state: dict[str, Any],
+    adapter: Adapter,
+    now: float,
+) -> dict[str, Any]:
+    """Update idleness observations for holds and workers, and derive signals."""
+    queue, _notes = _load_queue(root)
+    activity = dict(queue.get("activity") or {})
+    holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
+    labels = {hold["label"] for hold in holds}
+    hold_signals: dict[str, dict[str, Any]] = {}
+    for hold in holds:
+        label = hold["label"]
+        if hold.get("manual"):
+            working: Optional[bool] = None
+        else:
+            working = _hold_is_working(hold, adapter, _goal_scope_roots(label, adapter))
+        alive = _pid_alive(int(hold["pid"]))
+        if working:
+            activity.pop(label, None)
+        elif working is False:
+            activity.setdefault(label, now)
+        idle_since = activity.get(label)
+        hold_signals[label] = {
+            "pid_alive": alive,
+            "working": working,
+            "idle_seconds": (now - float(idle_since)) if idle_since is not None else None,
+            "idle_hold": (
+                idle_since is not None and now - float(idle_since) > IDLE_HOLD_SECONDS
+            ),
+            # A hold acquired from the command line normally outlives the
+            # process that took it, so a gone pid is not by itself a fault.
+            # Stranded means gone pid, no Lean work in the owned tree, and a
+            # lease nobody is renewing: nothing will ever release it.
+            "stranded": alive is False and working is False and _expired(hold, now),
+        }
+    queue["activity"] = {
+        label: value for label, value in activity.items() if label in labels
+    }
+
+    sample = adapter.lean_workers()
+    if sample.status == "OK" and isinstance(sample.data, dict):
+        workers = [
+            worker for worker in (sample.data.get("workers") or [])
+            if isinstance(worker, dict)
+        ]
+        previous = queue.get("workers")
+        observations, derived = idle_workers.update_observations(
+            workers, previous if isinstance(previous, dict) else {}, now
+        )
+        queue["workers"] = observations
+        hold_pids = {int(hold["pid"]): hold["label"] for hold in holds}
+        client_pattern = getattr(adapter, "client_pattern", _NEVER_MATCHES)
+        worker_report = {
+            "status": "OK",
+            "workers": [
+                {
+                    "pid": int(worker["pid"]),
+                    "rss_gib": round(int(worker["rss_kib"]) / (1024 ** 2), 2),
+                    "idle_seconds": (derived.get(int(worker["pid"])) or {}).get("idle_seconds"),
+                    "cpu_percent": (derived.get(int(worker["pid"])) or {}).get("cpu_percent"),
+                    "owner": idle_workers.owner_label(worker, hold_pids, client_pattern),
+                }
+                for worker in workers
+            ],
+            "detail": sample.detail,
+        }
+    else:
+        queue.setdefault("workers", {})
+        worker_report = {"status": sample.status, "workers": [], "detail": sample.detail}
+
+    idle = [
+        worker for worker in worker_report["workers"]
+        if worker["idle_seconds"] is not None
+    ]
+    worker_report["idle_workers"] = idle
+    worker_report["idle_rss_gib"] = round(sum(worker["rss_gib"] for worker in idle), 2)
+    worker_report["owners"] = sorted({worker["owner"] for worker in idle})
+    try:
+        _save_queue(root, queue)
+    except OSError:
+        pass
+    return {"holds": hold_signals, "lean_workers": worker_report}
+
+
+class _NeverMatches:
+    @staticmethod
+    def search(_text: str) -> None:
+        return None
+
+
+_NEVER_MATCHES = _NeverMatches()
+
+
+def refresh_signals(adapter: Optional[Adapter] = None) -> dict[str, Any]:
+    selected = adapter or get_adapter()
+    with locked_state() as (path, state):
+        return _refresh_signals(path.parent, state, selected, _now())
+
+
+def _idle_worker_line(report: dict[str, Any]) -> Optional[str]:
+    idle = report.get("idle_workers") or []
+    if not idle:
+        return None
+    owners = ", ".join(report.get("owners") or []) or "unattributed"
+    return (
+        f"IDLE_WORKERS: {report['idle_rss_gib']} GiB across {len(idle)} idle "
+        f"lean --worker process(es) (owner {owners}); "
+        "reclaim your own with `python3 -m creme reclaim --idle-workers MIN`"
+    )
+
+
 def snapshot() -> dict[str, Any]:
     with locked_state() as (_, state):
         return json.loads(json.dumps(state))
 
 
-def status_text() -> str:
-    state = snapshot()
+def _signal_lines(label: str, signals: dict[str, dict[str, Any]], indent: str) -> list[str]:
+    signal = signals.get(label) or {}
+    lines = []
+    if signal.get("stranded"):
+        lines.append(
+            f"{indent}STRANDED: the holding process is gone and no Lean work remains in "
+            f"its owned tree; run `python3 -m creme reclaim --wind-down {label}`"
+        )
+    elif signal.get("idle_hold"):
+        seconds = int(signal.get("idle_seconds") or 0)
+        lines.append(
+            f"{indent}IDLE_HOLD: no lake, lean, or repository child process for {seconds}s; "
+            "release between gates and reacquire with --wait for the next elaborating command"
+        )
+    return lines
+
+
+def status_text(adapter: Optional[Adapter] = None) -> str:
+    selected = adapter or get_adapter()
     now = _now()
+    with locked_state() as (path, state):
+        root = path.parent
+        state = json.loads(json.dumps(state))
+        derived = _refresh_signals(root, state, selected, now)
+        signals = derived["holds"]
+        worker_report = derived["lean_workers"]
+        queue, queue_notes = _load_queue(root)
+        waiters, _dropped = _prune_waiters(queue["waiters"], now)
     try:
-        default_memory_gib = int(_runtime_admission_policy(get_adapter())["task_memory_gib"])
+        default_memory_gib = int(_runtime_admission_policy(selected)["task_memory_gib"])
     except (KeyError, OSError, SemaphoreError, ValueError):
         default_memory_gib = 2
     lines = []
@@ -550,6 +976,7 @@ def status_text() -> str:
             f"hard: {hard['label']} ({state_word}) pid={hard['pid']} "
             f"memory={memory_gib}GiB contention={contention} note={note!r}"
         )
+        lines.extend(_signal_lines(hard["label"], signals, "  "))
     else:
         lines.append("hard: free")
     lines.append(f"soft (S={len(state['soft'])}):")
@@ -560,8 +987,22 @@ def status_text() -> str:
             f"  {hold['label']} ({state_word}) pid={hold['pid']} "
             f"memory={memory_gib}GiB contention={contention} note={note!r}"
         )
+        lines.extend(_signal_lines(hold["label"], signals, "    "))
     if not state["soft"]:
         lines.append("  none")
+    lines.append(f"waiting (W={len(waiters)}):")
+    for index, waiter in enumerate(_ordered_waiters(waiters), start=1):
+        lines.append(
+            f"  {index}. {waiter['label']} pid={waiter['pid']} "
+            f"memory={waiter['memory_gib']}GiB contention={waiter['contention']} "
+            f"waited={int(now - float(waiter['enqueued_at']))}s"
+        )
+    if not waiters:
+        lines.append("  none")
+    lines.extend(f"queue: {note}" for note in queue_notes)
+    idle_line = _idle_worker_line(worker_report)
+    if idle_line:
+        lines.append(idle_line)
     return "\n".join(lines)
 
 
@@ -576,23 +1017,14 @@ def _admit(
     adapter: Optional[Adapter],
     policy: Optional[dict[str, Any]],
 ) -> tuple[bool, str]:
-    if not label or label == MANUAL_LABEL:
-        return False, "reserved or empty label"
-    if lease < 1 or lease > MAX_LEASE_SECONDS:
-        return False, f"lease must be 1..{MAX_LEASE_SECONDS} seconds"
-    if contention not in ADMISSION_CONTENTION:
-        return False, f"unknown contention class: {contention}"
-    selected = adapter or get_adapter()
-    selected_policy = policy or _runtime_admission_policy(selected)
-    requested_memory = memory_gib if memory_gib is not None else int(selected_policy["task_memory_gib"])
-    if (
-        not isinstance(requested_memory, int)
-        or isinstance(requested_memory, bool)
-        or requested_memory < 1
-    ):
-        return False, "memory estimate must be a positive whole number of GiB"
+    invalid, selected, selected_policy, requested_memory = _validate_request(
+        label, lease, contention, memory_gib, adapter, policy
+    )
+    if invalid:
+        return False, invalid
     with locked_state() as (path, state):
-        admitted, selected_kind, decision, detail = _admission_decision(
+        signals = _refresh_signals(path.parent, state, selected, _now())
+        admitted, selected_kind, decision, detail, _ = _admission_decision(
             state,
             requested_kind,
             label,
@@ -600,6 +1032,7 @@ def _admit(
             contention,
             selected,
             selected_policy,
+            idle_report=signals["lean_workers"],
         )
         if not admitted or selected_kind is None:
             _log(f"{requested_kind}-acquire", label, "REFUSED", f"{decision}: {detail}")
@@ -652,6 +1085,191 @@ def acquire(
     )
 
 
+def _validate_request(
+    label: str,
+    lease: int,
+    contention: str,
+    memory_gib: Optional[int],
+    adapter: Optional[Adapter],
+    policy: Optional[dict[str, Any]],
+) -> tuple[Optional[str], Adapter, dict[str, Any], int]:
+    if not label or label == MANUAL_LABEL:
+        return "reserved or empty label", get_adapter(), {}, 0
+    if lease < 1 or lease > MAX_LEASE_SECONDS:
+        return f"lease must be 1..{MAX_LEASE_SECONDS} seconds", get_adapter(), {}, 0
+    if contention not in ADMISSION_CONTENTION:
+        return f"unknown contention class: {contention}", get_adapter(), {}, 0
+    selected = adapter or get_adapter()
+    selected_policy = policy or _runtime_admission_policy(selected)
+    requested = memory_gib if memory_gib is not None else int(selected_policy["task_memory_gib"])
+    if not isinstance(requested, int) or isinstance(requested, bool) or requested < 1:
+        return (
+            "memory estimate must be a positive whole number of GiB",
+            selected,
+            selected_policy,
+            0,
+        )
+    return None, selected, selected_policy, requested
+
+
+def _waiting_admit(
+    label: str,
+    note: str,
+    lease: int,
+    *,
+    memory_gib: Optional[int],
+    contention: str,
+    adapter: Optional[Adapter],
+    policy: Optional[dict[str, Any]],
+    wait_seconds: int,
+    poll_seconds: float = WAIT_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[bool, str]:
+    """Enqueue one request and return only when it is decided.
+
+    Waiting can postpone a request; it can never admit one past a floor. Every
+    pass re-evaluates the live decision under the mutex, so the drain
+    threshold, the usability reserve, and manual human holds behave exactly as
+    they do without ``--wait``.  Only the queue decides *which* fitting waiter
+    goes first, and only one log row is written per enqueue and per outcome.
+    """
+    invalid, selected, selected_policy, requested_memory = _validate_request(
+        label, lease, contention, memory_gib, adapter, policy
+    )
+    if invalid:
+        return False, invalid
+    if wait_seconds < 1 or wait_seconds > MAX_WAIT_SECONDS:
+        return False, f"--wait must be 1..{MAX_WAIT_SECONDS} seconds"
+
+    waiter_id = uuid.uuid4().hex
+    enqueued_at = _now()
+    deadline = enqueued_at + wait_seconds
+    announced = False
+    registered = False
+
+    def entry(now: float) -> dict[str, Any]:
+        return {
+            "id": waiter_id,
+            "label": label,
+            "pid": os.getpid(),
+            "uid": os.getuid(),
+            "contention": contention,
+            "memory_gib": requested_memory,
+            "enqueued_at": enqueued_at,
+            "heartbeat_at": now,
+        }
+
+    def deregister() -> None:
+        if not registered:
+            return
+        try:
+            with locked_state() as (path, _):
+                _drop_waiter(path.parent, waiter_id)
+        except (OSError, SemaphoreError):
+            # A stale entry is dropped by the next pass's liveness pruning.
+            pass
+
+    try:
+        while True:
+            with locked_state() as (path, state):
+                root = path.parent
+                queue, notes = _load_queue(root)
+                now = _now()
+                queue["waiters"], _dropped = _prune_waiters(queue["waiters"], now)
+                queue["waiters"] = [
+                    item for item in queue["waiters"] if item["id"] != waiter_id
+                ]
+                queue["waiters"].append(entry(now))
+                registered = True
+                _save_queue(root, queue)
+
+                sample = selected.memory_headroom()
+                signals = _refresh_signals(root, state, selected, now)
+                decisions = {
+                    item["id"]: _admission_decision(
+                        state, "adaptive", item["label"], int(item["memory_gib"]),
+                        str(item["contention"]), selected, selected_policy, sample,
+                        idle_report=signals["lean_workers"],
+                    )
+                    for item in _ordered_waiters(queue["waiters"])
+                }
+                winner = next(
+                    (
+                        item["id"]
+                        for item in _ordered_waiters(queue["waiters"])
+                        if decisions[item["id"]].admitted
+                    ),
+                    None,
+                )
+                mine = decisions[waiter_id]
+
+                if not announced:
+                    detail = "; ".join(
+                        [f"position={_position(queue['waiters'], waiter_id)}", *notes]
+                    )
+                    _log_to(root, "wait-enqueue", label, "OK", detail)
+                    announced = True
+
+                if mine.admitted and winner == waiter_id:
+                    if mine.kind == "soft":
+                        state["soft"].append(_hold(
+                            label, note, lease,
+                            memory_gib=requested_memory, contention=contention,
+                        ))
+                    else:
+                        state["soft"] = []
+                        state["hard"] = _hold(
+                            label, note, lease,
+                            memory_gib=requested_memory, contention=contention,
+                        )
+                    _drop_waiter(root, waiter_id)
+                    _save(path, state)
+                    registered = False
+                    waited = round(_now() - enqueued_at, 1)
+                    _log_to(
+                        root, "wait-acquire", label, "OK",
+                        f"{mine.verdict}: waited={waited}s; {mine.detail}",
+                    )
+                    return True, f"{mine.verdict} — waited {waited}s; {mine.detail}"
+
+                if not mine.admitted and not mine.waitable:
+                    _drop_waiter(root, waiter_id)
+                    registered = False
+                    _log_to(
+                        root, "wait-acquire", label, "REFUSED",
+                        f"{mine.verdict}: waiting cannot change this verdict; {mine.detail}",
+                    )
+                    return False, f"{mine.verdict} — {mine.detail}"
+
+            remaining = deadline - _now()
+            if remaining <= 0:
+                waited = round(_now() - enqueued_at, 1)
+                detail = (
+                    f"WAIT_TIMEOUT: no admission within {wait_seconds}s "
+                    f"(waited={waited}s); last verdict {mine.verdict}: {mine.detail}"
+                )
+                _log("wait-acquire", label, "REFUSED", detail)
+                return False, f"WAIT_TIMEOUT — {detail.split(': ', 1)[1]}"
+            sleep(min(poll_seconds, remaining))
+    finally:
+        deregister()
+
+
+def _drop_waiter(root: Path, waiter_id: str) -> None:
+    """Remove one entry from the freshest queue, preserving other updates."""
+    queue, _notes = _load_queue(root)
+    queue["waiters"] = [item for item in queue["waiters"] if item["id"] != waiter_id]
+    _save_queue(root, queue)
+
+
+def _position(waiters: list[dict[str, Any]], waiter_id: str) -> int:
+    ordered = _ordered_waiters(waiters)
+    return next(
+        (index + 1 for index, item in enumerate(ordered) if item["id"] == waiter_id),
+        len(ordered),
+    )
+
+
 def adaptive_acquire(
     label: str,
     note: str,
@@ -661,7 +1279,21 @@ def adaptive_acquire(
     contention: str = "tolerant",
     adapter: Optional[Adapter] = None,
     policy: Optional[dict[str, Any]] = None,
+    wait_seconds: Optional[int] = None,
+    poll_seconds: float = WAIT_POLL_SECONDS,
 ) -> tuple[bool, str]:
+    if wait_seconds is not None:
+        return _waiting_admit(
+            label,
+            note,
+            lease,
+            memory_gib=memory_gib,
+            contention=contention,
+            adapter=adapter,
+            policy=policy,
+            wait_seconds=wait_seconds,
+            poll_seconds=poll_seconds,
+        )
     return _admit(
         "adaptive",
         label,
@@ -859,12 +1491,19 @@ def renew(
         hold["renewed_at"] = _now()
         hold["lease_seconds"] = lease
         _save(path, state)
+        signals = _refresh_signals(path.parent, state, selected, _now())
     pressure = (
         f"headroom={free_percent}%"
         if free_percent is not None
         else f"headroom unavailable ({sample.detail}); checkpoint frequently"
     )
     detail = f"CONTINUE_HEAVY — hold renewed; {pressure}"
+    detail += "".join(
+        "\n  " + line for line in _signal_lines(label, signals["holds"], "")
+    )
+    idle_line = _idle_worker_line(signals["lean_workers"])
+    if idle_line:
+        detail += "\n  " + idle_line
     _log("renew", label, "OK", f"lease={lease}; {detail}")
     return True, detail
 

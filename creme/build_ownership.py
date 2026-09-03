@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import math
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from typing import Any, Iterable, Optional, TextIO
 
 from . import semaphore
 from .adapters import get_adapter
+from .profile import load_admission_settings
 from .task_wind_down import _goal_worktree_roots
 
 
@@ -37,11 +39,19 @@ _SAFE_LEDGER_KEYS = {
     "reason", "toolchain", "probe", "renewals", "max_concurrent_lean",
     "peak_lean_rss_mib",
     "sampling_samples", "sampling_unavailable",
+    "outcome", "toolchain_digest", "manifest_digest",
+    "requested_contention", "evidence_contention", "estimate_source",
+    "memory_gib", "dependency", "dependency_rev", "census",
 }
+SANCTIONED_WORKTREE_SUFFIXES = ("control", "mutation", "rehearsal")
+
+
+def _iso(moment: datetime) -> str:
+    return moment.isoformat().replace("+00:00", "Z")
 
 
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return _iso(datetime.now(timezone.utc))
 
 
 def runtime_root() -> Path:
@@ -86,19 +96,53 @@ def append_ledger(record: dict[str, Any]) -> None:
             os.fsync(output.fileno())
 
 
-def _parse_since(text: str, now: Optional[datetime] = None) -> datetime:
+def _parse_instant(text: str, option: str, now: Optional[datetime] = None) -> datetime:
+    """Accept a relative duration or an absolute UTC date/timestamp.
+
+    A return watch compares a fixed historical window against a live one, so
+    the roll-up has to name an exact boundary as well as "the last 5 hours".
+    """
     current = now or datetime.now(timezone.utc)
     match = re.fullmatch(r"([1-9][0-9]*)([dhm])", text)
-    if not match:
-        raise ValueError("--since must be a positive duration such as 7d, 24h, or 30m")
-    value = int(match.group(1))
-    unit = match.group(2)
-    delta = {"d": timedelta(days=value), "h": timedelta(hours=value), "m": timedelta(minutes=value)}[unit]
-    return current - delta
+    if match:
+        value = int(match.group(1))
+        delta = {
+            "d": timedelta(days=value),
+            "h": timedelta(hours=value),
+            "m": timedelta(minutes=value),
+        }[match.group(2)]
+        return current - delta
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(
+            f"{option} must be a positive duration such as 7d, 24h, or 30m, "
+            "or an absolute UTC instant such as 2026-09-03 or 2026-09-03T05:35:00Z"
+        ) from None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
-def read_ledger(since: str) -> tuple[list[dict[str, Any]], int]:
-    cutoff = _parse_since(since)
+def _parse_since(text: str, now: Optional[datetime] = None) -> datetime:
+    return _parse_instant(text, "--since", now)
+
+
+def parse_window(
+    since: str,
+    until: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> tuple[datetime, Optional[datetime]]:
+    start = _parse_instant(since, "--since", now)
+    stop = _parse_instant(until, "--until", now) if until else None
+    if stop is not None and stop <= start:
+        raise ValueError("--until must be later than --since")
+    return start, stop
+
+
+def read_ledger(
+    since: str,
+    until: Optional[str] = None,
+) -> tuple[list[dict[str, Any]], int]:
+    cutoff, stop = parse_window(since, until)
     path = ledger_path()
     if not path.exists():
         return [], 0
@@ -115,7 +159,7 @@ def read_ledger(since: str) -> tuple[list[dict[str, Any]], int]:
                     if not _valid_ledger_row(row):
                         raise ValueError("unsupported row")
                     when = datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
-                    if when >= cutoff:
+                    if when >= cutoff and (stop is None or when <= stop):
                         rows.append(row)
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     corrupt += 1
@@ -180,14 +224,109 @@ def _valid_ledger_row(row: Any) -> bool:
     )
     if not all(key not in row or _number_or_none(row[key]) for key in optional_numbers):
         return False
-    return (
-        ("toolchain" not in row or isinstance(row["toolchain"], str))
-        and ("renewals" not in row or _string_list(row["renewals"]))
+    optional_strings = (
+        "toolchain", "outcome", "toolchain_digest", "manifest_digest",
+        "requested_contention", "evidence_contention", "estimate_source",
+        "dependency", "dependency_rev",
     )
+    if not all(key not in row or isinstance(row[key], str) for key in optional_strings):
+        return False
+    if "census" in row and not isinstance(row["census"], bool):
+        return False
+    if "memory_gib" in row and not _number_or_none(row["memory_gib"]):
+        return False
+    return "renewals" not in row or _string_list(row["renewals"])
 
 
-def ledger_rollup(since: str) -> dict[str, Any]:
-    rows, corrupt = read_ledger(since)
+# `wait-acquire` is the outcome of a queued request and decides a lock-out
+# exactly as a direct acquisition does. `wait-enqueue` is not a decision.
+ACQUIRE_ACTIONS = ("adaptive-acquire", "soft-acquire", "hard-acquire", "wait-acquire")
+_VERDICT_TOKEN = re.compile(r"^([A-Z][A-Z_]*):")
+
+
+def _verdict_token(row: dict[str, Any]) -> str:
+    match = _VERDICT_TOKEN.match(str(row.get("detail", "")))
+    return match.group(1) if match else "UNCLASSIFIED"
+
+
+def coordination_rollup(
+    since: datetime,
+    until: Optional[datetime],
+    labels: Iterable[str] = (),
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Per-goal refusal counts and lock-out seconds from the semaphore log.
+
+    A lock-out episode runs from an acquisition refusal to that label's next
+    admission.  An episode with no admission before the window closes is
+    reported open with the seconds accrued so far; reporting it as zero would
+    make the worst case look like the best one.
+    """
+    rows, corrupt, status = semaphore.read_log(since, until)
+    window_end = until or (rows[-1]["when"] if rows else since)
+    by_label: dict[str, dict[str, Any]] = {}
+
+    def entry(label: str) -> dict[str, Any]:
+        return by_label.setdefault(label, {
+            "refusals": {},
+            "renew_refusals": {},
+            "admissions": 0,
+            "lockout_episodes": 0,
+            "lockout_seconds": 0.0,
+            "lockout_open": False,
+            "lockout_open_seconds": 0.0,
+        })
+
+    for label in labels:
+        entry(str(label))
+
+    open_since: dict[str, datetime] = {}
+    for row in rows:
+        label = str(row["label"])
+        action = str(row["action"])
+        token = _verdict_token(row)
+        if action == "renew":
+            if row["verdict"] == "REFUSED":
+                record = entry(label)["renew_refusals"]
+                record[token] = record.get(token, 0) + 1
+            continue
+        if action not in ACQUIRE_ACTIONS:
+            continue
+        record = entry(label)
+        if row["verdict"] == "REFUSED":
+            counts = record["refusals"]
+            counts[token] = counts.get(token, 0) + 1
+            open_since.setdefault(label, row["when"])
+        else:
+            record["admissions"] += 1
+            started = open_since.pop(label, None)
+            if started is not None:
+                record["lockout_episodes"] += 1
+                record["lockout_seconds"] += (row["when"] - started).total_seconds()
+
+    for label, started in open_since.items():
+        record = entry(label)
+        record["lockout_open"] = True
+        record["lockout_episodes"] += 1
+        record["lockout_open_seconds"] = max(0.0, (window_end - started).total_seconds())
+
+    for record in by_label.values():
+        record["lockout_seconds"] = round(record["lockout_seconds"], 1)
+        record["lockout_open_seconds"] = round(record["lockout_open_seconds"], 1)
+        record["lockout_total_seconds"] = round(
+            record["lockout_seconds"] + record["lockout_open_seconds"], 1
+        )
+    meta = {
+        "semaphore_log_status": status,
+        "semaphore_log_rows": len(rows),
+        "semaphore_log_corrupt_lines_skipped": corrupt,
+        "window_end": (window_end.isoformat().replace("+00:00", "Z")) if rows or until else None,
+    }
+    return by_label, meta
+
+
+def ledger_rollup(since: str, until: Optional[str] = None) -> dict[str, Any]:
+    rows, corrupt = read_ledger(since, until)
+    window_since, window_until = parse_window(since, until)
     builds = [row for row in rows if row["kind"] == "build" and not row.get("probe")]
     by_goal: dict[str, float] = {}
     seen_hashes: dict[tuple[str, str, str], str] = {}
@@ -216,11 +355,60 @@ def ledger_rollup(since: str) -> dict[str, Any]:
                 seen_hashes[key] = worktree
     full_seconds = sum(full)
     narrow_seconds = sum(narrow)
+
+    coordination, coordination_meta = coordination_rollup(
+        window_since,
+        window_until,
+        {str(row.get("goal", "<unknown>")) for row in builds},
+    )
+    per_goal: dict[str, dict[str, Any]] = {}
+    for goal in sorted(set(by_goal) | set(coordination)):
+        goal_builds = [row for row in builds if str(row.get("goal", "<unknown>")) == goal]
+        failed = [row for row in goal_builds if row["exit"] != 0]
+        classes: dict[str, int] = {}
+        for row in goal_builds:
+            key = str(row.get("contention", "<unknown>"))
+            classes[key] = classes.get(key, 0) + 1
+        coordinated = coordination.get(goal, {})
+        per_goal[goal] = {
+            "builds": len(goal_builds),
+            "failed_builds": len(failed),
+            "failed_builds_exit_1": sum(row["exit"] == 1 for row in goal_builds),
+            "failed_build_share": (
+                round(len(failed) / len(goal_builds), 3) if goal_builds else None
+            ),
+            "contention_class": dict(sorted(classes.items())),
+            "elaboration_seconds": round(by_goal.get(goal, 0.0), 3),
+            "refusals": dict(sorted(coordinated.get("refusals", {}).items())),
+            "renew_refusals": dict(sorted(coordinated.get("renew_refusals", {}).items())),
+            "admissions": coordinated.get("admissions", 0),
+            "lockout_episodes": coordinated.get("lockout_episodes", 0),
+            "lockout_seconds": coordinated.get("lockout_seconds", 0.0),
+            "lockout_open": coordinated.get("lockout_open", False),
+            "lockout_open_seconds": coordinated.get("lockout_open_seconds", 0.0),
+            "lockout_total_seconds": coordinated.get("lockout_total_seconds", 0.0),
+        }
+    all_classes: dict[str, int] = {}
+    for row in builds:
+        key = str(row.get("contention", "<unknown>"))
+        all_classes[key] = all_classes.get(key, 0) + 1
+    failed_builds = sum(row["exit"] != 0 for row in builds)
     return {
         "status": "OK",
         "since": since,
+        "until": until,
+        "window": {
+            "since": window_since.isoformat().replace("+00:00", "Z"),
+            "until": window_until.isoformat().replace("+00:00", "Z") if window_until else None,
+        },
         "rows": len(rows),
         "corrupt_lines_skipped": corrupt,
+        **coordination_meta,
+        "builds": len(builds),
+        "failed_builds": failed_builds,
+        "failed_build_share": round(failed_builds / len(builds), 3) if builds else None,
+        "contention_class": dict(sorted(all_classes.items())),
+        "by_goal": per_goal,
         "elaboration_seconds_by_goal": {key: round(value, 3) for key, value in sorted(by_goal.items())},
         "elaboration_timing_incomplete_builds": incomplete_timings,
         "duplicate_hash_pairs": duplicate_pairs,
@@ -419,13 +607,31 @@ def _apparent_goal(worktree: Path) -> str:
         return "<unowned>"
 
 
+def split_worktree_suffix(directory: str) -> tuple[str, Optional[str]]:
+    """Split ``GOAL-control`` into its goal and sanctioned purpose.
+
+    A disposable control, mutation, or rehearsal tree is the same goal's work;
+    refusing it only pushed destructive experiments back into the goal
+    worktree.  Any other suffix stays unowned.
+    """
+    for suffix in SANCTIONED_WORKTREE_SUFFIXES:
+        marker = f"-{suffix}"
+        if directory.endswith(marker) and len(directory) > len(marker):
+            return directory[: -len(marker)], suffix
+    return directory, None
+
+
 def _worktree_identity(cwd: Path, expected_goal: Optional[str] = None) -> tuple[Path, str]:
     resolved_cwd = cwd.resolve()
-    goal = expected_goal or _apparent_goal(resolved_cwd)
-    if goal == "<unowned>":
-        return resolved_cwd, goal
+    directory = _apparent_goal(resolved_cwd)
+    if directory == "<unowned>":
+        return resolved_cwd, directory
+    base, suffix = split_worktree_suffix(directory)
+    goal = base if suffix else directory
+    if expected_goal is not None and goal != expected_goal:
+        return resolved_cwd, "<unowned>"
     try:
-        roots = _goal_worktree_roots(goal, get_adapter())
+        roots = _goal_worktree_roots(directory, get_adapter())
     except Exception:
         return resolved_cwd, "<unowned>"
     matches = []
@@ -546,8 +752,11 @@ def nice_main(argv: list[str]) -> int:
 def _swap_gib() -> Optional[float]:
     try:
         result = get_adapter().memory_headroom()
-        value = result.data.get("swap_used_gib") if result.data else None
-        return round(float(value), 3) if value is not None else None
+        # Adapters report swap in MiB; a GiB lookup silently recorded None on
+        # every row, which would have made the memory-pressure column of a
+        # return watch unusable.
+        value = result.data.get("swap_used_mib") if result.data else None
+        return round(float(value) / 1024.0, 3) if value is not None else None
     except (AttributeError, OSError, TypeError, ValueError):
         return None
 
@@ -656,6 +865,331 @@ def _module_hashes(worktree: Path, modules: Iterable[str]) -> dict[str, str]:
     return hashes
 
 
+def _digest_file(path: Path) -> Optional[str]:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return None
+
+
+def worktree_digests(worktree: Path) -> tuple[Optional[str], Optional[str]]:
+    """Digest the two inputs that make an older measurement comparable."""
+    return (
+        _digest_file(worktree / "lean-toolchain"),
+        _digest_file(worktree / "lake-manifest.json"),
+    )
+
+
+_STALE_FAILURE_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_'.]+)\s*$")
+_IMPORT_RE = re.compile(r"^import\s+([A-Za-z0-9_'.]+)")
+_HEADER_SCAN_LINES = 400
+
+
+def _module_name(worktree: Path, path: Path) -> str:
+    relative = path.relative_to(worktree).with_suffix("")
+    return ".".join(relative.parts)
+
+
+def package_import_graph(worktree: Path, roots: Iterable[str]) -> Optional[dict[str, set[str]]]:
+    """Map each in-package module to the in-package modules it imports.
+
+    Only sources inside the worktree are read: dependency packages are Git
+    pinned, so their artifacts are either current or would themselves appear
+    in the probe's out-of-date frontier.
+    """
+    graph: dict[str, set[str]] = {}
+    prefixes = {str(root).split(".", 1)[0] for root in roots}
+    if not prefixes:
+        return None
+    try:
+        for prefix in sorted(prefixes):
+            candidates = [worktree / f"{prefix}.lean"]
+            directory = worktree / prefix
+            if directory.is_dir():
+                candidates.extend(sorted(directory.rglob("*.lean")))
+            for path in candidates:
+                if not path.is_file():
+                    continue
+                module = _module_name(worktree, path)
+                imports: set[str] = set()
+                with path.open(encoding="utf-8", errors="replace") as source:
+                    for index, line in enumerate(source):
+                        match = _IMPORT_RE.match(line)
+                        if match:
+                            imports.add(match.group(1))
+                            continue
+                        stripped = line.strip()
+                        if not stripped or stripped.startswith("--"):
+                            continue
+                        # Imports may only appear in the header, but the header
+                        # may open with a block comment, so the scan ends at
+                        # the first declaration *after* an import was seen.
+                        if imports or index >= _HEADER_SCAN_LINES:
+                            break
+                graph[module] = imports
+    except OSError:
+        return None
+    return {module: {name for name in imports if name in graph} for module, imports in graph.items()}
+
+
+def stale_closure(
+    graph: dict[str, set[str]],
+    targets: Iterable[str],
+    frontier: set[str],
+) -> Optional[int]:
+    """Count the modules a build of ``targets`` would have to elaborate.
+
+    Lake's `--no-build` probe names only the frontier it stopped at, so the
+    frontier alone under-reports what an actual build would elaborate.  The
+    answer is the frontier plus every module in the target's import closure
+    that reaches it.
+    """
+    named = [str(target) for target in targets]
+    if any(target not in graph for target in named):
+        return None
+    if any(module not in graph for module in frontier):
+        # A stale module outside this package — a dependency, or a target
+        # shape the graph does not model — is not evidence about the closure,
+        # and a stale dependency is exactly the broad case that must stay
+        # `sensitive`.
+        return None
+    closure: set[str] = set()
+    stack = list(named)
+    while stack:
+        module = stack.pop()
+        if module in closure:
+            continue
+        closure.add(module)
+        stack.extend(graph.get(module, ()))
+    stale = frontier & closure
+    changed = True
+    while changed:
+        changed = False
+        for module in closure - stale:
+            if graph.get(module, set()) & stale:
+                stale.add(module)
+                changed = True
+    return len(stale)
+
+
+def stale_module_count(
+    worktree: Path,
+    targets: list[str],
+    real_lake: Path,
+) -> tuple[Optional[int], str]:
+    """Count the modules a probe proves out of date, or explain why it cannot.
+
+    Exit 0 means nothing is stale.  Exit 3 means Lake refused to build and
+    named the out-of-date frontier; anything else is not evidence.
+    """
+    try:
+        completed = subprocess.run(
+            [str(real_lake), "build", "--no-build", *targets],
+            cwd=worktree, text=True, capture_output=True, check=False, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"probe unavailable: {exc}"
+    if completed.returncode == 0:
+        return 0, "probe reports the selected artifacts current"
+    if completed.returncode != STALE_EXIT:
+        return None, f"probe exited {completed.returncode}; not stale-set evidence"
+    output = (completed.stdout or "") + (completed.stderr or "")
+    lines = output.splitlines()
+    try:
+        start = next(
+            index for index, line in enumerate(lines)
+            if "logged failures" in line
+        )
+    except StopIteration:
+        return None, "probe reported stale artifacts without naming a frontier"
+    frontier = set()
+    for line in lines[start + 1:]:
+        match = _STALE_FAILURE_RE.match(line)
+        if not match:
+            break
+        frontier.add(match.group(1))
+    if not frontier:
+        return None, "probe named no out-of-date module"
+    graph = package_import_graph(worktree, targets)
+    if graph is None:
+        return None, "package import graph unavailable"
+    count = stale_closure(graph, targets, frontier)
+    if count is None:
+        return None, "targets are outside the package import graph"
+    return count, (
+        f"probe frontier {sorted(frontier)}; {count} module(s) in the target closure "
+        "would be elaborated"
+    )
+
+
+def _measured_rows(
+    worktree: Path,
+    targets: list[str],
+    toolchain_digest: Optional[str],
+    manifest_digest: Optional[str],
+    settings: dict[str, int],
+) -> tuple[list[dict[str, Any]], str]:
+    """Ledger rows that measured *this* worktree, targets, and pinned inputs."""
+    try:
+        rows, _corrupt = read_ledger("30d")
+    except (OSError, ValueError):
+        # Unreadable performance state is not evidence; it must never widen
+        # admission, so the caller falls back to the conservative class.
+        return [], "ledger unreadable"
+    if toolchain_digest is None or manifest_digest is None:
+        return [], "worktree toolchain or manifest digest unavailable"
+    matching = [
+        row for row in rows
+        if row.get("kind") == "build"
+        and not row.get("probe")
+        and row.get("exit") == 0
+        and str(row.get("worktree")) == str(worktree)
+        and list(row.get("targets") or []) == list(targets)
+        and row.get("toolchain_digest") == toolchain_digest
+        and row.get("manifest_digest") == manifest_digest
+        and isinstance(row.get("peak_rss_mib"), (int, float))
+    ]
+    if not matching:
+        return [], "no successful measurement for these targets on the pinned inputs"
+    matching.sort(key=lambda row: str(row["time"]))
+    keep = matching[-int(settings["estimate_sample_rows"]):]
+    return keep, f"{len(keep)} matching measurement(s)"
+
+
+def classify_contention(
+    worktree: Path,
+    targets: list[str],
+    real_lake: Path,
+    settings: dict[str, int],
+    digests: tuple[Optional[str], Optional[str]],
+) -> tuple[str, dict[str, Any]]:
+    """Choose a contention class from measurement, defaulting to `sensitive`.
+
+    `tolerant` requires all three: a small stale set now, a measured peak below
+    the configured threshold, and a ledger row taken on the same toolchain and
+    Lake manifest.  Any missing, drifted, or unreadable evidence keeps the
+    conservative class; evidence can only ever relax scheduling, never a floor.
+    """
+    evidence: dict[str, Any] = {}
+    if not targets:
+        evidence["reason"] = "a full target is a broad closure"
+        return "sensitive", evidence
+    stale, stale_detail = stale_module_count(worktree, targets, real_lake)
+    evidence["stale_modules"] = stale
+    evidence["stale_detail"] = stale_detail
+    limit = int(settings["tolerant_module_count"])
+    if stale is None or stale > limit:
+        evidence["reason"] = f"stale set is {stale if stale is not None else 'unmeasured'} (limit {limit})"
+        return "sensitive", evidence
+    rows, rows_detail = _measured_rows(worktree, targets, *digests, settings)
+    evidence["measurements"] = rows_detail
+    if not rows:
+        evidence["reason"] = rows_detail
+        return "sensitive", evidence
+    peak_gib = max(float(row["peak_rss_mib"]) for row in rows) / 1024.0
+    evidence["measured_peak_gib"] = round(peak_gib, 2)
+    threshold = float(settings["tolerant_peak_gib"])
+    if peak_gib >= threshold:
+        evidence["reason"] = f"measured peak {peak_gib:.2f} GiB is not below {threshold} GiB"
+        return "sensitive", evidence
+    evidence["reason"] = (
+        f"{stale} stale module(s) at or below {limit} and a measured peak of "
+        f"{peak_gib:.2f} GiB below {threshold} GiB on the pinned toolchain and manifest"
+    )
+    return "tolerant", evidence
+
+
+def derive_memory_gib(
+    worktree: Path,
+    targets: list[str],
+    settings: dict[str, int],
+    digests: tuple[Optional[str], Optional[str]],
+    default_gib: int,
+) -> tuple[int, dict[str, Any]]:
+    """Propose a whole-GiB estimate from measurement, never below the floor."""
+    floor = int(settings["minimum_estimate_gib"])
+    if not targets:
+        return max(floor, default_gib), {
+            "source": "profile default (full target)",
+            "rows": 0,
+        }
+    rows, detail = _measured_rows(worktree, targets, *digests, settings)
+    if not rows:
+        return max(floor, default_gib), {"source": f"profile default ({detail})", "rows": 0}
+    peak_gib = max(float(row["peak_rss_mib"]) for row in rows) / 1024.0
+    estimate = max(floor, math.ceil(peak_gib) + int(settings["estimate_margin_gib"]))
+    return estimate, {
+        "source": (
+            f"max of {len(rows)} measured peak(s) ({peak_gib:.2f} GiB) "
+            f"plus {settings['estimate_margin_gib']} GiB"
+        ),
+        "rows": len(rows),
+        "measured_peak_gib": round(peak_gib, 2),
+        "row_times": [str(row["time"]) for row in rows],
+    }
+
+
+def repeat_failure(
+    worktree: Path,
+    targets: list[str],
+    settings: dict[str, int],
+    before: Optional[datetime] = None,
+) -> Optional[str]:
+    """Was the previous build of exactly these targets also a failure, recently?"""
+    window = int(settings["repeat_fail_seconds"])
+    cutoff = before or datetime.now(timezone.utc)
+    start = cutoff - timedelta(seconds=window + 60)
+    try:
+        rows, _corrupt = read_ledger(_iso(start), _iso(cutoff))
+    except (OSError, ValueError):
+        return None
+    candidates = [
+        row for row in rows
+        if row.get("kind") == "build"
+        and not row.get("probe")
+        and str(row.get("worktree")) == str(worktree)
+        and list(row.get("targets") or []) == list(targets)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: str(row["time"]))
+    previous = candidates[-1]
+    when = datetime.fromisoformat(str(previous["time"]).replace("Z", "+00:00"))
+    if previous.get("exit") == 0 or (cutoff - when).total_seconds() > window:
+        return None
+    return (
+        "REPEAT_FAIL: the previous build of these targets also failed within "
+        f"{window // 60} minute(s). Read every error at once with "
+        "`lean_diagnostic_messages` on the edited file, and use `lean_goal` or "
+        "`lean_hover_info` for a type mismatch, before building again."
+    )
+
+
+def _digest_fields(digests: tuple[Optional[str], Optional[str]]) -> dict[str, str]:
+    toolchain, manifest = digests
+    fields = {}
+    if toolchain:
+        fields["toolchain_digest"] = toolchain
+    if manifest:
+        fields["manifest_digest"] = manifest
+    return fields
+
+
+def _dependency_revision(worktree: Path, dependency: str) -> tuple[Optional[str], str]:
+    """Read the pinned revision Lake resolved, refusing a non-Git dependency."""
+    try:
+        manifest = json.loads((worktree / "lake-manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"lake-manifest.json is unreadable: {exc}"
+    for package in manifest.get("packages") or []:
+        if not isinstance(package, dict) or package.get("name") != dependency:
+            continue
+        if package.get("type") != "git" or not isinstance(package.get("rev"), str):
+            return None, f"dependency {dependency} is no longer a Git-pinned package"
+        return str(package["rev"]), f"{dependency} pinned at {package['rev']}"
+    return None, f"dependency {dependency} is absent from the resolved manifest"
+
+
 def _process_group_alive(pgid: int) -> bool:
     try:
         os.killpg(pgid, 0)
@@ -722,14 +1256,26 @@ def run_lake_build(
     goal: str,
     targets: list[str],
     *,
-    memory_gib: int = DEFAULT_MEMORY_GIB,
-    contention: str = "sensitive",
+    memory_gib: Optional[int] = None,
+    contention: Optional[str] = None,
     threads: int = DEFAULT_THREADS,
     probe: bool = False,
+    wait_seconds: Optional[int] = None,
+    census: bool = False,
+    dependency: Optional[str] = None,
     stdout: Optional[TextIO] = None,
 ) -> int:
     output = stdout or os.sys.stdout
     cwd = Path.cwd().resolve()
+    _settings_cache: dict[str, int] = {}
+
+    def settings() -> dict[str, int]:
+        # Loaded only when a tunable is actually consulted, so an explicit
+        # classification and estimate reach Lake without touching the profile.
+        if not _settings_cache:
+            _settings_cache.update(load_admission_settings())
+        return _settings_cache
+
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", goal):
         print(json.dumps({"status": "REFUSED", "detail": "goal label must be a simple stable identifier"}, sort_keys=True), file=output)
         return 2
@@ -743,11 +1289,54 @@ def run_lake_build(
             "detail": f"build cwd belongs to goal {actual_goal!r}, not {goal!r}",
         }, sort_keys=True), file=output)
         return 2
+    _base, suffix = split_worktree_suffix(_apparent_goal(worktree))
+    if census:
+        if suffix != "rehearsal":
+            print(json.dumps({
+                "status": "REFUSED",
+                "detail": (
+                    "--census rewrites the pinned dependency and rebuilds the full "
+                    f"target; it runs only in .worktrees/{goal}-rehearsal"
+                ),
+            }, sort_keys=True), file=output)
+            return 2
+        if not dependency or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", dependency):
+            print(json.dumps({
+                "status": "REFUSED",
+                "detail": "--census requires --dependency NAME naming one Lake dependency",
+            }, sort_keys=True), file=output)
+            return 2
+        if probe:
+            print(json.dumps({
+                "status": "REFUSED", "detail": "--census cannot be combined with --probe",
+            }, sort_keys=True), file=output)
+            return 2
+    elif dependency:
+        print(json.dumps({
+            "status": "REFUSED", "detail": "--dependency is only meaningful with --census",
+        }, sort_keys=True), file=output)
+        return 2
     try:
         real_lake, _, _ = resolve_toolchain(worktree)
     except RuntimeError as exc:
         print(json.dumps({"status": "REFUSED", "detail": str(exc)}, sort_keys=True), file=output)
         return GUARD_REFUSAL_EXIT
+    digests = worktree_digests(worktree)
+    requested_contention = contention
+    evidence: dict[str, Any] = {}
+    if census:
+        contention = "exclusive"
+        evidence["reason"] = "a dependency census rebuilds the full closure"
+    elif contention is None:
+        contention, evidence = classify_contention(
+            worktree, targets, real_lake, settings(), digests
+        )
+    estimate_evidence: dict[str, Any] = {}
+    if memory_gib is None:
+        memory_gib, estimate_evidence = derive_memory_gib(
+            worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB
+        )
+
     lake_args = [str(real_lake), "build"]
     if probe:
         lake_args.append("--no-build")
@@ -765,6 +1354,7 @@ def run_lake_build(
             "threads": threads, "probe": True, "admission": "NOT_REQUIRED_NO_BUILD",
             "contention": contention, "modules_rebuilt": [], "modules_restored": [],
             "module_hashes": {}, "module_seconds": {},
+            **_digest_fields(digests),
         })
         state = "fresh" if completed.returncode == 0 else "stale" if completed.returncode == STALE_EXIT else "error"
         print(json.dumps({"status": state.upper(), "exit": completed.returncode}, sort_keys=True), file=output)
@@ -776,10 +1366,41 @@ def run_lake_build(
         semaphore.ADAPTIVE_LEASE_SECONDS,
         memory_gib=memory_gib,
         contention=contention,
+        wait_seconds=wait_seconds,
+        **(
+            {"poll_seconds": float(settings()["wait_poll_seconds"])}
+            if wait_seconds is not None else {}
+        ),
     )
     if not admitted:
-        print(json.dumps({"status": "REFUSED", "admission": admission}, sort_keys=True), file=output)
+        print(json.dumps({
+            "status": "REFUSED",
+            "admission": admission,
+            "contention": contention,
+            "requested_contention": requested_contention,
+            "evidence": evidence,
+            "memory_gib": memory_gib,
+            "estimate": estimate_evidence,
+        }, sort_keys=True), file=output)
         return 2
+    dependency_rev: Optional[str] = None
+    if census:
+        update = subprocess.run(
+            [str(real_lake), "update", str(dependency)],
+            cwd=worktree, text=True, capture_output=True, check=False,
+        )
+        print(update.stdout, end="", file=output)
+        print(update.stderr, end="", file=output)
+        dependency_rev, dependency_detail = _dependency_revision(worktree, str(dependency))
+        if update.returncode != 0 or dependency_rev is None:
+            semaphore.adaptive_release(goal)
+            print(json.dumps({
+                "status": "REFUSED",
+                "detail": f"dependency census aborted before building: {dependency_detail}",
+                "exit": update.returncode,
+            }, sort_keys=True), file=output)
+            return update.returncode or 2
+        digests = worktree_digests(worktree)
     try:
         priority_launcher = guard_bin() / "nice"
     except (OSError, RuntimeError) as exc:
@@ -854,6 +1475,14 @@ def run_lake_build(
         "modules_rebuilt": rebuilt, "modules_restored": restored,
         "module_hashes": hashes, "module_seconds": module_seconds,
         "toolchain": str(real_lake), "renewals": renewer.verdicts if renewer else [],
+        "memory_gib": memory_gib,
+        "evidence_contention": contention,
+        "estimate_source": str(estimate_evidence.get("source", "explicit")),
+        **({"requested_contention": requested_contention} if requested_contention else {}),
+        **({"outcome": "killed"} if interrupted else {}),
+        **({"census": True, "dependency": str(dependency)} if census else {}),
+        **({"dependency_rev": dependency_rev} if dependency_rev else {}),
+        **_digest_fields(digests),
     }
     if cleanup_proved:
         released, release_detail = semaphore.adaptive_release(goal)
@@ -869,8 +1498,9 @@ def run_lake_build(
         record["exit"] = exit_code
     for signum, handler in prior_handlers.items():
         signal.signal(signum, handler)
+    hint = repeat_failure(worktree, targets, settings()) if exit_code == 1 else None
     append_ledger(record)
-    print(json.dumps({
+    summary: dict[str, Any] = {
         "status": "OK" if exit_code == 0 else "ERROR", "exit": exit_code,
         "wall_seconds": round(wall, 3), "peak_rss_mib": round(sampler.peak_rss_mib, 1) if sampler and sampler.samples else None,
         "peak_lean_rss_mib": round(sampler.peak_lean_rss_mib, 1) if sampler and sampler.samples else None,
@@ -879,5 +1509,24 @@ def run_lake_build(
         "sampling_unavailable": sampler.unavailable_samples if sampler else 0,
         "modules_rebuilt": len(rebuilt), "modules_restored": len(restored), "admission": admission,
         "interrupted": interrupted,
-    }, sort_keys=True), file=output)
+        "contention": contention,
+        "requested_contention": requested_contention,
+        "evidence": evidence,
+        "memory_gib": memory_gib,
+        "estimate": estimate_evidence,
+    }
+    if interrupted:
+        summary["outcome"] = "killed"
+    if census:
+        summary["dependency"] = dependency
+        summary["dependency_rev"] = dependency_rev
+    if hint:
+        summary["hint"] = hint
+    if rebuilt:
+        summary["restart_lean_server"] = (
+            f"rebuilt {len(rebuilt)} module(s): {', '.join(rebuilt[:12])}"
+            + ("…" if len(rebuilt) > 12 else "")
+            + " — restart the Lean server before trusting diagnostics in files that import them"
+        )
+    print(json.dumps(summary, sort_keys=True), file=output)
     return exit_code

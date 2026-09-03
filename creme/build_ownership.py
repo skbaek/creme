@@ -256,12 +256,75 @@ def _valid_ledger_row(row: Any) -> bool:
 # `wait-acquire` is the outcome of a queued request and decides a lock-out
 # exactly as a direct acquisition does. `wait-enqueue` is not a decision.
 ACQUIRE_ACTIONS = ("adaptive-acquire", "soft-acquire", "hard-acquire", "wait-acquire")
+QUEUE_OUTCOME_ACTIONS = ("wait-acquire", "wait-dropped")
+RELEASE_ACTIONS = ("adaptive-release", "hard-release", "wind-down")
 _VERDICT_TOKEN = re.compile(r"^([A-Z][A-Z_]*):")
 
 
 def _verdict_token(row: dict[str, Any]) -> str:
     match = _VERDICT_TOKEN.match(str(row.get("detail", "")))
     return match.group(1) if match else "UNCLASSIFIED"
+
+
+def _hard_hold_intervals(
+    rows: list[dict[str, Any]], window_end: datetime
+) -> list[tuple[datetime, datetime, str]]:
+    """Reconstruct when *some* label held the host exclusively.
+
+    A hold's own row says which kind admission selected, so the intervals come
+    from the log rather than from a second source that could disagree with it.
+    """
+    intervals: list[tuple[datetime, datetime, str]] = []
+    holder: Optional[tuple[str, datetime]] = None
+    for row in rows:
+        action, verdict = str(row["action"]), str(row["verdict"])
+        if verdict != "OK":
+            continue
+        if action in ACQUIRE_ACTIONS and "ADMITTED_HARD" in str(row.get("detail", "")):
+            holder = (str(row["label"]), row["when"])
+        elif action in RELEASE_ACTIONS and holder and str(row["label"]) == holder[0]:
+            intervals.append((holder[1], row["when"], holder[0]))
+            holder = None
+    if holder:
+        intervals.append((holder[1], window_end, holder[0]))
+    return intervals
+
+
+def _queue_episodes(
+    rows: list[dict[str, Any]], window_end: datetime
+) -> dict[str, list[dict[str, Any]]]:
+    """Pair every `wait-enqueue` with the decision that ended it.
+
+    An enqueue with no outcome row is reported `UNRESOLVED` and bounded by the
+    label's next enqueue or the window's end.  Reporting it as zero would make
+    a wait somebody cancelled look like a wait that never happened.
+    """
+    episodes: dict[str, list[dict[str, Any]]] = {}
+    open_at: dict[str, datetime] = {}
+
+    def close(label: str, start: datetime, end: datetime, outcome: str) -> None:
+        episodes.setdefault(label, []).append({
+            "start": start, "end": end, "outcome": outcome,
+            "seconds": max(0.0, (end - start).total_seconds()),
+        })
+
+    for row in rows:
+        label, action = str(row["label"]), str(row["action"])
+        if action == "wait-enqueue":
+            if label in open_at:
+                close(label, open_at.pop(label), row["when"], "UNRESOLVED")
+            open_at[label] = row["when"]
+        elif action in QUEUE_OUTCOME_ACTIONS:
+            start = open_at.pop(label, None)
+            if start is None:
+                continue
+            outcome = (
+                "ADMITTED" if str(row["verdict"]) == "OK" else _verdict_token(row)
+            )
+            close(label, start, row["when"], outcome)
+    for label, start in open_at.items():
+        close(label, start, window_end, "UNRESOLVED")
+    return episodes
 
 
 def coordination_rollup(
@@ -289,6 +352,13 @@ def coordination_rollup(
             "lockout_seconds": 0.0,
             "lockout_open": False,
             "lockout_open_seconds": 0.0,
+            "queue_episodes": 0,
+            "queue_outcomes": {},
+            "queue_seconds_total": 0.0,
+            "queue_seconds_longest": 0.0,
+            "queue_seconds_no_hard_hold": 0.0,
+            "admissions_of_other_labels_while_queued": 0,
+            "admissions_of_other_labels_by_label": {},
         })
 
     for label in labels:
@@ -324,7 +394,52 @@ def coordination_rollup(
         record["lockout_episodes"] += 1
         record["lockout_open_seconds"] = max(0.0, (window_end - started).total_seconds())
 
+    # Queue time: every enqueue, the decision that closed it, and how much of
+    # it was spent while nothing held the host exclusively.
+    episodes = _queue_episodes(rows, window_end)
+    hard_intervals = _hard_hold_intervals(rows, window_end)
+    admissions = [
+        row for row in rows
+        if str(row["action"]) in ACQUIRE_ACTIONS and str(row["verdict"]) == "OK"
+    ]
+
+    def hard_held_seconds(start: datetime, end: datetime) -> float:
+        total = 0.0
+        for hold_start, hold_end, _label in hard_intervals:
+            low, high = max(start, hold_start), min(end, hold_end)
+            if high > low:
+                total += (high - low).total_seconds()
+        return total
+
+    for label, label_episodes in episodes.items():
+        record = entry(label)
+        outcomes: dict[str, int] = {}
+        passed_by: dict[str, int] = {}
+        for episode in label_episodes:
+            outcomes[episode["outcome"]] = outcomes.get(episode["outcome"], 0) + 1
+            record["queue_seconds_total"] += episode["seconds"]
+            record["queue_seconds_longest"] = max(
+                record["queue_seconds_longest"], episode["seconds"]
+            )
+            record["queue_seconds_no_hard_hold"] += max(
+                0.0,
+                episode["seconds"] - hard_held_seconds(episode["start"], episode["end"]),
+            )
+            for row in admissions:
+                if str(row["label"]) == label:
+                    continue
+                if episode["start"] <= row["when"] <= episode["end"]:
+                    passed_by[str(row["label"])] = passed_by.get(str(row["label"]), 0) + 1
+        record["queue_episodes"] = len(label_episodes)
+        record["queue_outcomes"] = dict(sorted(outcomes.items()))
+        record["admissions_of_other_labels_by_label"] = dict(sorted(passed_by.items()))
+        record["admissions_of_other_labels_while_queued"] = sum(passed_by.values())
+
     for record in by_label.values():
+        for key in (
+            "queue_seconds_total", "queue_seconds_longest", "queue_seconds_no_hard_hold",
+        ):
+            record[key] = round(record[key], 1)
         record["lockout_seconds"] = round(record["lockout_seconds"], 1)
         record["lockout_open_seconds"] = round(record["lockout_open_seconds"], 1)
         record["lockout_total_seconds"] = round(
@@ -337,6 +452,101 @@ def coordination_rollup(
         "window_end": (window_end.isoformat().replace("+00:00", "Z")) if rows or until else None,
     }
     return by_label, meta
+
+
+_REASON_BUCKETS = (
+    ("roots unresolved", "roots unresolved"),
+    ("a full target is a broad closure", "full target"),
+    ("a dependency census", "dependency census"),
+    ("stale set is unmeasured", "unmeasured stale set"),
+    ("stale set is", "stale set above the limit"),
+    ("ledger unreadable", "ledger unreadable"),
+    ("worktree toolchain or manifest digest", "digest unavailable"),
+    ("no successful measurement that elaborated", "no elaborating measurement"),
+    ("no successful measurement", "no successful measurement"),
+    ("is not below", "measured peak too high"),
+)
+
+
+def _reason_bucket(reason: str) -> str:
+    for needle, bucket in _REASON_BUCKETS:
+        if needle in reason:
+            return bucket
+    return "other"
+
+
+def _reason_histogram(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Why each build was left `sensitive`, from the row rather than a transcript."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        if str(row.get("contention")) != "sensitive":
+            continue
+        reason = row.get("evidence_reason")
+        if not isinstance(reason, str) or not reason:
+            bucket = (
+                "explicit class (no classification ran)"
+                if row.get("requested_contention")
+                else "unrecorded (row predates evidence_reason)"
+            )
+        else:
+            bucket = _reason_bucket(reason)
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _estimate_source_histogram(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        source = str(row.get("estimate_source") or "unrecorded")
+        if source.startswith("profile default (full target"):
+            bucket = "profile default (full target)"
+        elif source.startswith("profile default"):
+            bucket = "profile default (no measurement)"
+        elif source.startswith("max of"):
+            bucket = "measured"
+        elif source == "explicit":
+            bucket = "explicit"
+        else:
+            bucket = source
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _under_cover(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """How far each admitted estimate fell below the peak it was charged for.
+
+    Computed from the estimate the row carries and the peak it measured, so
+    the +1 GiB margin becomes a measured quantity over any window, including
+    windows recorded before the field existed.
+    """
+    cases: list[dict[str, Any]] = []
+    measured = 0
+    for row in rows:
+        peak = row.get("peak_rss_mib")
+        estimate = row.get("estimate_gib")
+        if estimate is None:
+            estimate = row.get("memory_gib")
+        if not isinstance(peak, (int, float)) or isinstance(peak, bool):
+            continue
+        if not isinstance(estimate, (int, float)) or isinstance(estimate, bool):
+            continue
+        measured += 1
+        gap = round(float(peak) / 1024.0 - float(estimate), 2)
+        if gap > 0:
+            cases.append({
+                "time": str(row.get("time")),
+                "targets": list(row.get("targets") or []),
+                "estimate_gib": estimate,
+                "peak_gib": round(float(peak) / 1024.0, 2),
+                "under_cover_gib": gap,
+            })
+    cases.sort(key=lambda case: case["time"])
+    return {
+        "rows_with_an_estimate_and_a_peak": measured,
+        "under_covered_rows": len(cases),
+        "worst_under_cover_gib": max((case["under_cover_gib"] for case in cases), default=0.0),
+        "cases": cases,
+    }
 
 
 def ledger_rollup(since: str, until: Optional[str] = None) -> dict[str, Any]:
@@ -402,6 +612,22 @@ def ledger_rollup(since: str, until: Optional[str] = None) -> dict[str, Any]:
             "lockout_open": coordinated.get("lockout_open", False),
             "lockout_open_seconds": coordinated.get("lockout_open_seconds", 0.0),
             "lockout_total_seconds": coordinated.get("lockout_total_seconds", 0.0),
+            "queue_episodes": coordinated.get("queue_episodes", 0),
+            "queue_outcomes": coordinated.get("queue_outcomes", {}),
+            "queue_seconds_total": coordinated.get("queue_seconds_total", 0.0),
+            "queue_seconds_longest": coordinated.get("queue_seconds_longest", 0.0),
+            "queue_seconds_no_hard_hold": coordinated.get(
+                "queue_seconds_no_hard_hold", 0.0
+            ),
+            "admissions_of_other_labels_while_queued": coordinated.get(
+                "admissions_of_other_labels_while_queued", 0
+            ),
+            "admissions_of_other_labels_by_label": coordinated.get(
+                "admissions_of_other_labels_by_label", {}
+            ),
+            "sensitive_reasons": _reason_histogram(goal_builds),
+            "estimate_sources": _estimate_source_histogram(goal_builds),
+            "estimate_under_cover": _under_cover(goal_builds),
         }
     all_classes: dict[str, int] = {}
     for row in builds:

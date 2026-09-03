@@ -1261,5 +1261,164 @@ def _iso_recent() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+class QueueRollupTest(unittest.TestCase):
+    """B4/B7b/B8c: queue time, reasons, and under-cover as roll-up metrics."""
+
+    BUILD = {
+        "kind": "build", "goal": "g", "targets": ["T"], "command": ["lake", "build", "T"],
+        "wall_seconds": 1.0, "threads": 2, "probe": False, "admission": "ADMITTED_HARD",
+        "modules_rebuilt": [], "modules_restored": [], "module_hashes": {},
+        "module_seconds": {}, "worktree": "/a", "exit": 0, "contention": "sensitive",
+    }
+
+    def test_queue_time_outcomes_pass_overs_and_free_host_time(self) -> None:
+        with _ledger_and_log() as (ledger, log):
+            _write_ledger(ledger, [("2026-09-03T01:00:00Z", dict(self.BUILD))])
+            _write_log(log, [
+                # `big` queues at 01:00 and is passed by `small` twice; a hard
+                # hold covers only the first five minutes of its wait.
+                ("2026-09-03T01:00:00Z", "wait-enqueue", "big", "OK", "position=1"),
+                ("2026-09-03T01:00:10Z", "adaptive-acquire", "holder", "OK", "ADMITTED_HARD: in"),
+                ("2026-09-03T01:02:00Z", "wait-enqueue", "small", "OK", "position=2"),
+                ("2026-09-03T01:05:10Z", "adaptive-release", "holder", "OK", "hard hold released"),
+                ("2026-09-03T01:06:00Z", "wait-acquire", "small", "OK", "ADMITTED_SOFT: waited=240s"),
+                ("2026-09-03T01:08:00Z", "adaptive-acquire", "small", "OK", "ADMITTED_SOFT: again"),
+                ("2026-09-03T01:10:00Z", "wait-acquire", "big", "REFUSED",
+                 "WAIT_TIMEOUT: no admission within 600s; dominant verdict LIGHT_ONLY"),
+            ])
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        big = report["by_goal"].get("big") or {}
+        self.assertEqual(big["queue_episodes"], 1)
+        self.assertEqual(big["queue_outcomes"], {"WAIT_TIMEOUT": 1})
+        self.assertEqual(big["queue_seconds_total"], 600.0)
+        self.assertEqual(big["queue_seconds_longest"], 600.0)
+        self.assertEqual(big["queue_seconds_no_hard_hold"], 300.0)
+        self.assertEqual(big["admissions_of_other_labels_while_queued"], 3)
+        self.assertEqual(
+            big["admissions_of_other_labels_by_label"], {"holder": 1, "small": 2}
+        )
+
+    def test_an_enqueue_with_no_outcome_is_unresolved_not_zero(self) -> None:
+        with _ledger_and_log() as (_ledger, log):
+            _write_log(log, [
+                ("2026-09-03T01:00:00Z", "wait-enqueue", "g", "OK", "position=1"),
+            ])
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T01:30:00Z")
+        goal = report["by_goal"]["g"]
+        self.assertEqual(goal["queue_outcomes"], {"UNRESOLVED": 1})
+        self.assertEqual(goal["queue_seconds_total"], 1800.0)
+
+    def test_a_cancelled_and_a_dropped_wait_are_their_own_outcomes(self) -> None:
+        with _ledger_and_log() as (_ledger, log):
+            _write_log(log, [
+                ("2026-09-03T01:00:00Z", "wait-enqueue", "g", "OK", "position=1"),
+                ("2026-09-03T01:02:00Z", "wait-acquire", "g", "REFUSED",
+                 "WAIT_CANCELLED: the waiting process ended before the queue decided"),
+                ("2026-09-03T01:03:00Z", "wait-enqueue", "h", "OK", "position=1"),
+                ("2026-09-03T01:04:00Z", "wait-dropped", "h", "REFUSED",
+                 "WAIT_DROPPED: the waiting process is gone"),
+            ])
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        self.assertEqual(
+            report["by_goal"]["g"]["queue_outcomes"], {"WAIT_CANCELLED": 1}
+        )
+        self.assertEqual(
+            report["by_goal"]["h"]["queue_outcomes"], {"WAIT_DROPPED": 1}
+        )
+
+    def test_two_goals_with_no_queue_report_zeros(self) -> None:
+        with _ledger_and_log() as (ledger, log):
+            _write_ledger(ledger, [
+                ("2026-09-03T01:00:00Z", dict(self.BUILD)),
+                ("2026-09-03T01:05:00Z", {**self.BUILD, "goal": "h"}),
+            ])
+            log.write_text("", encoding="utf-8")
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        for goal in ("g", "h"):
+            record = report["by_goal"][goal]
+            self.assertEqual(record["queue_episodes"], 0)
+            self.assertEqual(record["queue_outcomes"], {})
+            self.assertEqual(record["queue_seconds_total"], 0.0)
+            self.assertEqual(record["admissions_of_other_labels_while_queued"], 0)
+
+    def test_the_reason_histogram_reads_the_row_not_a_transcript(self) -> None:
+        with _ledger_and_log() as (ledger, _log):
+            _write_ledger(ledger, [
+                ("2026-09-03T01:00:00Z", {
+                    **self.BUILD, "evidence_reason": "roots unresolved: lakefile.lean is unreadable",
+                }),
+                ("2026-09-03T01:01:00Z", {
+                    **self.BUILD, "evidence_reason": "stale set is unmeasured (limit 8)",
+                }),
+                ("2026-09-03T01:02:00Z", {
+                    **self.BUILD, "evidence_reason": "stale set is 12 (limit 8)",
+                }),
+                ("2026-09-03T01:03:00Z", {
+                    **self.BUILD,
+                    "evidence_reason": "measured peak 5.00 GiB is not below 4 GiB",
+                }),
+                ("2026-09-03T01:04:00Z", dict(self.BUILD)),
+                ("2026-09-03T01:05:00Z", {
+                    **self.BUILD, "requested_contention": "sensitive",
+                }),
+                ("2026-09-03T01:06:00Z", {**self.BUILD, "contention": "tolerant"}),
+            ])
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        self.assertEqual(report["by_goal"]["g"]["sensitive_reasons"], {
+            "explicit class (no classification ran)": 1,
+            "measured peak too high": 1,
+            "roots unresolved": 1,
+            "stale set above the limit": 1,
+            "unmeasured stale set": 1,
+            "unrecorded (row predates evidence_reason)": 1,
+        })
+
+    def test_under_cover_uses_the_estimate_the_row_carried(self) -> None:
+        with _ledger_and_log() as (ledger, _log):
+            _write_ledger(ledger, [
+                # A pre-update row carries only `memory_gib`.
+                ("2026-09-03T01:00:00Z", {
+                    **self.BUILD, "memory_gib": 2, "peak_rss_mib": 2488.0,
+                }),
+                # A post-update row carries `estimate_gib` as well.
+                ("2026-09-03T01:01:00Z", {
+                    **self.BUILD, "memory_gib": 4, "estimate_gib": 4,
+                    "peak_rss_mib": 3642.0,
+                }),
+                # A row with no peak cannot be measured either way.
+                ("2026-09-03T01:02:00Z", {**self.BUILD, "memory_gib": 4}),
+            ])
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        under = report["by_goal"]["g"]["estimate_under_cover"]
+        self.assertEqual(under["rows_with_an_estimate_and_a_peak"], 2)
+        self.assertEqual(under["under_covered_rows"], 1)
+        self.assertEqual(under["worst_under_cover_gib"], 0.43)
+        self.assertEqual(under["cases"][0]["estimate_gib"], 2)
+        self.assertEqual(under["cases"][0]["peak_gib"], 2.43)
+
+    def test_the_estimate_source_histogram_separates_full_target_defaults(self) -> None:
+        with _ledger_and_log() as (ledger, _log):
+            _write_ledger(ledger, [
+                ("2026-09-03T01:00:00Z", {
+                    **self.BUILD, "estimate_source": "profile default (full target)",
+                }),
+                ("2026-09-03T01:01:00Z", {
+                    **self.BUILD,
+                    "estimate_source": "profile default (no successful measurement "
+                                       "for these targets on the pinned inputs)",
+                }),
+                ("2026-09-03T01:02:00Z", {
+                    **self.BUILD,
+                    "estimate_source": "max of 2 measured peak(s) (2.00 GiB) plus 1 GiB",
+                }),
+            ])
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        self.assertEqual(report["by_goal"]["g"]["estimate_sources"], {
+            "measured": 1,
+            "profile default (full target)": 1,
+            "profile default (no measurement)": 1,
+        })
+
+
 if __name__ == "__main__":
     unittest.main()

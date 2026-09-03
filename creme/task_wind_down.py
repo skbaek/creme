@@ -18,6 +18,16 @@ class WorktreeScopeError(ValueError):
     pass
 
 
+class NoGoalWorktreeError(WorktreeScopeError):
+    """The layout is readable and simply holds no worktree for this goal.
+
+    Wind-down treats this exactly like any other scope failure.  Idle-hold
+    attribution distinguishes it: a goal with no Jaune/Blanc worktree cannot
+    own a Lean process by working directory, which is a complete answer rather
+    than an uninspectable one.
+    """
+
+
 def _goal_worktree_roots(label: str, adapter: Adapter) -> tuple[Path, ...]:
     """Resolve the configured per-goal worktrees used as a process boundary."""
     if GOAL_LABEL.fullmatch(label) is None or label in {".", ".."}:
@@ -65,7 +75,7 @@ def _goal_worktree_roots(label: str, adapter: Adapter) -> tuple[Path, ...]:
                 roots.append(resolved)
 
     if not roots:
-        raise WorktreeScopeError(
+        raise NoGoalWorktreeError(
             "no configured per-goal Jaune/Blanc worktree exists; hold retained"
         )
     return tuple(roots)

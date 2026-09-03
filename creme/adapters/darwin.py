@@ -7,6 +7,7 @@ import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Optional
 
 from .base import Adapter, CapabilityResult
 from ..reclaim import (
@@ -213,6 +214,43 @@ class DarwinAdapter(Adapter):
             except ValueError:
                 continue
         return self.result("process_snapshot", "OK", "Darwin process snapshot sampled", {"processes": rows})
+
+    def process_working_directories(self, pids: list[int]) -> CapabilityResult:
+        """Read cwd for each pid with the same `lsof` sample reclamation uses."""
+        wanted = sorted({int(pid) for pid in pids})
+        if not wanted:
+            return self.result(
+                "process_working_directories", "OK",
+                "no pids requested", {"working_directories": {}, "requested": []},
+            )
+        try:
+            sample = self._run([
+                "/usr/sbin/lsof", "-a", "-d", "cwd", "-Fn", "-p",
+                ",".join(str(pid) for pid in wanted),
+            ])
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self.result("process_working_directories", "UNAVAILABLE", str(exc))
+        current: Optional[int] = None
+        cwds: dict[str, str] = {}
+        for line in sample.stdout.splitlines():
+            if line.startswith("p") and line[1:].isdigit():
+                current = int(line[1:])
+            elif line.startswith("n") and current is not None:
+                cwd = line[1:]
+                if cwd and not cwd.endswith(" (deleted)"):
+                    cwds[str(current)] = cwd
+        if not cwds and sample.returncode:
+            # lsof exits nonzero when a pid is gone as well as when the sample
+            # itself failed; an empty answer with a failure is not evidence.
+            return self.result(
+                "process_working_directories", "UNAVAILABLE",
+                "cwd sampling returned no readable entry",
+            )
+        return self.result(
+            "process_working_directories", "OK",
+            f"sampled {len(cwds)} of {len(wanted)} working director(y/ies)",
+            {"working_directories": cwds, "requested": wanted},
+        )
 
     def quiet_host(self) -> CapabilityResult:
         sample = self.telemetry()

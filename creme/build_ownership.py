@@ -1368,7 +1368,10 @@ def run_lake_build(
         contention=contention,
         wait_seconds=wait_seconds,
         **(
-            {"poll_seconds": float(settings()["wait_poll_seconds"])}
+            {
+                "poll_seconds": float(settings()["wait_poll_seconds"]),
+                "announce": lambda line: print(line, file=output, flush=True),
+            }
             if wait_seconds is not None else {}
         ),
     )

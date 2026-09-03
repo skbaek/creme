@@ -56,6 +56,12 @@ There is one compilation owner: probe and build only through
 proof loop, build the catalogue-required full target at checkpoints, and
 restart the Lean server after a coordinated build.
 
+The inner loop is edit → `lean_diagnostic_messages` on the edited file →
+`lean_goal`/`lean_hover_info` for a type mismatch → repeat. Build only when a
+module is registered, an import changes, or a checkpoint or commit is due. A
+clean diagnostics pass on a file whose imports are current is loop evidence
+and does not need confirming with a build.
+
 - Inspect the exact goal before editing. Verify names locally before broad
   search. Use `lean_multi_attempt` only when at least two genuine candidates
   remain unresolved; it evaluates every submitted candidate.
@@ -64,6 +70,10 @@ restart the Lean server after a coordinated build.
   are current and diagnostics are clean.
 - Do not intentionally break a theorem to inspect state, and do not use a build
   as an inner proof-state loop. The command line belongs at loop boundaries.
+- Let the wrapper classify: omit `--contention` and `--memory-gib` and it
+  derives both from the probe's stale closure and the ledger's measured peaks,
+  keeping `sensitive` whenever the evidence is missing or drifted. State a
+  class yourself when you know the build is cold or broad.
 - If MCP is unavailable or stale, repair or restart it. Do not substitute blind
   edits. Follow `docs/guides/lean-edit-loops.md` for the exceptional iterative
   cases.
@@ -127,14 +137,22 @@ memory-headroom probe still works. If headroom itself is unavailable, adaptive
 admission serializes heavy work under a hard hold; it does not infer pressure.
 
 Coordinate every memory-heavy Lean unit with the adaptive semaphore described
-in `docs/guides/execution.md`. Supply a conservative whole-GiB peak estimate.
-Use `contention=sensitive` for cold or unexpectedly broad rebuilds, multiple
-Lean workers, known memory spikes, and any operation whose concurrency could
-make the host unresponsive even when results remain valid; use `exclusive` for
-timing, whole-tree, and mutation work. The decision may admit soft, admit hard,
-or refuse with `DEFER_FOR_HARD`/`LIGHT_ONLY`. Never downgrade it. On refusal,
-reorder the queue and do light work rather than polling or starting the command
-uncoordinated.
+in `docs/guides/execution.md`. Supply a conservative whole-GiB peak estimate,
+or let the owned-build wrapper derive one from measurement. Use
+`contention=sensitive` for cold or unexpectedly broad rebuilds, multiple Lean
+workers, known memory spikes, and any operation whose concurrency could make
+the host unresponsive even when results remain valid; use `exclusive` for
+timing, whole-tree, mutation, and dependency-census work. A non-elaborating
+fixture or static gate is light and needs no hold at all. The decision may
+admit soft, admit hard, or refuse with `DEFER_FOR_HARD`/`LIGHT_ONLY`. Never
+downgrade it.
+
+When a refusal is one another session will lift, add `--wait SECS` to
+`adaptive-acquire` or `creme lake-build`: the request queues under the same
+mutex and returns admitted, timed out, or refused for a reason waiting cannot
+change. Never write a shell loop around `semaphore status`. On a refusal that
+waiting cannot fix, reorder and do light work rather than starting the command
+uncoordinated. A hold covers one elaborating command; release between gates.
 
 Run `semaphore renew GOAL` before each further heavy unit and at least every
 five minutes in an interactive proof session. `YIELD_HEAVY` gives the older

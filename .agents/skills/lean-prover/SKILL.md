@@ -9,6 +9,28 @@ Use `lean-lsp-mcp` throughout. Never edit blindly or introduce invalid syntax
 to force compiler feedback about a proof (see `AGENTS.md` for the one narrow
 exception: a control whose subject is the tooling itself).
 
+## The loop, in one place
+
+```
+edit
+  → lean_diagnostic_messages on the edited file      (every error, at once)
+  → lean_goal / lean_hover_info for a type mismatch  (what the types are)
+  → repeat from the exact position of what remains
+```
+
+Build **only** when a module is registered, an import changes, or a checkpoint
+or commit is due — not to find out whether an edit compiles. A build reports
+the first error and stops; `lean_diagnostic_messages` reports the whole file.
+Rebuilding after each edit turns the compiler into a slow error enumerator and
+takes a host hold that another session is waiting for.
+
+**A clean `lean_diagnostic_messages` pass on a file whose imports are current
+is loop evidence.** It is complete on its own. Do not follow it with a build
+"to confirm for real". If the diagnostics say `Imports are out of date`, the
+imports are not current: probe, build the narrow target, restart the Lean
+server, and read the diagnostics again — that is the repair, and it is the
+usual reason a clean pass looked untrustworthy.
+
 ## 1. Establish a baseline
 
 - Locate the exact target and capture `lean_diagnostic_messages` before editing.
@@ -24,6 +46,20 @@ exception: a control whose subject is the tooling itself).
   it shells to unowned compilation. Narrow targets belong in the loop; the
   repository catalogue's full target belongs at green checkpoints and still
   runs through the wrapper.
+- Omit `--contention` and `--memory-gib`: the wrapper derives both from the
+  probe's stale closure and the ledger's measured peaks, and keeps `sensitive`
+  whenever that evidence is missing or has drifted. Pass a class yourself only
+  when you know something it cannot — a cold worktree, an expected broad
+  rebuild, a command that spawns several workers.
+- If another session holds the host, add `--wait SECS` and let the request
+  queue; it returns admitted, `WAIT_TIMEOUT`, or refused for a reason waiting
+  cannot change. Never write a shell loop around
+  `~/creme/.semaphore/semaphore status`.
+- The wrapper prints the modules it rebuilt and tells you to restart the Lean
+  server before trusting diagnostics in files that import them. Do it.
+- `hint: REPEAT_FAIL` in the wrapper's JSON means the previous build of these
+  same targets also failed recently. Nothing is refused; it is telling you the
+  next error was already visible in `lean_diagnostic_messages`.
 
 ## 2. Explore without modifying the file
 
@@ -69,7 +105,8 @@ edit, never against a scratch artifact.
 
 - Query `lean_goal` on the modified line with the column omitted to inspect its
   before/after states, or query at the exact start of the next tactic.
-- Run `lean_diagnostic_messages` and compare it with the baseline.
+- Run `lean_diagnostic_messages` and compare it with the baseline. This is the
+  check. It does not need a build behind it.
 - Repair or revert newly introduced errors. Unrelated pre-existing diagnostics
   should remain visible but are not evidence that this edit caused a regression.
 - If goals remain, repeat the exploration-edit-check loop from their exact

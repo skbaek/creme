@@ -82,6 +82,44 @@ class BuildOwnershipTest(unittest.TestCase):
             self.assertNotIn("python3 -m creme\nlake-build", text, surface)
             self.assertIn("~/creme/scripts/creme lake-build", text.replace("\n", " "), surface)
 
+    def test_every_lean_surface_states_the_diagnostics_first_loop(self) -> None:
+        """B6: a reader of any one surface can reproduce the loop."""
+        surfaces = (
+            ROOT / "AGENTS.md",
+            ROOT / "docs" / "guides" / "execution.md",
+            ROOT / "docs" / "guides" / "lean-edit-loops.md",
+            ROOT / ".agents" / "skills" / "lean-prover" / "SKILL.md",
+            ROOT / ".agents" / "skills" / "lean-inspector" / "SKILL.md",
+        )
+        for surface in surfaces:
+            text = " ".join(surface.read_text(encoding="utf-8").split())
+            self.assertIn("lean_diagnostic_messages", text, surface)
+            self.assertIn("imports are current", text.lower(), surface)
+            self.assertIn("loop evidence", text.lower(), surface)
+        for surface in surfaces[:4]:
+            text = " ".join(surface.read_text(encoding="utf-8").split())
+            self.assertIn("--wait", text, surface)
+
+    def test_the_narrow_build_example_no_longer_copies_a_contention_class(self) -> None:
+        text = (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8")
+        narrow = [
+            line for line in text.splitlines()
+            if "lake-build GOAL" in line and "Narrow.Target" in line
+        ]
+        self.assertTrue(narrow)
+        for line in narrow:
+            self.assertNotIn("--contention", line)
+            self.assertNotIn("--memory-gib", line)
+
+    def test_the_guides_forbid_a_hand_rolled_status_poll(self) -> None:
+        for surface in (
+            ROOT / "AGENTS.md",
+            ROOT / "docs" / "guides" / "execution.md",
+            ROOT / ".agents" / "skills" / "lean-prover" / "SKILL.md",
+        ):
+            text = " ".join(surface.read_text(encoding="utf-8").split()).lower()
+            self.assertIn("never write a shell loop around", text, surface)
+
     def test_doctor_validates_every_client_surface(self) -> None:
         checks = check_client_surface(ROOT)
         by_name = {check.name: check for check in checks}

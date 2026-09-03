@@ -100,16 +100,24 @@ python3 -m creme telemetry
 python3 -m creme python-runtime 3.11.9
 ./.semaphore/semaphore status
 ./.semaphore/semaphore adaptive-acquire GOAL --note "proof loop" --memory-gib 4
+./.semaphore/semaphore adaptive-acquire GOAL --note "queued" --wait 600
 python3 -m creme tempdir
 python3 -m creme cache-copy SOURCE DESTINATION
 python3 -m creme reclaim --dry-run
+python3 -m creme reclaim --idle-workers 10
 python3 -m creme reclaim --wind-down GOAL
+python3 -m creme build-ledger --since 2026-09-03 --until 2026-09-03T05:35:00Z
 python3 -m unittest discover -s scripts/tests -v
 ```
 
 Mutating commands are preview-first where practical. `cache-copy` needs
 `--execute`; reclamation proves same-client ancestry from a frozen process
-snapshot and refuses ambiguous subtrees. Task wind-down additionally scopes
+snapshot and refuses ambiguous subtrees. `--idle-workers MIN` narrows that
+proven plan to Lean workers measured idle across two CPU samples, and reports
+every worker outside the caller's ownership boundary instead of signalling it.
+`--wait SECS` queues a request under the same mutex and returns in one call
+rather than inviting a hand-rolled `status` polling loop; it can postpone a
+request but never admits one past a safety floor. Task wind-down additionally scopes
 every candidate to the caller's configured `.worktrees/GOAL` roots, so
 concurrent goals can wind down independently without releasing or killing one
 another.

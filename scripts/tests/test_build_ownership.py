@@ -402,12 +402,13 @@ class BuildOwnershipTest(unittest.TestCase):
     # -- B2/B3: evidence classification and derived estimates ------------
     def _measured(self, ledger: Path, *, peak_mib: float, targets=("T",),
                   worktree="/w", toolchain="tc", manifest="mf", exit_code=0,
-                  time="2026-09-03T01:00:00Z") -> None:
+                  rebuilt=(), time="2026-09-03T01:00:00Z") -> None:
         _write_ledger(ledger, [(time, {
             "kind": "build", "goal": "g", "targets": list(targets),
             "command": ["lake", "build"], "exit": exit_code, "wall_seconds": 1.0,
             "threads": 2, "probe": False, "admission": "ADMITTED_SOFT",
-            "contention": "tolerant", "modules_rebuilt": [], "modules_restored": [],
+            "contention": "tolerant", "modules_rebuilt": list(rebuilt),
+            "modules_restored": [],
             "module_hashes": {}, "module_seconds": {}, "worktree": worktree,
             "peak_rss_mib": peak_mib, "toolchain_digest": toolchain,
             "manifest_digest": manifest,
@@ -415,10 +416,11 @@ class BuildOwnershipTest(unittest.TestCase):
 
     def _classify(self, stale, **kwargs):
         settings = dict(SETTINGS, **kwargs.pop("settings", {}))
-        with patch("creme.build_ownership.stale_module_count", return_value=(stale, "fixture")):
-            return owned.classify_contention(
-                Path("/w"), ["T"], Path("/lake"), settings, ("tc", "mf")
-            )
+        return owned.classify_contention(
+            Path("/w"), ["T"], Path("/lake"), settings, ("tc", "mf"),
+            {"roots": ["T"], "package_roots": ["T"], "resolution": "T (module)",
+             "stale": stale, "detail": "fixture"},
+        )
 
     def test_a_warm_narrow_target_with_a_small_measured_peak_is_tolerant(self) -> None:
         with _ledger_and_log() as (ledger, _):
@@ -465,19 +467,20 @@ class BuildOwnershipTest(unittest.TestCase):
             ledger.write_text("{not json\n", encoding="utf-8")
             self.assertEqual(self._classify(1)[0], "sensitive")
 
-    def test_a_full_target_is_never_auto_tolerant(self) -> None:
+    def test_a_full_target_with_no_readable_configuration_stays_sensitive(self) -> None:
         with _ledger_and_log() as (_ledger, _):
             verdict, evidence = owned.classify_contention(
                 Path("/w"), [], Path("/lake"), SETTINGS, ("tc", "mf")
             )
         self.assertEqual(verdict, "sensitive")
-        self.assertIn("broad closure", evidence["reason"])
+        self.assertIn("roots unresolved", evidence["reason"])
+        self.assertIsNone(evidence["resolved_roots"])
 
     def test_the_estimate_comes_from_measured_peaks_plus_a_margin(self) -> None:
         with _ledger_and_log() as (ledger, _):
             self._measured(ledger, peak_mib=2560.0)
             estimate, evidence = owned.derive_memory_gib(
-                Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8
+                Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8, 0
             )
         self.assertEqual(estimate, 4)          # ceil(2.5) + 1
         self.assertEqual(evidence["rows"], 1)
@@ -486,7 +489,7 @@ class BuildOwnershipTest(unittest.TestCase):
     def test_the_estimate_falls_back_to_the_profile_default(self) -> None:
         with _ledger_and_log() as (_ledger, _):
             estimate, evidence = owned.derive_memory_gib(
-                Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8
+                Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8, 0
             )
         self.assertEqual(estimate, 8)
         self.assertIn("profile default", evidence["source"])
@@ -495,7 +498,7 @@ class BuildOwnershipTest(unittest.TestCase):
         with _ledger_and_log() as (ledger, _):
             self._measured(ledger, peak_mib=100.0)
             estimate, _ = owned.derive_memory_gib(
-                Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8
+                Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8, 0
             )
         self.assertEqual(estimate, 2)
 
@@ -906,6 +909,356 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
             )
         self.assertEqual(events, ["hash", "release", "ledger"])
         self.assertEqual(captured[0]["module_hashes"], {"M": "first"})
+
+
+class TargetResolutionTest(unittest.TestCase):
+    """B5/B7/B8: full and package targets classified from evidence."""
+
+    JAUNE_SHAPED = (
+        "import Lake\nopen Lake DSL\n\n"
+        "package \u00abpkg\u00bb where\n\n"
+        "@[default_target]\nlean_lib \u00abLib\u00bb where\n\n"
+        "@[default_target]\nlean_exe \u00abpkg\u00bb where\n  root := `Main\n\n"
+        "lean_exe \u00abprobe\u00bb where\n  root := `Probe\n"
+    )
+    BLANC_SHAPED = (
+        "import Lake\nopen Lake DSL\n\n"
+        "package \u00abblanc\u00bb where\n\n"
+        "@[default_target]\nlean_lib \u00abLib\u00bb where\n"
+        "lean_exe \u00abblanc\u00bb where\n  root := `Main\n"
+    )
+
+    def worktree(self, lakefile: str) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "lakefile.lean").write_text(lakefile, encoding="utf-8")
+        (root / "Lib").mkdir()
+        (root / "Lib.lean").write_text("import Lib.Core\nimport Lib.Top\n", encoding="utf-8")
+        (root / "Lib" / "Core.lean").write_text("def c := 1\n", encoding="utf-8")
+        (root / "Lib" / "Top.lean").write_text("import Lib.Core\ndef t := 2\n", encoding="utf-8")
+        (root / "Main.lean").write_text("import Lib\ndef main := pure ()\n", encoding="utf-8")
+        (root / "Probe.lean").write_text("def p := 3\n", encoding="utf-8")
+        return root
+
+    def probe(self, frontier: list[str]):
+        return SimpleNamespace(
+            returncode=3,
+            stdout="Some required targets logged failures:\n"
+                   + "".join(f"- {name}\n" for name in frontier),
+            stderr="",
+        )
+
+    # -- resolution -------------------------------------------------------
+    def test_a_full_target_resolves_to_the_default_target_roots(self) -> None:
+        root = self.worktree(self.JAUNE_SHAPED)
+        closure, package, detail = owned.resolve_target_roots(root, [])
+        self.assertEqual(closure, ["Lib", "Main"])
+        self.assertEqual(package, ["Lib", "Main", "Probe"])
+        self.assertIn("full target", detail)
+
+    def test_a_package_shaped_exe_target_resolves_to_its_root(self) -> None:
+        root = self.worktree(self.JAUNE_SHAPED)
+        closure, _package, detail = owned.resolve_target_roots(root, ["pkg"])
+        self.assertEqual(closure, ["Main"])
+        self.assertIn("pkg -> ['Main']", detail)
+
+    def test_a_library_target_resolves_to_its_library_roots(self) -> None:
+        root = self.worktree(self.BLANC_SHAPED)
+        closure, _package, _detail = owned.resolve_target_roots(root, ["Lib"])
+        self.assertEqual(closure, ["Lib"])
+
+    def test_a_module_target_is_its_own_root(self) -> None:
+        root = self.worktree(self.BLANC_SHAPED)
+        closure, _package, detail = owned.resolve_target_roots(root, ["Lib.Top"])
+        self.assertEqual(closure, ["Lib.Top"])
+        self.assertIn("(module)", detail)
+
+    # -- B5 positive: a warm full target and a warm package target ---------
+    def _row(self, ledger: Path, worktree: Path, targets, peak_mib, rebuilt=("Lib.Top",)):
+        _write_ledger(ledger, [("2026-09-03T01:00:00Z", {
+            "kind": "build", "goal": "g", "targets": list(targets),
+            "command": ["lake", "build"], "exit": 0, "wall_seconds": 3.0,
+            "threads": 2, "probe": False, "admission": "ADMITTED_HARD",
+            "contention": "sensitive", "modules_rebuilt": list(rebuilt),
+            "modules_restored": [], "module_hashes": {}, "module_seconds": {},
+            "worktree": str(worktree), "peak_rss_mib": peak_mib,
+            "toolchain_digest": "tc", "manifest_digest": "mf",
+        })])
+
+    def test_a_warm_full_target_with_a_small_closure_is_tolerant(self) -> None:
+        root = self.worktree(self.BLANC_SHAPED)
+        with _ledger_and_log() as (ledger, _):
+            self._row(ledger, root, [], 2048.0)
+            with patch("creme.build_ownership.subprocess.run",
+                       return_value=self.probe(["Lib.Core"])):
+                verdict, evidence = owned.classify_contention(
+                    root, [], Path("/lake"), SETTINGS, ("tc", "mf")
+                )
+        self.assertEqual(verdict, "tolerant", evidence)
+        self.assertEqual(evidence["resolved_roots"], ["Lib"])
+        self.assertEqual(evidence["stale_modules"], 3)
+
+    def test_a_warm_package_target_is_classified_by_its_closure(self) -> None:
+        root = self.worktree(self.JAUNE_SHAPED)
+        with _ledger_and_log() as (ledger, _):
+            self._row(ledger, root, ["pkg"], 2048.0)
+            with patch("creme.build_ownership.subprocess.run",
+                       return_value=self.probe(["Lib.Top"])):
+                verdict, evidence = owned.classify_contention(
+                    root, ["pkg"], Path("/lake"), SETTINGS, ("tc", "mf")
+                )
+        self.assertEqual(verdict, "tolerant", evidence)
+        self.assertEqual(evidence["resolved_roots"], ["Main"])
+        self.assertEqual(evidence["stale_modules"], 3)   # Top, Lib, Main
+
+    # -- B5 controls ------------------------------------------------------
+    def test_an_unreadable_lake_configuration_names_the_failure(self) -> None:
+        root = self.worktree(self.BLANC_SHAPED)
+        (root / "lakefile.lean").write_text("import Lake\npackage p where\n", encoding="utf-8")
+        with _ledger_and_log() as (ledger, _):
+            self._row(ledger, root, [], 2048.0)
+            verdict, evidence = owned.classify_contention(
+                root, [], Path("/lake"), SETTINGS, ("tc", "mf")
+            )
+        self.assertEqual(verdict, "sensitive")
+        self.assertIn("roots unresolved", evidence["reason"])
+        self.assertIn("no lean_lib or lean_exe target", evidence["reason"])
+
+    def test_a_stale_dependency_in_the_frontier_stays_sensitive(self) -> None:
+        root = self.worktree(self.BLANC_SHAPED)
+        with _ledger_and_log() as (ledger, _):
+            self._row(ledger, root, [], 2048.0)
+            with patch("creme.build_ownership.subprocess.run",
+                       return_value=self.probe(["Mathlib.Order.Basic"])):
+                verdict, evidence = owned.classify_contention(
+                    root, [], Path("/lake"), SETTINGS, ("tc", "mf")
+                )
+        self.assertEqual(verdict, "sensitive")
+        self.assertIn("unmeasured", evidence["reason"])
+
+    def test_a_closure_above_the_limit_stays_sensitive(self) -> None:
+        root = self.worktree(self.BLANC_SHAPED)
+        with _ledger_and_log() as (ledger, _):
+            self._row(ledger, root, [], 2048.0)
+            with patch("creme.build_ownership.subprocess.run",
+                       return_value=self.probe(["Lib.Core"])):
+                verdict, evidence = owned.classify_contention(
+                    root, [], Path("/lake"), SETTINGS,
+                    ("tc", "mf"),
+                )
+                self.assertEqual(verdict, "tolerant")
+                narrow = dict(SETTINGS, tolerant_module_count=2)
+                verdict, evidence = owned.classify_contention(
+                    root, [], Path("/lake"), narrow, ("tc", "mf")
+                )
+        self.assertEqual(verdict, "sensitive")
+        self.assertIn("stale set is 3", evidence["reason"])
+
+    # -- B7: estimates are sized from elaboration --------------------------
+    def test_a_zero_rebuild_row_does_not_size_a_build_with_a_stale_set(self) -> None:
+        root = self.worktree(self.BLANC_SHAPED)
+        with _ledger_and_log() as (ledger, _):
+            self._row(ledger, root, ["Lib.Top"], 645.0, rebuilt=())
+            estimate, evidence = owned.derive_memory_gib(
+                root, ["Lib.Top"], SETTINGS, ("tc", "mf"), 8, 10
+            )
+        self.assertEqual(estimate, 8)
+        self.assertIn("elaborated a module", evidence["source"])
+        self.assertTrue(evidence["keyed_on_elaboration"])
+
+    def test_the_same_row_still_sizes_a_build_with_an_empty_stale_set(self) -> None:
+        root = self.worktree(self.BLANC_SHAPED)
+        with _ledger_and_log() as (ledger, _):
+            self._row(ledger, root, ["Lib.Top"], 645.0, rebuilt=())
+            estimate, evidence = owned.derive_memory_gib(
+                root, ["Lib.Top"], SETTINGS, ("tc", "mf"), 8, 0
+            )
+        self.assertEqual(estimate, 2)
+        self.assertFalse(evidence["keyed_on_elaboration"])
+
+    def test_an_unmeasured_stale_set_is_keyed_on_elaboration(self) -> None:
+        root = self.worktree(self.BLANC_SHAPED)
+        with _ledger_and_log() as (ledger, _):
+            self._row(ledger, root, ["Lib.Top"], 645.0, rebuilt=())
+            estimate, evidence = owned.derive_memory_gib(
+                root, ["Lib.Top"], SETTINGS, ("tc", "mf"), 8, None
+            )
+        self.assertEqual(estimate, 8)
+        self.assertTrue(evidence["keyed_on_elaboration"])
+
+    def test_a_full_target_estimate_now_uses_its_measured_rows(self) -> None:
+        root = self.worktree(self.BLANC_SHAPED)
+        with _ledger_and_log() as (ledger, _):
+            self._row(ledger, root, [], 2560.0)
+            estimate, evidence = owned.derive_memory_gib(
+                root, [], SETTINGS, ("tc", "mf"), 8, 2
+            )
+        self.assertEqual(estimate, 4)
+        self.assertEqual(evidence["rows"], 1)
+
+
+class RowEvidenceTest(unittest.TestCase):
+    """B8: reasons, stale detail, hints, and under-cover reach the row."""
+
+    def run_build(self, ledger: Path, *, exit_code: int, rebuilt: list[str],
+                  peak_mib: float, memory_gib: int = 4, contention="sensitive"):
+        captured: list[dict] = []
+        output = io.StringIO()
+
+        class FakeProc:
+            pid = 4321
+            stdout = iter([])
+
+            def wait(self, timeout=None):
+                return exit_code
+
+        class FakeSampler:
+            def __init__(self, _pid):
+                self.peak_rss_mib = peak_mib
+                self.peak_lean_rss_mib = peak_mib
+                self.max_concurrent_lean = 1
+                self.samples = 4
+                self.unavailable_samples = 0
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        class FakeRenewer:
+            def __init__(self, *_args, **_kwargs):
+                self.verdicts: list[str] = []
+                self.refused = False
+                self.cleanup_proved = True
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), \
+             patch("creme.build_ownership.resolve_toolchain",
+                   return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))), \
+             patch("creme.build_ownership.semaphore.adaptive_acquire",
+                   return_value=(True, "ADMITTED_HARD")), \
+             patch("creme.build_ownership.semaphore.adaptive_release",
+                   return_value=(True, "released")), \
+             patch("creme.build_ownership.guard_bin", return_value=Path("/guard")), \
+             patch("creme.build_ownership.subprocess.Popen", return_value=FakeProc()), \
+             patch("creme.build_ownership.ProcessSampler", FakeSampler), \
+             patch("creme.build_ownership.RenewalThread", FakeRenewer), \
+             patch("creme.build_ownership._process_group_alive", return_value=False), \
+             patch("creme.build_ownership._module_hashes", return_value={}), \
+             patch("creme.build_ownership._parse_build_output",
+                   return_value=(list(rebuilt), [], {})), \
+             patch("creme.build_ownership._swap_gib", return_value=1.0), \
+             patch("creme.build_ownership.append_ledger", side_effect=captured.append):
+            code = owned.run_lake_build(
+                "g", ["T"], contention=contention, memory_gib=memory_gib, stdout=output
+            )
+        return code, captured[0], output.getvalue()
+
+    def test_the_row_records_the_estimate_and_its_under_cover(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            _code, row, _text = self.run_build(
+                ledger, exit_code=0, rebuilt=["A"], peak_mib=2560.0, memory_gib=2
+            )
+        self.assertEqual(row["estimate_gib"], 2)
+        self.assertEqual(row["estimate_under_cover_gib"], 0.5)
+
+    def test_an_estimate_that_covered_the_build_records_zero(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            _code, row, _text = self.run_build(
+                ledger, exit_code=0, rebuilt=["A"], peak_mib=3642.0, memory_gib=4
+            )
+        self.assertEqual(row["estimate_under_cover_gib"], 0.0)
+
+    def test_the_restart_instruction_is_its_own_stdout_line(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            _code, _row, text = self.run_build(
+                ledger, exit_code=0, rebuilt=["A", "B"], peak_mib=100.0
+            )
+        restart = [line for line in text.splitlines() if line.startswith("restart: ")]
+        self.assertEqual(len(restart), 1)
+        self.assertIn("rebuilt 2 module(s)", restart[0])
+
+    def test_a_repeat_failure_hint_reaches_stdout_and_the_row(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            _write_ledger(ledger, [(_iso_recent(), {
+                "kind": "build", "goal": "g", "targets": ["T"],
+                "command": ["lake", "build"], "exit": 1, "wall_seconds": 1.0,
+                "threads": 2, "probe": False, "admission": "ADMITTED_HARD",
+                "contention": "sensitive", "modules_rebuilt": [], "modules_restored": [],
+                "module_hashes": {}, "module_seconds": {}, "worktree": str(Path.cwd()),
+                "peak_rss_mib": 100.0,
+            })])
+            _code, row, text = self.run_build(
+                ledger, exit_code=1, rebuilt=[], peak_mib=100.0
+            )
+        hints = [line for line in text.splitlines() if line.startswith("hint: ")]
+        self.assertEqual(len(hints), 1)
+        self.assertIn("REPEAT_FAIL", hints[0])
+        self.assertIn("REPEAT_FAIL", row["hint"])
+
+    def test_no_hint_on_a_first_failure_or_after_a_success(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            _code, row, text = self.run_build(
+                ledger, exit_code=1, rebuilt=[], peak_mib=100.0
+            )
+        self.assertNotIn("hint: ", text)
+        self.assertNotIn("hint", row)
+
+    def test_the_row_records_the_evidence_reason_stale_set_and_roots(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            _write_ledger(ledger, [])
+            with patch("creme.build_ownership.stale_evidence", return_value={
+                "roots": ["Main"], "package_roots": ["Main"],
+                "resolution": "pkg -> ['Main']", "stale": 12, "detail": "fixture",
+            }), patch("creme.build_ownership.classify_contention",
+                       return_value=("sensitive", {
+                           "reason": "stale set is 12 (limit 8)",
+                           "stale_modules": 12,
+                           "stale_detail": "probe frontier ['Lib.Core']; 12 module(s)",
+                           "resolved_roots": ["Main"],
+                           "resolution": "pkg -> ['Main']",
+                       })):
+                _code, row, _text = self.run_build(
+                    ledger, exit_code=0, rebuilt=["A"], peak_mib=100.0,
+                    contention=None,
+                )
+        self.assertEqual(row["evidence_reason"], "stale set is 12 (limit 8)")
+        self.assertEqual(row["stale_modules"], 12)
+        self.assertEqual(row["resolved_roots"], ["Main"])
+        self.assertIn("probe frontier", row["stale_detail"])
+        # The row must still satisfy the writer's own schema.
+        self.assertTrue(owned._valid_ledger_row({"schema_version": 1, "time": row.get("time", "2026-09-04T00:00:00Z"), **row}))
+
+    def test_an_older_reader_skips_rather_than_misreads_a_new_row(self) -> None:
+        """Fixed decision 8: unknown entries are reported, never reset."""
+        with _ledger_and_log() as (ledger, _):
+            _write_ledger(ledger, [])
+            _code, row, _text = self.run_build(
+                ledger, exit_code=0, rebuilt=["A"], peak_mib=100.0
+            )
+        legacy_keys = owned._SAFE_LEDGER_KEYS - {
+            "evidence_reason", "resolved_roots", "stale_modules", "stale_detail",
+            "estimate_gib", "estimate_under_cover_gib", "hint",
+        }
+        new_keys = sorted(set(row) - legacy_keys)
+        self.assertEqual(new_keys, ["estimate_gib", "estimate_under_cover_gib"])
+        # This reader tolerates keys it does not know, so a future additive
+        # field cannot make a whole window read as corrupt.
+        self.assertTrue(owned._valid_ledger_row({
+            "schema_version": 1, "time": "2026-09-04T00:00:00Z",
+            **row, "a_field_from_the_future": {"nested": True},
+        }))
+
+
+def _iso_recent() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 if __name__ == "__main__":

@@ -163,12 +163,17 @@ class IdleWorkerTest(unittest.TestCase):
         self.assertEqual((targets, reported), ([], []))
 
     def test_owner_label_prefers_the_holding_goal_then_the_client(self):
-        pattern = re.compile(r"/(?:codex|claude)$")
+        pattern = re.compile(r"/(?:codex|claude)$|claude\.app/", re.IGNORECASE)
         held = self.worker(10, 1.0, ancestry=[{"pid": 4, "command": "/usr/bin/claude"}])
         self.assertEqual(idle_workers.owner_label(held, {4: "goal-a"}, pattern), "goal goal-a")
         self.assertEqual(
             idle_workers.owner_label(held, {}, pattern), "client claude pid 4"
         )
+        # An executable path containing spaces still names the client family.
+        spaced = self.worker(11, 1.0, ancestry=[
+            {"pid": 5, "command": "/Users/a/Library/Application Support/Claude/claude.app/x --flag"},
+        ])
+        self.assertEqual(idle_workers.owner_label(spaced, {}, pattern), "client claude pid 5")
         self.assertIn("unattributed", idle_workers.owner_label(self.worker(10, 1.0), {}, pattern))
 
     def test_pid_narrowing_can_only_shrink_a_proven_target_set(self):

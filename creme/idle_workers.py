@@ -98,9 +98,16 @@ def owner_label(
         if pid in hold_pids:
             return f"goal {hold_pids[pid]}"
     for ancestor in worker.get("ancestry") or []:
-        command = str(ancestor["command"])
-        if client_pattern.search(command):
-            return f"client {command.split(None, 1)[0].rsplit('/', 1)[-1]} pid {ancestor['pid']}"
+        match = client_pattern.search(str(ancestor["command"]))
+        if match:
+            # Name the client family from the matched marker: an executable
+            # path can contain spaces, so the first token is not its name.
+            matched = match.group(0).lower()
+            family = next(
+                (name for name in ("codex", "chatgpt", "claude") if name in matched),
+                "agent",
+            )
+            return f"client {family} pid {ancestor['pid']}"
     return f"unattributed pid {worker.get('ppid')}"
 
 

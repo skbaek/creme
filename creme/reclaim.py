@@ -148,14 +148,38 @@ def ancestry(table: dict[int, Process], pid: int) -> tuple[int, ...]:
     return tuple(chain)
 
 
+def is_lean_worker(command: str) -> bool:
+    """Precise `lean --worker` test for a process that may be terminated."""
+    tokens = command.split()
+    if not tokens:
+        return False
+    return os.path.basename(tokens[0]) == "lean" and "--worker" in tokens[1:]
+
+
 def is_candidate(process: Process) -> bool:
+    """Is this a Lean language server, worker, or Lake server process?
+
+    The executable has to be `lean` or `lake` for the flag forms.  Matching a
+    bare `--worker` anywhere beside the word "lean" also matched any shell
+    whose command line merely quoted those strings, and one such false
+    positive becomes the root of an ownership plan and suppresses every real
+    target under it.  The whole-command forms are kept so that a process this
+    predicate cannot tokenize is still recognized: wind-down must fail safe
+    towards seeing a Lean process, never away from it.
+    """
     command = process.command
-    return (
-        "lean --server" in command
-        or "lean --worker" in command
-        or "lake serve" in command
-        or ("--worker" in command and "lean" in command)
-    )
+    if "lean --server" in command or "lean --worker" in command or "lake serve" in command:
+        return True
+    tokens = command.split()
+    if not tokens:
+        return False
+    executable = os.path.basename(tokens[0])
+    arguments = tokens[1:]
+    if executable == "lean":
+        return "--worker" in arguments or "--server" in arguments
+    if executable == "lake":
+        return "serve" in arguments
+    return False
 
 
 def _client_above(

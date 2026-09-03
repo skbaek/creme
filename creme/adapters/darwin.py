@@ -11,6 +11,7 @@ from pathlib import Path
 from .base import Adapter, CapabilityResult
 from ..reclaim import (
     Process,
+    is_lean_worker as _is_lean_worker,
     narrow_targets,
     parse_cpu_seconds as _parse_cpu_seconds,
     build_plan,
@@ -269,7 +270,7 @@ class DarwinAdapter(Adapter):
                 "ancestry": ancestry(pid),
             }
             for pid, (parent, cpu, rss, command) in sorted(table.items())
-            if "lean" in command and "--worker" in command
+            if _is_lean_worker(command)
         ]
         return self.result(
             "lean_workers", "OK",

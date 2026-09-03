@@ -878,7 +878,89 @@ def worktree_digests(worktree: Path) -> tuple[Optional[str], Optional[str]]:
     )
 
 
-_STALE_RE = re.compile(r"^\s*(?:info:\s*)?([A-Za-z0-9_'.]+)\b.*\bout of date\b", re.IGNORECASE)
+_STALE_FAILURE_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_'.]+)\s*$")
+_IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z0-9_'.]+)")
+
+
+def _module_name(worktree: Path, path: Path) -> str:
+    relative = path.relative_to(worktree).with_suffix("")
+    return ".".join(relative.parts)
+
+
+def package_import_graph(worktree: Path, roots: Iterable[str]) -> Optional[dict[str, set[str]]]:
+    """Map each in-package module to the in-package modules it imports.
+
+    Only sources inside the worktree are read: dependency packages are Git
+    pinned, so their artifacts are either current or would themselves appear
+    in the probe's out-of-date frontier.
+    """
+    graph: dict[str, set[str]] = {}
+    prefixes = {str(root).split(".", 1)[0] for root in roots}
+    if not prefixes:
+        return None
+    try:
+        for prefix in sorted(prefixes):
+            candidates = [worktree / f"{prefix}.lean"]
+            directory = worktree / prefix
+            if directory.is_dir():
+                candidates.extend(sorted(directory.rglob("*.lean")))
+            for path in candidates:
+                if not path.is_file():
+                    continue
+                module = _module_name(worktree, path)
+                imports = set()
+                with path.open(encoding="utf-8", errors="replace") as source:
+                    for line in source:
+                        stripped = line.strip()
+                        if not stripped or stripped.startswith("--"):
+                            continue
+                        match = _IMPORT_RE.match(line)
+                        if match:
+                            imports.add(match.group(1))
+                            continue
+                        # Imports may only appear in the header; the first
+                        # other declaration ends it.
+                        break
+                graph[module] = imports
+    except OSError:
+        return None
+    return {module: {name for name in imports if name in graph} for module, imports in graph.items()}
+
+
+def stale_closure(
+    graph: dict[str, set[str]],
+    targets: Iterable[str],
+    frontier: set[str],
+) -> Optional[int]:
+    """Count the modules a build of ``targets`` would have to elaborate.
+
+    Lake's `--no-build` probe names only the frontier it stopped at, so the
+    frontier alone under-reports what an actual build would elaborate.  The
+    answer is the frontier plus every module in the target's import closure
+    that reaches it.
+    """
+    named = [str(target) for target in targets]
+    if any(target not in graph for target in named):
+        return None
+    closure: set[str] = set()
+    stack = list(named)
+    while stack:
+        module = stack.pop()
+        if module in closure:
+            continue
+        closure.add(module)
+        stack.extend(graph.get(module, ()))
+    if not frontier.issubset(closure | frontier):
+        return None
+    stale = {module for module in frontier if module in closure}
+    changed = True
+    while changed:
+        changed = False
+        for module in closure - stale:
+            if graph.get(module, set()) & stale:
+                stale.add(module)
+                changed = True
+    return len(stale | (frontier & closure))
 
 
 def stale_module_count(
@@ -886,15 +968,15 @@ def stale_module_count(
     targets: list[str],
     real_lake: Path,
 ) -> tuple[Optional[int], str]:
-    """Count the modules a probe reports stale, or explain why it could not.
+    """Count the modules a probe proves out of date, or explain why it cannot.
 
     Exit 0 means nothing is stale.  Exit 3 means Lake refused to build and
-    named what is out of date; anything else is not evidence.
+    named the out-of-date frontier; anything else is not evidence.
     """
     try:
         completed = subprocess.run(
             [str(real_lake), "build", "--no-build", *targets],
-            cwd=worktree, text=True, capture_output=True, check=False, timeout=300,
+            cwd=worktree, text=True, capture_output=True, check=False, timeout=120,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return None, f"probe unavailable: {exc}"
@@ -903,14 +985,32 @@ def stale_module_count(
     if completed.returncode != STALE_EXIT:
         return None, f"probe exited {completed.returncode}; not stale-set evidence"
     output = (completed.stdout or "") + (completed.stderr or "")
-    modules = {
-        match.group(1)
-        for match in (_STALE_RE.match(line) for line in output.splitlines())
-        if match
-    }
-    if not modules:
-        return None, "probe reported stale artifacts without naming modules"
-    return len(modules), f"probe named {len(modules)} out-of-date module(s)"
+    lines = output.splitlines()
+    try:
+        start = next(
+            index for index, line in enumerate(lines)
+            if "logged failures" in line
+        )
+    except StopIteration:
+        return None, "probe reported stale artifacts without naming a frontier"
+    frontier = set()
+    for line in lines[start + 1:]:
+        match = _STALE_FAILURE_RE.match(line)
+        if not match:
+            break
+        frontier.add(match.group(1))
+    if not frontier:
+        return None, "probe named no out-of-date module"
+    graph = package_import_graph(worktree, targets)
+    if graph is None:
+        return None, "package import graph unavailable"
+    count = stale_closure(graph, targets, frontier)
+    if count is None:
+        return None, "targets are outside the package import graph"
+    return count, (
+        f"probe frontier {sorted(frontier)}; {count} module(s) in the target closure "
+        "would be elaborated"
+    )
 
 
 def _measured_rows(

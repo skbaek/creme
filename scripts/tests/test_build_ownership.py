@@ -438,23 +438,60 @@ class BuildOwnershipTest(unittest.TestCase):
             )
         self.assertEqual(estimate, 2)
 
-    def test_stale_set_parsing_counts_named_modules(self) -> None:
+    def test_the_stale_count_is_the_closure_not_the_probe_frontier(self) -> None:
+        # Lake's --no-build probe stops at the first out-of-date module, so the
+        # frontier under-reports what a build would elaborate.  This is the
+        # exact shape observed on the pinned Lean 4.32.1 toolchain.
         completed = SimpleNamespace(
             returncode=3,
-            stdout="info: Blanc.A: package configuration is out of date\n"
-                   "Blanc.B: artifacts are out of date\n"
-                   "unrelated line\n",
+            stdout=(
+                "\u2716 [902/906] Building Blanc.AddressSlot\n"
+                "error: target is out-of-date and needs to be rebuilt\n"
+                "Some required targets logged failures:\n"
+                "- Blanc.AddressSlot\n"
+            ),
             stderr="",
         )
-        with patch("creme.build_ownership.subprocess.run", return_value=completed):
-            count, detail = owned.stale_module_count(Path("/w"), ["T"], Path("/lake"))
-        self.assertEqual(count, 2, detail)
-        with patch("creme.build_ownership.subprocess.run",
-                   return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
-            self.assertEqual(owned.stale_module_count(Path("/w"), ["T"], Path("/lake"))[0], 0)
-        with patch("creme.build_ownership.subprocess.run",
-                   return_value=SimpleNamespace(returncode=1, stdout="boom", stderr="")):
-            self.assertIsNone(owned.stale_module_count(Path("/w"), ["T"], Path("/lake"))[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "Blanc").mkdir()
+            (worktree / "Blanc" / "AddressSlot.lean").write_text("def a := 1\n")
+            (worktree / "Blanc" / "AddressSlotProofs.lean").write_text(
+                "import Blanc.AddressSlot\n\ndef b := 2\n"
+            )
+            with patch("creme.build_ownership.subprocess.run", return_value=completed):
+                count, detail = owned.stale_module_count(
+                    worktree, ["Blanc.AddressSlotProofs"], Path("/lake")
+                )
+            self.assertEqual(count, 2, detail)
+            with patch("creme.build_ownership.subprocess.run",
+                       return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+                self.assertEqual(
+                    owned.stale_module_count(worktree, ["Blanc.AddressSlot"], Path("/lake"))[0], 0
+                )
+            with patch("creme.build_ownership.subprocess.run",
+                       return_value=SimpleNamespace(returncode=1, stdout="boom", stderr="")):
+                self.assertIsNone(
+                    owned.stale_module_count(worktree, ["Blanc.AddressSlot"], Path("/lake"))[0]
+                )
+            # A target outside the package graph is not evidence.
+            with patch("creme.build_ownership.subprocess.run", return_value=completed):
+                self.assertIsNone(
+                    owned.stale_module_count(worktree, ["Blanc.Absent"], Path("/lake"))[0]
+                )
+
+    def test_the_stale_closure_follows_reverse_imports(self) -> None:
+        graph = {
+            "P.Leaf": set(),
+            "P.Mid": {"P.Leaf"},
+            "P.Top": {"P.Mid"},
+            "P.Other": set(),
+        }
+        self.assertEqual(owned.stale_closure(graph, ["P.Top"], {"P.Leaf"}), 3)
+        self.assertEqual(owned.stale_closure(graph, ["P.Mid"], {"P.Leaf"}), 2)
+        # A frontier outside the target's closure costs the target nothing.
+        self.assertEqual(owned.stale_closure(graph, ["P.Other"], {"P.Leaf"}), 0)
+        self.assertIsNone(owned.stale_closure(graph, ["P.Missing"], {"P.Leaf"}))
 
     # -- B6: the repeat-failure hint -------------------------------------
     def test_repeat_fail_needs_a_recent_previous_failure_of_the_same_targets(self) -> None:

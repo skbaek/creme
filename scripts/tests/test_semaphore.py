@@ -1046,6 +1046,22 @@ class QueueVisibilityTest(QueueTest):
         )
         self.assertEqual(announced, [])
 
+    def test_status_shows_the_holder_class_and_age(self):
+        self.hold("holder", memory_gib=4, contention="exclusive")
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("contention=exclusive held=", text)
+
+    def test_a_timeout_names_the_holder_class_and_age(self):
+        self.hold("holder", memory_gib=4, contention="exclusive")
+        ok, detail = self.wait_acquire("queued", seconds=1, poll=0.02)
+        self.assertFalse(ok)
+        self.assertIn("holder at timeout: holder contention=exclusive held=", detail)
+
+    def test_the_timeout_holder_note_carries_no_hold_note(self):
+        self.hold("holder", memory_gib=4, contention="exclusive", note="secret-gate-name")
+        _ok, detail = self.wait_acquire("queued", seconds=1, poll=0.02)
+        self.assertNotIn("secret-gate-name", detail)
+
     # -- B3: every enqueue has an outcome ----------------------------------
     def test_a_cancelled_wait_writes_exactly_one_outcome_row(self):
         self.hold("holder")

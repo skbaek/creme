@@ -968,6 +968,18 @@ class TargetResolutionTest(unittest.TestCase):
         closure, _package, _detail = owned.resolve_target_roots(root, ["Lib"])
         self.assertEqual(closure, ["Lib"])
 
+    def test_an_import_written_in_guillemets_is_read(self) -> None:
+        """Jaune's `Main.lean` writes `import «Jaune».Execution`."""
+        root = self.worktree(self.JAUNE_SHAPED)
+        (root / "Main.lean").write_text(
+            "import \u00abLib\u00bb.Top\ndef main := pure ()\n", encoding="utf-8"
+        )
+        graph = owned.package_import_graph(root, ["Lib", "Main"])
+        self.assertEqual(graph["Main"], {"Lib.Top"})
+        # Dropping the import would report a closure of 1 and could widen the
+        # class on evidence that is not there.
+        self.assertEqual(owned.stale_closure(graph, ["Main"], {"Lib.Core"}), 3)
+
     def test_a_module_target_is_its_own_root(self) -> None:
         root = self.worktree(self.BLANC_SHAPED)
         closure, _package, detail = owned.resolve_target_roots(root, ["Lib.Top"])

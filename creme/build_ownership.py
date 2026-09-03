@@ -1122,8 +1122,16 @@ def worktree_digests(worktree: Path) -> tuple[Optional[str], Optional[str]]:
 
 
 _STALE_FAILURE_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_'.]+)\s*$")
-_IMPORT_RE = re.compile(r"^import\s+([A-Za-z0-9_'.]+)")
+# Lean allows a component of a module name to be written in guillemets, and
+# Jaune's `Main.lean` does exactly that (`import «Jaune».Execution`).  Dropping
+# such an import would under-report the closure and could widen a class on
+# evidence that is not there, so the scanner reads them and normalises.
+_IMPORT_RE = re.compile(r"^import\s+([A-Za-z0-9_'.\u00ab\u00bb]+)")
 _HEADER_SCAN_LINES = 400
+
+
+def _normalise_module(name: str) -> str:
+    return name.replace("\u00ab", "").replace("\u00bb", "")
 
 
 def _module_name(worktree: Path, path: Path) -> str:
@@ -1157,7 +1165,7 @@ def package_import_graph(worktree: Path, roots: Iterable[str]) -> Optional[dict[
                     for index, line in enumerate(source):
                         match = _IMPORT_RE.match(line)
                         if match:
-                            imports.add(match.group(1))
+                            imports.add(_normalise_module(match.group(1)))
                             continue
                         stripped = line.strip()
                         if not stripped or stripped.startswith("--"):

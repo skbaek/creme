@@ -1196,7 +1196,8 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
         note, memory_gib, contention = _decode_admission_note(hard["note"], default_memory_gib)
         lines.append(
             f"hard: {hard['label']} ({state_word}) pid={hard['pid']} "
-            f"memory={memory_gib}GiB contention={contention} note={note!r}"
+            f"memory={memory_gib}GiB contention={contention} "
+            f"held={int(now - float(hard['acquired_at']))}s note={note!r}"
         )
         lines.extend(_signal_lines(hard["label"], signals, "  "))
     else:
@@ -1207,7 +1208,8 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
         note, memory_gib, contention = _decode_admission_note(hold["note"], default_memory_gib)
         lines.append(
             f"  {hold['label']} ({state_word}) pid={hold['pid']} "
-            f"memory={memory_gib}GiB contention={contention} note={note!r}"
+            f"memory={memory_gib}GiB contention={contention} "
+            f"held={int(now - float(hold['acquired_at']))}s note={note!r}"
         )
         lines.extend(_signal_lines(hold["label"], signals, "    "))
     if not state["soft"]:
@@ -1416,6 +1418,7 @@ def _waiting_admit(
         return False, f"--wait must be 1..{MAX_WAIT_SECONDS} seconds"
 
     waiter_id = uuid.uuid4().hex
+    holder: Optional[str] = None
     enqueued_at = _now()
     deadline = enqueued_at + wait_seconds
     announced = False
@@ -1511,6 +1514,19 @@ def _waiting_admit(
                     None,
                 )
                 mine = decisions[waiter_id]
+                hard = state["hard"]
+                if hard:
+                    # Enough to size a requeue: which class is ahead, and how
+                    # long it has been running. No note text.
+                    _note, _gib, holder_class = _decode_admission_note(
+                        hard["note"], int(selected_policy["task_memory_gib"])
+                    )
+                    holder = (
+                        f"{hard['label']} contention={holder_class} "
+                        f"held={int(now - float(hard['acquired_at']))}s"
+                    )
+                else:
+                    holder = None
                 record = tally.setdefault(mine.verdict, {"passes": 0.0, "seconds": 0.0})
                 record["passes"] += 1
                 if not mine.admitted:
@@ -1590,8 +1606,9 @@ def _waiting_admit(
                 detail = (
                     f"WAIT_TIMEOUT: no admission within {wait_seconds}s "
                     f"(waited={waited}s); waiter={waiter_id[:8]}; "
-                    f"{_wait_summary(tally, tightest)}; "
-                    f"last verdict {mine.verdict}: {mine.detail}"
+                    f"{_wait_summary(tally, tightest)}"
+                    + (f"; holder at timeout: {holder}" if holder else "")
+                    + f"; last verdict {mine.verdict}: {mine.detail}"
                 )
                 _log("wait-acquire", label, "REFUSED", detail)
                 return False, f"WAIT_TIMEOUT — {detail.split(': ', 1)[1]}"

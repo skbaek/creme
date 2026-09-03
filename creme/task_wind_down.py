@@ -11,6 +11,7 @@ from .profile import DEFAULT_RELATIVE_PROFILE, load as load_profile
 
 FAILURE_STATUSES = {"UNAVAILABLE", "BUSY", "REFUSED", "ERROR"}
 GOAL_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SANCTIONED_SUFFIXES = ("control", "mutation", "rehearsal")
 
 
 class WorktreeScopeError(ValueError):
@@ -42,21 +43,26 @@ def _goal_worktree_roots(label: str, adapter: Adapter) -> tuple[Path, ...]:
                 "configured repository escapes the workspace root"
             ) from exc
         worktree_parent = repository / ".worktrees"
-        candidate = worktree_parent / label
-        if candidate.is_symlink():
-            raise WorktreeScopeError("goal worktree scope cannot be a symlink")
-        if not candidate.is_dir() or not (candidate / ".git").is_file():
-            continue
-        resolved_parent = worktree_parent.resolve()
-        resolved = candidate.resolve()
-        try:
-            resolved.relative_to(resolved_parent)
-        except ValueError as exc:
-            raise WorktreeScopeError(
-                "goal worktree resolves outside the repository worktree directory"
-            ) from exc
-        if resolved not in roots:
-            roots.append(resolved)
+        # The build owner treats a goal's sanctioned disposable trees as that
+        # goal's own, so wind-down has to reclaim servers left in them too;
+        # otherwise it would report OK while a Lean process survived in one.
+        names = [label, *(f"{label}-{suffix}" for suffix in SANCTIONED_SUFFIXES)]
+        for name in names:
+            candidate = worktree_parent / name
+            if candidate.is_symlink():
+                raise WorktreeScopeError("goal worktree scope cannot be a symlink")
+            if not candidate.is_dir() or not (candidate / ".git").is_file():
+                continue
+            resolved_parent = worktree_parent.resolve()
+            resolved = candidate.resolve()
+            try:
+                resolved.relative_to(resolved_parent)
+            except ValueError as exc:
+                raise WorktreeScopeError(
+                    "goal worktree resolves outside the repository worktree directory"
+                ) from exc
+            if resolved not in roots:
+                roots.append(resolved)
 
     if not roots:
         raise WorktreeScopeError(

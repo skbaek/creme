@@ -15,6 +15,7 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 | semaphore core | locked state plus adaptive admission | locked state plus adaptive admission | one hard task; expired holds continue blocking |
 | manual GUI hold | local-user and launchd GUI-domain checks | `UNAVAILABLE` | explicit manual coordination outside Creme |
 | Lean reclaim | frozen process snapshot and signals | frozen same-user process snapshot and signals | restart the client |
+| process working directories | `lsof -a -d cwd -Fn -p PIDS` over the host's `lake`/`lean` pids | `/proc/PID/cwd` over the same pids | attribution reports uninspectable; no hold is called idle |
 | cache copy | APFS clone, then recursive-copy fallback | reflink-auto, then recursive-copy fallback | portable recursive copy |
 | temporary root | `TMPDIR` or runtime temp directory | `TMPDIR` or runtime temp directory | `UNAVAILABLE` if no writable root exists |
 | guarded Lean server | toolchain-selected Lake with Creme `setup-file` guard | same | fail closed if Elan, the real toolchain, or the facade cannot be proved |
@@ -165,11 +166,25 @@ pid, uid, class, estimate, and timestamps — never a free-form note.
 ### Idleness signals
 
 The same file records per-hold and per-worker idleness observations. A hold is
-reported `IDLE_HOLD` when it has had no `lake`, `lean`, or repository-owned
-child process for the configured interval, and `STRANDED` only when its
-process is gone, its owned tree has no Lean work, and its lease has lapsed —
-a command-line hold normally outlives the process that took it, so a missing
-pid alone means nothing. A Lean worker is called idle only by comparing
+**working** when a `lake` or `lean` process is a descendant of the pid that
+took it, or when one is working inside the goal's own worktrees — the goal
+worktree and its sanctioned `-control`/`-mutation`/`-rehearsal` trees —
+resolved through the read-only `process_working_directories` capability, which
+samples only the host's `lake`/`lean` pids and does so once per refresh. The
+descendant test alone is not enough: a hold taken by one shell call is not the
+parent of the gate launched by the next, which made every manual gate hold a
+false positive. The capability never signals a process; reclamation's ownership
+boundary is unchanged.
+
+A hold is reported `IDLE_HOLD` when neither test finds work for the configured
+interval, and `STRANDED` only when its process is gone, its owned tree has no
+Lean work by the same attribution, and its lease has lapsed — a command-line
+hold normally outlives the process that took it, so a missing pid alone means
+nothing. When the process snapshot is unreadable, when the working-directory
+sample is unavailable, when a `lake`/`lean` pid cannot be placed, or when the
+goal's worktree scope itself is unreadable, the hold is reported
+`ATTRIBUTION_UNAVAILABLE` and the idle signal is suspended: an uninspectable
+hold is never called idle. A Lean worker is called idle only by comparing
 cumulative CPU seconds between two observations: a worker seen once is never
 idle, and one that consumed more than a small share of the window is busy even
 if it is blocked. `reclaim --idle-workers MIN` narrows the existing

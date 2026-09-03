@@ -298,10 +298,20 @@ worktree, a rebuild you expect to be broad, a command that will spawn several
 workers. The JSON records both the class you asked for and the class the
 evidence supports, so a disagreement is visible afterwards.
 
-On completion the wrapper lists the modules it rebuilt and tells you to
-restart the Lean server before trusting diagnostics in files that import them.
-Do that: a stale `.olean` from a neighbour's build is the usual reason an
-agent stops believing the language server.
+On completion the wrapper lists the modules it rebuilt on a `restart:` line
+of its own. A file worker keeps the imports it loaded when it started, so
+neither the rebuild nor an edit to your own file changes what it reports about
+them. To refresh one file: **query two other Lean files, then that file
+again.** With `LEAN_LSP_MAX_OPEN_FILES=2` the second query evicts its worker
+and the third starts a fresh one against the rebuilt `.olean`s. `reclaim
+--idle-workers` frees that memory but does **not** refresh diagnostics — it
+terminates the worker while the MCP layer keeps answering from its cache. A
+stale `.olean` from a neighbour's build is the usual reason an agent stops
+believing the language server.
+
+Never filter the wrapper's output. `hint:` and `restart:` are printed as their
+own lines precisely so a pipeline that keeps only `^error` and `Build complete`
+still sees them; a filter that drops the JSON line drops them too.
 
 ### The build is not a type-checker
 
@@ -320,8 +330,8 @@ whether an edit compiles.
 **A clean `lean_diagnostic_messages` pass on a file whose imports are current
 is loop evidence.** It does not need confirming with a build. If diagnostics
 say `Imports are out of date`, they are not current: probe, build the narrow
-target, restart the server, and read them again — that is the repair, not a
-reason to distrust the tool.
+target, refresh that file's worker (query two other Lean files, then it again),
+and read them again — that is the repair, not a reason to distrust the tool.
 
 When a build exits 1 and the previous build of the same targets also failed
 within the repeat window, the JSON carries `hint: REPEAT_FAIL` naming the

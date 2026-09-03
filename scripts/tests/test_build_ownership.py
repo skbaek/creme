@@ -120,6 +120,65 @@ class BuildOwnershipTest(unittest.TestCase):
             text = " ".join(surface.read_text(encoding="utf-8").split()).lower()
             self.assertIn("never write a shell loop around", text, surface)
 
+    def test_no_surface_still_says_restart_the_lean_server(self) -> None:
+        """B9: the instruction names a mechanism this client actually has."""
+        surfaces = (
+            ROOT / "AGENTS.md",
+            ROOT / "docs" / "guides" / "execution.md",
+            ROOT / "docs" / "guides" / "lean-edit-loops.md",
+            ROOT / ".agents" / "skills" / "lean-prover" / "SKILL.md",
+            ROOT / ".agents" / "skills" / "lean-inspector" / "SKILL.md",
+        )
+        for surface in surfaces + (ROOT / "creme" / "build_ownership.py",):
+            joined = " ".join(surface.read_text(encoding="utf-8").split())
+            self.assertNotIn("restart the Lean server", joined, surface)
+            self.assertNotIn("restart the server", joined, surface)
+            self.assertIn("two other Lean files", joined, surface)
+        for surface in surfaces:
+            # The prose names the setting the mechanism depends on; the wrapper
+            # stays client-neutral and only states the two extra queries.
+            joined = " ".join(surface.read_text(encoding="utf-8").split())
+            self.assertIn("LEAN_LSP_MAX_OPEN_FILES", joined, surface)
+
+    def test_the_guide_states_the_fit_arithmetic_a_waiter_needs(self) -> None:
+        """B10: a reader can compute why a large estimate is unschedulable."""
+        joined = " ".join(
+            (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()
+        )
+        self.assertIn("currently fit", joined)
+        self.assertIn("ceil(1.25 x estimate)", joined)
+        self.assertIn("max(2 GiB, 25% of physical RAM)", joined)
+        self.assertIn("available >= charged + reserve", joined)
+        self.assertIn("10 GiB estimate needs 19.0 GiB", joined)
+
+    def test_the_guide_forbids_a_sleep_loop_on_your_own_process_too(self) -> None:
+        joined = " ".join(
+            (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()
+        )
+        self.assertIn("kill -0 PID", joined)
+        self.assertIn("never write one around your own backgrounded process", joined)
+
+    def test_the_class_table_covers_full_and_package_targets(self) -> None:
+        joined = " ".join(
+            (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()
+        )
+        self.assertIn("a warm **full target** whose stale closure is small", joined)
+        self.assertIn("a warm **package or library target**", joined)
+        self.assertIn("roots unresolved", joined)
+
+    def test_the_guide_says_a_gate_runner_holds_only_for_its_lean_rows(self) -> None:
+        joined = " ".join(
+            (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()
+        )
+        self.assertIn("one** hold sized for its Lean rows", joined)
+        self.assertIn("take no hold at all", joined)
+
+    def test_the_guide_says_not_to_filter_the_wrappers_output(self) -> None:
+        joined = " ".join(
+            (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()
+        )
+        self.assertIn("Never filter the wrapper's output", joined)
+
     def test_doctor_validates_every_client_surface(self) -> None:
         checks = check_client_surface(ROOT)
         by_name = {check.name: check for check in checks}

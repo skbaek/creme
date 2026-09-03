@@ -1964,8 +1964,9 @@ def run_lake_build(
         (
             f"rebuilt {len(rebuilt)} module(s): {', '.join(rebuilt[:12])}"
             + ("…" if len(rebuilt) > 12 else "")
-            + " — restart the Lean server before trusting diagnostics in files "
-            "that import them"
+            + " — a file worker keeps the imports it loaded; before trusting "
+            "diagnostics in a file that imports them, query two other Lean files "
+            "and then that one again to evict and reload it"
         )
         if rebuilt else None
     )

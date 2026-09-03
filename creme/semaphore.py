@@ -222,6 +222,57 @@ def _log(action: str, label: str, verdict: str, detail: str) -> None:
     _log_to(state_root(), action, label, verdict, detail)
 
 
+def log_path() -> Path:
+    return state_root() / "log.jsonl"
+
+
+def _valid_log_row(row: Any) -> bool:
+    return (
+        isinstance(row, dict)
+        and all(isinstance(row.get(key), str) for key in ("time", "action", "label", "verdict", "detail"))
+        and row["verdict"] in {"OK", "REFUSED"}
+    )
+
+
+def read_log(
+    since: datetime,
+    until: Optional[datetime] = None,
+) -> tuple[list[dict[str, Any]], int, str]:
+    """Return coordination rows in the window, corrupt-line count, and a status.
+
+    The audit log is append-only host state written by every client.  A
+    malformed line is skipped and counted rather than raised: a roll-up that
+    dies on one bad line cannot be used to compare a return watch against a
+    baseline.
+    """
+    path = log_path()
+    if not path.exists():
+        return [], 0, "MISSING"
+    rows: list[dict[str, Any]] = []
+    corrupt = 0
+    try:
+        with path.open(encoding="utf-8") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                    if not _valid_log_row(row):
+                        raise ValueError("unsupported row")
+                    when = datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
+                    if when.tzinfo is None:
+                        raise ValueError("naive timestamp")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    corrupt += 1
+                    continue
+                if when >= since and (until is None or when <= until):
+                    rows.append({**row, "when": when})
+    except OSError as exc:
+        return [], corrupt, f"UNREADABLE: {exc}"
+    rows.sort(key=lambda row: row["when"])
+    return rows, corrupt, "OK"
+
+
 def migrate_legacy_state(
     neutral_root: Optional[Path] = None,
     legacy_root: Optional[Path] = None,

@@ -409,7 +409,7 @@ def cmd_lake_build(arguments: argparse.Namespace) -> int:
 
 def cmd_build_ledger(arguments: argparse.Namespace) -> int:
     try:
-        _json(ledger_rollup(arguments.since))
+        _json(ledger_rollup(arguments.since, arguments.until))
     except ValueError as exc:
         _json({"status": "REFUSED", "detail": str(exc)})
         return 2
@@ -576,7 +576,15 @@ def parser() -> argparse.ArgumentParser:
         "build-ledger",
         help="summarize ignored host-local Lean build ownership measurements",
     )
-    build_ledger.add_argument("--since", default="7d")
+    build_ledger.add_argument(
+        "--since",
+        default="7d",
+        help="duration such as 7d/24h/30m, or an absolute UTC instant such as 2026-09-03",
+    )
+    build_ledger.add_argument(
+        "--until",
+        help="optional absolute UTC instant closing the window, for a fixed baseline",
+    )
     build_ledger.set_defaults(func=cmd_build_ledger)
     return root
 

@@ -86,19 +86,53 @@ def append_ledger(record: dict[str, Any]) -> None:
             os.fsync(output.fileno())
 
 
-def _parse_since(text: str, now: Optional[datetime] = None) -> datetime:
+def _parse_instant(text: str, option: str, now: Optional[datetime] = None) -> datetime:
+    """Accept a relative duration or an absolute UTC date/timestamp.
+
+    A return watch compares a fixed historical window against a live one, so
+    the roll-up has to name an exact boundary as well as "the last 5 hours".
+    """
     current = now or datetime.now(timezone.utc)
     match = re.fullmatch(r"([1-9][0-9]*)([dhm])", text)
-    if not match:
-        raise ValueError("--since must be a positive duration such as 7d, 24h, or 30m")
-    value = int(match.group(1))
-    unit = match.group(2)
-    delta = {"d": timedelta(days=value), "h": timedelta(hours=value), "m": timedelta(minutes=value)}[unit]
-    return current - delta
+    if match:
+        value = int(match.group(1))
+        delta = {
+            "d": timedelta(days=value),
+            "h": timedelta(hours=value),
+            "m": timedelta(minutes=value),
+        }[match.group(2)]
+        return current - delta
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(
+            f"{option} must be a positive duration such as 7d, 24h, or 30m, "
+            "or an absolute UTC instant such as 2026-09-03 or 2026-09-03T05:35:00Z"
+        ) from None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
-def read_ledger(since: str) -> tuple[list[dict[str, Any]], int]:
-    cutoff = _parse_since(since)
+def _parse_since(text: str, now: Optional[datetime] = None) -> datetime:
+    return _parse_instant(text, "--since", now)
+
+
+def parse_window(
+    since: str,
+    until: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> tuple[datetime, Optional[datetime]]:
+    start = _parse_instant(since, "--since", now)
+    stop = _parse_instant(until, "--until", now) if until else None
+    if stop is not None and stop <= start:
+        raise ValueError("--until must be later than --since")
+    return start, stop
+
+
+def read_ledger(
+    since: str,
+    until: Optional[str] = None,
+) -> tuple[list[dict[str, Any]], int]:
+    cutoff, stop = parse_window(since, until)
     path = ledger_path()
     if not path.exists():
         return [], 0
@@ -115,7 +149,7 @@ def read_ledger(since: str) -> tuple[list[dict[str, Any]], int]:
                     if not _valid_ledger_row(row):
                         raise ValueError("unsupported row")
                     when = datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
-                    if when >= cutoff:
+                    if when >= cutoff and (stop is None or when <= stop):
                         rows.append(row)
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     corrupt += 1
@@ -186,8 +220,93 @@ def _valid_ledger_row(row: Any) -> bool:
     )
 
 
-def ledger_rollup(since: str) -> dict[str, Any]:
-    rows, corrupt = read_ledger(since)
+ACQUIRE_ACTIONS = ("adaptive-acquire", "soft-acquire", "hard-acquire")
+_VERDICT_TOKEN = re.compile(r"^([A-Z][A-Z_]*):")
+
+
+def _verdict_token(row: dict[str, Any]) -> str:
+    match = _VERDICT_TOKEN.match(str(row.get("detail", "")))
+    return match.group(1) if match else "UNCLASSIFIED"
+
+
+def coordination_rollup(
+    since: datetime,
+    until: Optional[datetime],
+    labels: Iterable[str] = (),
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Per-goal refusal counts and lock-out seconds from the semaphore log.
+
+    A lock-out episode runs from an acquisition refusal to that label's next
+    admission.  An episode with no admission before the window closes is
+    reported open with the seconds accrued so far; reporting it as zero would
+    make the worst case look like the best one.
+    """
+    rows, corrupt, status = semaphore.read_log(since, until)
+    window_end = until or (rows[-1]["when"] if rows else since)
+    by_label: dict[str, dict[str, Any]] = {}
+
+    def entry(label: str) -> dict[str, Any]:
+        return by_label.setdefault(label, {
+            "refusals": {},
+            "renew_refusals": {},
+            "admissions": 0,
+            "lockout_episodes": 0,
+            "lockout_seconds": 0.0,
+            "lockout_open": False,
+            "lockout_open_seconds": 0.0,
+        })
+
+    for label in labels:
+        entry(str(label))
+
+    open_since: dict[str, datetime] = {}
+    for row in rows:
+        label = str(row["label"])
+        action = str(row["action"])
+        token = _verdict_token(row)
+        if action == "renew":
+            if row["verdict"] == "REFUSED":
+                record = entry(label)["renew_refusals"]
+                record[token] = record.get(token, 0) + 1
+            continue
+        if action not in ACQUIRE_ACTIONS:
+            continue
+        record = entry(label)
+        if row["verdict"] == "REFUSED":
+            counts = record["refusals"]
+            counts[token] = counts.get(token, 0) + 1
+            open_since.setdefault(label, row["when"])
+        else:
+            record["admissions"] += 1
+            started = open_since.pop(label, None)
+            if started is not None:
+                record["lockout_episodes"] += 1
+                record["lockout_seconds"] += (row["when"] - started).total_seconds()
+
+    for label, started in open_since.items():
+        record = entry(label)
+        record["lockout_open"] = True
+        record["lockout_episodes"] += 1
+        record["lockout_open_seconds"] = max(0.0, (window_end - started).total_seconds())
+
+    for record in by_label.values():
+        record["lockout_seconds"] = round(record["lockout_seconds"], 1)
+        record["lockout_open_seconds"] = round(record["lockout_open_seconds"], 1)
+        record["lockout_total_seconds"] = round(
+            record["lockout_seconds"] + record["lockout_open_seconds"], 1
+        )
+    meta = {
+        "semaphore_log_status": status,
+        "semaphore_log_rows": len(rows),
+        "semaphore_log_corrupt_lines_skipped": corrupt,
+        "window_end": (window_end.isoformat().replace("+00:00", "Z")) if rows or until else None,
+    }
+    return by_label, meta
+
+
+def ledger_rollup(since: str, until: Optional[str] = None) -> dict[str, Any]:
+    rows, corrupt = read_ledger(since, until)
+    window_since, window_until = parse_window(since, until)
     builds = [row for row in rows if row["kind"] == "build" and not row.get("probe")]
     by_goal: dict[str, float] = {}
     seen_hashes: dict[tuple[str, str, str], str] = {}
@@ -216,11 +335,60 @@ def ledger_rollup(since: str) -> dict[str, Any]:
                 seen_hashes[key] = worktree
     full_seconds = sum(full)
     narrow_seconds = sum(narrow)
+
+    coordination, coordination_meta = coordination_rollup(
+        window_since,
+        window_until,
+        {str(row.get("goal", "<unknown>")) for row in builds},
+    )
+    per_goal: dict[str, dict[str, Any]] = {}
+    for goal in sorted(set(by_goal) | set(coordination)):
+        goal_builds = [row for row in builds if str(row.get("goal", "<unknown>")) == goal]
+        failed = [row for row in goal_builds if row["exit"] != 0]
+        classes: dict[str, int] = {}
+        for row in goal_builds:
+            key = str(row.get("contention", "<unknown>"))
+            classes[key] = classes.get(key, 0) + 1
+        coordinated = coordination.get(goal, {})
+        per_goal[goal] = {
+            "builds": len(goal_builds),
+            "failed_builds": len(failed),
+            "failed_builds_exit_1": sum(row["exit"] == 1 for row in goal_builds),
+            "failed_build_share": (
+                round(len(failed) / len(goal_builds), 3) if goal_builds else None
+            ),
+            "contention_class": dict(sorted(classes.items())),
+            "elaboration_seconds": round(by_goal.get(goal, 0.0), 3),
+            "refusals": dict(sorted(coordinated.get("refusals", {}).items())),
+            "renew_refusals": dict(sorted(coordinated.get("renew_refusals", {}).items())),
+            "admissions": coordinated.get("admissions", 0),
+            "lockout_episodes": coordinated.get("lockout_episodes", 0),
+            "lockout_seconds": coordinated.get("lockout_seconds", 0.0),
+            "lockout_open": coordinated.get("lockout_open", False),
+            "lockout_open_seconds": coordinated.get("lockout_open_seconds", 0.0),
+            "lockout_total_seconds": coordinated.get("lockout_total_seconds", 0.0),
+        }
+    all_classes: dict[str, int] = {}
+    for row in builds:
+        key = str(row.get("contention", "<unknown>"))
+        all_classes[key] = all_classes.get(key, 0) + 1
+    failed_builds = sum(row["exit"] != 0 for row in builds)
     return {
         "status": "OK",
         "since": since,
+        "until": until,
+        "window": {
+            "since": window_since.isoformat().replace("+00:00", "Z"),
+            "until": window_until.isoformat().replace("+00:00", "Z") if window_until else None,
+        },
         "rows": len(rows),
         "corrupt_lines_skipped": corrupt,
+        **coordination_meta,
+        "builds": len(builds),
+        "failed_builds": failed_builds,
+        "failed_build_share": round(failed_builds / len(builds), 3) if builds else None,
+        "contention_class": dict(sorted(all_classes.items())),
+        "by_goal": per_goal,
         "elaboration_seconds_by_goal": {key: round(value, 3) for key, value in sorted(by_goal.items())},
         "elaboration_timing_incomplete_builds": incomplete_timings,
         "duplicate_hash_pairs": duplicate_pairs,
@@ -546,8 +714,11 @@ def nice_main(argv: list[str]) -> int:
 def _swap_gib() -> Optional[float]:
     try:
         result = get_adapter().memory_headroom()
-        value = result.data.get("swap_used_gib") if result.data else None
-        return round(float(value), 3) if value is not None else None
+        # Adapters report swap in MiB; a GiB lookup silently recorded None on
+        # every row, which would have made the memory-pressure column of a
+        # return watch unusable.
+        value = result.data.get("swap_used_mib") if result.data else None
+        return round(float(value) / 1024.0, 3) if value is not None else None
     except (AttributeError, OSError, TypeError, ValueError):
         return None
 

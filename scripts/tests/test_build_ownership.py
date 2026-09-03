@@ -8,6 +8,7 @@ import signal
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,46 @@ from creme.doctor import STATUS_FAIL, STATUS_OK, check_client_surface
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+@contextmanager
+def _ledger_and_log():
+    """Isolate both the build ledger and the shared coordination log."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        ledger = root / "ledger.jsonl"
+        state = root / "state"
+        state.mkdir()
+        log = state / "log.jsonl"
+        log.touch()
+        with patch.dict(os.environ, {
+            "CREME_BUILD_LEDGER": str(ledger),
+            "CREME_SEMAPHORE_DIR": str(state),
+        }):
+            yield ledger, log
+
+
+def _write_ledger(path: Path, rows: list[tuple[str, dict]]) -> None:
+    path.write_text(
+        "".join(
+            json.dumps({"schema_version": 1, "time": time, **row}) + "\n"
+            for time, row in rows
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_log(path: Path, rows: list[tuple[str, str, str, str, str]]) -> None:
+    path.write_text(
+        "".join(
+            json.dumps({
+                "time": time, "action": action, "label": label,
+                "verdict": verdict, "detail": detail,
+            }) + "\n"
+            for time, action, label, verdict, detail in rows
+        ),
+        encoding="utf-8",
+    )
 
 
 class BuildOwnershipTest(unittest.TestCase):
@@ -201,6 +242,100 @@ class BuildOwnershipTest(unittest.TestCase):
     def test_since_validation_is_fail_closed(self) -> None:
         with self.assertRaises(ValueError):
             owned._parse_since("yesterday", datetime.now(timezone.utc))
+
+    def test_window_accepts_absolute_instants_and_rejects_inverted_ranges(self) -> None:
+        start, stop = owned.parse_window("2026-09-03", "2026-09-03T05:35:00Z")
+        self.assertEqual(start, datetime(2026, 9, 3, tzinfo=timezone.utc))
+        self.assertEqual(stop, datetime(2026, 9, 3, 5, 35, tzinfo=timezone.utc))
+        with self.assertRaises(ValueError):
+            owned.parse_window("2026-09-03T05:35:00Z", "2026-09-03")
+
+    def test_rollup_reports_failed_share_classes_refusals_and_lockout(self) -> None:
+        with _ledger_and_log() as (ledger, log):
+            base = {
+                "kind": "build", "goal": "g", "targets": ["T"], "command": ["lake", "build", "T"],
+                "wall_seconds": 1.0, "threads": 2, "probe": False, "admission": "ADMITTED_HARD",
+                "modules_rebuilt": [], "modules_restored": [], "module_hashes": {},
+                "module_seconds": {}, "worktree": "/a",
+            }
+            _write_ledger(ledger, [
+                ("2026-09-03T00:10:00Z", {**base, "exit": 0, "contention": "tolerant"}),
+                ("2026-09-03T00:20:00Z", {**base, "exit": 1, "contention": "sensitive"}),
+                ("2026-09-03T00:30:00Z", {**base, "exit": 1, "contention": "sensitive"}),
+                ("2026-09-03T00:40:00Z", {**base, "exit": 0, "goal": "other", "contention": "exclusive"}),
+            ])
+            _write_log(log, [
+                ("2026-09-03T01:00:00Z", "adaptive-acquire", "g", "REFUSED", "DEFER_HEAVY: blocked"),
+                ("2026-09-03T01:01:00Z", "adaptive-acquire", "g", "REFUSED", "DEFER_HEAVY: blocked"),
+                ("2026-09-03T01:10:00Z", "adaptive-acquire", "g", "OK", "ADMITTED_HARD: in"),
+                ("2026-09-03T01:20:00Z", "renew", "g", "REFUSED", "YIELD_HEAVY: older holder"),
+            ])
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+
+        self.assertEqual(report["builds"], 4)
+        self.assertEqual(report["failed_builds"], 2)
+        self.assertEqual(report["failed_build_share"], 0.5)
+        self.assertEqual(
+            report["contention_class"], {"exclusive": 1, "sensitive": 2, "tolerant": 1}
+        )
+        goal = report["by_goal"]["g"]
+        self.assertEqual(goal["builds"], 3)
+        self.assertEqual(goal["failed_build_share"], 0.667)
+        self.assertEqual(goal["contention_class"], {"sensitive": 2, "tolerant": 1})
+        self.assertEqual(goal["refusals"], {"DEFER_HEAVY": 2})
+        self.assertEqual(goal["renew_refusals"], {"YIELD_HEAVY": 1})
+        # Two refusals open one episode; the episode closes at the next admission.
+        self.assertEqual(goal["lockout_episodes"], 1)
+        self.assertEqual(goal["lockout_seconds"], 600.0)
+        self.assertFalse(goal["lockout_open"])
+
+    def test_rollup_reports_an_unadmitted_refusal_as_open_not_zero(self) -> None:
+        with _ledger_and_log() as (_, log):
+            _write_log(log, [
+                ("2026-09-03T01:00:00Z", "adaptive-acquire", "g", "REFUSED", "LIGHT_ONLY: low"),
+            ])
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        goal = report["by_goal"]["g"]
+        self.assertTrue(goal["lockout_open"])
+        self.assertEqual(goal["lockout_seconds"], 0.0)
+        self.assertEqual(goal["lockout_open_seconds"], 3600.0)
+        self.assertEqual(goal["lockout_total_seconds"], 3600.0)
+
+    def test_rollup_skips_and_counts_corrupt_log_lines_without_failing(self) -> None:
+        with _ledger_and_log() as (_, log):
+            log.write_text(
+                "not json\n"
+                + json.dumps({"time": "2026-09-03T01:00:00Z", "action": "adaptive-acquire",
+                              "label": "g", "verdict": "REFUSED", "detail": "DEFER_HEAVY: x"}) + "\n"
+                + json.dumps({"time": "not-a-time", "action": "adaptive-acquire", "label": "g",
+                              "verdict": "OK", "detail": "ADMITTED_HARD: x"}) + "\n"
+                + json.dumps({"time": "2026-09-03T01:05:00Z", "action": "adaptive-acquire",
+                              "label": "g", "verdict": "MAYBE", "detail": "x"}) + "\n",
+                encoding="utf-8",
+            )
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        self.assertEqual(report["status"], "OK")
+        self.assertEqual(report["semaphore_log_corrupt_lines_skipped"], 3)
+        self.assertEqual(report["semaphore_log_status"], "OK")
+        self.assertTrue(report["by_goal"]["g"]["lockout_open"])
+
+    def test_swap_is_recorded_from_the_adapter_mib_field(self) -> None:
+        sample = SimpleNamespace(data={"swap_used_mib": 2560.0})
+        with patch("creme.build_ownership.get_adapter", return_value=SimpleNamespace(
+            memory_headroom=lambda: sample
+        )):
+            self.assertEqual(owned._swap_gib(), 2.5)
+        with patch("creme.build_ownership.get_adapter", return_value=SimpleNamespace(
+            memory_headroom=lambda: SimpleNamespace(data={"swap_used_mib": None})
+        )):
+            self.assertIsNone(owned._swap_gib())
+
+    def test_rollup_survives_a_missing_semaphore_log(self) -> None:
+        with _ledger_and_log() as (_, log):
+            log.unlink(missing_ok=True)
+            report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
+        self.assertEqual(report["status"], "OK")
+        self.assertEqual(report["semaphore_log_status"], "MISSING")
 
     @patch("creme.build_ownership.resolve_tool")
     def test_wrapper_rejects_lake_options_disguised_as_targets(self, resolve: Mock) -> None:

@@ -530,6 +530,22 @@ class BuildOwnershipTest(unittest.TestCase):
         # A frontier outside the target's closure costs the target nothing.
         self.assertEqual(owned.stale_closure(graph, ["P.Other"], {"P.Leaf"}), 0)
         self.assertIsNone(owned.stale_closure(graph, ["P.Missing"], {"P.Leaf"}))
+        # A stale module outside the package is not evidence: a stale
+        # dependency is the broad case that must stay `sensitive`.
+        self.assertIsNone(owned.stale_closure(graph, ["P.Top"], {"Mathlib.Order"}))
+
+    def test_the_import_graph_survives_a_leading_block_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "P").mkdir()
+            (worktree / "P" / "Leaf.lean").write_text("def a := 1\n")
+            (worktree / "P" / "Top.lean").write_text(
+                "/-\nA copyright header that precedes the imports.\n-/\n"
+                "import P.Leaf\n\ndef b := 2\n"
+            )
+            graph = owned.package_import_graph(worktree, ["P.Top"])
+        self.assertEqual(graph["P.Top"], {"P.Leaf"})
+        self.assertEqual(owned.stale_closure(graph, ["P.Top"], {"P.Leaf"}), 2)
 
     # -- B6: the repeat-failure hint -------------------------------------
     def test_repeat_fail_needs_a_recent_previous_failure_of_the_same_targets(self) -> None:

@@ -879,7 +879,8 @@ def worktree_digests(worktree: Path) -> tuple[Optional[str], Optional[str]]:
 
 
 _STALE_FAILURE_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_'.]+)\s*$")
-_IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z0-9_'.]+)")
+_IMPORT_RE = re.compile(r"^import\s+([A-Za-z0-9_'.]+)")
+_HEADER_SCAN_LINES = 400
 
 
 def _module_name(worktree: Path, path: Path) -> str:
@@ -908,19 +909,21 @@ def package_import_graph(worktree: Path, roots: Iterable[str]) -> Optional[dict[
                 if not path.is_file():
                     continue
                 module = _module_name(worktree, path)
-                imports = set()
+                imports: set[str] = set()
                 with path.open(encoding="utf-8", errors="replace") as source:
-                    for line in source:
-                        stripped = line.strip()
-                        if not stripped or stripped.startswith("--"):
-                            continue
+                    for index, line in enumerate(source):
                         match = _IMPORT_RE.match(line)
                         if match:
                             imports.add(match.group(1))
                             continue
-                        # Imports may only appear in the header; the first
-                        # other declaration ends it.
-                        break
+                        stripped = line.strip()
+                        if not stripped or stripped.startswith("--"):
+                            continue
+                        # Imports may only appear in the header, but the header
+                        # may open with a block comment, so the scan ends at
+                        # the first declaration *after* an import was seen.
+                        if imports or index >= _HEADER_SCAN_LINES:
+                            break
                 graph[module] = imports
     except OSError:
         return None
@@ -942,6 +945,12 @@ def stale_closure(
     named = [str(target) for target in targets]
     if any(target not in graph for target in named):
         return None
+    if any(module not in graph for module in frontier):
+        # A stale module outside this package — a dependency, or a target
+        # shape the graph does not model — is not evidence about the closure,
+        # and a stale dependency is exactly the broad case that must stay
+        # `sensitive`.
+        return None
     closure: set[str] = set()
     stack = list(named)
     while stack:
@@ -950,9 +959,7 @@ def stale_closure(
             continue
         closure.add(module)
         stack.extend(graph.get(module, ()))
-    if not frontier.issubset(closure | frontier):
-        return None
-    stale = {module for module in frontier if module in closure}
+    stale = frontier & closure
     changed = True
     while changed:
         changed = False
@@ -960,7 +967,7 @@ def stale_closure(
             if graph.get(module, set()) & stale:
                 stale.add(module)
                 changed = True
-    return len(stale | (frontier & closure))
+    return len(stale)
 
 
 def stale_module_count(

@@ -1248,7 +1248,7 @@ def _waiting_admit(
                     f"WAIT_TIMEOUT: no admission within {wait_seconds}s "
                     f"(waited={waited}s); last verdict {mine.verdict}: {mine.detail}"
                 )
-                _log(f"wait-acquire", label, "REFUSED", detail)
+                _log("wait-acquire", label, "REFUSED", detail)
                 return False, f"WAIT_TIMEOUT — {detail.split(': ', 1)[1]}"
             sleep(min(poll_seconds, remaining))
     finally:

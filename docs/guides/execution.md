@@ -57,6 +57,8 @@ Classify from what the unit actually does, not from the nearest example:
 | a warm **package or library target** (`jaune`, `Blanc`) under the same conditions | `tolerant` — the target resolves to its Lake roots first |
 | a focused language-server proof loop | `tolerant` |
 | a full or package target whose Lake configuration cannot be read | `sensitive` — "roots unresolved" |
+| a build whose probe reports every artifact current (`FRESH`) | no hold at all — it elaborates nothing |
+| a small stale set whose modules have no measurement of their own | `sensitive`, sized at the narrow default (4 GiB here), not the host default |
 | a cold worktree, an unmeasured target, or a broad closure | `sensitive` |
 | anything that creates several Lean workers, or a previously observed spike | `sensitive` |
 | a long indivisible command that cannot reach a renewal boundary | `sensitive` |
@@ -121,14 +123,25 @@ supports is the surest way to starve.** State one only when you know the build
 is cold or broad; otherwise omit `--memory-gib` and let the wrapper derive it.
 
 You never have to guess which case you are in. Before it blocks, a `--wait`
-prints its own arithmetic, and says what would fit if this one does not:
+prints its own arithmetic, says where the estimate came from, and says what
+would fit if this one does not:
 
 ```
 fit: estimate 10 GiB -> charged 13 GiB (x1.25) + reserve 6.0 GiB = 19.0 GiB needed;
      18.7 GiB available now (77% free) -> does not fit now
+fit: estimate 10 GiB is derived, not explicit (derived: broader rebuild: 284 of
+     294 stale module(s) unmeasured; the tightest of 1 successful rebuild(s) …)
 fit: at this instant an estimate of at most 10 GiB would fit; a larger one is
      queued in arrival order but passed over by every request that fits
 ```
+
+The second line is the one to read when the number surprises you. **Derived**
+means the wrapper sized the build from the ledger's evidence about the modules
+that are stale right now, and the remedy is to narrow the stale set or to wait
+for the host, never to pass a smaller `--memory-gib`; **explicit** means you
+passed the number, and the line names the estimate the evidence supports
+instead. In B11 a session read a derived 12 GiB as "an explicit --memory-gib
+12" and escalated the wrong cause twice; the line now says which it is.
 
 `semaphore status` prints, under every waiter, the verdict the queue would give
 it right now — computed by the same function the queue uses — with the same
@@ -147,7 +160,20 @@ behind one of them buys nothing but a requeue and a spent turn.
 
 A wait blocks the command that issued it. Either line up light work first and
 issue the wait when you have nothing else to do, or issue it in the background
-and read its result when the client hands it back. Never write a shell loop
+and read its result when the client hands it back.
+
+**The client's foreground ceiling is 600 s.** The Claude client kills a
+foreground tool call at 600 s when that is the timeout it was given, and only
+backgrounds a call whose stated timeout was shorter; B11 lost two ten-minute
+waits and a head-of-queue place to exactly that, and a foreground `--wait
+1500` cannot complete in any case. Run every `--wait`, every gate run that
+may pass ten minutes, and every `acquire && gate; release` script with the
+Bash tool's `run_in_background`, and after a call moves to the background
+confirm that your own waiter line is still in `semaphore status`. A chain of
+`acquire; gate` with `;` starts the gate uncoordinated on a timeout: write
+`acquire && gate; release` under `set -e` with a `trap` that releases.
+
+Never write a shell loop
 around `semaphore status`, and never write one around your own backgrounded
 process either: `while kill -0 PID; do sleep 20; done` is the same stall with
 the poll target renamed. A hand-rolled poll cannot hold a place in the queue,
@@ -171,10 +197,34 @@ children nor working inside the goal's worktrees, which is how a gate launched
 from a different shell call than the one that took the hold is still counted as
 work — `STRANDED` with the exact wind-down command when a hold's process is
 gone and its lease has lapsed, and `IDLE_WORKERS` when reclaimable
-language-server memory is resident. When the host cannot be attributed at all,
-the line says `ATTRIBUTION_UNAVAILABLE` and no hold is called idle. A `LIGHT_ONLY` refusal for headroom names that memory and its owner;
-reclaim your own with `python3 -m creme reclaim --idle-workers MIN`, which
-reports every worker outside your ownership boundary instead of killing it.
+language-server memory is resident. A process is `lake` or `lean` by its
+executable — the basename, or an elan toolchain path — never because the word
+`lean` occurs in its name: a macOS daemon called `CleanupPreparePathService`
+once suppressed the signal host-wide for a whole window. When a `lake`/`lean`
+process cannot be placed, the line says `ATTRIBUTION_UNAVAILABLE`, no hold is
+called idle, and one `attribution` row in `.semaphore/state/log.jsonl` names
+the process and the cause, with an `ATTRIBUTION_RESTORED` row when it clears;
+the same cause is logged once, not once per `status`.
+
+An `exclusive` hold is **not judged idle**. A timing gate or a t8n/Python lane
+runs under exclusivity with no `lake` or `lean` process at all, so "no Lean
+work" is not idleness for that class; the line reads `IDLE_HOLD not judged:
+… the hold is exclusive` and says how long, and releasing it the moment the
+timed run ends is the holder's job. A `sensitive` or `tolerant` hold over a
+non-Lean lane is still `IDLE_HOLD` after two minutes — take no hold for it.
+`STRANDED` is unaffected by class.
+
+Ownership is the goal worktree. Under the master model every worker session
+is a subagent of one client process, so a client pid names everyone on the
+host and therefore no one. `IDLE_HOLD` places a process by its working
+directory under the goal's `.worktrees/GOAL` (and its `-control`,
+`-mutation`, `-rehearsal` trees); `IDLE_WORKERS` names each idle worker's
+owner as `goal GOAL` by the same rule; and a `LIGHT_ONLY` refusal for headroom
+names that memory and its owner. Reclaim your own with
+`python3 -m creme reclaim --idle-workers MIN --goal GOAL`, which signals only
+workers working inside that goal's worktrees and reports every other one
+with the command its owner should run; without `--goal` a worker inside any
+goal worktree is reported, never signalled.
 
 A hold's recorded pid is the launcher's and is normally gone the moment the
 hold exists, and `reclaim --dry-run` sees only the calling session's own Lean
@@ -300,14 +350,42 @@ dependency builds, and startup cache downloads are not compilation owners and
 are refused or disabled.
 
 **Let the wrapper classify.** Omit `--contention` and `--memory-gib` and it
-derives both from evidence: `tolerant` only when the probe's stale closure is
-small *and* the ledger holds a measured peak below the configured threshold
-for the same worktree, the same targets, and the same toolchain and Lake
-manifest digests. Anything missing, drifted, or unreadable keeps `sensitive`.
-State a class explicitly when you know something the ledger cannot — a cold
-worktree, a rebuild you expect to be broad, a command that will spawn several
-workers. The JSON records both the class you asked for and the class the
-evidence supports, so a disagreement is visible afterwards.
+derives both from evidence about the *modules that are stale right now*, not
+from the name of the target list. The probe resolves the targets to their
+roots, names every module in the stale closure, and the ledger supplies each
+module's own measured `lean` peak — recorded per module on every build row
+from now on, and read from an older narrow row's largest `lean` process
+before that — on the same worktree, toolchain, and Lake manifest digests. A
+broad row without per-module peaks measures no single module: its peak is its
+breadth. The build's peak is then the Lake overhead plus the peaks that can
+elaborate at the same time, which the import order decides (two modules in
+one chain never overlap). `tolerant` needs a small stale set, every module in
+it measured, and that modelled peak below the threshold; the estimate is the
+same model plus the margin. So `-- Blanc` with one stale root module is
+priced from that module, whatever a 376-module rebuild of `-- Blanc` peaked
+at an hour earlier, and a two-target list inherits its members' rows.
+
+When a module is unmeasured: a small stale set (at most the tolerant module
+count) whose members never elaborated for `heavy_module_seconds` in any
+measured rebuild takes the **narrow default** (`narrow_default_gib`, 4 GiB),
+`sensitive`, so a fresh worktree's first narrow build is admitted at once and
+measured instead of starting at the host default it could never fit; a small
+set with a member that did elaborate that long in a broad rebuild keeps the
+profile default, because that member is a heavy one whose cost is not yet on
+its own row; a large set is bounded by the tightest broader successful rebuild
+that included its members, and by the profile default when none did. Anything
+missing, drifted, or unreadable keeps `sensitive`. State a class explicitly
+when you know something the ledger cannot — a cold worktree, a rebuild you
+expect to be broad, a command that will spawn several workers. The JSON
+records both the class you asked for and the class the evidence supports, and
+the estimate's `source` names which rule sized it.
+
+A probe that reports every selected artifact current means the build
+elaborates nothing, and the wrapper then **takes no hold**: the row says
+`NOT_REQUIRED_FRESH`. `--probe` prints a `stale:` line naming the whole stale
+closure — every module a build would elaborate, not only the frontier Lake
+stops at — so a broad rebuild can be planned as one build of the top of its
+import chain instead of walked a layer at a time.
 
 On completion the wrapper lists the modules it rebuilt on a `restart:` line
 of its own. A file worker keeps the imports it loaded when it started, so

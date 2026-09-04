@@ -100,9 +100,12 @@ and does not need confirming with a build.
 - Do not intentionally break a theorem to inspect state, and do not use a build
   as an inner proof-state loop. The command line belongs at loop boundaries.
 - Let the wrapper classify: omit `--contention` and `--memory-gib` and it
-  derives both from the probe's stale closure and the ledger's measured peaks,
-  keeping `sensitive` whenever the evidence is missing or drifted. State a
-  class yourself when you know the build is cold or broad.
+  derives both from the probe's stale closure and the ledger's measured peaks
+  of the modules in it — never from the name of the target list — keeping
+  `sensitive` whenever the evidence is missing or drifted, sizing an
+  unmeasured small stale set at the narrow default, and taking no hold when
+  the probe reports everything current. State a class yourself when you know
+  the build is cold or broad.
 - If MCP is unavailable or stale, repair or restart it. Do not substitute blind
   edits. Follow `docs/guides/lean-edit-loops.md` for the exceptional iterative
   cases.

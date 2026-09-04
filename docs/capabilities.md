@@ -221,10 +221,15 @@ is: hold-state validation rejects unknown keys, and a pre-update reader must
 still validate the hold state.
 
 The neutral adapter inputs are `CREME_MASTER_SESSION_ID` and
-`CREME_MASTER_LIVENESS_SOCKET`. A client integration supplies both without
-asking the user to copy a token between commands. The Codex adapter consumes
-the task identity and app-tools listener exported by Codex Desktop when they
-are present; absent or malformed inputs simply select the bounded fallback.
+`CREME_MASTER_LIVENESS_SOCKET`. A client integration may supply both without
+asking the user to copy a token between commands. The latter is trusted only
+under the explicit contract that its Unix listener belongs to this task and
+disappears with it. Codex's internal session/thread aliases are accepted as
+best-effort identity hints, but they are not a documented public interface.
+Codex Desktop's app-tools pipe is app-global and thread-multiplexed, so Creme
+never treats it—or the shared app pid—as task identity or liveness. Missing or
+malformed task identity fails closed for direct holder writes and selects the
+lease-id-bound fallback for the detached helper.
 
 `master-acquire` refuses while a lease is live, naming the holder and the
 command that ends it. When process discovery is unavailable, a stable
@@ -244,21 +249,25 @@ other than the holder is refused while the lease is live, even if it supplies
 the same client label or shares a discovered app pid. Corrupt lease state is
 reported and never reset. Schema-1 leases are validated and upgraded in
 memory, then persisted as schema 2 on the next legitimate write without
-changing their holder or times.
+changing their holder or times. A process-unknown schema-1 lease remains live
+but unverifiable: no unknown invocation may renew or release it, and it becomes
+take-overable when its original window lapses. A process-verified, task-scoped
+legacy holder may upgrade normally.
 
 The detached heartbeat is bound to the lease id it started for. With no usable
-process snapshot it actively probes the adapter's session-owned Unix listener;
-three consecutive failed probes stop renewal, so an abruptly closed task is
-take-overable no later than the lease window after its last successful beat.
-If a session digest takes precedence but has no listener, or if neither
-process nor listener liveness exists, the safe fallback permits only three
-persisted self-renewals and then becomes passive until a direct,
-identity-checked holder renewal resets the budget. With the prescribed
+task-scoped process it may actively probe an explicitly supplied task-owned
+Unix listener; three consecutive failed probes stop renewal, so an abruptly
+closed task is take-overable no later than the lease window after its last
+successful beat. If no such listener or task-scoped process exists, the safe
+fallback permits only two persisted self-renewals and then becomes passive
+until a direct, identity-checked holder renewal resets the budget. With the prescribed
 1,500-second heartbeat and 1,800-second lease, that fallback can extend a dead
 holder for at most 4,800 seconds after its last direct activity. A successor's
 new lease id ends the old passive heartbeat. Missing capabilities therefore
 degrade toward bounded take-over, never indefinite orphan renewal or two
-masters.
+masters. A matching session digest can still renew directly after sleep if no
+successor has taken over; an automatic post-wake renewal beyond the bounded
+fallback requires the explicit task-owned listener contract.
 
 Fresh installations store mutex, state, and audit log under the canonical
 checkout's ignored `.semaphore/state/`. Linked Git worktrees resolve through

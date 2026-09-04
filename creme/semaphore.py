@@ -2153,7 +2153,7 @@ MASTER_KEYS = MASTER_V1_KEYS | {
 }
 MASTER_SESSION_DIGEST_DOMAIN = b"creme-master-session-v1\0"
 MASTER_LIVENESS_DIGEST_DOMAIN = b"creme-master-liveness-v1\0"
-MASTER_UNVERIFIED_HEARTBEAT_RENEWALS = 3
+MASTER_UNVERIFIED_HEARTBEAT_RENEWALS = 2
 MASTER_LIVENESS_FAILURE_LIMIT = 3
 CLIENT_LABEL = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 HEX_32 = re.compile(r"[0-9a-f]{32}")
@@ -2331,9 +2331,11 @@ def _client_session(client: Optional[str]) -> _ClientSession:
 
     Client adapters inject high-entropy identifiers through the environment.
     The generic lease stores only domain-separated digests and never returns or
-    logs the raw identifier or socket path.  Codex Desktop already provides the
-    two adapter values used below; ``CREME_MASTER_*`` is the neutral interface
-    for future clients and test harnesses.
+    logs the raw identifier or socket path. ``CREME_MASTER_*`` is the stable
+    neutral interface. Codex's internal task-id aliases are accepted only as
+    identity hints; they have no public lifetime contract. In particular, the
+    Desktop app-tools pipe is app-global and must never be treated as task
+    liveness.
     """
     raw_identity = os.environ.get("CREME_MASTER_SESSION_ID", "")
     raw_socket = os.environ.get("CREME_MASTER_LIVENESS_SOCKET", "")
@@ -2343,9 +2345,7 @@ def _client_session(client: Optional[str]) -> _ClientSession:
             os.environ.get("CODEX_SESSION_ID", "")
             or os.environ.get("CODEX_THREAD_ID", "")
         )
-        source = "Codex adapter"
-    if not raw_socket and client in {None, "codex"}:
-        raw_socket = os.environ.get("CODEX_APP_TOOLS_PIPE_PATH", "")
+        source = "Codex compatibility alias"
     if not raw_identity:
         return _ClientSession(None, None, None, "no stable session identity available")
     digest = _digest_session_value(MASTER_SESSION_DIGEST_DOMAIN, raw_identity)
@@ -2364,7 +2364,7 @@ def _client_session(client: Optional[str]) -> _ClientSession:
 
 
 def _session_socket_live(path: Optional[str]) -> bool:
-    """Conservatively prove that a session-owned Unix listener still accepts."""
+    """Conservatively prove that an explicitly task-owned listener accepts."""
     if not path or not os.path.isabs(path):
         return False
     try:
@@ -2386,7 +2386,7 @@ def _master_view(lease: Optional[dict[str, Any]], now: float) -> dict[str, Any]:
     if lease is None:
         return {"lease": None, "state": "none"}
     expired = _expired(lease, now)
-    client_pid = lease["client_pid"]
+    client_pid = _trusted_master_client_pid(lease)
     client_alive = _pid_alive(int(client_pid)) if client_pid is not None else None
     if client_alive is False:
         # The session that took the lease is gone: nothing legitimate can
@@ -2431,9 +2431,26 @@ def _same_client(
         if session_digest is None:
             return False
         return hmac.compare_digest(recorded_digest, session_digest)
-    if client_pid is None or lease["client_pid"] is None:
+    recorded_pid = _trusted_master_client_pid(lease)
+    if client_pid is None or recorded_pid is None:
         return None
-    return int(client_pid) == int(lease["client_pid"])
+    return int(client_pid) == int(recorded_pid)
+
+
+def _trusted_master_client_pid(lease: dict[str, Any]) -> Optional[int]:
+    """Return a task-scoped holder pid, never an app-global Codex ancestor."""
+    if lease["client"].casefold() in {"codex", "chatgpt"}:
+        return None
+    client_pid = lease["client_pid"]
+    return int(client_pid) if client_pid is not None else None
+
+
+def _bounded_master_heartbeat(lease: dict[str, Any]) -> bool:
+    """Whether renewal lacks independently task-scoped liveness evidence."""
+    return (
+        lease["liveness_digest"] is None
+        and _trusted_master_client_pid(lease) is None
+    )
 
 
 def _master_lines(root: Path, now: float) -> list[str]:
@@ -2519,9 +2536,17 @@ def master_acquire(
                 _log("master-acquire", client, "REFUSED", detail)
                 return False, detail
             replaced = (view["state"], holder)
+        # A Codex Desktop task may share its visible app ancestor with other
+        # tasks. Retain process discovery for diagnostics, but never persist
+        # that shared pid as holder identity or liveness evidence.
+        shared_codex_process = (
+            family == "codex"
+            or client.casefold() in {"codex", "chatgpt"}
+        )
+        recorded_client_pid = None if shared_codex_process else client_pid
         data["lease"] = {
             "client": client,
-            "client_pid": client_pid,
+            "client_pid": recorded_client_pid,
             "pid": os.getpid(),
             "uid": os.getuid(),
             "note": note,
@@ -2586,13 +2611,17 @@ def master_renew(
         view = _master_view(current, now)
         holder = _master_holder_text(current)
         same = _same_client(current, client_pid, session_digest)
-        if view["state"] == "live" and (
-            same is False or (same is None and not current["legacy_unbound"])
-        ):
+        heartbeat_claim = (
+            heartbeat
+            and expected_lease_id is not None
+            and not current["legacy_unbound"]
+            and same is not False
+        )
+        if view["state"] == "live" and same is not True and not heartbeat_claim:
             detail = f"the master lease belongs to {holder}; this invocation: {found}"
             _log("master-renew", current["client"], "REFUSED", detail)
             return False, detail
-        if view["state"] != "live" and same is not True:
+        if view["state"] != "live" and same is not True and not heartbeat_claim:
             detail = (
                 f"the master lease is {view['state'].upper()} and this invocation "
                 f"({found}) is not its holder; use `master-acquire --take-over`"
@@ -2601,11 +2630,7 @@ def master_renew(
             return False, detail
         if (
             heartbeat
-            and current["liveness_digest"] is None
-            and (
-                current["session_digest"] is not None
-                or current["client_pid"] is None
-            )
+            and _bounded_master_heartbeat(current)
             and current["heartbeat_renewals"] >= MASTER_UNVERIFIED_HEARTBEAT_RENEWALS
         ):
             return False, "unverified heartbeat self-renewal budget exhausted"
@@ -2656,9 +2681,7 @@ def master_release(
         view = _master_view(current, _now())
         holder = _master_holder_text(current)
         same = _same_client(current, client_pid, session.digest)
-        if view["state"] == "live" and same is not True and not (
-            current["legacy_unbound"] and same is None
-        ) and not force:
+        if view["state"] == "live" and same is not True and not force:
             detail = (
                 f"the master lease is live and belongs to {holder}; this invocation: "
                 f"{found}; release it from that session, wait for it to lapse, or pass "
@@ -2696,8 +2719,8 @@ def master_heartbeat(
     longer alive — an orphaned heartbeat must never make a dead master look
     live to the next session.  Every loop is bound to one lease id and one
     opaque session identity.  When process liveness is unavailable, a
-    session-owned listener proves liveness; without either capability, the
-    heartbeat has a small persisted self-renewal budget and then becomes
+    task-owned listener proves liveness; without that or a task-scoped process,
+    the heartbeat has a small persisted self-renewal budget and then becomes
     passive until a direct holder renewal resets it.
 
     It sleeps in short slices and judges "due" by the wall clock.  A system
@@ -2770,8 +2793,7 @@ def master_heartbeat(
                 continue
             liveness_failures = 0
         elif (
-            lease["liveness_digest"] is None
-            and (session_digest is not None or client_pid is None)
+            _bounded_master_heartbeat(lease)
             and lease["heartbeat_renewals"] >= MASTER_UNVERIFIED_HEARTBEAT_RENEWALS
         ):
             # Stay alive but stop extending the lease.  A direct, identity-

@@ -127,7 +127,8 @@ admission; it exists only so that two masters cannot coexist.
 - **Live** means the lease window has not passed and any available holder
   liveness evidence has not failed. The holder is matched by an opaque
   adapter-supplied session digest when available, otherwise by its discovered
-  client process. Raw session identifiers are never written to disk or logs.
+  task-scoped client process. A Codex Desktop app pid is shared and is never
+  task identity. Raw session identifiers are never written to disk or logs.
   Renew at every event and keep the background heartbeat running.
 - **Lapsed** means the window passed but the client process is still alive:
   a master that stopped renewing, or a tab nobody wound down.
@@ -146,12 +147,13 @@ admission; it exists only so that two masters cannot coexist.
 - `master-release` from the holding session is the normal end. From any other
   session it succeeds only against a lapsed or stranded lease.
 - A detached heartbeat is bound to one lease id. With process discovery denied,
-  an adapter-supplied session listener lets it stop when the task closes and
-  recover within one heartbeat slice after wake. Without a listener for a
-  digest-identified task (or without either liveness capability), it
-  self-renews only three times, then waits passively for a direct
-  holder renewal; at the standard 1,500/1,800-second settings an orphan becomes
-  take-overable within 4,800 seconds of the last direct holder activity.
+  an explicitly supplied task-owned neutral listener lets it stop when the task
+  closes and recover within one heartbeat slice after wake. The Codex Desktop
+  app-tools pipe is app-global and does not qualify. Without a task-scoped
+  process or listener, the helper self-renews only twice, then waits passively
+  for a direct holder renewal; at the standard 1,500/1,800-second settings an
+  orphan becomes take-overable within 4,800 seconds of the last direct holder
+  activity.
 
 Every transition writes one row to the semaphore log with the holder's
 client, pid, and note, so a disputed lease can be read back.

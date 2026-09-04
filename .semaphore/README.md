@@ -43,9 +43,10 @@ A second `master-acquire` is refused while the lease is live. An
 adapter-supplied session identity is stored only as a digest and prevents a
 second task of the same client from renewing or releasing the lease when
 process discovery is unavailable or shared. The detached heartbeat is bound
-to one lease id and uses an adapter liveness socket when available. A
-digest-identified task without that listener, or a task with neither process
-nor socket liveness, gets three self-renewals and then becomes passive;
+to one lease id and uses only an explicitly supplied, task-owned neutral
+liveness socket when available. Codex Desktop's shared app pid and app-tools
+pipe are never task-liveness evidence. A task without a task-scoped process or
+listener gets two self-renewals and then becomes passive;
 with the standard 1,500-second heartbeat and 1,800-second lease an orphan is
 take-overable within 4,800 seconds of the last direct holder activity. A lease
 is *stranded* when its process is gone or its window passes without process

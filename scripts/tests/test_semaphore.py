@@ -1479,6 +1479,70 @@ class MasterLeaseTest(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("live", detail)
 
+    def test_codex_app_pipe_is_never_task_liveness(self):
+        raw_pipe = "/private/tmp/app-global-codex-tools.sock"
+        with mock.patch.dict(os.environ, {
+            "CREME_MASTER_SESSION_ID": "",
+            "CREME_MASTER_LIVENESS_SOCKET": "",
+            "CODEX_SESSION_ID": "session-a",
+            "CODEX_THREAD_ID": "",
+            "CODEX_APP_TOOLS_PIPE_PATH": raw_pipe,
+        }, clear=False):
+            session = semaphore._client_session("codex")
+        self.assertIsNotNone(session.digest)
+        self.assertIsNone(session.liveness_digest)
+        self.assertIsNone(session.liveness_socket)
+        self.assertNotIn(raw_pipe, session.detail)
+
+    def test_codex_without_identity_never_trusts_a_shared_app_pid(self):
+        self.as_client(os.getpid(), "codex")
+        ok, detail = semaphore.master_acquire("codex", "no identity")
+        self.assertTrue(ok, detail)
+        lease = semaphore.master_snapshot()["lease"]
+        self.assertIsNone(lease["client_pid"])
+
+        # Another task has the same observable app pid. Direct holder actions
+        # must fail closed because that pid is not task identity.
+        ok, detail = semaphore.master_renew()
+        self.assertFalse(ok)
+        self.assertIn("belongs to client codex", detail)
+        ok, detail = semaphore.master_release()
+        self.assertFalse(ok)
+        self.assertIn("--force", detail)
+
+        # The acquisition-bound helper still gets the documented finite grace.
+        for _ in range(semaphore.MASTER_UNVERIFIED_HEARTBEAT_RENEWALS):
+            ok, detail = semaphore.master_renew(
+                expected_lease_id=lease["lease_id"], heartbeat=True
+            )
+            self.assertTrue(ok, detail)
+        ok, detail = semaphore.master_renew(
+            expected_lease_id=lease["lease_id"], heartbeat=True
+        )
+        self.assertFalse(ok)
+        self.assertIn("budget exhausted", detail)
+        semaphore.master_release(force=True, reason="test cleanup")
+
+        # A cosmetic --client label cannot turn the discovered Codex app
+        # ancestor back into task-scoped process evidence.
+        ok, detail = semaphore.master_acquire("custom-client", "renamed codex")
+        self.assertTrue(ok, detail)
+        self.assertIsNone(semaphore.master_snapshot()["lease"]["client_pid"])
+        semaphore.master_release(force=True, reason="test cleanup")
+
+    def test_identity_holder_recovers_after_sleep_without_process_or_socket(self):
+        self.as_client(None, None)
+        with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False):
+            ok, detail = semaphore.master_acquire("codex", "sleeping master")
+            self.assertTrue(ok, detail)
+            self.expire()
+            self.assertIn("(stranded)", semaphore.status_text(self.adapter))
+            ok, detail = semaphore.master_renew()
+            self.assertTrue(ok, detail)
+            self.assertIn("holder verified", detail)
+            ok, detail = semaphore.master_release()
+            self.assertTrue(ok, detail)
+
     def test_session_listener_loss_stops_an_orphaned_heartbeat(self):
         self.as_client(None, None)
         session_digest = semaphore._digest_session_value(
@@ -1570,6 +1634,44 @@ class MasterLeaseTest(unittest.TestCase):
             self.assertTrue(ok, detail)
             self.assertEqual(semaphore.master_snapshot()["lease"]["heartbeat_renewals"], 0)
 
+    def test_standard_fallback_expires_within_4800_seconds_of_direct_activity(self):
+        self.as_client(None, None)
+        wall = [1_000.0]
+        with (
+            mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False),
+            mock.patch("creme.semaphore._now", side_effect=lambda: wall[0]),
+        ):
+            ok, detail = semaphore.master_acquire("codex", "bounded master")
+            self.assertTrue(ok, detail)
+            wall[0] = 1_001.0
+            ok, detail = semaphore.master_renew()
+            self.assertTrue(ok, detail)
+            direct = wall[0]
+            lease = semaphore.master_snapshot()["lease"]
+
+            # Place each permitted helper beat as late as a 1,500-second
+            # schedule allows after the direct renewal.
+            for elapsed in (1_499.9, 2_999.9):
+                wall[0] = direct + elapsed
+                ok, detail = semaphore.master_renew(
+                    as_session_digest=lease["session_digest"],
+                    expected_lease_id=lease["lease_id"],
+                    heartbeat=True,
+                )
+                self.assertTrue(ok, detail)
+            wall[0] = direct + 4_499.9
+            ok, detail = semaphore.master_renew(
+                as_session_digest=lease["session_digest"],
+                expected_lease_id=lease["lease_id"],
+                heartbeat=True,
+            )
+            self.assertFalse(ok)
+            self.assertIn("budget exhausted", detail)
+
+            final = semaphore.master_snapshot()["lease"]
+            expires_after = final["renewed_at"] + final["lease_seconds"] - direct
+            self.assertLessEqual(expires_after, 4_800)
+
     def test_predecessor_heartbeat_cannot_renew_a_successor_lease(self):
         self.as_client(None, None)
         with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False):
@@ -1613,6 +1715,34 @@ class MasterLeaseTest(unittest.TestCase):
         self.assertEqual(persisted["schema_version"], 2)
         self.assertFalse(persisted["lease"]["legacy_unbound"])
         self.assertEqual(persisted["lease"]["client"], "claude")
+
+    def test_schema_one_process_unknown_live_lease_is_preserved_but_unwritable(self):
+        self.as_client(None, None)
+        legacy_lease = {
+            "client": "codex",
+            "client_pid": None,
+            "pid": os.getpid(),
+            "uid": os.getuid(),
+            "note": "legacy unknown master",
+            "acquired_at": time.time() - 10,
+            "renewed_at": time.time() - 5,
+            "lease_seconds": 1800,
+        }
+        path = self.root / "master.json"
+        path.write_text(json.dumps({
+            "schema_version": 1,
+            "lease": legacy_lease,
+        }), encoding="utf-8")
+        snapshot = semaphore.master_snapshot()
+        self.assertTrue(snapshot["lease"]["legacy_unbound"])
+        self.assertEqual(snapshot["lease"]["renewed_at"], legacy_lease["renewed_at"])
+        ok, detail = semaphore.master_renew()
+        self.assertFalse(ok)
+        ok, detail = semaphore.master_release()
+        self.assertFalse(ok)
+        # Refusals do not opportunistically persist or invalidate the legacy
+        # record; it remains schema 1 until a legitimate write is possible.
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 1)
 
     def test_the_lease_lives_beside_the_hold_state_and_changes_no_verdict(self):
         semaphore.master_acquire("claude", "master")

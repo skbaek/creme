@@ -2117,8 +2117,11 @@ class MasterLeaseTest(unittest.TestCase):
                 ok, detail = semaphore.master_heartbeat_detached(1500)
             self.assertTrue(ok, detail)
             command = popen.call_args.args[0]
-            bound_id = command[command.index("--heartbeat-lease-id") + 1]
-            self.assertEqual(bound_id, first["lease_id"])
+            bound_id = (
+                command[command.index("--heartbeat-lease-id") + 1]
+                if "--heartbeat-lease-id" in command
+                else None
+            )
 
             ok, detail = semaphore.master_release()
             self.assertTrue(ok, detail)
@@ -2135,6 +2138,7 @@ class MasterLeaseTest(unittest.TestCase):
             )
         self.assertTrue(ok, detail)
         self.assertIn("master lease changed", detail)
+        self.assertEqual(bound_id, first["lease_id"])
         final = semaphore.master_snapshot()["lease"]
         self.assertEqual(final["lease_id"], successor["lease_id"])
         self.assertEqual(final["heartbeat_renewals"], 0)
@@ -2149,8 +2153,11 @@ class MasterLeaseTest(unittest.TestCase):
                 ok, detail = semaphore.master_heartbeat_detached(1500)
             self.assertTrue(ok, detail)
             command = popen.call_args.args[0]
-            bound_id = command[command.index("--heartbeat-lease-id") + 1]
-            self.assertEqual(bound_id, first["lease_id"])
+            bound_id = (
+                command[command.index("--heartbeat-lease-id") + 1]
+                if "--heartbeat-lease-id" in command
+                else None
+            )
 
             self.expire()
             ok, detail = semaphore.master_acquire(
@@ -2168,6 +2175,7 @@ class MasterLeaseTest(unittest.TestCase):
             )
         self.assertTrue(ok, detail)
         self.assertIn("master lease changed", detail)
+        self.assertEqual(bound_id, first["lease_id"])
         final = semaphore.master_snapshot()["lease"]
         self.assertEqual(final["lease_id"], successor["lease_id"])
         self.assertEqual(final["heartbeat_renewals"], 0)

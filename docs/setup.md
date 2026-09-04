@@ -395,6 +395,9 @@ Public goal-writing and execution methods are part of Creme:
   authoring a goal document.
 - [`docs/guides/execution.md`](guides/execution.md) is the authoritative method
   for executing it.
+- [`docs/guides/master.md`](guides/master.md) is the method for the single
+  master session that owns goals, workers, merges, and pushes on a host, and
+  for the independent audits that replace user review of reports.
 
 Launch the authoring or execution agent from `~/creme` and refer to those
 paths. The concrete goal may live in an authorized private repository such as

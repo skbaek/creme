@@ -6,6 +6,7 @@ from pathlib import Path
 
 from creme.adapters.base import Adapter
 from creme.doctor import (
+    check_goal_store,
     STATUS_FAIL,
     STATUS_OK,
     STATUS_WARN,
@@ -56,6 +57,22 @@ class DoctorTest(unittest.TestCase):
             checks, validation = check_host_guidance(path)
             self.assertEqual(checks[0].status, STATUS_OK)
             self.assertEqual(validation.status, "OK")
+
+    def test_goal_store_reports_master_state_presence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            self.assertIn("not configured", check_goal_store(workspace, None)[0].detail)
+            profile = {"workspace": {"goal_store": "plans"}}
+            missing = check_goal_store(workspace, profile)[0]
+            self.assertEqual(missing.status, STATUS_FAIL)
+            (workspace / "plans").mkdir()
+            absent = check_goal_store(workspace, profile)[0]
+            self.assertEqual(absent.status, STATUS_OK)
+            self.assertIn("master state absent", absent.detail)
+            (workspace / "plans" / "master").mkdir()
+            (workspace / "plans" / "master" / "board.md").write_text("# Board\n", encoding="utf-8")
+            present = check_goal_store(workspace, profile)[0]
+            self.assertIn("master state present", present.detail)
 
     def test_neutral_semaphore_interface_is_complete(self):
         root = Path(__file__).resolve().parents[2]

@@ -100,6 +100,7 @@ def cmd_init(arguments: argparse.Namespace) -> int:
             ROOT,
             Path(arguments.workspace_root).expanduser() if arguments.workspace_root else None,
             adapter,
+            goal_store=arguments.goal_store,
         )
     except RuntimeError as exc:
         _json({"status": "UNAVAILABLE", "detail": str(exc)})
@@ -340,6 +341,18 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
         return _sem_result(*semaphore.manual_release())
     if action == "migrate-state":
         return _sem_result(*semaphore.migrate_legacy_state())
+    if action == "master-acquire":
+        return _sem_result(*semaphore.master_acquire(
+            arguments.client, arguments.note, arguments.lease, take_over=arguments.take_over,
+        ))
+    if action == "master-renew":
+        if arguments.heartbeat is not None:
+            return _sem_result(*semaphore.master_heartbeat(arguments.heartbeat))
+        return _sem_result(*semaphore.master_renew(arguments.lease))
+    if action == "master-release":
+        return _sem_result(*semaphore.master_release(
+            force=arguments.force, reason=arguments.reason,
+        ))
     return _sem_result(False, f"unknown action: {action}")
 
 
@@ -540,6 +553,11 @@ def parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--workspace-root")
     init_parser.add_argument("--write", action="store_true")
     init_parser.add_argument("--replace", action="store_true")
+    init_parser.add_argument(
+        "--goal-store",
+        metavar="NAME",
+        help="name of the private goal store beside the siblings (e.g. plans); optional",
+    )
     init_parser.set_defaults(func=cmd_init)
 
     validate = commands.add_parser("validate-profile")
@@ -661,6 +679,39 @@ def parser() -> argparse.ArgumentParser:
         "migrate-state",
         help="copy legacy host state into .semaphore/state without deleting the legacy files",
     )
+    master_acquire = sem_commands.add_parser(
+        "master-acquire",
+        help="take the single master lease; refused while another master is live",
+    )
+    master_acquire.add_argument(
+        "--client",
+        help="claude, codex, or human; detected from the process ancestry when omitted",
+    )
+    master_acquire.add_argument("--note", required=True)
+    master_acquire.add_argument("--lease", type=int, default=semaphore.MASTER_LEASE_SECONDS)
+    master_acquire.add_argument(
+        "--take-over",
+        action="store_true",
+        help="replace a lapsed or stranded lease; never a live one",
+    )
+    master_renew = sem_commands.add_parser("master-renew", help="heartbeat the master lease")
+    master_renew.add_argument("--lease", type=int, default=None)
+    master_renew.add_argument(
+        "--heartbeat",
+        type=_positive,
+        metavar="SECS",
+        help=(
+            "run in the background: renew every SECS seconds until the lease is gone, "
+            "a renewal is refused, or the holding client process exits"
+        ),
+    )
+    master_release = sem_commands.add_parser("master-release", help="end the master lease")
+    master_release.add_argument(
+        "--force",
+        action="store_true",
+        help="release a live lease held by another client; logged with --reason",
+    )
+    master_release.add_argument("--reason", default="")
     sem.set_defaults(func=cmd_semaphore)
 
     client = commands.add_parser("client-profile", help="preview a machine-local Codex sibling-access profile")

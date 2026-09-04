@@ -179,6 +179,24 @@ def _load_mcp_surface(path: Path) -> dict[str, Any]:
     return {**values["server"], "env": values["env"]}
 
 
+def check_goal_store(workspace: Path, profile: Optional[dict[str, Any]]) -> list[Check]:
+    """Report the configured goal store and whether master state exists there.
+
+    The store is optional and never a runtime dependency.  When it is named,
+    the master role keeps its durable state under ``master/`` there, and a
+    session becoming the master needs to find it without knowing a path.
+    """
+    name = (profile or {}).get("workspace", {}).get("goal_store") if profile else None
+    if not name:
+        return [Check("goal store", STATUS_OK, "not configured (optional; set with `init --goal-store NAME`)")]
+    store = (workspace / name).resolve()
+    if not store.is_dir():
+        return [Check("goal store", STATUS_FAIL, f"configured but missing: {store}")]
+    board = store / "master" / "board.md"
+    detail = f"{store} (master state {'present' if board.is_file() else 'absent'}: {board})"
+    return [Check("goal store", STATUS_OK, detail)]
+
+
 def check_client_surface(root: Path) -> list[Check]:
     checks: list[Check] = []
     versions_path = root / "scripts" / "versions.json"
@@ -407,6 +425,7 @@ def run_doctor(
     blanc_name = profile["workspace"]["blanc"] if profile else "blanc"
     checks.extend(check_sibling("jaune", workspace / jaune_name, "github.com/skbaek/jaune"))
     checks.extend(check_sibling("blanc", workspace / blanc_name, "github.com/skbaek/blanc"))
+    checks.extend(check_goal_store(workspace, profile))
     checks.extend(check_client_surface(root))
     checks.extend(check_neutral_semaphore(root))
     checks.extend(check_host_wrappers(shared_root))

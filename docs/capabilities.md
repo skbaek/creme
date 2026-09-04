@@ -20,6 +20,7 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 | temporary root | `TMPDIR` or runtime temp directory | `TMPDIR` or runtime temp directory | `UNAVAILABLE` if no writable root exists |
 | guarded Lean server | toolchain-selected Lake with Creme `setup-file` guard | same | fail closed if Elan, the real toolchain, or the facade cannot be proved |
 | owned Lake build | adaptive admission, `nice`, thread cap, process sampling, ledger | same | refusal; bare or tool-initiated builds remain disabled |
+| master lease | locked `master.json` beside the hold state; client ancestry from the process snapshot | same | a second master is refused; a lapsed or stranded lease is replaced only by an explicit take-over |
 
 Shared code does not invoke another OS's command as a fallback. An unavailable
 telemetry sample never proves a host is quiet or under pressure. Aggregate
@@ -191,6 +192,30 @@ if it is blocked. `reclaim --idle-workers MIN` narrows the existing
 ownership-verifying plan to those pids; narrowing can only shrink a proven
 target set, and every worker outside the caller's client ancestry or goal
 worktree is reported with its owner rather than signalled.
+
+### Master lease
+
+`master.json` beside the hold state records at most one master lease: the
+client family and client process, the pid and uid that took it, a note, and
+the acquire/renew times with the lease window. It is written under the same
+mutex as the holds and never read by admission, so it cannot change any
+verdict. The file is separate from `state.json` for the same reason the queue
+is: hold-state validation rejects unknown keys, and a pre-update reader must
+still validate the hold state.
+
+`master-acquire` refuses while a lease is live, naming the holder and the
+command that ends it. A lease whose window has passed is *lapsed* while the
+client process that took it is still alive and *stranded* once that process
+is gone or cannot be found; `status` prints the take-over command, and
+`master-acquire --take-over` replaces only a lapsed or stranded lease, logging
+whose lease it replaced. `master-release` from the holding client is the
+normal end; from another client it succeeds only against a lapsed or stranded
+lease, or with an explicit, logged `--force`. `master-renew` from a client
+other than the holder is refused while the lease is live. Corrupt lease state
+is reported and never reset. A missing process snapshot leaves the client
+process unknown; such a lease is treated as stranded once its window passes,
+so a sandbox that denies `ps` degrades toward take-over, never toward two
+masters.
 
 Fresh installations store mutex, state, and audit log under the canonical
 checkout's ignored `.semaphore/state/`. Linked Git worktrees resolve through

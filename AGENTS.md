@@ -30,12 +30,33 @@ is performed, repository gate catalogues govern their commands and verdicts,
 and the named goal governs product semantics. Reconcile contradictions instead
 of choosing the convenient source.
 
+## The master role
+
+One session at a time is the user's representative for all Jaune/Blanc work
+on this host and holds the master lease
+(`~/creme/.semaphore/semaphore master-acquire`). It owns goals, briefs,
+workers, merges, and pushes; the user owns the intent statements, the
+reserved decisions, and independent audits. Read `docs/guides/master.md`
+before taking or handing off the role and before merging to or pushing a
+default branch. Every other session is a worker: it works in its per-goal
+worktree, reports through files and Git, and never merges to or pushes a
+default branch.
+
+The default for any decision is decide and log. Only an irreversible external
+commitment, a product-semantics fork the intent statements leave open, or a
+decision an intent statement explicitly reserves goes to the user, and then as
+a decision packet with a recommendation. Retiring a procedure requires a logged
+`procedure` event naming the failure it prevented and what prevents that
+failure now.
+
 ## Before changing a sibling
 
 1. Confirm the client trusts Creme and has the required sibling read/write
    access. Do not work around a real permission boundary.
-2. Read `docs/guides/execution.md` for substantial work and the named goal in
-   full. A goal must have stable identity and status `ready`.
+2. Read `docs/guides/execution.md` for substantial work and the named goal or
+   the master's brief in full. A goal must have stable identity and status
+   `ready`; a brief must name its objective, owned paths, gates, and report
+   location.
 3. Use per-goal worktrees. A worktree for the repository at `PATH` belongs
    in `PATH/.worktrees/<goal>`, which assumes nothing about the layout above
    that repository and needs no write access outside it; add `/.worktrees/`
@@ -187,8 +208,9 @@ preserving the gate's authoritative final command and verdict.
 Preserve unrelated work. Inspect the complete diff and status, stage explicit
 owned paths, commit coherent green checkpoints, and push dedicated
 non-protected branches when authorized. Never rewrite history or force-push.
-Merging a protected or default branch remains user-owned unless a named goal
-explicitly says otherwise.
+Merging to or pushing a protected or default branch belongs to the master
+under the merge policy in `docs/guides/master.md`; a worker never does it.
+Publication surfaces and licenses remain user decisions.
 
 Completion means every mandatory goal condition maps to inspectable evidence
 on the exact candidate. Update the state brief at green boundaries and write a

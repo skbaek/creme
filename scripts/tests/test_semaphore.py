@@ -1282,3 +1282,237 @@ class HoldAttributionTest(QueueTest):
         self.assertNotIn("STRANDED", semaphore.status_text(self.adapter))
         self.adapter.cwds = {999100: str(self.other / "Blanc")}
         self.assertIn("STRANDED", semaphore.status_text(self.adapter))
+
+
+class MasterLeaseTest(unittest.TestCase):
+    """One master at a time: live, lapsed, stranded, and take-over."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.adapter = ProcessAdapter(free_percent=80, total_gib=32)
+        self.policy = {
+            "task_memory_gib": 2,
+            "heavy_workers": 2,
+            "light_workers": 4,
+            "physical_memory_gib": 32.0,
+            "profile_status": "VALID",
+        }
+        for patcher in (
+            mock.patch.dict(os.environ, {"CREME_SEMAPHORE_DIR": self.tmp.name}, clear=False),
+            mock.patch("creme.semaphore.get_adapter", return_value=self.adapter),
+            mock.patch("creme.semaphore._runtime_admission_policy", return_value=self.policy),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.as_client(os.getpid(), "claude")
+
+    def as_client(self, pid, family):
+        if getattr(self, "_client_patch", None):
+            self._client_patch.stop()
+        value = (pid, family, f"client {family} pid {pid}") if pid else (None, None, "no client")
+        self._client_patch = mock.patch("creme.semaphore._client_process", return_value=value)
+        self._client_patch.start()
+        self.addCleanup(self._client_patch.stop)
+
+    def expire(self):
+        path = self.root / "master.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["lease"]["acquired_at"] = 1.0
+        data["lease"]["renewed_at"] = 1.0
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def dead_pid(self):
+        gone = subprocess.Popen([os.sys.executable, "-c", "pass"])
+        gone.wait()
+        return gone.pid
+
+    def log_actions(self):
+        rows = (self.root / "log.jsonl").read_text(encoding="utf-8").splitlines()
+        return [json.loads(row)["action"] for row in rows]
+
+    def test_acquire_then_a_second_acquire_is_refused_and_names_the_holder(self):
+        ok, detail = semaphore.master_acquire("claude", "first master")
+        self.assertTrue(ok, detail)
+        self.as_client(os.getpid() + 100000, "codex")
+        ok, detail = semaphore.master_acquire("codex", "second master")
+        self.assertFalse(ok)
+        self.assertIn("live", detail)
+        self.assertIn("client claude", detail)
+        self.assertIn("master-release", detail)
+        self.assertIn("never edit master.json", detail)
+        self.assertEqual(semaphore.master_snapshot()["lease"]["client"], "claude")
+
+    def test_the_holder_renews_and_releases(self):
+        semaphore.master_acquire("claude", "master")
+        before = semaphore.master_snapshot()["lease"]["renewed_at"]
+        time.sleep(0.01)
+        ok, detail = semaphore.master_renew(900)
+        self.assertTrue(ok, detail)
+        self.assertIn("holder verified", detail)
+        lease = semaphore.master_snapshot()["lease"]
+        self.assertGreater(lease["renewed_at"], before)
+        self.assertEqual(lease["lease_seconds"], 900)
+        ok, detail = semaphore.master_release()
+        self.assertTrue(ok, detail)
+        self.assertIn("by its holder", detail)
+        self.assertIsNone(semaphore.master_snapshot()["lease"])
+        self.assertIn("master: none", semaphore.status_text(self.adapter))
+        self.assertEqual(
+            self.log_actions(), ["master-acquire", "master-renew", "master-release"]
+        )
+
+    def test_another_client_cannot_renew_or_release_a_live_lease(self):
+        semaphore.master_acquire("claude", "master")
+        self.as_client(os.getpid() + 100000, "codex")
+        ok, detail = semaphore.master_renew()
+        self.assertFalse(ok)
+        self.assertIn("belongs to client claude", detail)
+        ok, detail = semaphore.master_release()
+        self.assertFalse(ok)
+        self.assertIn("--force", detail)
+        self.assertIsNotNone(semaphore.master_snapshot()["lease"])
+        ok, detail = semaphore.master_release(force=True, reason="hung session")
+        self.assertTrue(ok, detail)
+        self.assertIn("by force", detail)
+        rows = (self.root / "log.jsonl").read_text(encoding="utf-8")
+        self.assertIn("hung session", rows)
+
+    def test_a_lapsed_lease_is_replaced_only_by_take_over(self):
+        semaphore.master_acquire("claude", "idle tab")
+        self.expire()                      # client pid is this test process: alive
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("(lapsed)", text)
+        self.assertIn("LAPSED", text)
+        self.assertIn("--take-over", text)
+        self.as_client(os.getpid() + 100000, "codex")
+        ok, detail = semaphore.master_acquire("codex", "new master")
+        self.assertFalse(ok)
+        self.assertIn("LAPSED", detail)
+        ok, detail = semaphore.master_acquire("codex", "new master", take_over=True)
+        self.assertTrue(ok, detail)
+        self.assertIn("taken over", detail)
+        self.assertEqual(semaphore.master_snapshot()["lease"]["client"], "codex")
+        self.assertIn("master-take-over", self.log_actions())
+
+    def test_a_stranded_lease_names_the_take_over_command(self):
+        self.as_client(self.dead_pid(), "claude")
+        semaphore.master_acquire("claude", "crashed master")
+        self.expire()
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("(stranded)", text)
+        self.assertIn("STRANDED", text)
+        self.assertIn("master-acquire --take-over", text)
+        self.as_client(os.getpid(), "codex")
+        ok, _ = semaphore.master_acquire("codex", "successor")
+        self.assertFalse(ok)
+        ok, detail = semaphore.master_acquire("codex", "successor", take_over=True)
+        self.assertTrue(ok, detail)
+        self.assertIn("stranded", detail)
+
+    def test_a_live_lease_is_never_taken_over(self):
+        semaphore.master_acquire("claude", "master")
+        self.as_client(os.getpid() + 100000, "codex")
+        ok, detail = semaphore.master_acquire("codex", "impatient", take_over=True)
+        self.assertFalse(ok)
+        self.assertIn("live", detail)
+        self.assertEqual(semaphore.master_snapshot()["lease"]["client"], "claude")
+
+    def test_an_unknown_client_process_is_stranded_once_lapsed(self):
+        self.as_client(None, None)
+        ok, detail = semaphore.master_acquire(None, "sandboxed")
+        self.assertFalse(ok)
+        self.assertIn("--client", detail)
+        ok, detail = semaphore.master_acquire("human", "sandboxed")
+        self.assertTrue(ok, detail)
+        self.assertIsNone(semaphore.master_snapshot()["lease"]["client_pid"])
+        self.assertIn("(live)", semaphore.status_text(self.adapter))
+        self.expire()
+        self.assertIn("(stranded)", semaphore.status_text(self.adapter))
+
+    def test_the_lease_lives_beside_the_hold_state_and_changes_no_verdict(self):
+        semaphore.master_acquire("claude", "master")
+        path = self.root / "master.json"
+        self.assertTrue(path.exists())
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        state_path = self.root / "state.json"
+        if state_path.exists():
+            semaphore._validate(json.loads(state_path.read_text(encoding="utf-8")))
+        ok, detail = semaphore.adaptive_acquire(
+            "goal", "worker build", memory_gib=2, contention="tolerant",
+            adapter=self.adapter, policy=self.policy,
+        )
+        self.assertTrue(ok, detail)
+        semaphore._validate(json.loads(state_path.read_text(encoding="utf-8")))
+        self.assertNotIn("master", json.loads(state_path.read_text(encoding="utf-8")))
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("master: claude (live)", text)
+        self.assertIn("goal (live)", text)
+
+    def test_corrupt_master_state_is_reported_not_reset(self):
+        path = self.root / "master.json"
+        self.root.mkdir(exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        with self.assertRaises(semaphore.SemaphoreError):
+            semaphore.master_acquire("claude", "master")
+        self.assertEqual(path.read_text(encoding="utf-8"), "{not json")
+        self.assertIn("refusing to replace corrupt master lease state", semaphore.status_text(self.adapter))
+
+    def test_the_client_walk_finds_the_session_above_the_launcher(self):
+        self._client_patch.stop()
+        self.addCleanup(lambda: None)
+        adapter = ProcessAdapter(processes=[
+            {"pid": 10, "ppid": 1, "rss_kib": 1, "command": "/Applications/Claude.app/Contents/MacOS/Claude"},
+            {"pid": 20, "ppid": 10, "rss_kib": 1, "command": "/x/claude.app/Contents/MacOS/claude --model x"},
+            {"pid": 30, "ppid": 20, "rss_kib": 1, "command": "/bin/zsh -c semaphore"},
+            {"pid": 40, "ppid": 30, "rss_kib": 1, "command": "python3 semaphore master-acquire"},
+        ])
+        adapter.client_pattern = semaphore.re.compile(r"claude\.app/")
+        pid, family, detail = semaphore._client_process(adapter, start_pid=30)
+        self.assertEqual((pid, family), (20, "claude"))
+        self.assertIn("pid 20", detail)
+        unavailable = ProcessAdapter(processes=None)
+        self.assertEqual(semaphore._client_process(unavailable, start_pid=30)[:2], (None, None))
+
+    def test_the_heartbeat_renews_while_the_holder_lives_and_stops_when_it_is_gone(self):
+        semaphore.master_acquire("claude", "master")
+        before = semaphore.master_snapshot()["lease"]["renewed_at"]
+        time.sleep(0.01)
+        naps = []
+        ok, detail = semaphore.master_heartbeat(5, sleep=naps.append, max_beats=2)
+        self.assertTrue(ok, detail)
+        self.assertEqual(naps, [5])
+        self.assertGreater(semaphore.master_snapshot()["lease"]["renewed_at"], before)
+        self.assertEqual(self.log_actions().count("master-renew"), 2)
+        # An orphaned heartbeat must not keep a dead master alive.
+        path = self.root / "master.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["lease"]["client_pid"] = self.dead_pid()
+        path.write_text(json.dumps(data), encoding="utf-8")
+        ok, detail = semaphore.master_heartbeat(5, sleep=naps.append, max_beats=5)
+        self.assertTrue(ok, detail)
+        self.assertIn("is gone", detail)
+        self.assertEqual(self.log_actions().count("master-renew"), 2)
+        semaphore.master_release(force=True, reason="test")
+        ok, detail = semaphore.master_heartbeat(5, sleep=naps.append)
+        self.assertIn("no master lease", detail)
+
+    def test_the_client_walk_accepts_bare_executable_names(self):
+        # Darwin's snapshot is `ps -o comm`: no paths, so the session is `claude`
+        # under the desktop app `Claude`; the walk must stop at the session.
+        self._client_patch.stop()
+        adapter = ProcessAdapter(processes=[
+            {"pid": 1, "ppid": 0, "rss_kib": 1, "command": "launchd"},
+            {"pid": 10, "ppid": 1, "rss_kib": 1, "command": "Claude"},
+            {"pid": 15, "ppid": 10, "rss_kib": 1, "command": "disclaimer"},
+            {"pid": 20, "ppid": 15, "rss_kib": 1, "command": "claude"},
+            {"pid": 30, "ppid": 20, "rss_kib": 1, "command": "zsh"},
+        ])
+        adapter.client_pattern = semaphore.re.compile(r"/Applications/Claude\.app/")
+        self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (20, "claude"))
+        adapter.processes[3]["command"] = "codex"
+        self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (20, "codex"))
+        adapter.processes[3]["command"] = "python3"
+        adapter.processes[1]["command"] = "bash"
+        self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (None, None))

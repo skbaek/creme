@@ -49,6 +49,12 @@ Include:
 - concrete conditions for de-escalating, escalating, or handing off to a
   successor lead.
 
+State the primary and the equivalent as `client / model / effort` triples at
+the same rung: the model tier and the effort selector are independent axes,
+and this workflow pairs Fable with Sol and Opus with Terra. After the hard
+boundary, de-escalate the effort, not the model; weaker models belong only on
+delegated worker packets.
+
 Date-stamp or reconcile the recommendation with the goal. At launch, recheck
 the installed client's available models and selectors. A renamed or retired
 model may be replaced by its closest current capability equivalent, but the
@@ -123,5 +129,6 @@ than inflating the lead setting.
 
 The lead may adapt internal implementation, packet boundaries, and cheap test
 selection. Changes to objective, public claim, security boundary, supported
-platforms, license, remote, or a protected/default merge require the authority
-named in the goal.
+platforms, license, or remote require the authority named in the goal; a
+protected/default merge follows the master's merge policy in
+[the master guide](master.md).

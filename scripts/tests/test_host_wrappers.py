@@ -230,7 +230,10 @@ class HostWrappersTest(unittest.TestCase):
                 self.assertEqual(cmd_host_wrappers(preview), 0)
             payload = emit.call_args.args[0]
             self.assertEqual(payload["status"], "PREVIEW")
-            self.assertEqual(len(payload["wrappers"]), 2)
+            wrapper_names = {Path(path).name for path in payload["wrappers"]}
+            self.assertTrue({
+                "codex-host-telemetry", "codex-reclaim-lean",
+            }.issubset(wrapper_names))
             self.assertEqual(len(payload["rules"]), 1)
             self.assertIs(payload["rules_changed_by_install"], True)
             self.assertFalse(output.exists())

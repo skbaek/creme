@@ -45,6 +45,12 @@ transcript, memory directory, session title, or terminal scrollback. A
 client-specific memory is a cache. Host-specific facts belong in the ignored
 `.creme/host-guidance.md`, which every client reads.
 
+The record is the **locus of continuity**. A master session is ephemeral by
+design: it is a view onto the record, and the test of the record is that a
+fresh session of any client can continue from it alone, with nothing
+reconstructed from a predecessor's memory. That test is run as the handoff
+rehearsal below and as the `continuity` audit kind.
+
 ## Becoming the master
 
 Any supported client can take the role. From the Creme launch root:
@@ -271,6 +277,7 @@ against itself, which is why those are user-authored.
 | procedure review | what was retired, and was it load-bearing? | `procedure` events, `AGENTS.md`, guides |
 | process waste | where do sessions spend turns and holds for nothing? | transcripts, semaphore log, build ledger |
 | merge hygiene | was the full target run on each merged candidate? | `merge` events, build ledger, Git history |
+| continuity | could a fresh session of another client take over from the record alone, with nothing reconstructed from memory or transcript? | `master/` first and only; then the semaphore, worktrees, branches, and ledger to compare against it |
 
 **Conduct.** The auditor is read-only on the repositories and the state. It
 takes no goal hold and runs no build in a goal worktree; if a control needs

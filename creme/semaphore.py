@@ -2329,12 +2329,16 @@ def master_release(
     return True, f"master lease of {holder} released {how}"
 
 
+HEARTBEAT_SLICE_SECONDS = 60
+
+
 def master_heartbeat(
     interval: int,
     *,
     adapter: Optional[Adapter] = None,
     sleep: Callable[[float], None] = time.sleep,
     max_beats: Optional[int] = None,
+    clock: Callable[[], float] = time.time,
 ) -> tuple[bool, str]:
     """Renew the master lease every ``interval`` seconds from a background process.
 
@@ -2342,11 +2346,19 @@ def master_heartbeat(
     when the lease is gone, or when the client process that holds it is no
     longer alive — an orphaned heartbeat must never make a dead master look
     live to the next session.
+
+    It sleeps in short slices and judges "due" by the wall clock.  A system
+    sleep freezes the process, and a frozen ``nanosleep`` resumes with its
+    remaining time on wake, while the lease window is wall-clock and has
+    already passed; slicing means the lease is renewed within a minute of
+    waking instead of up to a whole interval later.  The liveness check runs
+    every slice too, so a closed session is noticed within a minute.
     """
     if interval < 1 or interval > MAX_LEASE_SECONDS:
         return False, f"interval must be 1..{MAX_LEASE_SECONDS} seconds"
     selected = adapter or get_adapter()
     beats = 0
+    last: Optional[float] = None
     while True:
         try:
             data = master_snapshot()
@@ -2359,15 +2371,19 @@ def master_heartbeat(
         if client_pid is not None and not _pid_alive(int(client_pid)):
             return True, (
                 f"heartbeat stopped after {beats} renewal(s): the holding client "
-                f"pid {client_pid} is gone; the lease will lapse and read STRANDED"
+                f"pid {client_pid} is gone; the lease will read STRANDED"
             )
-        ok, detail = master_renew(adapter=selected, as_client_pid=client_pid)
-        if not ok:
-            return False, f"heartbeat stopped after {beats} renewal(s): {detail}"
-        beats += 1
-        if max_beats is not None and beats >= max_beats:
-            return True, f"heartbeat stopped after {beats} renewal(s): beat limit reached"
-        sleep(interval)
+        now = clock()
+        if last is None or now - last >= interval:
+            ok, detail = master_renew(adapter=selected, as_client_pid=client_pid)
+            if not ok:
+                return False, f"heartbeat stopped after {beats} renewal(s): {detail}"
+            beats += 1
+            last = now
+            if max_beats is not None and beats >= max_beats:
+                return True, f"heartbeat stopped after {beats} renewal(s): beat limit reached"
+        remaining = interval - (clock() - last)
+        sleep(max(1.0, min(float(HEARTBEAT_SLICE_SECONDS), remaining)))
 
 
 def master_heartbeat_detached(interval: int) -> tuple[bool, str]:

@@ -1480,7 +1480,15 @@ class MasterLeaseTest(unittest.TestCase):
         before = semaphore.master_snapshot()["lease"]["renewed_at"]
         time.sleep(0.01)
         naps = []
-        ok, detail = semaphore.master_heartbeat(5, sleep=naps.append, max_beats=2)
+        clock = [0.0]
+
+        def nap(seconds):
+            naps.append(seconds)
+            clock[0] += seconds
+
+        ok, detail = semaphore.master_heartbeat(
+            5, sleep=nap, max_beats=2, clock=lambda: clock[0],
+        )
         self.assertTrue(ok, detail)
         self.assertEqual(naps, [5])
         self.assertGreater(semaphore.master_snapshot()["lease"]["renewed_at"], before)
@@ -1557,3 +1565,21 @@ class MasterLeaseTest(unittest.TestCase):
         semaphore.master_release()
         ok, detail = semaphore.master_heartbeat_detached(1500)
         self.assertFalse(ok)
+
+    def test_the_heartbeat_renews_within_a_slice_of_waking_from_system_sleep(self):
+        semaphore.master_acquire("claude", "master")
+        naps = []
+        clock = [0.0]
+
+        def nap(seconds):
+            naps.append(seconds)
+            # The machine slept: the wall clock jumps far past the window
+            # while the process itself slept only one slice.
+            clock[0] += 10_000 if len(naps) == 1 else seconds
+
+        ok, detail = semaphore.master_heartbeat(
+            1500, sleep=nap, max_beats=2, clock=lambda: clock[0],
+        )
+        self.assertTrue(ok, detail)
+        self.assertEqual(naps, [60])
+        self.assertEqual(self.log_actions().count("master-renew"), 2)

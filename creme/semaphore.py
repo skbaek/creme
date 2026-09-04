@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -8,6 +10,8 @@ import sys
 import subprocess
 import re
 import signal
+import socket
+import stat
 import tempfile
 import threading
 import time
@@ -2137,13 +2141,23 @@ def break_expired(label: str, reason: str, adapter: Optional[Adapter] = None) ->
 # ---------------------------------------------------------------------------
 
 MASTER_NAME = "master.json"
-MASTER_SCHEMA_VERSION = 1
+MASTER_SCHEMA_VERSION = 2
 MASTER_LEASE_SECONDS = 1800
-MASTER_KEYS = {
+MASTER_V1_KEYS = {
     "client", "client_pid", "pid", "uid", "note",
     "acquired_at", "renewed_at", "lease_seconds",
 }
+MASTER_KEYS = MASTER_V1_KEYS | {
+    "session_digest", "liveness_digest", "lease_id",
+    "heartbeat_renewals", "legacy_unbound",
+}
+MASTER_SESSION_DIGEST_DOMAIN = b"creme-master-session-v1\0"
+MASTER_LIVENESS_DIGEST_DOMAIN = b"creme-master-liveness-v1\0"
+MASTER_UNVERIFIED_HEARTBEAT_RENEWALS = 3
+MASTER_LIVENESS_FAILURE_LIMIT = 3
 CLIENT_LABEL = re.compile(r"[A-Za-z0-9_.-]{1,32}")
+HEX_32 = re.compile(r"[0-9a-f]{32}")
+HEX_64 = re.compile(r"[0-9a-f]{64}")
 
 
 def master_path(root: Optional[Path] = None) -> Path:
@@ -2154,15 +2168,34 @@ def _empty_master() -> dict[str, Any]:
     return {"schema_version": MASTER_SCHEMA_VERSION, "lease": None}
 
 
+def _upgrade_master_v1(data: dict[str, Any]) -> dict[str, Any]:
+    lease = data["lease"]
+    if lease is None:
+        return _empty_master()
+    identity = json.dumps(lease, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "schema_version": MASTER_SCHEMA_VERSION,
+        "lease": {
+            **lease,
+            "session_digest": None,
+            "liveness_digest": None,
+            "lease_id": hashlib.sha256(b"creme-master-lease-v1\0" + identity).hexdigest()[:32],
+            "heartbeat_renewals": 0,
+            "legacy_unbound": True,
+        },
+    }
+
+
 def _validate_master(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict) or set(data) != {"schema_version", "lease"}:
         raise SemaphoreError("master lease state has an unexpected shape")
-    if data["schema_version"] != MASTER_SCHEMA_VERSION:
+    if data["schema_version"] not in {1, MASTER_SCHEMA_VERSION}:
         raise SemaphoreError("master lease schema is unsupported")
     lease = data["lease"]
     if lease is None:
-        return data
-    if not isinstance(lease, dict) or set(lease) != MASTER_KEYS:
+        return _empty_master() if data["schema_version"] == 1 else data
+    expected_keys = MASTER_V1_KEYS if data["schema_version"] == 1 else MASTER_KEYS
+    if not isinstance(lease, dict) or set(lease) != expected_keys:
         raise SemaphoreError("master lease has an unexpected shape")
     if not isinstance(lease["client"], str) or CLIENT_LABEL.fullmatch(lease["client"]) is None:
         raise SemaphoreError("master lease client must be a short label")
@@ -2186,6 +2219,21 @@ def _validate_master(data: Any) -> dict[str, Any]:
         raise SemaphoreError("master lease lease_seconds is outside the supported range")
     if lease["renewed_at"] < lease["acquired_at"]:
         raise SemaphoreError("master lease renewed_at predates acquired_at")
+    if data["schema_version"] == 1:
+        return _upgrade_master_v1(data)
+    for key in ("session_digest", "liveness_digest"):
+        digest = lease[key]
+        if digest is not None and (
+            not isinstance(digest, str) or HEX_64.fullmatch(digest) is None
+        ):
+            raise SemaphoreError(f"master lease {key} must be a SHA-256 digest or null")
+    if not isinstance(lease["lease_id"], str) or HEX_32.fullmatch(lease["lease_id"]) is None:
+        raise SemaphoreError("master lease lease_id must be a 128-bit hexadecimal identifier")
+    renewals = lease["heartbeat_renewals"]
+    if isinstance(renewals, bool) or not isinstance(renewals, int) or renewals < 0:
+        raise SemaphoreError("master lease heartbeat_renewals must be a non-negative integer")
+    if not isinstance(lease["legacy_unbound"], bool):
+        raise SemaphoreError("master lease legacy_unbound must be boolean")
     return data
 
 
@@ -2200,8 +2248,8 @@ def _load_master(root: Path) -> dict[str, Any]:
 
 
 def _save_master(root: Path, data: dict[str, Any]) -> None:
-    _validate_master(data)
-    _write_json(master_path(root), data)
+    validated = _validate_master(data)
+    _write_json(master_path(root), validated)
 
 
 def master_snapshot() -> dict[str, Any]:
@@ -2267,6 +2315,72 @@ def _client_family(command: str, pattern: Any) -> Optional[str]:
     return "agent"
 
 
+class _ClientSession(NamedTuple):
+    digest: Optional[str]
+    liveness_digest: Optional[str]
+    liveness_socket: Optional[str]
+    detail: str
+
+
+def _digest_session_value(domain: bytes, value: str) -> str:
+    return hashlib.sha256(domain + value.encode("utf-8")).hexdigest()
+
+
+def _client_session(client: Optional[str]) -> _ClientSession:
+    """Return an opaque session identity and optional liveness socket.
+
+    Client adapters inject high-entropy identifiers through the environment.
+    The generic lease stores only domain-separated digests and never returns or
+    logs the raw identifier or socket path.  Codex Desktop already provides the
+    two adapter values used below; ``CREME_MASTER_*`` is the neutral interface
+    for future clients and test harnesses.
+    """
+    raw_identity = os.environ.get("CREME_MASTER_SESSION_ID", "")
+    raw_socket = os.environ.get("CREME_MASTER_LIVENESS_SOCKET", "")
+    source = "client adapter"
+    if not raw_identity and client in {None, "codex"}:
+        raw_identity = (
+            os.environ.get("CODEX_SESSION_ID", "")
+            or os.environ.get("CODEX_THREAD_ID", "")
+        )
+        source = "Codex adapter"
+    if not raw_socket and client in {None, "codex"}:
+        raw_socket = os.environ.get("CODEX_APP_TOOLS_PIPE_PATH", "")
+    if not raw_identity:
+        return _ClientSession(None, None, None, "no stable session identity available")
+    digest = _digest_session_value(MASTER_SESSION_DIGEST_DOMAIN, raw_identity)
+    liveness_digest = None
+    liveness_socket = None
+    if raw_socket and os.path.isabs(raw_socket):
+        try:
+            mode = os.stat(raw_socket).st_mode
+        except OSError:
+            mode = 0
+        if stat.S_ISSOCK(mode):
+            liveness_digest = _digest_session_value(MASTER_LIVENESS_DIGEST_DOMAIN, raw_socket)
+            liveness_socket = raw_socket
+    suffix = " with liveness socket" if liveness_digest else ""
+    return _ClientSession(digest, liveness_digest, liveness_socket, f"{source} identity{suffix}")
+
+
+def _session_socket_live(path: Optional[str]) -> bool:
+    """Conservatively prove that a session-owned Unix listener still accepts."""
+    if not path or not os.path.isabs(path):
+        return False
+    try:
+        if not stat.S_ISSOCK(os.stat(path).st_mode):
+            return False
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(0.25)
+            probe.connect(path)
+            return True
+        finally:
+            probe.close()
+    except OSError:
+        return False
+
+
 def _master_view(lease: Optional[dict[str, Any]], now: float) -> dict[str, Any]:
     """Classify the lease: ``none``, ``live``, ``lapsed``, or ``stranded``."""
     if lease is None:
@@ -2301,11 +2415,22 @@ def _master_view(lease: Optional[dict[str, Any]], now: float) -> dict[str, Any]:
 def _master_holder_text(lease: dict[str, Any]) -> str:
     client_pid = lease["client_pid"]
     where = f"client_pid={client_pid}" if client_pid is not None else "client process unknown"
+    if lease["session_digest"] is not None:
+        where += ", session identity recorded"
     return f"client {lease['client']} ({where}, taken by pid {lease['pid']}, note={lease['note']!r})"
 
 
-def _same_client(lease: dict[str, Any], client_pid: Optional[int]) -> Optional[bool]:
+def _same_client(
+    lease: dict[str, Any],
+    client_pid: Optional[int],
+    session_digest: Optional[str],
+) -> Optional[bool]:
     """Is this invocation the lease holder's session? ``None`` when unverifiable."""
+    recorded_digest = lease["session_digest"]
+    if recorded_digest is not None:
+        if session_digest is None:
+            return False
+        return hmac.compare_digest(recorded_digest, session_digest)
     if client_pid is None or lease["client_pid"] is None:
         return None
     return int(client_pid) == int(lease["client_pid"])
@@ -2324,6 +2449,7 @@ def _master_lines(root: Path, now: float) -> list[str]:
         f"master: {lease['client']} ({view['state']}) client_pid={lease['client_pid']} "
         f"pid={lease['pid']} held={int(view['held'])}s "
         f"renewed={int(view['since_renewal'])}s ago lease={lease['lease_seconds']}s "
+        f"identity={'session' if lease['session_digest'] else 'process' if lease['client_pid'] else 'unverified'} "
         f"note={lease['note']!r}"
     ]
     if view["state"] == "lapsed":
@@ -2356,6 +2482,11 @@ def master_acquire(
         return False, "a non-empty --note is required"
     selected = adapter or get_adapter()
     client_pid, family, found = _client_process(selected)
+    session = _client_session(client or family)
+    if family is None and session.digest is not None and (
+        os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+    ):
+        family = "codex"
     if client is None:
         client = family
     if client is None or CLIENT_LABEL.fullmatch(client) is None:
@@ -2397,6 +2528,15 @@ def master_acquire(
             "acquired_at": now,
             "renewed_at": now,
             "lease_seconds": lease,
+            "session_digest": session.digest,
+            "liveness_digest": (
+                session.liveness_digest
+                if _session_socket_live(session.liveness_socket)
+                else None
+            ),
+            "lease_id": uuid.uuid4().hex,
+            "heartbeat_renewals": 0,
+            "legacy_unbound": False,
         }
         _save_master(root, data)
     if replaced:
@@ -2406,8 +2546,9 @@ def master_acquire(
             f"master lease taken over from {holder} ({state_word}); this session is "
             f"the master as {found}; renew within {lease}s"
         )
-    _log("master-acquire", client, "OK", f"{found}; lease={lease}; {note}")
-    return True, f"master lease acquired by client {client} ({found}); renew within {lease}s"
+    identity = session.detail if session.digest else found
+    _log("master-acquire", client, "OK", f"{found}; {identity}; lease={lease}; {note}")
+    return True, f"master lease acquired by client {client} ({identity}); renew within {lease}s"
 
 
 def master_renew(
@@ -2415,10 +2556,14 @@ def master_renew(
     *,
     adapter: Optional[Adapter] = None,
     as_client_pid: Optional[int] = None,
+    as_session_digest: Optional[str] = None,
+    expected_lease_id: Optional[str] = None,
+    heartbeat: bool = False,
 ) -> tuple[bool, str]:
     if lease is not None and (lease < 1 or lease > MAX_LEASE_SECONDS):
         return False, f"lease must be 1..{MAX_LEASE_SECONDS} seconds"
     selected = adapter or get_adapter()
+    session = _client_session(None)
     if as_client_pid is not None:
         # The detached heartbeat is orphaned to the init process and cannot
         # find a client above itself; it acts for the holder it read from
@@ -2426,17 +2571,24 @@ def master_renew(
         client_pid, found = as_client_pid, f"heartbeat for client pid {as_client_pid}"
     else:
         client_pid, _family, found = _client_process(selected)
+    session_digest = as_session_digest if as_session_digest is not None else session.digest
     with locked_state() as (path, _state):
         root = path.parent
         data = _load_master(root)
         current = data["lease"]
         if current is None:
             return False, "no master lease exists; run master-acquire"
+        if expected_lease_id is not None and not hmac.compare_digest(
+            current["lease_id"], expected_lease_id
+        ):
+            return False, "the master lease changed; this heartbeat belongs to its predecessor"
         now = _now()
         view = _master_view(current, now)
         holder = _master_holder_text(current)
-        same = _same_client(current, client_pid)
-        if view["state"] == "live" and same is False:
+        same = _same_client(current, client_pid, session_digest)
+        if view["state"] == "live" and (
+            same is False or (same is None and not current["legacy_unbound"])
+        ):
             detail = f"the master lease belongs to {holder}; this invocation: {found}"
             _log("master-renew", current["client"], "REFUSED", detail)
             return False, detail
@@ -2447,9 +2599,36 @@ def master_renew(
             )
             _log("master-renew", current["client"], "REFUSED", detail)
             return False, detail
+        if (
+            heartbeat
+            and current["liveness_digest"] is None
+            and (
+                current["session_digest"] is not None
+                or current["client_pid"] is None
+            )
+            and current["heartbeat_renewals"] >= MASTER_UNVERIFIED_HEARTBEAT_RENEWALS
+        ):
+            return False, "unverified heartbeat self-renewal budget exhausted"
+        if current["legacy_unbound"] and same is True:
+            current["legacy_unbound"] = False
+            current["session_digest"] = session_digest
+            if session_digest is not None and _session_socket_live(session.liveness_socket):
+                current["liveness_digest"] = session.liveness_digest
         current["renewed_at"] = now
         if lease is not None:
             current["lease_seconds"] = lease
+        if heartbeat:
+            current["heartbeat_renewals"] += 1
+        else:
+            current["heartbeat_renewals"] = 0
+            if (
+                same is True
+                and session_digest is not None
+                and current["session_digest"] is not None
+                and hmac.compare_digest(session_digest, current["session_digest"])
+                and _session_socket_live(session.liveness_socket)
+            ):
+                current["liveness_digest"] = session.liveness_digest
         _save_master(root, data)
     verified = "holder verified" if same else "holder unverified"
     _log("master-renew", current["client"], "OK", f"lease={current['lease_seconds']}; {verified}")
@@ -2467,6 +2646,7 @@ def master_release(
 ) -> tuple[bool, str]:
     selected = adapter or get_adapter()
     client_pid, _family, found = _client_process(selected)
+    session = _client_session(None)
     with locked_state() as (path, _state):
         root = path.parent
         data = _load_master(root)
@@ -2475,8 +2655,10 @@ def master_release(
             return False, "no master lease exists"
         view = _master_view(current, _now())
         holder = _master_holder_text(current)
-        same = _same_client(current, client_pid)
-        if view["state"] == "live" and same is not True and not force:
+        same = _same_client(current, client_pid, session.digest)
+        if view["state"] == "live" and same is not True and not (
+            current["legacy_unbound"] and same is None
+        ) and not force:
             detail = (
                 f"the master lease is live and belongs to {holder}; this invocation: "
                 f"{found}; release it from that session, wait for it to lapse, or pass "
@@ -2512,7 +2694,11 @@ def master_heartbeat(
     The loop is the sanctioned heartbeat: it exits when a renewal is refused,
     when the lease is gone, or when the client process that holds it is no
     longer alive — an orphaned heartbeat must never make a dead master look
-    live to the next session.
+    live to the next session.  Every loop is bound to one lease id and one
+    opaque session identity.  When process liveness is unavailable, a
+    session-owned listener proves liveness; without either capability, the
+    heartbeat has a small persisted self-renewal budget and then becomes
+    passive until a direct holder renewal resets it.
 
     It sleeps in short slices and judges "due" by the wall clock.  A system
     sleep freezes the process, and a frozen ``nanosleep`` resumes with its
@@ -2524,7 +2710,29 @@ def master_heartbeat(
     if interval < 1 or interval > MAX_LEASE_SECONDS:
         return False, f"interval must be 1..{MAX_LEASE_SECONDS} seconds"
     selected = adapter or get_adapter()
+    try:
+        initial = master_snapshot()["lease"]
+    except SemaphoreError as exc:
+        return False, str(exc)
+    if initial is None:
+        return True, "heartbeat stopped after 0 renewal(s): no master lease exists"
+    lease_id = initial["lease_id"]
+    client_pid = initial["client_pid"]
+    session = _client_session(initial["client"])
+    session_digest = initial["session_digest"]
+    if session_digest is not None and (
+        session.digest is None or not hmac.compare_digest(session_digest, session.digest)
+    ):
+        return False, "heartbeat session identity does not match the master lease"
+    liveness_socket = None
+    if initial["liveness_digest"] is not None:
+        if session.liveness_digest is None or not hmac.compare_digest(
+            initial["liveness_digest"], session.liveness_digest
+        ):
+            return False, "heartbeat liveness identity does not match the master lease"
+        liveness_socket = session.liveness_socket
     beats = 0
+    liveness_failures = 0
     last: Optional[float] = None
     while True:
         try:
@@ -2534,15 +2742,52 @@ def master_heartbeat(
         lease = data["lease"]
         if lease is None:
             return True, f"heartbeat stopped after {beats} renewal(s): no master lease exists"
-        client_pid = lease["client_pid"]
+        if not hmac.compare_digest(lease["lease_id"], lease_id):
+            return True, f"heartbeat stopped after {beats} renewal(s): the master lease changed"
         if client_pid is not None and not _pid_alive(int(client_pid)):
             return True, (
                 f"heartbeat stopped after {beats} renewal(s): the holding client "
                 f"pid {client_pid} is gone; the lease will read STRANDED"
             )
+        if lease["liveness_digest"] is not None:
+            if liveness_socket is None:
+                refreshed_session = _client_session(lease["client"])
+                if (
+                    refreshed_session.liveness_digest is not None
+                    and hmac.compare_digest(
+                        lease["liveness_digest"], refreshed_session.liveness_digest
+                    )
+                ):
+                    liveness_socket = refreshed_session.liveness_socket
+            if not _session_socket_live(liveness_socket):
+                liveness_failures += 1
+                if liveness_failures >= MASTER_LIVENESS_FAILURE_LIMIT:
+                    return True, (
+                        f"heartbeat stopped after {beats} renewal(s): the holding "
+                        "session listener is gone; the lease will lapse"
+                    )
+                sleep(float(HEARTBEAT_SLICE_SECONDS))
+                continue
+            liveness_failures = 0
+        elif (
+            lease["liveness_digest"] is None
+            and (session_digest is not None or client_pid is None)
+            and lease["heartbeat_renewals"] >= MASTER_UNVERIFIED_HEARTBEAT_RENEWALS
+        ):
+            # Stay alive but stop extending the lease.  A direct, identity-
+            # checked renewal proves holder activity and resets the persisted
+            # budget; a successor take-over changes lease_id and ends us.
+            sleep(float(HEARTBEAT_SLICE_SECONDS))
+            continue
         now = clock()
         if last is None or now - last >= interval:
-            ok, detail = master_renew(adapter=selected, as_client_pid=client_pid)
+            ok, detail = master_renew(
+                adapter=selected,
+                as_client_pid=client_pid,
+                as_session_digest=session_digest,
+                expected_lease_id=lease_id,
+                heartbeat=True,
+            )
             if not ok:
                 return False, f"heartbeat stopped after {beats} renewal(s): {detail}"
             beats += 1

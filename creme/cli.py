@@ -764,7 +764,7 @@ def parser() -> argparse.ArgumentParser:
         metavar="SECS",
         help=(
             "run in the background: renew every SECS seconds until the lease is gone, "
-            "a renewal is refused, or the holding client process exits"
+            "the bound session disappears, or bounded fallback renewal becomes passive"
         ),
     )
     master_renew.add_argument(

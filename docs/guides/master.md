@@ -77,7 +77,7 @@ anything else and whether or not the user mentions the role:
 3. Try to take the lease:
 
    ```sh
-   ~/creme/.semaphore/semaphore master-acquire --client claude --note "why this session"
+   ~/creme/.semaphore/semaphore master-acquire --client codex --note "why this session"
    ```
 
    - `OK`: this session is the **master**. Start the heartbeat detached
@@ -117,22 +117,26 @@ the hold state under the same mutex. It charges no memory and never affects
 admission; it exists only so that two masters cannot coexist.
 
 ```sh
-~/creme/.semaphore/semaphore master-acquire --client claude --note "..." [--lease SECS]
+~/creme/.semaphore/semaphore master-acquire --client codex --note "..." [--lease SECS]
 ~/creme/.semaphore/semaphore master-renew --heartbeat 1500 --detach
 ~/creme/.semaphore/semaphore master-renew
 ~/creme/.semaphore/semaphore master-release
 ~/creme/.semaphore/semaphore status        # prints the master: line
 ```
 
-- **Live** means the client process that took the lease is alive and the
-  window has not passed. Renew at every event and keep the background
-  heartbeat running; an idle tab whose heartbeat died will lapse.
+- **Live** means the lease window has not passed and any available holder
+  liveness evidence has not failed. The holder is matched by an opaque
+  adapter-supplied session digest when available, otherwise by its discovered
+  client process. Raw session identifiers are never written to disk or logs.
+  Renew at every event and keep the background heartbeat running.
 - **Lapsed** means the window passed but the client process is still alive:
   a master that stopped renewing, or a tab nobody wound down.
   `master-acquire` refuses and says so.
-- **Stranded** means the client process is gone, or the window passed and the
-  process was never identified. A closed tab strands its lease at once;
-  `status` prints the take-over command.
+- **Stranded** means the client process is gone, or the window passed and
+  process liveness is unavailable. A matching session digest lets a still-live
+  holder recover after system sleep; a different session cannot renew or
+  release merely by naming the same client. `status` prints the take-over
+  command.
 - Before every write to the record, merge, push, or worker spawn, the master
   runs `master-renew`. A refusal means it has been superseded: stop, write
   nothing, and tell the user.
@@ -141,6 +145,13 @@ admission; it exists only so that two masters cannot coexist.
   sanctioned recovery; editing `master.json` is not.
 - `master-release` from the holding session is the normal end. From any other
   session it succeeds only against a lapsed or stranded lease.
+- A detached heartbeat is bound to one lease id. With process discovery denied,
+  an adapter-supplied session listener lets it stop when the task closes and
+  recover within one heartbeat slice after wake. Without a listener for a
+  digest-identified task (or without either liveness capability), it
+  self-renews only three times, then waits passively for a direct
+  holder renewal; at the standard 1,500/1,800-second settings an orphan becomes
+  take-overable within 4,800 seconds of the last direct holder activity.
 
 Every transition writes one row to the semaphore log with the holder's
 client, pid, and note, so a disputed lease can be read back.

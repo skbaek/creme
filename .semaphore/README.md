@@ -34,17 +34,24 @@ One session at a time holds the master lease, kept in `state/master.json`
 under the same mutex. It charges no memory and never affects admission:
 
 ```sh
-~/creme/.semaphore/semaphore master-acquire --client claude --note "why"
+~/creme/.semaphore/semaphore master-acquire --client codex --note "why"
 ~/creme/.semaphore/semaphore master-renew --heartbeat 1500 --detach
 ~/creme/.semaphore/semaphore master-release
 ```
 
-A second `master-acquire` is refused while the lease is live. A lease is
-*stranded* as soon as the client process that took it is gone, or when its
-window passes with that process never identified; it is *lapsed* when the
-window passes while the process is still alive. `status` prints the
-take-over command, and `master-acquire --take-over` replaces only a lapsed or
-stranded lease.
+A second `master-acquire` is refused while the lease is live. An
+adapter-supplied session identity is stored only as a digest and prevents a
+second task of the same client from renewing or releasing the lease when
+process discovery is unavailable or shared. The detached heartbeat is bound
+to one lease id and uses an adapter liveness socket when available. A
+digest-identified task without that listener, or a task with neither process
+nor socket liveness, gets three self-renewals and then becomes passive;
+with the standard 1,500-second heartbeat and 1,800-second lease an orphan is
+take-overable within 4,800 seconds of the last direct holder activity. A lease
+is *stranded* when its process is gone or its window passes without process
+liveness, and *lapsed* when the window passes while the process is still
+alive. `status` prints the take-over command, and `master-acquire --take-over`
+replaces only a lapsed or stranded lease.
 
 Existing installations keep using the legacy state directory until an explicit migration:
 

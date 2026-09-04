@@ -210,27 +210,54 @@ rather than signalled.
 ### Master lease
 
 `master.json` beside the hold state records at most one master lease: the
-client family and client process, the pid and uid that took it, a note, and
-the acquire/renew times with the lease window. It is written under the same
+client family and client process, opaque digests of any adapter-supplied
+session identity and liveness socket, a per-acquisition lease id, the pid and
+uid that took it, a note, and the acquire/renew times with the lease window.
+Raw session identifiers and socket paths are never persisted, printed, or
+logged. It is written under the same
 mutex as the holds and never read by admission, so it cannot change any
 verdict. The file is separate from `state.json` for the same reason the queue
 is: hold-state validation rejects unknown keys, and a pre-update reader must
 still validate the hold state.
 
+The neutral adapter inputs are `CREME_MASTER_SESSION_ID` and
+`CREME_MASTER_LIVENESS_SOCKET`. A client integration supplies both without
+asking the user to copy a token between commands. The Codex adapter consumes
+the task identity and app-tools listener exported by Codex Desktop when they
+are present; absent or malformed inputs simply select the bounded fallback.
+
 `master-acquire` refuses while a lease is live, naming the holder and the
-command that ends it. A lease is *stranded* as soon as the client process
-that took it is gone — a closed session cannot renew — or once its window
-passes with that process never identified, and *lapsed* when the window
-passes while the process is still alive; `status` prints the take-over
-command, and
+command that ends it. When process discovery is unavailable, a stable
+adapter-supplied session identity still distinguishes the holder from another
+task of the same client; the digest takes precedence even when two desktop
+tasks share a visible app-process ancestor. A matching holder can renew an
+expired lease after system sleep, unless a successor already took it over.
+A lease is *stranded* as soon as the identified client process is gone, or
+once its window passes with process liveness unavailable, and *lapsed* when
+the window passes while the process is still alive; `status` prints the
+take-over command, and
 `master-acquire --take-over` replaces only a lapsed or stranded lease, logging
 whose lease it replaced. `master-release` from the holding client is the
 normal end; from another client it succeeds only against a lapsed or stranded
 lease, or with an explicit, logged `--force`. `master-renew` from a client
-other than the holder is refused while the lease is live. Corrupt lease state
-is reported and never reset. A missing process snapshot leaves the client
-process unknown; such a lease is treated as stranded once its window passes,
-so a sandbox that denies `ps` degrades toward take-over, never toward two
+other than the holder is refused while the lease is live, even if it supplies
+the same client label or shares a discovered app pid. Corrupt lease state is
+reported and never reset. Schema-1 leases are validated and upgraded in
+memory, then persisted as schema 2 on the next legitimate write without
+changing their holder or times.
+
+The detached heartbeat is bound to the lease id it started for. With no usable
+process snapshot it actively probes the adapter's session-owned Unix listener;
+three consecutive failed probes stop renewal, so an abruptly closed task is
+take-overable no later than the lease window after its last successful beat.
+If a session digest takes precedence but has no listener, or if neither
+process nor listener liveness exists, the safe fallback permits only three
+persisted self-renewals and then becomes passive until a direct,
+identity-checked holder renewal resets the budget. With the prescribed
+1,500-second heartbeat and 1,800-second lease, that fallback can extend a dead
+holder for at most 4,800 seconds after its last direct activity. A successor's
+new lease id ends the old passive heartbeat. Missing capabilities therefore
+degrade toward bounded take-over, never indefinite orphan renewal or two
 masters.
 
 Fresh installations store mutex, state, and audit log under the canonical

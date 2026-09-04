@@ -2149,11 +2149,12 @@ MASTER_V1_KEYS = {
 }
 MASTER_KEYS = MASTER_V1_KEYS | {
     "session_digest", "liveness_digest", "lease_id",
-    "heartbeat_renewals", "legacy_unbound",
+    "heartbeat_renewals", "direct_activity_at", "legacy_unbound",
 }
 MASTER_SESSION_DIGEST_DOMAIN = b"creme-master-session-v1\0"
 MASTER_LIVENESS_DIGEST_DOMAIN = b"creme-master-liveness-v1\0"
 MASTER_UNVERIFIED_HEARTBEAT_RENEWALS = 2
+MASTER_UNVERIFIED_HEARTBEAT_GRACE_SECONDS = 3000
 MASTER_LIVENESS_FAILURE_LIMIT = 3
 CLIENT_LABEL = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 HEX_32 = re.compile(r"[0-9a-f]{32}")
@@ -2181,6 +2182,9 @@ def _upgrade_master_v1(data: dict[str, Any]) -> dict[str, Any]:
             "liveness_digest": None,
             "lease_id": hashlib.sha256(b"creme-master-lease-v1\0" + identity).hexdigest()[:32],
             "heartbeat_renewals": 0,
+            # Schema 1 had no helper/direct distinction.  Its last renewal is
+            # therefore the only safe anchor until its verified holder writes.
+            "direct_activity_at": lease["renewed_at"],
             "legacy_unbound": True,
         },
     }
@@ -2232,6 +2236,18 @@ def _validate_master(data: Any) -> dict[str, Any]:
     renewals = lease["heartbeat_renewals"]
     if isinstance(renewals, bool) or not isinstance(renewals, int) or renewals < 0:
         raise SemaphoreError("master lease heartbeat_renewals must be a non-negative integer")
+    direct_activity = lease["direct_activity_at"]
+    if (
+        isinstance(direct_activity, bool)
+        or not isinstance(direct_activity, (int, float))
+        or not math.isfinite(direct_activity)
+        or direct_activity <= 0
+    ):
+        raise SemaphoreError("master lease direct_activity_at must be a positive finite number")
+    if not lease["acquired_at"] <= direct_activity <= lease["renewed_at"]:
+        raise SemaphoreError(
+            "master lease direct_activity_at must be between acquisition and renewal"
+        )
     if not isinstance(lease["legacy_unbound"], bool):
         raise SemaphoreError("master lease legacy_unbound must be boolean")
     return data
@@ -2499,7 +2515,10 @@ def master_acquire(
         return False, "a non-empty --note is required"
     selected = adapter or get_adapter()
     client_pid, family, found = _client_process(selected)
-    session = _client_session(client or family)
+    # Process discovery determines the adapter family even when --client is a
+    # cosmetic label.  Preserve its compatibility identity while keeping the
+    # user-supplied label as the public lease label.
+    session = _client_session(family or client)
     if family is None and session.digest is not None and (
         os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
     ):
@@ -2561,6 +2580,7 @@ def master_acquire(
             ),
             "lease_id": uuid.uuid4().hex,
             "heartbeat_renewals": 0,
+            "direct_activity_at": now,
             "legacy_unbound": False,
         }
         _save_master(root, data)
@@ -2631,9 +2651,14 @@ def master_renew(
         if (
             heartbeat
             and _bounded_master_heartbeat(current)
-            and current["heartbeat_renewals"] >= MASTER_UNVERIFIED_HEARTBEAT_RENEWALS
         ):
-            return False, "unverified heartbeat self-renewal budget exhausted"
+            if now > (
+                current["direct_activity_at"]
+                + MASTER_UNVERIFIED_HEARTBEAT_GRACE_SECONDS
+            ):
+                return False, "unverified heartbeat direct-activity deadline passed"
+            if current["heartbeat_renewals"] >= MASTER_UNVERIFIED_HEARTBEAT_RENEWALS:
+                return False, "unverified heartbeat self-renewal budget exhausted"
         if current["legacy_unbound"] and same is True:
             current["legacy_unbound"] = False
             current["session_digest"] = session_digest
@@ -2646,6 +2671,10 @@ def master_renew(
             current["heartbeat_renewals"] += 1
         else:
             current["heartbeat_renewals"] = 0
+            # Reaching this branch required same=True.  Only this direct,
+            # verified holder action advances the absolute fallback anchor;
+            # helper renewals never do.
+            current["direct_activity_at"] = now
             if (
                 same is True
                 and session_digest is not None
@@ -2708,6 +2737,7 @@ def master_heartbeat(
     interval: int,
     *,
     adapter: Optional[Adapter] = None,
+    expected_lease_id: Optional[str] = None,
     sleep: Callable[[float], None] = time.sleep,
     max_beats: Optional[int] = None,
     clock: Callable[[], float] = time.time,
@@ -2720,8 +2750,10 @@ def master_heartbeat(
     live to the next session.  Every loop is bound to one lease id and one
     opaque session identity.  When process liveness is unavailable, a
     task-owned listener proves liveness; without that or a task-scoped process,
-    the heartbeat has a small persisted self-renewal budget and then becomes
-    passive until a direct holder renewal resets it.
+    the heartbeat has a small persisted self-renewal budget plus an absolute
+    deadline anchored to the last verified direct holder activity.  It never
+    advances that anchor.  A parent-supplied ``expected_lease_id`` is checked
+    against the first snapshot before a detached child adopts the lease.
 
     It sleeps in short slices and judges "due" by the wall clock.  A system
     sleep freezes the process, and a frozen ``nanosleep`` resumes with its
@@ -2732,6 +2764,8 @@ def master_heartbeat(
     """
     if interval < 1 or interval > MAX_LEASE_SECONDS:
         return False, f"interval must be 1..{MAX_LEASE_SECONDS} seconds"
+    if expected_lease_id is not None and HEX_32.fullmatch(expected_lease_id) is None:
+        return False, "heartbeat lease id must be a 128-bit hexadecimal identifier"
     selected = adapter or get_adapter()
     try:
         initial = master_snapshot()["lease"]
@@ -2739,9 +2773,16 @@ def master_heartbeat(
         return False, str(exc)
     if initial is None:
         return True, "heartbeat stopped after 0 renewal(s): no master lease exists"
-    lease_id = initial["lease_id"]
+    if expected_lease_id is not None and not hmac.compare_digest(
+        initial["lease_id"], expected_lease_id
+    ):
+        return True, "heartbeat stopped after 0 renewal(s): the master lease changed"
+    lease_id = expected_lease_id or initial["lease_id"]
     client_pid = initial["client_pid"]
-    session = _client_session(initial["client"])
+    # The public lease label may be cosmetic.  Re-read the adapter identity
+    # independently so a discovered Codex family keeps its compatibility
+    # identity without trusting the shared app process.
+    session = _client_session(None)
     session_digest = initial["session_digest"]
     if session_digest is not None and (
         session.digest is None or not hmac.compare_digest(session_digest, session.digest)
@@ -2826,8 +2867,10 @@ def master_heartbeat_detached(interval: int) -> tuple[bool, str]:
     A client's tool call is reaped when it ends or times out, and macOS has no
     ``setsid`` binary, so the launcher detaches itself: the child starts a new
     session, reads and writes nothing on the caller's descriptors, and logs to
-    ``heartbeat.log`` beside the lease state.  It still exits on its own when
-    the holding client process is gone or a renewal is refused.
+    ``heartbeat.log`` beside the lease state.  Its command carries only the
+    random lease id read by the parent, never raw session identity or a
+    liveness path.  It still exits on its own when the holding client process
+    is gone, the lease id changes, or a renewal is refused.
     """
     if interval < 1 or interval > MAX_LEASE_SECONDS:
         return False, f"interval must be 1..{MAX_LEASE_SECONDS} seconds"
@@ -2842,7 +2885,15 @@ def master_heartbeat_detached(interval: int) -> tuple[bool, str]:
     try:
         os.fchmod(fd, 0o600)
         process = subprocess.Popen(
-            [sys.executable, str(launcher), "master-renew", "--heartbeat", str(interval)],
+            [
+                sys.executable,
+                str(launcher),
+                "master-renew",
+                "--heartbeat",
+                str(interval),
+                "--heartbeat-lease-id",
+                lease["lease_id"],
+            ],
             stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
             start_new_session=True, close_fds=True,
         )

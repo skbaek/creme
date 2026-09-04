@@ -46,13 +46,16 @@ process discovery is unavailable or shared. The detached heartbeat is bound
 to one lease id and uses only an explicitly supplied, task-owned neutral
 liveness socket when available. Codex Desktop's shared app pid and app-tools
 pipe are never task-liveness evidence. A task without a task-scoped process or
-listener gets two self-renewals and then becomes passive;
-with the standard 1,500-second heartbeat and 1,800-second lease an orphan is
-take-overable within 4,800 seconds of the last direct holder activity. A lease
-is *stranded* when its process is gone or its window passes without process
-liveness, and *lapsed* when the window passes while the process is still
-alive. `status` prints the take-over command, and `master-acquire --take-over`
-replaces only a lapsed or stranded lease.
+listener gets two self-renewals, never later than 3,000 seconds after the last
+verified direct holder activity, and then becomes passive. A helper cannot
+advance that anchor. With the standard 1,500-second heartbeat and 1,800-second
+lease an orphan is take-overable within 4,800 seconds of the last direct
+activity. The detached child receives only its parent's random lease id—not
+raw session identity or a liveness path—and stops before renewing if that id
+changed. A lease is *stranded* when its process is gone or its window passes
+without process liveness, and *lapsed* when the window passes while the process
+is still alive. `status` prints the take-over command, and
+`master-acquire --take-over` replaces only a lapsed or stranded lease.
 
 Existing installations keep using the legacy state directory until an explicit migration:
 

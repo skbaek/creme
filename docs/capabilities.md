@@ -212,7 +212,8 @@ rather than signalled.
 `master.json` beside the hold state records at most one master lease: the
 client family and client process, opaque digests of any adapter-supplied
 session identity and liveness socket, a per-acquisition lease id, the pid and
-uid that took it, a note, and the acquire/renew times with the lease window.
+uid that took it, a note, the last verified direct-holder activity, and the
+acquire/renew times with the lease window.
 Raw session identifiers and socket paths are never persisted, printed, or
 logged. It is written under the same
 mutex as the holds and never read by admission, so it cannot change any
@@ -260,14 +261,20 @@ Unix listener; three consecutive failed probes stop renewal, so an abruptly
 closed task is take-overable no later than the lease window after its last
 successful beat. If no such listener or task-scoped process exists, the safe
 fallback permits only two persisted self-renewals and then becomes passive
-until a direct, identity-checked holder renewal resets the budget. With the prescribed
-1,500-second heartbeat and 1,800-second lease, that fallback can extend a dead
-holder for at most 4,800 seconds after its last direct activity. A successor's
-new lease id ends the old passive heartbeat. Missing capabilities therefore
-degrade toward bounded take-over, never indefinite orphan renewal or two
-masters. A matching session digest can still renew directly after sleep if no
-successor has taken over; an automatic post-wake renewal beyond the bounded
-fallback requires the explicit task-owned listener contract.
+until a direct, identity-checked holder renewal resets the budget and its
+absolute activity anchor. A helper never advances that anchor and may not
+self-renew more than 3,000 seconds after it, even if the helper starts late or
+wakes after a long system sleep. With the prescribed 1,500-second heartbeat
+and 1,800-second lease, automatic expiry is therefore no later than 4,800
+seconds after the last direct activity. A successor's new lease id ends the
+old passive heartbeat: the detached parent passes only that random id to its
+child, never raw session identity or a liveness path, and the child checks it
+before adopting any lease snapshot. Missing capabilities therefore degrade
+toward bounded take-over, never indefinite orphan renewal or two masters. A
+matching session digest can still renew directly after sleep if no successor
+has taken over; that direct action resets the anchor. An automatic post-wake
+renewal beyond the bounded fallback requires the explicit task-owned listener
+contract.
 
 Fresh installations store mutex, state, and audit log under the canonical
 checkout's ignored `.semaphore/state/`. Linked Git worktrees resolve through

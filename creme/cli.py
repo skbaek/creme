@@ -403,8 +403,18 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
     if action == "master-renew":
         if arguments.heartbeat is not None:
             if arguments.detach:
+                if arguments.heartbeat_lease_id is not None:
+                    return _sem_result(
+                        False,
+                        "--heartbeat-lease-id is internal to the detached child",
+                    )
                 return _sem_result(*semaphore.master_heartbeat_detached(arguments.heartbeat))
-            return _sem_result(*semaphore.master_heartbeat(arguments.heartbeat))
+            return _sem_result(*semaphore.master_heartbeat(
+                arguments.heartbeat,
+                expected_lease_id=arguments.heartbeat_lease_id,
+            ))
+        if arguments.heartbeat_lease_id is not None:
+            return _sem_result(False, "--heartbeat-lease-id requires --heartbeat")
         return _sem_result(*semaphore.master_renew(arguments.lease))
     if action == "master-release":
         return _sem_result(*semaphore.master_release(
@@ -771,6 +781,10 @@ def parser() -> argparse.ArgumentParser:
         "--detach",
         action="store_true",
         help="with --heartbeat: start it in its own process session and return at once",
+    )
+    master_renew.add_argument(
+        "--heartbeat-lease-id",
+        help=argparse.SUPPRESS,
     )
     master_release = sem_commands.add_parser("master-release", help="end the master lease")
     master_release.add_argument(

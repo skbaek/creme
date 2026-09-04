@@ -35,10 +35,14 @@ ask the language server or MCP to build: `lean_build` and the shelling proof
 profiler are deliberately absent.
 From the goal worktree, probe the narrow target with `~/creme/scripts/creme
 lake-build GOAL --probe -- TARGET`; on exit 3, run the same narrow target
-through the admitted wrapper, restart the server, and recheck the exact goal
-and diagnostics. The wrapper prints the modules it rebuilt with that restart
-instruction; a stale `.olean` left by a neighbour's build is the usual reason
-diagnostics stop looking trustworthy. Use the repository catalogue's full
+through the admitted wrapper, refresh the file's worker, and recheck the exact
+goal and diagnostics. Refreshing is two tool calls: query two other Lean files,
+then the file you care about; under `LEAN_LSP_MAX_OPEN_FILES=2` that evicts its
+worker and reloads the rebuilt `.olean`s. Editing the file's own body does not
+do it, and neither does `reclaim --idle-workers`, which frees the memory while
+the MCP layer keeps answering from its cache. The wrapper prints the modules it
+rebuilt on its own `restart:` line; a stale `.olean` left by a neighbour's
+build is the usual reason diagnostics stop looking trustworthy. Use the repository catalogue's full
 target at a green checkpoint, also through the wrapper. Never use bare `lake
 build` in either loop.
 

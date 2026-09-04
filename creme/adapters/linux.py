@@ -269,6 +269,23 @@ class LinuxAdapter(Adapter):
             ["/bin/ps", "-axo", "pid=,ppid=,rss=,time=,command="]
         )
 
+    def process_working_directories(self, pids: list[int]) -> CapabilityResult:
+        """Read cwd for each pid from procfs, as reclamation already does."""
+        wanted = sorted({int(pid) for pid in pids})
+        cwds: dict[str, str] = {}
+        for pid in wanted:
+            try:
+                cwd = os.readlink(f"/proc/{pid}/cwd")
+            except OSError:
+                continue
+            if cwd and not cwd.endswith(" (deleted)"):
+                cwds[str(pid)] = cwd
+        return self.result(
+            "process_working_directories", "OK",
+            f"sampled {len(cwds)} of {len(wanted)} working director(y/ies)",
+            {"working_directories": cwds, "requested": wanted},
+        )
+
     def quiet_host(self) -> CapabilityResult:
         sample = self.telemetry()
         if sample.status != "OK" or not sample.data:

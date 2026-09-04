@@ -4,7 +4,9 @@ import fcntl
 import json
 import math
 import os
+import signal
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -436,13 +438,39 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _prune_waiters(waiters: list[dict[str, Any]], now: float) -> tuple[list[dict[str, Any]], int]:
-    live = [
-        entry for entry in waiters
-        if _pid_alive(int(entry["pid"]))
-        and now - float(entry["heartbeat_at"]) <= WAITER_STALE_SECONDS
-    ]
-    return live, len(waiters) - len(live)
+def _prune_waiters(
+    waiters: list[dict[str, Any]], now: float
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    live = []
+    dropped = []
+    for entry in waiters:
+        if (
+            _pid_alive(int(entry["pid"]))
+            and now - float(entry["heartbeat_at"]) <= WAITER_STALE_SECONDS
+        ):
+            live.append(entry)
+        else:
+            dropped.append(entry)
+    return live, dropped
+
+
+def _log_dropped_waiters(root: Path, dropped: list[dict[str, Any]], now: float) -> None:
+    """One `wait-dropped` row per pruned waiter, so no enqueue is left open.
+
+    Dropping is a decision about a queued request; without a row its enqueue
+    would be indistinguishable in the roll-up from a wait that is still live.
+    """
+    for entry in dropped:
+        waited = round(now - float(entry["enqueued_at"]), 1)
+        try:
+            _log_to(
+                root, "wait-dropped", str(entry["label"]), "REFUSED",
+                f"WAIT_DROPPED: the waiting process is gone or stopped heartbeating "
+                f"(waited={waited}s); waiter={str(entry['id'])[:8]}; "
+                f"memory={int(entry['memory_gib'])}GiB; contention={entry['contention']}",
+            )
+        except OSError:
+            continue
 
 
 def _ordered_waiters(waiters: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -552,6 +580,61 @@ def _headroom_values(
     else:
         available_gib = None
     return int(free), available_gib, total_gib
+
+
+def fit_arithmetic(sample: Any, policy: dict[str, Any], memory_gib: int) -> dict[str, Any]:
+    """The numbers behind the usability-reserve test, deciding nothing.
+
+    `_admission_decision` stays the only producer of a verdict.  This exposes
+    the arithmetic it applies so a waiter, and anyone reading `status`, can see
+    why a request does or does not fit right now.
+    """
+    configured_total = policy.get("physical_memory_gib")
+    if isinstance(configured_total, bool) or not isinstance(configured_total, (int, float)):
+        configured_total = None
+    free_percent, available_gib, total_gib = _headroom_values(sample, configured_total)
+    reserve_gib = _reserve_gib(total_gib)
+    charged_gib = _charged_memory_gib(memory_gib)
+    needed_gib = charged_gib + reserve_gib if reserve_gib is not None else None
+    chargeable = (
+        available_gib - reserve_gib
+        if available_gib is not None and reserve_gib is not None
+        else None
+    )
+    return {
+        "estimate_gib": memory_gib,
+        "charged_gib": charged_gib,
+        "reserve_gib": round(reserve_gib, 1) if reserve_gib is not None else None,
+        "needed_gib": round(needed_gib, 1) if needed_gib is not None else None,
+        "available_gib": round(available_gib, 2) if available_gib is not None else None,
+        "free_percent": free_percent,
+        "largest_fitting_estimate_gib": (
+            max(0, int(chargeable / ADMISSION_PEAK_MULTIPLIER))
+            if chargeable is not None
+            else None
+        ),
+        "fits": (
+            None
+            if needed_gib is None or available_gib is None
+            else available_gib >= needed_gib
+        ),
+    }
+
+
+def fit_line(fit: dict[str, Any]) -> str:
+    if fit["needed_gib"] is None or fit["available_gib"] is None:
+        return (
+            f"fit: estimate {fit['estimate_gib']} GiB charges {fit['charged_gib']} GiB "
+            f"(x{ADMISSION_PEAK_MULTIPLIER}); memory headroom is unavailable, so heavy "
+            "work serializes under a hard hold"
+        )
+    return (
+        f"fit: estimate {fit['estimate_gib']} GiB -> charged {fit['charged_gib']} GiB "
+        f"(x{ADMISSION_PEAK_MULTIPLIER}) + reserve {fit['reserve_gib']} GiB = "
+        f"{fit['needed_gib']} GiB needed; {fit['available_gib']} GiB available now "
+        f"({fit['free_percent']}% free) -> "
+        + ("fits now" if fit["fits"] else "does not fit now")
+    )
 
 
 def _hold_reservation(hold: dict[str, Any], default_memory_gib: int) -> int:
@@ -760,20 +843,59 @@ def _expired(hold: dict[str, Any], now: Optional[float] = None) -> bool:
     return (now or _now()) > float(hold["renewed_at"]) + int(hold["lease_seconds"])
 
 
-def _descendant_commands(pid: int, adapter: Adapter) -> Optional[list[str]]:
-    """Return the command lines of ``pid``'s descendants, or None if unreadable."""
+def _is_elaborating(command: str) -> bool:
+    first = command.split(None, 1)[0] if command else ""
+    return os.path.basename(first) in {"lake", "lean"} or "lean" in first
+
+
+class HostView(NamedTuple):
+    """One process and working-directory sample shared by a refresh pass.
+
+    Attribution has to run for every hold on every ``status`` and ``renew``,
+    so the expensive parts — the process table and one ``lsof``/procfs sample
+    bounded to the host's ``lake``/``lean`` pids — are taken once and reused.
+    """
+
+    table: Optional[dict[int, tuple[int, str]]]
+    elaborating: tuple[int, ...]
+    cwds: Optional[dict[int, str]]
+    unattributed: tuple[int, ...]
+
+
+def _host_view(adapter: Adapter) -> HostView:
     result = adapter.process_snapshot()
     if result.status != "OK" or not isinstance(result.data, dict):
-        return None
+        return HostView(None, (), None, ())
     rows = result.data.get("processes")
     if not isinstance(rows, list):
-        return None
+        return HostView(None, (), None, ())
     table: dict[int, tuple[int, str]] = {}
     for row in rows:
         try:
             table[int(row["pid"])] = (int(row["ppid"]), str(row["command"]))
         except (KeyError, TypeError, ValueError):
             continue
+    elaborating = tuple(
+        sorted(pid for pid, (_, command) in table.items() if _is_elaborating(command))
+    )
+    if not elaborating:
+        return HostView(table, (), {}, ())
+    sample = adapter.process_working_directories(list(elaborating))
+    if sample.status != "OK" or not isinstance(sample.data, dict):
+        return HostView(table, elaborating, None, elaborating)
+    raw = sample.data.get("working_directories")
+    cwds: dict[int, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            try:
+                cwds[int(key)] = str(value)
+            except (TypeError, ValueError):
+                continue
+    unattributed = tuple(pid for pid in elaborating if pid not in cwds)
+    return HostView(table, elaborating, cwds, unattributed)
+
+
+def _descendants(table: dict[int, tuple[int, str]], pid: int) -> set[int]:
     found = {pid}
     changed = True
     while changed:
@@ -782,39 +904,73 @@ def _descendant_commands(pid: int, adapter: Adapter) -> Optional[list[str]]:
             if parent in found and child not in found:
                 found.add(child)
                 changed = True
-    return [table[child][1] for child in found if child != pid and child in table]
+    found.discard(pid)
+    return found
+
+
+def _path_under(candidate: str, roots: tuple[Path, ...]) -> bool:
+    current = Path(os.path.normpath(candidate))
+    for root in roots:
+        try:
+            current.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def _hold_is_working(
     hold: dict[str, Any],
     adapter: Adapter,
-    scope_roots: tuple[Path, ...] = (),
+    scope_roots: Optional[tuple[Path, ...]] = (),
+    view: Optional[HostView] = None,
 ) -> Optional[bool]:
-    """Is this holder running an elaborating or repository child right now?
+    """Is this holder's gate elaborating right now, whoever started it?
 
-    None means the host could not be inspected; an uninspectable holder is
-    never reported idle.
+    A hold taken by one shell call is not the parent of the gate launched by
+    the next, so descent from the acquiring pid answers only the easy case.
+    The truthful test adds the one the reclaim path already trusts: a
+    ``lake``/``lean`` process whose working directory lies inside the goal's
+    own worktrees is that goal's work.  ``None`` means attribution could not
+    be completed, and an uninspectable holder is never reported idle.
     """
-    commands = _descendant_commands(int(hold["pid"]), adapter)
-    if commands is None:
+    sampled = view if view is not None else _host_view(adapter)
+    if sampled.table is None:
         return None
-    roots = [str(root) for root in scope_roots]
-    for command in commands:
-        name = os.path.basename(command.split(None, 1)[0] if command else "")
-        if name in {"lake", "lean"} or "lean" in command.split(None, 1)[0]:
+    roots = [str(root) for root in (scope_roots or ())]
+    for pid in _descendants(sampled.table, int(hold["pid"])):
+        command = sampled.table[pid][1]
+        if _is_elaborating(command) or any(root in command for root in roots):
             return True
-        if any(root in command for root in roots):
-            return True
+    if not sampled.elaborating:
+        return False
+    if scope_roots is None:
+        # The goal's boundary itself is unreadable, so a Lean process on this
+        # host can be neither claimed nor excluded.
+        return None
+    if sampled.cwds is None or sampled.unattributed:
+        return None
+    if scope_roots:
+        for pid in sampled.elaborating:
+            if _path_under(sampled.cwds[pid], scope_roots):
+                return True
     return False
 
 
-def _goal_scope_roots(label: str, adapter: Adapter) -> tuple[Path, ...]:
-    from .task_wind_down import WorktreeScopeError, _goal_worktree_roots
+def _goal_scope_roots(label: str, adapter: Adapter) -> Optional[tuple[Path, ...]]:
+    """The goal's worktrees, ``()`` when it has none, ``None`` when unreadable."""
+    from .task_wind_down import (
+        NoGoalWorktreeError,
+        WorktreeScopeError,
+        _goal_worktree_roots,
+    )
 
     try:
         return _goal_worktree_roots(label, adapter)
-    except (OSError, WorktreeScopeError):
+    except NoGoalWorktreeError:
         return ()
+    except (OSError, WorktreeScopeError):
+        return None
 
 
 def _refresh_signals(
@@ -829,12 +985,15 @@ def _refresh_signals(
     holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
     labels = {hold["label"] for hold in holds}
     hold_signals: dict[str, dict[str, Any]] = {}
+    view = _host_view(adapter) if any(not hold.get("manual") for hold in holds) else None
     for hold in holds:
         label = hold["label"]
+        scope: Optional[tuple[Path, ...]] = ()
         if hold.get("manual"):
             working: Optional[bool] = None
         else:
-            working = _hold_is_working(hold, adapter, _goal_scope_roots(label, adapter))
+            scope = _goal_scope_roots(label, adapter)
+            working = _hold_is_working(hold, adapter, scope, view)
         alive = _pid_alive(int(hold["pid"]))
         if working:
             activity.pop(label, None)
@@ -844,9 +1003,17 @@ def _refresh_signals(
         hold_signals[label] = {
             "pid_alive": alive,
             "working": working,
+            "manual": bool(hold.get("manual")),
+            "scope_roots": None if scope is None else [str(root) for root in scope],
+            "unattributed_pids": list((view.unattributed if view else ()) or ()),
             "idle_seconds": (now - float(idle_since)) if idle_since is not None else None,
+            # Idleness is only ever claimed from a pass that could attribute
+            # the host's Lean work; an uninspectable pass suspends the signal
+            # without discarding the streak it had already measured.
             "idle_hold": (
-                idle_since is not None and now - float(idle_since) > IDLE_HOLD_SECONDS
+                working is False
+                and idle_since is not None
+                and now - float(idle_since) > IDLE_HOLD_SECONDS
             ),
             # A hold acquired from the command line normally outlives the
             # process that took it, so a gone pid is not by itself a fault.
@@ -935,20 +1102,48 @@ def snapshot() -> dict[str, Any]:
         return json.loads(json.dumps(state))
 
 
+def _attribution_text(signal: dict[str, Any]) -> str:
+    """Name what idleness looked for, so the reader can check the claim."""
+    roots = signal.get("scope_roots")
+    if roots is None:
+        return "no lake or lean child process, and this goal's worktree scope is unreadable"
+    if roots:
+        listed = ", ".join(roots)
+        return (
+            "no lake or lean process among this hold's children or working in "
+            f"{listed}"
+        )
+    return (
+        "no lake or lean child process, and this goal has no Jaune/Blanc worktree "
+        "for one to work in"
+    )
+
+
 def _signal_lines(label: str, signals: dict[str, dict[str, Any]], indent: str) -> list[str]:
     signal = signals.get(label) or {}
     lines = []
     if signal.get("stranded"):
         lines.append(
-            f"{indent}STRANDED: the holding process is gone and no Lean work remains in "
-            f"its owned tree; run `python3 -m creme reclaim --wind-down {label}`"
+            f"{indent}STRANDED: the holding process is gone and {_attribution_text(signal)}; "
+            f"run `python3 -m creme reclaim --wind-down {label}`"
         )
     elif signal.get("idle_hold"):
         seconds = int(signal.get("idle_seconds") or 0)
         lines.append(
-            f"{indent}IDLE_HOLD: no lake, lean, or repository child process for {seconds}s; "
+            f"{indent}IDLE_HOLD: {_attribution_text(signal)} for {seconds}s; "
             "release between gates and reacquire with --wait for the next elaborating command"
         )
+    elif signal.get("working") is None and not signal.get("manual"):
+        unattributed = signal.get("unattributed_pids") or []
+        if unattributed or signal.get("scope_roots") is None:
+            detail = (
+                f"{len(unattributed)} lake/lean process(es) could not be placed"
+                if unattributed
+                else "this goal's worktree scope is unreadable"
+            )
+            lines.append(
+                f"{indent}ATTRIBUTION_UNAVAILABLE: {detail}; this hold is not reported idle"
+            )
     return lines
 
 
@@ -962,10 +1157,37 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
         signals = derived["holds"]
         worker_report = derived["lean_workers"]
         queue, queue_notes = _load_queue(root)
-        waiters, _dropped = _prune_waiters(queue["waiters"], now)
+        waiters, dropped = _prune_waiters(queue["waiters"], now)
+        if dropped:
+            queue["waiters"] = waiters
+            _log_dropped_waiters(root, dropped, now)
+            try:
+                _save_queue(root, queue)
+            except OSError:
+                pass
+        try:
+            policy = _runtime_admission_policy(selected)
+        except (KeyError, OSError, SemaphoreError, ValueError):
+            policy = None
+        would: dict[str, tuple[Decision, dict[str, Any]]] = {}
+        if waiters and policy is not None:
+            # One sample for every waiter, and the same decision function the
+            # queue uses, so the printed verdict is the live one rather than a
+            # second implementation that could drift from it.
+            sample = selected.memory_headroom()
+            for waiter in waiters:
+                decision = _admission_decision(
+                    state, "adaptive", str(waiter["label"]), int(waiter["memory_gib"]),
+                    str(waiter["contention"]), selected, policy, sample,
+                    idle_report=worker_report,
+                )
+                would[str(waiter["id"])] = (
+                    decision,
+                    fit_arithmetic(sample, policy, int(waiter["memory_gib"])),
+                )
     try:
-        default_memory_gib = int(_runtime_admission_policy(selected)["task_memory_gib"])
-    except (KeyError, OSError, SemaphoreError, ValueError):
+        default_memory_gib = int((policy or {})["task_memory_gib"])
+    except (KeyError, TypeError, ValueError):
         default_memory_gib = 2
     lines = []
     hard = state["hard"]
@@ -974,7 +1196,8 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
         note, memory_gib, contention = _decode_admission_note(hard["note"], default_memory_gib)
         lines.append(
             f"hard: {hard['label']} ({state_word}) pid={hard['pid']} "
-            f"memory={memory_gib}GiB contention={contention} note={note!r}"
+            f"memory={memory_gib}GiB contention={contention} "
+            f"held={int(now - float(hard['acquired_at']))}s note={note!r}"
         )
         lines.extend(_signal_lines(hard["label"], signals, "  "))
     else:
@@ -985,7 +1208,8 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
         note, memory_gib, contention = _decode_admission_note(hold["note"], default_memory_gib)
         lines.append(
             f"  {hold['label']} ({state_word}) pid={hold['pid']} "
-            f"memory={memory_gib}GiB contention={contention} note={note!r}"
+            f"memory={memory_gib}GiB contention={contention} "
+            f"held={int(now - float(hold['acquired_at']))}s note={note!r}"
         )
         lines.extend(_signal_lines(hold["label"], signals, "    "))
     if not state["soft"]:
@@ -997,6 +1221,11 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
             f"memory={waiter['memory_gib']}GiB contention={waiter['contention']} "
             f"waited={int(now - float(waiter['enqueued_at']))}s"
         )
+        verdict = would.get(str(waiter["id"]))
+        if verdict is not None:
+            decision, fit = verdict
+            lines.append(f"     would: {decision.verdict} — {decision.detail}")
+            lines.append("     " + fit_line(fit))
     if not waiters:
         lines.append("  none")
     lines.extend(f"queue: {note}" for note in queue_notes)
@@ -1112,6 +1341,48 @@ def _validate_request(
     return None, selected, selected_policy, requested
 
 
+class _WaitCancelled(BaseException):
+    """A signal ended the wait before the queue decided it."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _dominant(tally: dict[str, dict[str, float]]) -> Optional[str]:
+    if not tally:
+        return None
+    return max(
+        tally,
+        key=lambda verdict: (tally[verdict]["seconds"], tally[verdict]["passes"], verdict),
+    )
+
+
+def _wait_summary(
+    tally: dict[str, dict[str, float]],
+    tightest: Optional[tuple[float, float]],
+) -> str:
+    """Say which verdict actually held the request, not which one closed it."""
+    dominant = _dominant(tally)
+    if dominant is None:
+        return "no queue pass completed"
+    passes = int(sum(record["passes"] for record in tally.values()))
+    breakdown = ", ".join(
+        f"{verdict} {int(record['passes'])}"
+        for verdict, record in sorted(tally.items(), key=lambda item: -item[1]["passes"])
+    )
+    summary = (
+        f"dominant verdict {dominant} over {int(tally[dominant]['passes'])} pass(es) "
+        f"and {tally[dominant]['seconds']:.1f}s of {passes} pass(es) ({breakdown})"
+    )
+    if tightest is not None:
+        summary += (
+            f"; tightest headroom margin: needed {tightest[0]:.1f} GiB; "
+            f"most available {tightest[1]:.2f} GiB"
+        )
+    return summary
+
+
 def _waiting_admit(
     label: str,
     note: str,
@@ -1124,6 +1395,7 @@ def _waiting_admit(
     wait_seconds: int,
     poll_seconds: float = WAIT_POLL_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    announce: Optional[Callable[[str], None]] = None,
 ) -> tuple[bool, str]:
     """Enqueue one request and return only when it is decided.
 
@@ -1132,6 +1404,10 @@ def _waiting_admit(
     threshold, the usability reserve, and manual human holds behave exactly as
     they do without ``--wait``.  Only the queue decides *which* fitting waiter
     goes first, and only one log row is written per enqueue and per outcome.
+
+    Every pass is also *observed*: the verdict it produced and the seconds it
+    held are tallied so a timeout can report what actually kept the request
+    out, and a cancelled wait still writes its one outcome row.
     """
     invalid, selected, selected_policy, requested_memory = _validate_request(
         label, lease, contention, memory_gib, adapter, policy
@@ -1142,10 +1418,33 @@ def _waiting_admit(
         return False, f"--wait must be 1..{MAX_WAIT_SECONDS} seconds"
 
     waiter_id = uuid.uuid4().hex
+    holder: Optional[str] = None
     enqueued_at = _now()
     deadline = enqueued_at + wait_seconds
     announced = False
     registered = False
+    decided = False
+    tally: dict[str, dict[str, float]] = {}
+    tightest: Optional[tuple[float, float]] = None
+    cancelled: Optional[BaseException] = None
+
+    if announce is not None:
+        fit = fit_arithmetic(selected.memory_headroom(), selected_policy, requested_memory)
+        announce(fit_line(fit))
+        if fit["fits"] is False and fit["largest_fitting_estimate_gib"] is not None:
+            announce(
+                f"fit: at this instant an estimate of at most "
+                f"{fit['largest_fitting_estimate_gib']} GiB would fit; a larger one is "
+                "queued in arrival order but passed over by every request that fits"
+            )
+        default_gib = int(selected_policy["task_memory_gib"])
+        if memory_gib is not None and memory_gib > default_gib:
+            announce(
+                f"fit: an explicit --memory-gib {memory_gib} exceeds this host's default "
+                f"estimate of {default_gib} GiB and is charged "
+                f"{_charged_memory_gib(memory_gib)} GiB; state it only when you know the "
+                "build is cold or broad"
+            )
 
     def entry(now: float) -> dict[str, Any]:
         return {
@@ -1169,13 +1468,26 @@ def _waiting_admit(
             # A stale entry is dropped by the next pass's liveness pruning.
             pass
 
+    def on_signal(signum: int, _frame: Any) -> None:
+        raise _WaitCancelled(signum)
+
+    prior_handlers: dict[int, Any] = {}
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                prior_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, on_signal)
+            except (OSError, ValueError):
+                prior_handlers.pop(signum, None)
+
     try:
         while True:
             with locked_state() as (path, state):
                 root = path.parent
                 queue, notes = _load_queue(root)
                 now = _now()
-                queue["waiters"], _dropped = _prune_waiters(queue["waiters"], now)
+                queue["waiters"], dropped = _prune_waiters(queue["waiters"], now)
+                _log_dropped_waiters(root, dropped, now)
                 queue["waiters"] = [
                     item for item in queue["waiters"] if item["id"] != waiter_id
                 ]
@@ -1202,15 +1514,51 @@ def _waiting_admit(
                     None,
                 )
                 mine = decisions[waiter_id]
+                hard = state["hard"]
+                if hard:
+                    # Enough to size a requeue: which class is ahead, and how
+                    # long it has been running. No note text.
+                    _note, _gib, holder_class = _decode_admission_note(
+                        hard["note"], int(selected_policy["task_memory_gib"])
+                    )
+                    holder = (
+                        f"{hard['label']} contention={holder_class} "
+                        f"held={int(now - float(hard['acquired_at']))}s"
+                    )
+                else:
+                    holder = None
+                record = tally.setdefault(mine.verdict, {"passes": 0.0, "seconds": 0.0})
+                record["passes"] += 1
+                if not mine.admitted:
+                    fit = fit_arithmetic(sample, selected_policy, requested_memory)
+                    if (
+                        fit["fits"] is False
+                        and fit["needed_gib"] is not None
+                        and fit["available_gib"] is not None
+                        and (tightest is None or fit["available_gib"] > tightest[1])
+                    ):
+                        tightest = (float(fit["needed_gib"]), float(fit["available_gib"]))
 
                 if not announced:
                     detail = "; ".join(
-                        [f"position={_position(queue['waiters'], waiter_id)}", *notes]
+                        [
+                            f"position={_position(queue['waiters'], waiter_id)}",
+                            f"waiter={waiter_id[:8]}",
+                            f"memory={requested_memory}GiB",
+                            f"contention={contention}",
+                            *notes,
+                        ]
                     )
                     _log_to(root, "wait-enqueue", label, "OK", detail)
                     announced = True
 
                 if mine.admitted and winner == waiter_id:
+                    passed = [
+                        f"{item['label']}({decisions[item['id']].verdict})"
+                        for item in _ordered_waiters(queue["waiters"])
+                        if item["id"] != waiter_id
+                        and float(item["enqueued_at"]) < enqueued_at
+                    ]
                     if mine.kind == "soft":
                         state["soft"].append(_hold(
                             label, note, lease,
@@ -1225,34 +1573,72 @@ def _waiting_admit(
                     _drop_waiter(root, waiter_id)
                     _save(path, state)
                     registered = False
+                    decided = True
                     waited = round(_now() - enqueued_at, 1)
+                    passed_note = (
+                        f"; passed {len(passed)} older waiter(s): " + ", ".join(passed)
+                        if passed else ""
+                    )
                     _log_to(
                         root, "wait-acquire", label, "OK",
-                        f"{mine.verdict}: waited={waited}s; {mine.detail}",
+                        f"{mine.verdict}: waited={waited}s; waiter={waiter_id[:8]}; "
+                        f"{mine.detail}{passed_note}",
                     )
-                    return True, f"{mine.verdict} — waited {waited}s; {mine.detail}"
+                    return True, (
+                        f"{mine.verdict} — waited {waited}s; {mine.detail}{passed_note}"
+                    )
 
                 if not mine.admitted and not mine.waitable:
                     _drop_waiter(root, waiter_id)
                     registered = False
+                    decided = True
                     _log_to(
                         root, "wait-acquire", label, "REFUSED",
-                        f"{mine.verdict}: waiting cannot change this verdict; {mine.detail}",
+                        f"{mine.verdict}: waiting cannot change this verdict; "
+                        f"waiter={waiter_id[:8]}; {mine.detail}",
                     )
                     return False, f"{mine.verdict} — {mine.detail}"
 
             remaining = deadline - _now()
             if remaining <= 0:
+                decided = True
                 waited = round(_now() - enqueued_at, 1)
                 detail = (
                     f"WAIT_TIMEOUT: no admission within {wait_seconds}s "
-                    f"(waited={waited}s); last verdict {mine.verdict}: {mine.detail}"
+                    f"(waited={waited}s); waiter={waiter_id[:8]}; "
+                    f"{_wait_summary(tally, tightest)}"
+                    + (f"; holder at timeout: {holder}" if holder else "")
+                    + f"; last verdict {mine.verdict}: {mine.detail}"
                 )
                 _log("wait-acquire", label, "REFUSED", detail)
                 return False, f"WAIT_TIMEOUT — {detail.split(': ', 1)[1]}"
+            slept_from = _now()
             sleep(min(poll_seconds, remaining))
+            tally[mine.verdict]["seconds"] += _now() - slept_from
+    except (_WaitCancelled, KeyboardInterrupt) as exc:
+        cancelled = exc
     finally:
+        for signum, handler in prior_handlers.items():
+            try:
+                signal.signal(signum, handler)
+            except (OSError, ValueError):
+                pass
+        if not decided and announced:
+            waited = round(_now() - enqueued_at, 1)
+            try:
+                _log(
+                    "wait-acquire", label, "REFUSED",
+                    f"WAIT_CANCELLED: the waiting process ended before the queue decided "
+                    f"(waited={waited}s); waiter={waiter_id[:8]}; "
+                    f"{_wait_summary(tally, tightest)}",
+                )
+            except OSError:
+                pass
         deregister()
+    if isinstance(cancelled, _WaitCancelled):
+        signal.signal(cancelled.signum, signal.SIG_DFL)
+        signal.raise_signal(cancelled.signum)
+    raise cancelled if cancelled is not None else SemaphoreError("wait ended without a decision")
 
 
 def _drop_waiter(root: Path, waiter_id: str) -> None:
@@ -1281,6 +1667,7 @@ def adaptive_acquire(
     policy: Optional[dict[str, Any]] = None,
     wait_seconds: Optional[int] = None,
     poll_seconds: float = WAIT_POLL_SECONDS,
+    announce: Optional[Callable[[str], None]] = None,
 ) -> tuple[bool, str]:
     if wait_seconds is not None:
         return _waiting_admit(
@@ -1293,6 +1680,7 @@ def adaptive_acquire(
             policy=policy,
             wait_seconds=wait_seconds,
             poll_seconds=poll_seconds,
+            announce=announce,
         )
     return _admit(
         "adaptive",

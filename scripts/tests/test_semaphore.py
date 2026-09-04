@@ -607,10 +607,11 @@ if __name__ == "__main__":
 class ProcessAdapter(HeadroomAdapter):
     """Headroom fixture that can also answer process and worker questions."""
 
-    def __init__(self, processes=None, workers=None, **kwargs):
+    def __init__(self, processes=None, workers=None, cwds=None, **kwargs):
         super().__init__(**kwargs)
         self.processes = processes
         self.workers = workers
+        self.cwds = {} if cwds is None else cwds
 
     def process_snapshot(self):
         if self.processes is None:
@@ -624,6 +625,20 @@ class ProcessAdapter(HeadroomAdapter):
             return self.result("lean_workers", "UNAVAILABLE", "fixture unavailable")
         return self.result(
             "lean_workers", "OK", "fixture", {"workers": list(self.workers)}
+        )
+
+    def process_working_directories(self, pids):
+        if self.cwds is None:
+            return self.result(
+                "process_working_directories", "UNAVAILABLE", "fixture unavailable"
+            )
+        wanted = sorted({int(pid) for pid in pids})
+        answered = {
+            str(pid): self.cwds[pid] for pid in wanted if pid in self.cwds
+        }
+        return self.result(
+            "process_working_directories", "OK", "fixture",
+            {"working_directories": answered, "requested": wanted},
         )
 
 
@@ -888,3 +903,382 @@ class QueueTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("idle", detail)
         self.assertIn("goal gate", detail)
+
+
+class QueueVisibilityTest(QueueTest):
+    """B1/B3: a waiter can see why it waits, and every enqueue has an outcome."""
+
+    def hold(self, label, memory_gib=4, contention="exclusive", note="blocking"):
+        ok, detail = semaphore.adaptive_acquire(
+            label, note, memory_gib=memory_gib, contention=contention,
+            adapter=self.adapter, policy=self.policy,
+        )
+        self.assertTrue(ok, detail)
+
+    # -- B1(a): status shows the live verdict and the arithmetic -----------
+    def test_status_prints_the_would_be_verdict_and_arithmetic_for_a_waiter(self):
+        self.seed_waiter("large", pid=os.getpid(), memory_gib=15, age=600.0)
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("would: LIGHT_ONLY", text)
+        self.assertIn("usability reserve", text)
+        self.assertIn("fit: estimate 15 GiB -> charged 19 GiB", text)
+        self.assertIn("does not fit now", text)
+
+    def test_the_printed_verdict_is_the_one_the_queue_would_compute(self):
+        self.hold("holder")
+        self.seed_waiter("queued", pid=os.getpid(), memory_gib=2, age=5.0)
+        state = semaphore.snapshot()
+        expected = semaphore._admission_decision(
+            state, "adaptive", "queued", 2, "tolerant",
+            self.adapter, self.policy, self.adapter.memory_headroom(),
+        )
+        text = semaphore.status_text(self.adapter)
+        self.assertIn(f"would: {expected.verdict} — {expected.detail}", text)
+
+    def test_a_waiter_that_fits_is_shown_as_admitted(self):
+        self.seed_waiter("small", pid=os.getpid(), memory_gib=2, age=5.0)
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("would: ADMITTED_", text)
+        self.assertIn("fits now", text)
+
+    # -- B1(a) control: privacy -------------------------------------------
+    def test_would_be_text_never_repeats_a_hold_note(self):
+        self.hold("holder", note="secret-campaign-detail")
+        self.seed_waiter("queued", pid=os.getpid(), memory_gib=2, age=5.0)
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("would: ", text)
+        after_waiting = text.split("waiting (W=")[1]
+        self.assertNotIn("secret-campaign-detail", after_waiting)
+
+    # -- B1(b): the timeout reports the verdict that dominated -------------
+    def test_timeout_reports_the_dominant_verdict_not_the_final_pass(self):
+        self.adapter.free_percent = 40           # 12.8 GiB available of 32
+        passes = {"n": 0}
+        clock = {"t": 1_000.0}
+
+        def scripted_sleep(seconds):
+            # A deterministic clock: three passes refused for the usability
+            # reserve, then a hold appears and only the closing passes see it.
+            clock["t"] += seconds
+            passes["n"] += 1
+            if passes["n"] == 3:
+                self.hold("holder", memory_gib=2, contention="exclusive")
+
+        with mock.patch.object(semaphore, "_now", lambda: clock["t"]):
+            ok, detail = semaphore._waiting_admit(
+                "large", "waiting", 600,
+                memory_gib=12, contention="sensitive",
+                adapter=self.adapter, policy=self.policy,
+                wait_seconds=1, poll_seconds=0.25, sleep=scripted_sleep,
+            )
+        self.assertFalse(ok)
+        self.assertIn("WAIT_TIMEOUT", detail)
+        self.assertIn("dominant verdict LIGHT_ONLY over 3 pass(es)", detail)
+        self.assertIn("LIGHT_ONLY 3", detail)
+        self.assertIn("DEFER_HEAVY 2", detail)
+        self.assertIn("last verdict DEFER_HEAVY", detail)
+        self.assertIn("tightest headroom margin", detail)
+        row = [r for r in self.log_rows() if r["action"] == "wait-acquire"][-1]
+        self.assertIn("dominant verdict LIGHT_ONLY", row["detail"])
+
+    def test_the_dominant_verdict_counts_both_passes(self):
+        tally = {
+            "LIGHT_ONLY": {"passes": 190, "seconds": 570.0},
+            "DEFER_HEAVY": {"passes": 10, "seconds": 30.0},
+        }
+        summary = semaphore._wait_summary(tally, (19.0, 18.96))
+        self.assertIn("dominant verdict LIGHT_ONLY over 190 pass(es)", summary)
+        self.assertIn("LIGHT_ONLY 190", summary)
+        self.assertIn("DEFER_HEAVY 10", summary)
+        self.assertIn("needed 19.0 GiB; most available 18.96 GiB", summary)
+
+    # -- B1(c): the admitted waiter names whom it passed -------------------
+    def test_an_admitted_waiter_names_the_older_waiters_it_passed(self):
+        self.adapter.total_gib = 24
+        self.policy = {**self.policy, "physical_memory_gib": 24.0}
+        self.seed_waiter("large", pid=os.getpid(), memory_gib=15, age=600.0)
+        ok, detail = self.wait_acquire("small", seconds=3, memory_gib=2)
+        self.assertTrue(ok, detail)
+        self.assertIn("passed 1 older waiter(s): large(LIGHT_ONLY)", detail)
+        row = [r for r in self.log_rows() if r["action"] == "wait-acquire"][-1]
+        self.assertIn("passed 1 older waiter(s): large(LIGHT_ONLY)", row["detail"])
+
+    # -- B1(d): the pre-enqueue fit line -----------------------------------
+    def test_a_wait_announces_its_fit_arithmetic_before_enqueueing(self):
+        announced: list[str] = []
+        self.hold("holder")
+        semaphore._waiting_admit(
+            "queued", "waiting", 600, memory_gib=2, contention="tolerant",
+            adapter=self.adapter, policy=self.policy,
+            wait_seconds=1, poll_seconds=0.01, announce=announced.append,
+        )
+        self.assertTrue(announced)
+        self.assertIn("fit: estimate 2 GiB -> charged 3 GiB", announced[0])
+        self.assertIn("fits now", announced[0])
+
+    def test_an_explicit_estimate_above_the_default_is_called_out(self):
+        announced: list[str] = []
+        semaphore._waiting_admit(
+            "queued", "waiting", 600, memory_gib=12, contention="tolerant",
+            adapter=self.adapter, policy=self.policy,
+            wait_seconds=1, poll_seconds=0.01, announce=announced.append,
+        )
+        joined = "\n".join(announced)
+        self.assertIn("exceeds this host's default estimate of 2 GiB", joined)
+
+    def test_an_unschedulable_request_is_told_what_would_fit(self):
+        announced: list[str] = []
+        self.adapter.free_percent = 50           # 16 GiB available of 32
+        semaphore._waiting_admit(
+            "queued", "waiting", 600, memory_gib=12, contention="sensitive",
+            adapter=self.adapter, policy=self.policy,
+            wait_seconds=1, poll_seconds=0.01, announce=announced.append,
+        )
+        joined = "\n".join(announced)
+        self.assertIn("does not fit now", joined)
+        self.assertIn("an estimate of at most", joined)
+
+    def test_no_fit_line_is_printed_without_wait(self):
+        announced: list[str] = []
+        semaphore.adaptive_acquire(
+            "direct", "no wait", memory_gib=2, contention="tolerant",
+            adapter=self.adapter, policy=self.policy, announce=announced.append,
+        )
+        self.assertEqual(announced, [])
+
+    def test_status_shows_the_holder_class_and_age(self):
+        self.hold("holder", memory_gib=4, contention="exclusive")
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("contention=exclusive held=", text)
+
+    def test_a_timeout_names_the_holder_class_and_age(self):
+        self.hold("holder", memory_gib=4, contention="exclusive")
+        ok, detail = self.wait_acquire("queued", seconds=1, poll=0.02)
+        self.assertFalse(ok)
+        self.assertIn("holder at timeout: holder contention=exclusive held=", detail)
+
+    def test_the_timeout_holder_note_carries_no_hold_note(self):
+        self.hold("holder", memory_gib=4, contention="exclusive", note="secret-gate-name")
+        _ok, detail = self.wait_acquire("queued", seconds=1, poll=0.02)
+        self.assertNotIn("secret-gate-name", detail)
+
+    # -- B3: every enqueue has an outcome ----------------------------------
+    def test_a_cancelled_wait_writes_exactly_one_outcome_row(self):
+        self.hold("holder")
+
+        def cancel(_seconds):
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            semaphore._waiting_admit(
+                "cancelled", "waiting", 600, memory_gib=2, contention="tolerant",
+                adapter=self.adapter, policy=self.policy,
+                wait_seconds=600, poll_seconds=0.01, sleep=cancel,
+            )
+        rows = [r for r in self.log_rows() if r["label"] == "cancelled"]
+        self.assertEqual([r["action"] for r in rows], ["wait-enqueue", "wait-acquire"])
+        self.assertIn("WAIT_CANCELLED", rows[1]["detail"])
+        self.assertIn("dominant verdict DEFER_HEAVY", rows[1]["detail"])
+        self.assertEqual(semaphore._load_queue(self.root)[0]["waiters"], [])
+
+    def test_a_terminated_wait_writes_its_row_from_a_real_signal(self):
+        self.hold("holder")
+        script = (
+            "import os, sys, time\n"
+            "sys.path.insert(0, %r)\n"
+            "from creme import semaphore\n"
+            "from test_semaphore import ProcessAdapter\n"
+            "adapter = ProcessAdapter(free_percent=80, total_gib=32)\n"
+            "policy = %r\n"
+            "semaphore._waiting_admit('terminated', 'waiting', 600, memory_gib=2,\n"
+            "    contention='tolerant', adapter=adapter, policy=policy,\n"
+            "    wait_seconds=600, poll_seconds=0.05)\n"
+        ) % (str(Path(__file__).resolve().parents[2]), self.policy)
+        env = {
+            **os.environ,
+            "CREME_SEMAPHORE_DIR": str(self.root),
+            "PYTHONPATH": str(Path(__file__).resolve().parent),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        child = subprocess.Popen([os.sys.executable, "-c", script], env=env)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if any(r["label"] == "terminated" for r in self.log_rows()):
+                break
+            time.sleep(0.05)
+        child.terminate()
+        child.wait(timeout=10)
+        rows = [r for r in self.log_rows() if r["label"] == "terminated"]
+        self.assertEqual([r["action"] for r in rows], ["wait-enqueue", "wait-acquire"])
+        self.assertIn("WAIT_CANCELLED", rows[1]["detail"])
+        self.assertEqual(semaphore._load_queue(self.root)[0]["waiters"], [])
+        self.assertEqual(-child.returncode, 15)
+
+    def test_a_killed_waiter_is_dropped_with_one_row(self):
+        dead = subprocess.Popen([os.sys.executable, "-c", "pass"])
+        dead.wait()
+        self.seed_waiter("ghost", pid=dead.pid, memory_gib=2, age=600.0)
+        ok, _ = self.wait_acquire("live", seconds=5)
+        self.assertTrue(ok)
+        dropped = [r for r in self.log_rows() if r["action"] == "wait-dropped"]
+        self.assertEqual(len(dropped), 1)
+        self.assertEqual(dropped[0]["label"], "ghost")
+        self.assertIn("WAIT_DROPPED", dropped[0]["detail"])
+
+    def test_a_dropped_waiter_is_logged_once_across_repeated_status_reads(self):
+        dead = subprocess.Popen([os.sys.executable, "-c", "pass"])
+        dead.wait()
+        self.seed_waiter("ghost", pid=dead.pid, memory_gib=2, age=600.0)
+        semaphore.status_text(self.adapter)
+        semaphore.status_text(self.adapter)
+        dropped = [r for r in self.log_rows() if r["action"] == "wait-dropped"]
+        self.assertEqual(len(dropped), 1)
+
+    def test_a_normal_admission_still_adds_no_extra_row(self):
+        self.wait_acquire("patient", seconds=1, poll=0.02)
+        rows = [r for r in self.log_rows() if r["label"] == "patient"]
+        self.assertEqual([r["action"] for r in rows], ["wait-enqueue", "wait-acquire"])
+
+
+class HoldAttributionTest(QueueTest):
+    """B2: a hold is idle only when nothing attributable to it is elaborating."""
+
+    def setUp(self):
+        super().setUp()
+        self.scope = Path(self.tmp.name) / "blanc" / ".worktrees" / "gate"
+        self.scope.mkdir(parents=True)
+        self.other = Path(self.tmp.name) / "blanc" / ".worktrees" / "peer"
+        self.other.mkdir(parents=True)
+        self.scopes = {"gate": (self.scope,), "peer": (self.other,)}
+        patcher = mock.patch(
+            "creme.semaphore._goal_scope_roots",
+            side_effect=lambda label, adapter: self.scopes.get(label, ()),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def acquire_gate(self):
+        semaphore.adaptive_acquire(
+            "gate", "fixture", memory_gib=2, contention="tolerant",
+            adapter=self.adapter, policy=self.policy,
+        )
+        return semaphore.snapshot()["soft"][0]["pid"]
+
+    def make_idle(self, label="gate"):
+        semaphore.refresh_signals(self.adapter)
+        queue = semaphore._load_queue(self.root)[0]
+        queue["activity"][label] = semaphore._now() - (semaphore.IDLE_HOLD_SECONDS + 30)
+        semaphore._save_queue(self.root, queue)
+
+    def test_a_sibling_lean_working_in_the_goal_worktree_reads_busy(self):
+        self.acquire_gate()
+        self.adapter.processes = [
+            {"pid": 999100, "ppid": 1, "rss_kib": 4000, "command": "lean"},
+        ]
+        self.adapter.cwds = {999100: str(self.scope / "Blanc")}
+        self.make_idle()
+        text = semaphore.status_text(self.adapter)
+        self.assertNotIn("IDLE_HOLD", text)
+
+    def test_a_lean_in_another_goals_worktree_leaves_this_hold_idle(self):
+        self.acquire_gate()
+        self.adapter.processes = [
+            {"pid": 999100, "ppid": 1, "rss_kib": 4000, "command": "lean"},
+        ]
+        self.adapter.cwds = {999100: str(self.other / "Blanc")}
+        self.make_idle()
+        self.assertIn("IDLE_HOLD", semaphore.status_text(self.adapter))
+
+    def test_the_idle_hold_line_names_what_it_looked_for(self):
+        self.acquire_gate()
+        self.adapter.processes = []
+        self.make_idle()
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("no lake or lean process among this hold's children", text)
+        self.assertIn(str(self.scope), text)
+
+    def test_an_unavailable_cwd_sample_is_uninspectable_never_idle(self):
+        self.acquire_gate()
+        self.adapter.processes = [
+            {"pid": 999100, "ppid": 1, "rss_kib": 4000, "command": "lean"},
+        ]
+        self.adapter.cwds = None
+        self.make_idle()
+        text = semaphore.status_text(self.adapter)
+        self.assertNotIn("IDLE_HOLD", text)
+        self.assertIn("ATTRIBUTION_UNAVAILABLE", text)
+
+    def test_an_unanswered_lean_pid_is_uninspectable_never_idle(self):
+        self.acquire_gate()
+        self.adapter.processes = [
+            {"pid": 999100, "ppid": 1, "rss_kib": 4000, "command": "lean"},
+        ]
+        self.adapter.cwds = {}
+        self.make_idle()
+        text = semaphore.status_text(self.adapter)
+        self.assertNotIn("IDLE_HOLD", text)
+        self.assertIn("ATTRIBUTION_UNAVAILABLE", text)
+
+    def test_a_sleeping_lean_child_of_the_holder_still_reads_busy(self):
+        pid = self.acquire_gate()
+        self.adapter.processes = [
+            {"pid": pid, "ppid": 1, "rss_kib": 1000, "command": "python3"},
+            {"pid": 999101, "ppid": pid, "rss_kib": 4000, "command": "lean"},
+        ]
+        self.adapter.cwds = {999101: "/elsewhere"}
+        self.make_idle()
+        self.assertNotIn("IDLE_HOLD", semaphore.status_text(self.adapter))
+
+    def test_a_goal_without_a_worktree_is_still_reported_idle(self):
+        semaphore.adaptive_acquire(
+            "nowhere", "fixture", memory_gib=2, contention="tolerant",
+            adapter=self.adapter, policy=self.policy,
+        )
+        self.adapter.processes = []
+        self.make_idle("nowhere")
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("IDLE_HOLD", text)
+        self.assertIn("has no Jaune/Blanc worktree", text)
+
+    def test_an_unreadable_scope_is_uninspectable_never_idle(self):
+        self.scopes = {"gate": None}
+        self.acquire_gate()
+        self.adapter.processes = [
+            {"pid": 999100, "ppid": 1, "rss_kib": 4000, "command": "lean"},
+        ]
+        self.adapter.cwds = {999100: "/elsewhere"}
+        self.make_idle()
+        text = semaphore.status_text(self.adapter)
+        self.assertNotIn("IDLE_HOLD", text)
+        self.assertIn("ATTRIBUTION_UNAVAILABLE", text)
+
+    def test_a_manual_human_hold_is_never_attributed_or_flagged(self):
+        semaphore.manual_acquire  # documented; macOS-only, so seed state directly
+        path = self.root / "state.json"
+        state = semaphore._empty_state()
+        state["soft"] = [
+            semaphore._hold(semaphore.MANUAL_LABEL, "human", 300, manual=True)
+        ]
+        path.write_text(json.dumps(state), encoding="utf-8")
+        self.adapter.processes = []
+        text = semaphore.status_text(self.adapter)
+        self.assertNotIn("IDLE_HOLD", text)
+        self.assertNotIn("ATTRIBUTION_UNAVAILABLE", text)
+
+    def test_stranded_uses_the_same_attribution(self):
+        self.acquire_gate()
+        path = self.root / "state.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        dead = subprocess.Popen([os.sys.executable, "-c", "pass"])
+        dead.wait()
+        data["soft"][0]["pid"] = dead.pid
+        data["soft"][0]["acquired_at"] = 1.0
+        data["soft"][0]["renewed_at"] = 1.0
+        path.write_text(json.dumps(data), encoding="utf-8")
+        self.adapter.processes = [
+            {"pid": 999100, "ppid": 1, "rss_kib": 4000, "command": "lean"},
+        ]
+        self.adapter.cwds = {999100: str(self.scope / "Blanc")}
+        self.assertNotIn("STRANDED", semaphore.status_text(self.adapter))
+        self.adapter.cwds = {999100: str(self.other / "Blanc")}
+        self.assertIn("STRANDED", semaphore.status_text(self.adapter))

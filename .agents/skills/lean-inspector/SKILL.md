@@ -23,7 +23,9 @@ description: Inspects Lean 4 proof states, term goals, diagnostics, declarations
    means stale. Run that narrow target through the same command without
    `--probe` (adding `--wait SECS` if another session holds the host, and
    letting the wrapper choose the contention class and memory estimate),
-   restart the server, and inspect again. Use the repository's full target
+   then refresh the file's worker — call any lean tool on two other Lean files
+   and then on this one, which evicts and reloads it under
+   `LEAN_LSP_MAX_OPEN_FILES=2` — and inspect again. Use the repository's full target
    only at checkpoints and only through this admitted wrapper; never run bare
    `lake build`. `lean_profile_proof` is also absent because it shells out to
    an unowned `lake env lean` compilation.

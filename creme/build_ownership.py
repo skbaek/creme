@@ -42,6 +42,12 @@ _SAFE_LEDGER_KEYS = {
     "outcome", "toolchain_digest", "manifest_digest",
     "requested_contention", "evidence_contention", "estimate_source",
     "memory_gib", "dependency", "dependency_rev", "census",
+    # Additive, from creme-admission-visibility-v1: why a class was chosen,
+    # what the probe measured, what the estimate proposed, and the hint the
+    # build emitted.  A reader that does not know these keys skips the row and
+    # counts it; the ledger itself is never rewritten.
+    "evidence_reason", "resolved_roots", "stale_modules", "stale_detail",
+    "estimate_gib", "estimate_under_cover_gib", "hint",
 }
 SANCTIONED_WORKTREE_SUFFIXES = ("control", "mutation", "rehearsal")
 
@@ -175,7 +181,10 @@ def _number_or_none(value: Any) -> bool:
 
 
 def _valid_ledger_row(row: Any) -> bool:
-    if not isinstance(row, dict) or set(row).difference(_SAFE_LEDGER_KEYS | {"schema_version", "time"}):
+    # Unknown keys are tolerated so a later writer's additive field cannot make
+    # this reader treat a whole window of rows as corrupt.  Every key this
+    # reader *uses* is still validated below.
+    if not isinstance(row, dict):
         return False
     if row.get("schema_version") != SCHEMA_VERSION or not isinstance(row.get("time"), str):
         return False
@@ -221,6 +230,7 @@ def _valid_ledger_row(row: Any) -> bool:
     optional_numbers = (
         "peak_rss_mib", "peak_lean_rss_mib", "max_concurrent_lean",
         "swap_before_gib", "swap_after_gib", "sampling_samples", "sampling_unavailable",
+        "stale_modules", "estimate_gib", "estimate_under_cover_gib",
     )
     if not all(key not in row or _number_or_none(row[key]) for key in optional_numbers):
         return False
@@ -228,6 +238,7 @@ def _valid_ledger_row(row: Any) -> bool:
         "toolchain", "outcome", "toolchain_digest", "manifest_digest",
         "requested_contention", "evidence_contention", "estimate_source",
         "dependency", "dependency_rev",
+        "evidence_reason", "stale_detail", "hint",
     )
     if not all(key not in row or isinstance(row[key], str) for key in optional_strings):
         return False
@@ -235,18 +246,85 @@ def _valid_ledger_row(row: Any) -> bool:
         return False
     if "memory_gib" in row and not _number_or_none(row["memory_gib"]):
         return False
+    if "resolved_roots" in row and not (
+        row["resolved_roots"] is None or _string_list(row["resolved_roots"])
+    ):
+        return False
     return "renewals" not in row or _string_list(row["renewals"])
 
 
 # `wait-acquire` is the outcome of a queued request and decides a lock-out
 # exactly as a direct acquisition does. `wait-enqueue` is not a decision.
 ACQUIRE_ACTIONS = ("adaptive-acquire", "soft-acquire", "hard-acquire", "wait-acquire")
+QUEUE_OUTCOME_ACTIONS = ("wait-acquire", "wait-dropped")
+RELEASE_ACTIONS = ("adaptive-release", "hard-release", "wind-down")
 _VERDICT_TOKEN = re.compile(r"^([A-Z][A-Z_]*):")
 
 
 def _verdict_token(row: dict[str, Any]) -> str:
     match = _VERDICT_TOKEN.match(str(row.get("detail", "")))
     return match.group(1) if match else "UNCLASSIFIED"
+
+
+def _hard_hold_intervals(
+    rows: list[dict[str, Any]], window_end: datetime
+) -> list[tuple[datetime, datetime, str]]:
+    """Reconstruct when *some* label held the host exclusively.
+
+    A hold's own row says which kind admission selected, so the intervals come
+    from the log rather than from a second source that could disagree with it.
+    """
+    intervals: list[tuple[datetime, datetime, str]] = []
+    holder: Optional[tuple[str, datetime]] = None
+    for row in rows:
+        action, verdict = str(row["action"]), str(row["verdict"])
+        if verdict != "OK":
+            continue
+        if action in ACQUIRE_ACTIONS and "ADMITTED_HARD" in str(row.get("detail", "")):
+            holder = (str(row["label"]), row["when"])
+        elif action in RELEASE_ACTIONS and holder and str(row["label"]) == holder[0]:
+            intervals.append((holder[1], row["when"], holder[0]))
+            holder = None
+    if holder:
+        intervals.append((holder[1], window_end, holder[0]))
+    return intervals
+
+
+def _queue_episodes(
+    rows: list[dict[str, Any]], window_end: datetime
+) -> dict[str, list[dict[str, Any]]]:
+    """Pair every `wait-enqueue` with the decision that ended it.
+
+    An enqueue with no outcome row is reported `UNRESOLVED` and bounded by the
+    label's next enqueue or the window's end.  Reporting it as zero would make
+    a wait somebody cancelled look like a wait that never happened.
+    """
+    episodes: dict[str, list[dict[str, Any]]] = {}
+    open_at: dict[str, datetime] = {}
+
+    def close(label: str, start: datetime, end: datetime, outcome: str) -> None:
+        episodes.setdefault(label, []).append({
+            "start": start, "end": end, "outcome": outcome,
+            "seconds": max(0.0, (end - start).total_seconds()),
+        })
+
+    for row in rows:
+        label, action = str(row["label"]), str(row["action"])
+        if action == "wait-enqueue":
+            if label in open_at:
+                close(label, open_at.pop(label), row["when"], "UNRESOLVED")
+            open_at[label] = row["when"]
+        elif action in QUEUE_OUTCOME_ACTIONS:
+            start = open_at.pop(label, None)
+            if start is None:
+                continue
+            outcome = (
+                "ADMITTED" if str(row["verdict"]) == "OK" else _verdict_token(row)
+            )
+            close(label, start, row["when"], outcome)
+    for label, start in open_at.items():
+        close(label, start, window_end, "UNRESOLVED")
+    return episodes
 
 
 def coordination_rollup(
@@ -274,6 +352,13 @@ def coordination_rollup(
             "lockout_seconds": 0.0,
             "lockout_open": False,
             "lockout_open_seconds": 0.0,
+            "queue_episodes": 0,
+            "queue_outcomes": {},
+            "queue_seconds_total": 0.0,
+            "queue_seconds_longest": 0.0,
+            "queue_seconds_no_hard_hold": 0.0,
+            "admissions_of_other_labels_while_queued": 0,
+            "admissions_of_other_labels_by_label": {},
         })
 
     for label in labels:
@@ -309,7 +394,52 @@ def coordination_rollup(
         record["lockout_episodes"] += 1
         record["lockout_open_seconds"] = max(0.0, (window_end - started).total_seconds())
 
+    # Queue time: every enqueue, the decision that closed it, and how much of
+    # it was spent while nothing held the host exclusively.
+    episodes = _queue_episodes(rows, window_end)
+    hard_intervals = _hard_hold_intervals(rows, window_end)
+    admissions = [
+        row for row in rows
+        if str(row["action"]) in ACQUIRE_ACTIONS and str(row["verdict"]) == "OK"
+    ]
+
+    def hard_held_seconds(start: datetime, end: datetime) -> float:
+        total = 0.0
+        for hold_start, hold_end, _label in hard_intervals:
+            low, high = max(start, hold_start), min(end, hold_end)
+            if high > low:
+                total += (high - low).total_seconds()
+        return total
+
+    for label, label_episodes in episodes.items():
+        record = entry(label)
+        outcomes: dict[str, int] = {}
+        passed_by: dict[str, int] = {}
+        for episode in label_episodes:
+            outcomes[episode["outcome"]] = outcomes.get(episode["outcome"], 0) + 1
+            record["queue_seconds_total"] += episode["seconds"]
+            record["queue_seconds_longest"] = max(
+                record["queue_seconds_longest"], episode["seconds"]
+            )
+            record["queue_seconds_no_hard_hold"] += max(
+                0.0,
+                episode["seconds"] - hard_held_seconds(episode["start"], episode["end"]),
+            )
+            for row in admissions:
+                if str(row["label"]) == label:
+                    continue
+                if episode["start"] <= row["when"] <= episode["end"]:
+                    passed_by[str(row["label"])] = passed_by.get(str(row["label"]), 0) + 1
+        record["queue_episodes"] = len(label_episodes)
+        record["queue_outcomes"] = dict(sorted(outcomes.items()))
+        record["admissions_of_other_labels_by_label"] = dict(sorted(passed_by.items()))
+        record["admissions_of_other_labels_while_queued"] = sum(passed_by.values())
+
     for record in by_label.values():
+        for key in (
+            "queue_seconds_total", "queue_seconds_longest", "queue_seconds_no_hard_hold",
+        ):
+            record[key] = round(record[key], 1)
         record["lockout_seconds"] = round(record["lockout_seconds"], 1)
         record["lockout_open_seconds"] = round(record["lockout_open_seconds"], 1)
         record["lockout_total_seconds"] = round(
@@ -322,6 +452,101 @@ def coordination_rollup(
         "window_end": (window_end.isoformat().replace("+00:00", "Z")) if rows or until else None,
     }
     return by_label, meta
+
+
+_REASON_BUCKETS = (
+    ("roots unresolved", "roots unresolved"),
+    ("a full target is a broad closure", "full target"),
+    ("a dependency census", "dependency census"),
+    ("stale set is unmeasured", "unmeasured stale set"),
+    ("stale set is", "stale set above the limit"),
+    ("ledger unreadable", "ledger unreadable"),
+    ("worktree toolchain or manifest digest", "digest unavailable"),
+    ("no successful measurement that elaborated", "no elaborating measurement"),
+    ("no successful measurement", "no successful measurement"),
+    ("is not below", "measured peak too high"),
+)
+
+
+def _reason_bucket(reason: str) -> str:
+    for needle, bucket in _REASON_BUCKETS:
+        if needle in reason:
+            return bucket
+    return "other"
+
+
+def _reason_histogram(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Why each build was left `sensitive`, from the row rather than a transcript."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        if str(row.get("contention")) != "sensitive":
+            continue
+        reason = row.get("evidence_reason")
+        if not isinstance(reason, str) or not reason:
+            bucket = (
+                "explicit class (no classification ran)"
+                if row.get("requested_contention")
+                else "unrecorded (row predates evidence_reason)"
+            )
+        else:
+            bucket = _reason_bucket(reason)
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _estimate_source_histogram(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        source = str(row.get("estimate_source") or "unrecorded")
+        if source.startswith("profile default (full target"):
+            bucket = "profile default (full target)"
+        elif source.startswith("profile default"):
+            bucket = "profile default (no measurement)"
+        elif source.startswith("max of"):
+            bucket = "measured"
+        elif source == "explicit":
+            bucket = "explicit"
+        else:
+            bucket = source
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _under_cover(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """How far each admitted estimate fell below the peak it was charged for.
+
+    Computed from the estimate the row carries and the peak it measured, so
+    the +1 GiB margin becomes a measured quantity over any window, including
+    windows recorded before the field existed.
+    """
+    cases: list[dict[str, Any]] = []
+    measured = 0
+    for row in rows:
+        peak = row.get("peak_rss_mib")
+        estimate = row.get("estimate_gib")
+        if estimate is None:
+            estimate = row.get("memory_gib")
+        if not isinstance(peak, (int, float)) or isinstance(peak, bool):
+            continue
+        if not isinstance(estimate, (int, float)) or isinstance(estimate, bool):
+            continue
+        measured += 1
+        gap = round(float(peak) / 1024.0 - float(estimate), 2)
+        if gap > 0:
+            cases.append({
+                "time": str(row.get("time")),
+                "targets": list(row.get("targets") or []),
+                "estimate_gib": estimate,
+                "peak_gib": round(float(peak) / 1024.0, 2),
+                "under_cover_gib": gap,
+            })
+    cases.sort(key=lambda case: case["time"])
+    return {
+        "rows_with_an_estimate_and_a_peak": measured,
+        "under_covered_rows": len(cases),
+        "worst_under_cover_gib": max((case["under_cover_gib"] for case in cases), default=0.0),
+        "cases": cases,
+    }
 
 
 def ledger_rollup(since: str, until: Optional[str] = None) -> dict[str, Any]:
@@ -387,6 +612,22 @@ def ledger_rollup(since: str, until: Optional[str] = None) -> dict[str, Any]:
             "lockout_open": coordinated.get("lockout_open", False),
             "lockout_open_seconds": coordinated.get("lockout_open_seconds", 0.0),
             "lockout_total_seconds": coordinated.get("lockout_total_seconds", 0.0),
+            "queue_episodes": coordinated.get("queue_episodes", 0),
+            "queue_outcomes": coordinated.get("queue_outcomes", {}),
+            "queue_seconds_total": coordinated.get("queue_seconds_total", 0.0),
+            "queue_seconds_longest": coordinated.get("queue_seconds_longest", 0.0),
+            "queue_seconds_no_hard_hold": coordinated.get(
+                "queue_seconds_no_hard_hold", 0.0
+            ),
+            "admissions_of_other_labels_while_queued": coordinated.get(
+                "admissions_of_other_labels_while_queued", 0
+            ),
+            "admissions_of_other_labels_by_label": coordinated.get(
+                "admissions_of_other_labels_by_label", {}
+            ),
+            "sensitive_reasons": _reason_histogram(goal_builds),
+            "estimate_sources": _estimate_source_histogram(goal_builds),
+            "estimate_under_cover": _under_cover(goal_builds),
         }
     all_classes: dict[str, int] = {}
     for row in builds:
@@ -881,8 +1122,16 @@ def worktree_digests(worktree: Path) -> tuple[Optional[str], Optional[str]]:
 
 
 _STALE_FAILURE_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_'.]+)\s*$")
-_IMPORT_RE = re.compile(r"^import\s+([A-Za-z0-9_'.]+)")
+# Lean allows a component of a module name to be written in guillemets, and
+# Jaune's `Main.lean` does exactly that (`import «Jaune».Execution`).  Dropping
+# such an import would under-report the closure and could widen a class on
+# evidence that is not there, so the scanner reads them and normalises.
+_IMPORT_RE = re.compile(r"^import\s+([A-Za-z0-9_'.\u00ab\u00bb]+)")
 _HEADER_SCAN_LINES = 400
+
+
+def _normalise_module(name: str) -> str:
+    return name.replace("\u00ab", "").replace("\u00bb", "")
 
 
 def _module_name(worktree: Path, path: Path) -> str:
@@ -916,7 +1165,7 @@ def package_import_graph(worktree: Path, roots: Iterable[str]) -> Optional[dict[
                     for index, line in enumerate(source):
                         match = _IMPORT_RE.match(line)
                         if match:
-                            imports.add(match.group(1))
+                            imports.add(_normalise_module(match.group(1)))
                             continue
                         stripped = line.strip()
                         if not stripped or stripped.startswith("--"):
@@ -930,6 +1179,152 @@ def package_import_graph(worktree: Path, roots: Iterable[str]) -> Optional[dict[
     except OSError:
         return None
     return {module: {name for name in imports if name in graph} for module, imports in graph.items()}
+
+
+_PACKAGE_RE = re.compile(r"^\s*package\s+[«\"]?([A-Za-z0-9_'.\-]+)[»\"]?", re.M)
+_TARGET_RE = re.compile(
+    r"(?P<default>@\[[^\]]*default_target[^\]]*\]\s*)?"
+    r"^\s*(?P<kind>lean_lib|lean_exe)\s+[«\"]?(?P<name>[A-Za-z0-9_'.\-]+)[»\"]?",
+    re.M,
+)
+_ROOT_RE = re.compile(r"^\s*roots?\s*:=\s*(?P<value>.+)$", re.M)
+_ROOT_NAME_RE = re.compile(r"`+([A-Za-z0-9_'.]+)")
+
+
+def _lean_lakefile_targets(source: str) -> dict[str, Any]:
+    """Read package name, targets, roots, and default targets from Lean DSL."""
+    package = _PACKAGE_RE.search(source)
+    targets: dict[str, dict[str, Any]] = {}
+    defaults: list[str] = []
+    matches = list(_TARGET_RE.finditer(source))
+    for index, match in enumerate(matches):
+        name = match.group("name")
+        stop = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        body = source[match.end():stop]
+        roots = [name]
+        root_match = _ROOT_RE.search(body)
+        if root_match:
+            named = _ROOT_NAME_RE.findall(root_match.group("value"))
+            if named:
+                roots = named
+        targets[name] = {"kind": match.group("kind"), "roots": roots}
+        if match.group("default"):
+            defaults.append(name)
+    return {
+        "package": package.group(1) if package else None,
+        "targets": targets,
+        "default_targets": defaults,
+    }
+
+
+def _toml_lakefile_targets(source: str) -> dict[str, Any]:
+    import tomllib
+
+    data = tomllib.loads(source)
+    targets: dict[str, dict[str, Any]] = {}
+    for kind, key in (("lean_lib", "lean_lib"), ("lean_exe", "lean_exe")):
+        for entry in data.get(key) or []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            name = entry["name"]
+            declared = entry.get("roots") or entry.get("root") or name
+            roots = [declared] if isinstance(declared, str) else [
+                item for item in declared if isinstance(item, str)
+            ]
+            targets[name] = {"kind": kind, "roots": roots or [name]}
+    declared_defaults = data.get("defaultTargets") or []
+    defaults = [name for name in declared_defaults if isinstance(name, str)]
+    if not defaults:
+        defaults = sorted(targets)
+    return {
+        "package": data.get("name") if isinstance(data.get("name"), str) else None,
+        "targets": targets,
+        "default_targets": defaults,
+    }
+
+
+def lake_configuration(worktree: Path) -> tuple[Optional[dict[str, Any]], str]:
+    """Read the package's declared targets, or say why they are unreadable.
+
+    A full or package target names no module, so its stale closure cannot be
+    computed until the configuration says which module roots it builds.  The
+    configuration is only ever read: an unreadable or empty one leaves the
+    caller with no roots, which is what keeps such a build `sensitive`.
+    """
+    for name, parse in (
+        ("lakefile.toml", _toml_lakefile_targets),
+        ("lakefile.lean", _lean_lakefile_targets),
+    ):
+        path = worktree / name
+        if not path.is_file():
+            continue
+        try:
+            config = parse(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception as exc:                       # noqa: BLE001 - fail closed
+            return None, f"{name} is unreadable: {type(exc).__name__}"
+        if not config["targets"]:
+            return None, f"{name} declares no lean_lib or lean_exe target"
+        if not config["default_targets"]:
+            return None, f"{name} declares no default target"
+        return config, f"{name} declares {len(config['targets'])} target(s)"
+    return None, "no lakefile.toml or lakefile.lean in the worktree"
+
+
+def resolve_target_roots(
+    worktree: Path, targets: list[str]
+) -> tuple[Optional[list[str]], list[str], str]:
+    """Map Lake targets to the module roots a build of them would elaborate.
+
+    Returns the closure roots, the package-wide roots the import graph is built
+    over, and a human detail.  ``None`` roots means the resolution failed and
+    the caller must keep the conservative class.
+    """
+    config, detail = lake_configuration(worktree)
+    if config is None:
+        if targets:
+            # A named module target needs no configuration: it is its own root.
+            return list(targets), list(targets), f"module targets ({detail})"
+        return None, [], f"roots unresolved: {detail}"
+    package_roots: list[str] = []
+    for entry in config["targets"].values():
+        for root in entry["roots"]:
+            if root not in package_roots:
+                package_roots.append(root)
+
+    def roots_of(names: list[str]) -> list[str]:
+        collected: list[str] = []
+        for name in names:
+            for root in config["targets"][name]["roots"]:
+                if root not in collected:
+                    collected.append(root)
+        return collected
+
+    if not targets:
+        resolved = roots_of(config["default_targets"])
+        if not resolved:
+            return None, package_roots, "roots unresolved: no default target has a root"
+        return resolved, package_roots, (
+            f"full target -> default target(s) {config['default_targets']} "
+            f"-> root(s) {resolved}"
+        )
+    resolved = []
+    named: list[str] = []
+    for target in targets:
+        if target in config["targets"]:
+            named.append(f"{target} -> {config['targets'][target]['roots']}")
+            for root in config["targets"][target]["roots"]:
+                if root not in resolved:
+                    resolved.append(root)
+        elif config["package"] and target == config["package"]:
+            named.append(f"{target} (package) -> {config['default_targets']}")
+            for root in roots_of(config["default_targets"]):
+                if root not in resolved:
+                    resolved.append(root)
+        else:
+            named.append(f"{target} (module)")
+            if target not in resolved:
+                resolved.append(target)
+    return resolved, package_roots, "; ".join(named)
 
 
 def stale_closure(
@@ -976,6 +1371,8 @@ def stale_module_count(
     worktree: Path,
     targets: list[str],
     real_lake: Path,
+    closure_roots: Optional[list[str]] = None,
+    package_roots: Optional[list[str]] = None,
 ) -> tuple[Optional[int], str]:
     """Count the modules a probe proves out of date, or explain why it cannot.
 
@@ -1010,16 +1407,42 @@ def stale_module_count(
         frontier.add(match.group(1))
     if not frontier:
         return None, "probe named no out-of-date module"
-    graph = package_import_graph(worktree, targets)
+    roots = list(closure_roots if closure_roots is not None else targets)
+    graph = package_import_graph(worktree, list(package_roots or []) + roots)
     if graph is None:
         return None, "package import graph unavailable"
-    count = stale_closure(graph, targets, frontier)
+    count = stale_closure(graph, roots, frontier)
     if count is None:
         return None, "targets are outside the package import graph"
     return count, (
-        f"probe frontier {sorted(frontier)}; {count} module(s) in the target closure "
-        "would be elaborated"
+        f"probe frontier {sorted(frontier)}; {count} module(s) in the closure of "
+        f"{roots} would be elaborated"
     )
+
+
+def stale_evidence(
+    worktree: Path, targets: list[str], real_lake: Path
+) -> dict[str, Any]:
+    """Resolve the targets to module roots, then measure their stale closure.
+
+    A full or package target names no module, so before this the probe's
+    frontier had nothing to be a closure *of* and the class was decided by the
+    shape of the request rather than by evidence.  Resolution failure keeps the
+    conservative class and says which part failed.
+    """
+    closure_roots, package_roots, resolution = resolve_target_roots(worktree, targets)
+    if closure_roots is None:
+        return {
+            "roots": None, "package_roots": package_roots, "resolution": resolution,
+            "stale": None, "detail": resolution,
+        }
+    stale, detail = stale_module_count(
+        worktree, targets, real_lake, closure_roots, package_roots
+    )
+    return {
+        "roots": closure_roots, "package_roots": package_roots,
+        "resolution": resolution, "stale": stale, "detail": detail,
+    }
 
 
 def _measured_rows(
@@ -1028,8 +1451,14 @@ def _measured_rows(
     toolchain_digest: Optional[str],
     manifest_digest: Optional[str],
     settings: dict[str, int],
+    require_elaboration: bool = False,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Ledger rows that measured *this* worktree, targets, and pinned inputs."""
+    """Ledger rows that measured *this* worktree, targets, and pinned inputs.
+
+    ``require_elaboration`` keeps only rows that rebuilt at least one module.
+    A row that restored everything from the artifact cache measured a build
+    that elaborated nothing; it cannot size one that will.
+    """
     try:
         rows, _corrupt = read_ledger("30d")
     except (OSError, ValueError):
@@ -1051,9 +1480,18 @@ def _measured_rows(
     ]
     if not matching:
         return [], "no successful measurement for these targets on the pinned inputs"
+    if require_elaboration:
+        elaborated = [row for row in matching if row.get("modules_rebuilt")]
+        if not elaborated:
+            return [], (
+                "no successful measurement that elaborated a module for these "
+                "targets on the pinned inputs"
+            )
+        matching = elaborated
     matching.sort(key=lambda row: str(row["time"]))
     keep = matching[-int(settings["estimate_sample_rows"]):]
-    return keep, f"{len(keep)} matching measurement(s)"
+    detail = f"{len(keep)} matching measurement(s)"
+    return keep, (detail + " that elaborated" if require_elaboration else detail)
 
 
 def classify_contention(
@@ -1062,6 +1500,7 @@ def classify_contention(
     real_lake: Path,
     settings: dict[str, int],
     digests: tuple[Optional[str], Optional[str]],
+    stale: Optional[dict[str, Any]] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Choose a contention class from measurement, defaulting to `sensitive`.
 
@@ -1071,15 +1510,21 @@ def classify_contention(
     conservative class; evidence can only ever relax scheduling, never a floor.
     """
     evidence: dict[str, Any] = {}
-    if not targets:
-        evidence["reason"] = "a full target is a broad closure"
+    probe = stale if stale is not None else stale_evidence(worktree, targets, real_lake)
+    stale_count = probe["stale"]
+    evidence["resolved_roots"] = probe["roots"]
+    evidence["resolution"] = probe["resolution"]
+    evidence["stale_modules"] = stale_count
+    evidence["stale_detail"] = probe["detail"]
+    if probe["roots"] is None:
+        evidence["reason"] = probe["resolution"]
         return "sensitive", evidence
-    stale, stale_detail = stale_module_count(worktree, targets, real_lake)
-    evidence["stale_modules"] = stale
-    evidence["stale_detail"] = stale_detail
     limit = int(settings["tolerant_module_count"])
-    if stale is None or stale > limit:
-        evidence["reason"] = f"stale set is {stale if stale is not None else 'unmeasured'} (limit {limit})"
+    if stale_count is None or stale_count > limit:
+        evidence["reason"] = (
+            f"stale set is {stale_count if stale_count is not None else 'unmeasured'} "
+            f"(limit {limit})"
+        )
         return "sensitive", evidence
     rows, rows_detail = _measured_rows(worktree, targets, *digests, settings)
     evidence["measurements"] = rows_detail
@@ -1093,7 +1538,7 @@ def classify_contention(
         evidence["reason"] = f"measured peak {peak_gib:.2f} GiB is not below {threshold} GiB"
         return "sensitive", evidence
     evidence["reason"] = (
-        f"{stale} stale module(s) at or below {limit} and a measured peak of "
+        f"{stale_count} stale module(s) at or below {limit} and a measured peak of "
         f"{peak_gib:.2f} GiB below {threshold} GiB on the pinned toolchain and manifest"
     )
     return "tolerant", evidence
@@ -1105,25 +1550,37 @@ def derive_memory_gib(
     settings: dict[str, int],
     digests: tuple[Optional[str], Optional[str]],
     default_gib: int,
+    stale_modules: Optional[int] = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Propose a whole-GiB estimate from measurement, never below the floor."""
+    """Propose a whole-GiB estimate from measurement, never below the floor.
+
+    ``stale_modules`` is the probe's count for this build.  A build with
+    nothing stale may be sized by any successful row of the same targets; a
+    build that will elaborate — or one whose stale set could not be measured —
+    is sized only by rows that themselves elaborated a module, because a
+    cache-restored row measures a build that did no work.
+    """
     floor = int(settings["minimum_estimate_gib"])
-    if not targets:
-        return max(floor, default_gib), {
-            "source": "profile default (full target)",
-            "rows": 0,
-        }
-    rows, detail = _measured_rows(worktree, targets, *digests, settings)
+    require_elaboration = stale_modules != 0
+    rows, detail = _measured_rows(
+        worktree, targets, *digests, settings, require_elaboration
+    )
     if not rows:
-        return max(floor, default_gib), {"source": f"profile default ({detail})", "rows": 0}
+        return max(floor, default_gib), {
+            "source": f"profile default ({detail})",
+            "rows": 0,
+            "keyed_on_elaboration": require_elaboration,
+        }
     peak_gib = max(float(row["peak_rss_mib"]) for row in rows) / 1024.0
     estimate = max(floor, math.ceil(peak_gib) + int(settings["estimate_margin_gib"]))
     return estimate, {
         "source": (
             f"max of {len(rows)} measured peak(s) ({peak_gib:.2f} GiB) "
             f"plus {settings['estimate_margin_gib']} GiB"
+            + (" from rows that elaborated" if require_elaboration else "")
         ),
         "rows": len(rows),
+        "keyed_on_elaboration": require_elaboration,
         "measured_peak_gib": round(peak_gib, 2),
         "row_times": [str(row["time"]) for row in rows],
     }
@@ -1324,18 +1781,54 @@ def run_lake_build(
     digests = worktree_digests(worktree)
     requested_contention = contention
     evidence: dict[str, Any] = {}
+    probe_evidence: Optional[dict[str, Any]] = None
+
+    def stale() -> dict[str, Any]:
+        # One probe per build, shared by the class and the estimate: the two
+        # answers must describe the same stale set.
+        nonlocal probe_evidence
+        if probe_evidence is None:
+            probe_evidence = stale_evidence(worktree, targets, real_lake)
+        return probe_evidence
+
     if census:
         contention = "exclusive"
         evidence["reason"] = "a dependency census rebuilds the full closure"
     elif contention is None:
         contention, evidence = classify_contention(
-            worktree, targets, real_lake, settings(), digests
+            worktree, targets, real_lake, settings(), digests, stale()
         )
     estimate_evidence: dict[str, Any] = {}
+    # The estimate reuses the class's probe when there was one.  It never asks
+    # for a probe of its own: a caller who states the class deserves the
+    # conservative keying, not a second Lake invocation.
+    measured_stale = probe_evidence["stale"] if probe_evidence is not None else None
     if memory_gib is None:
         memory_gib, estimate_evidence = derive_memory_gib(
-            worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB
+            worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale
         )
+    elif probe_evidence is not None:
+        # An explicit estimate is honoured, but the reader is told what the
+        # evidence would have proposed: a larger one is charged 1.25x and can
+        # be passed over by every smaller request on a busy host.
+        derived, derived_evidence = derive_memory_gib(
+            worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale
+        )
+        estimate_evidence = {
+            "source": "explicit",
+            "explicit_gib": memory_gib,
+            "derived_gib": derived,
+            "derived_source": derived_evidence["source"],
+        }
+        if memory_gib > derived:
+            print(
+                f"estimate: an explicit --memory-gib {memory_gib} exceeds the "
+                f"{derived} GiB this worktree's evidence supports "
+                f"({derived_evidence['source']}); it is charged "
+                f"{semaphore._charged_memory_gib(memory_gib)} GiB and can be passed over by "
+                "every smaller request while it waits",
+                file=output,
+            )
 
     lake_args = [str(real_lake), "build"]
     if probe:
@@ -1368,7 +1861,10 @@ def run_lake_build(
         contention=contention,
         wait_seconds=wait_seconds,
         **(
-            {"poll_seconds": float(settings()["wait_poll_seconds"])}
+            {
+                "poll_seconds": float(settings()["wait_poll_seconds"]),
+                "announce": lambda line: print(line, file=output, flush=True),
+            }
             if wait_seconds is not None else {}
         ),
     )
@@ -1462,6 +1958,25 @@ def run_lake_build(
     after = _swap_gib()
     rebuilt, restored, module_seconds = _parse_build_output(lines)
     hashes = _module_hashes(worktree, rebuilt)
+    peak_mib = round(sampler.peak_rss_mib, 1) if sampler and sampler.samples else None
+    hint = repeat_failure(worktree, targets, settings()) if exit_code == 1 else None
+    restart_line = (
+        (
+            f"rebuilt {len(rebuilt)} module(s): {', '.join(rebuilt[:12])}"
+            + ("…" if len(rebuilt) > 12 else "")
+            + " — a file worker keeps the imports it loaded; before trusting "
+            "diagnostics in a file that imports them, query two other Lean files "
+            "and then that one again to evict and reload it"
+        )
+        if rebuilt else None
+    )
+    # The margin the estimate carried over what the build actually needed.
+    # Recording it per row makes the +1 GiB a measured quantity rather than a
+    # belief; the margin itself is unchanged.
+    under_cover = (
+        round(max(0.0, peak_mib / 1024.0 - float(memory_gib)), 2)
+        if peak_mib is not None else None
+    )
     record = {
         "kind": "build", "worktree": str(worktree), "goal": goal, "targets": targets,
         "command": args, "exit": exit_code, "wall_seconds": round(wall, 3),
@@ -1478,6 +1993,17 @@ def run_lake_build(
         "memory_gib": memory_gib,
         "evidence_contention": contention,
         "estimate_source": str(estimate_evidence.get("source", "explicit")),
+        "estimate_gib": memory_gib,
+        "estimate_under_cover_gib": under_cover,
+        **({"evidence_reason": str(evidence["reason"])} if evidence.get("reason") else {}),
+        **({"resolved_roots": [str(root) for root in evidence["resolved_roots"]]}
+           if isinstance(evidence.get("resolved_roots"), list) else {}),
+        **({"stale_modules": int(evidence["stale_modules"])}
+           if isinstance(evidence.get("stale_modules"), int)
+           and not isinstance(evidence.get("stale_modules"), bool) else {}),
+        **({"stale_detail": str(evidence["stale_detail"])}
+           if evidence.get("stale_detail") else {}),
+        **({"hint": hint} if hint else {}),
         **({"requested_contention": requested_contention} if requested_contention else {}),
         **({"outcome": "killed"} if interrupted else {}),
         **({"census": True, "dependency": str(dependency)} if census else {}),
@@ -1498,7 +2024,6 @@ def run_lake_build(
         record["exit"] = exit_code
     for signum, handler in prior_handlers.items():
         signal.signal(signum, handler)
-    hint = repeat_failure(worktree, targets, settings()) if exit_code == 1 else None
     append_ledger(record)
     summary: dict[str, Any] = {
         "status": "OK" if exit_code == 0 else "ERROR", "exit": exit_code,
@@ -1522,11 +2047,14 @@ def run_lake_build(
         summary["dependency_rev"] = dependency_rev
     if hint:
         summary["hint"] = hint
-    if rebuilt:
-        summary["restart_lean_server"] = (
-            f"rebuilt {len(rebuilt)} module(s): {', '.join(rebuilt[:12])}"
-            + ("…" if len(rebuilt) > 12 else "")
-            + " — restart the Lean server before trusting diagnostics in files that import them"
-        )
+    if restart_line:
+        summary["restart_lean_server"] = restart_line
+    # These two are what a caller most needs and most often filters away: a
+    # pipeline keeping only `^error` and `Build complete` drops the JSON line
+    # entirely. They are printed on their own prefixed lines as well.
+    if hint:
+        print(f"hint: {hint}", file=output)
+    if restart_line:
+        print(f"restart: {restart_line}", file=output)
     print(json.dumps(summary, sort_keys=True), file=output)
     return exit_code

@@ -92,6 +92,22 @@ class Adapter:
             f"process snapshots are not implemented for {self.system}",
         )
 
+    def process_working_directories(self, pids: list[int]) -> CapabilityResult:
+        """Sample the working directory of each named pid.
+
+        Attribution of a Lean process to a goal cannot use a parent chain: a
+        hold taken from one shell call is not an ancestor of the gate launched
+        by the next.  The reclaim path already resolves working directories
+        for the processes it may signal; this exposes the same sample as a
+        read-only capability so idleness can be judged the same way.  A pid the
+        sample cannot answer for is simply absent from the map, and the caller
+        must fail closed rather than treat it as out of scope.
+        """
+        return self.result(
+            "process_working_directories", "UNAVAILABLE",
+            f"process working directories are not readable on {self.system}",
+        )
+
     def lean_workers(self) -> CapabilityResult:
         """Sample Lean language-server workers with cumulative CPU time.
 

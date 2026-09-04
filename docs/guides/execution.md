@@ -51,7 +51,10 @@ Classify from what the unit actually does, not from the nearest example:
 | fixture, static, link, schema, and other non-elaborating gates | light — no hold at all |
 | a unit test suite that does not elaborate Lean | light |
 | a warm narrow build whose stale set is small and whose measured peak is modest | `tolerant` |
+| a warm **full target** whose stale closure is small and whose measured peak is modest | `tolerant` — it is judged by its closure, not by naming no target |
+| a warm **package or library target** (`jaune`, `Blanc`) under the same conditions | `tolerant` — the target resolves to its Lake roots first |
 | a focused language-server proof loop | `tolerant` |
+| a full or package target whose Lake configuration cannot be read | `sensitive` — "roots unresolved" |
 | a cold worktree, an unmeasured target, or a broad closure | `sensitive` |
 | anything that creates several Lean workers, or a previously observed spike | `sensitive` |
 | a long indivisible command that cannot reach a renewal boundary | `sensitive` |
@@ -96,18 +99,78 @@ never blocks a smaller one behind it, and a waiter whose process dies is
 dropped. Waiting can only postpone a request. It never admits one past a
 floor, and it never changes a verdict you would have received without it.
 
-Never write a shell loop around `semaphore status`. A hand-rolled poll cannot
-hold a place in the queue, it spends a foreground turn per iteration, and the
-verdict it eventually reads is the one `--wait` would have returned. `status`
-is for looking at the host, not for waiting on it.
+#### What "currently fit" means, in numbers
+
+Arrival order decides between the requests that fit *at that pass*. Fit is:
+
+```
+charged  = ceil(1.25 x estimate)            # the peak multiplier
+reserve  = max(2 GiB, 25% of physical RAM)  # the host usability reserve
+it fits when   available >= charged + reserve
+```
+
+On this 24 GiB host the reserve is 6.0 GiB, so an 8 GiB estimate needs
+16.0 GiB available and a **10 GiB estimate needs 19.0 GiB** — about 79% free.
+With three sessions running, this host offered 16.5–19.0 GiB all through the
+B9 window, so a 10 GiB request was unschedulable and was passed over 26 times
+in 107 minutes while smaller requests behind it were admitted in 0.0 s. That
+is the policy working, not a fault — **and a larger estimate than the evidence
+supports is the surest way to starve.** State one only when you know the build
+is cold or broad; otherwise omit `--memory-gib` and let the wrapper derive it.
+
+You never have to guess which case you are in. Before it blocks, a `--wait`
+prints its own arithmetic, and says what would fit if this one does not:
+
+```
+fit: estimate 10 GiB -> charged 13 GiB (x1.25) + reserve 6.0 GiB = 19.0 GiB needed;
+     18.7 GiB available now (77% free) -> does not fit now
+fit: at this instant an estimate of at most 10 GiB would fit; a larger one is
+     queued in arrival order but passed over by every request that fits
+```
+
+`semaphore status` prints, under every waiter, the verdict the queue would give
+it right now — computed by the same function the queue uses — with the same
+arithmetic. If it says `LIGHT_ONLY` with a reserve line while the host looks
+free, the estimate is the problem; if it says `DEFER_HEAVY`, something is
+holding and waiting is the right answer.
+
+#### Sizing the wait, and working while it runs
+
+`status` prints each hold's class and how long it has been held
+(`contention=exclusive held=1180s`), and a `WAIT_TIMEOUT` prints the same for
+the holder it timed out behind, together with the verdict that *dominated* the
+wait rather than the one on the final pass. Size `SECS` to the unit ahead: in
+B9 calibration and campaign units ran 15–25 minutes, so a literal `--wait 600`
+behind one of them buys nothing but a requeue and a spent turn.
+
+A wait blocks the command that issued it. Either line up light work first and
+issue the wait when you have nothing else to do, or issue it in the background
+and read its result when the client hands it back. Never write a shell loop
+around `semaphore status`, and never write one around your own backgrounded
+process either: `while kill -0 PID; do sleep 20; done` is the same stall with
+the poll target renamed. A hand-rolled poll cannot hold a place in the queue,
+it spends a foreground turn per iteration, and the verdict it eventually reads
+is the one `--wait` would have returned. `status` is for looking at the host,
+not for waiting on it.
+
+#### A gate runner that cannot release between rows
+
+Split it if you can. If you cannot, take **one** hold sized for its Lean rows,
+not for the whole script, and release the instant the last Lean row finishes.
+Rows that do not elaborate — fixtures, static scans, link and schema checks —
+take no hold at all. One lease across sixty-one sequential gate rows blocks
+every proof session on the host for the duration, and `status` will say so.
 
 A hold covers **one elaborating command**, not a whole gate script. Release
 between gates and reacquire — with `--wait` there is no race to lose by
 letting go. `status` and `renew` print `IDLE_HOLD` when a holder has had no
-`lake`, `lean`, or repository child process for two minutes, `STRANDED` with
-the exact wind-down command when a hold's process is gone and its lease has
-lapsed, and `IDLE_WORKERS` when reclaimable language-server memory is
-resident. A `LIGHT_ONLY` refusal for headroom names that memory and its owner;
+`lake` or `lean` process for two minutes — neither among the holder's own
+children nor working inside the goal's worktrees, which is how a gate launched
+from a different shell call than the one that took the hold is still counted as
+work — `STRANDED` with the exact wind-down command when a hold's process is
+gone and its lease has lapsed, and `IDLE_WORKERS` when reclaimable
+language-server memory is resident. When the host cannot be attributed at all,
+the line says `ATTRIBUTION_UNAVAILABLE` and no hold is called idle. A `LIGHT_ONLY` refusal for headroom names that memory and its owner;
 reclaim your own with `python3 -m creme reclaim --idle-workers MIN`, which
 reports every worker outside your ownership boundary instead of killing it.
 
@@ -204,8 +267,16 @@ human shell cannot execute an absolute toolchain binary:
 ```sh
 ~/creme/scripts/creme lake-build GOAL --probe -- Narrow.Target
 ~/creme/scripts/creme lake-build GOAL --wait 600 -- Narrow.Target
-~/creme/scripts/creme lake-build GOAL --memory-gib 10 --contention sensitive --wait 600 -- Broad.Target
+~/creme/scripts/creme lake-build GOAL --wait 900 --                      # the full target
+~/creme/scripts/creme lake-build GOAL --contention sensitive --wait 1800 -- Cold.Or.Broad.Target
 ```
+
+The third and fourth commands carry no `--memory-gib`: a full or package target
+is classified and sized from its own stale closure like any other, and an
+estimate above what the evidence supports only makes the request harder to
+schedule. State a class when you know something the ledger cannot — a cold
+worktree, a rebuild you expect to be broad — and state an estimate only when
+you also know the peak.
 
 Probe first. Exit 0 means the selected artifacts are current; exit 3 means
 stale and authorizes no work by itself. The second command requests adaptive
@@ -227,10 +298,20 @@ worktree, a rebuild you expect to be broad, a command that will spawn several
 workers. The JSON records both the class you asked for and the class the
 evidence supports, so a disagreement is visible afterwards.
 
-On completion the wrapper lists the modules it rebuilt and tells you to
-restart the Lean server before trusting diagnostics in files that import them.
-Do that: a stale `.olean` from a neighbour's build is the usual reason an
-agent stops believing the language server.
+On completion the wrapper lists the modules it rebuilt on a `restart:` line
+of its own. A file worker keeps the imports it loaded when it started, so
+neither the rebuild nor an edit to your own file changes what it reports about
+them. To refresh one file: **query two other Lean files, then that file
+again.** With `LEAN_LSP_MAX_OPEN_FILES=2` the second query evicts its worker
+and the third starts a fresh one against the rebuilt `.olean`s. `reclaim
+--idle-workers` frees that memory but does **not** refresh diagnostics — it
+terminates the worker while the MCP layer keeps answering from its cache. A
+stale `.olean` from a neighbour's build is the usual reason an agent stops
+believing the language server.
+
+Never filter the wrapper's output. `hint:` and `restart:` are printed as their
+own lines precisely so a pipeline that keeps only `^error` and `Build complete`
+still sees them; a filter that drops the JSON line drops them too.
 
 ### The build is not a type-checker
 
@@ -249,8 +330,8 @@ whether an edit compiles.
 **A clean `lean_diagnostic_messages` pass on a file whose imports are current
 is loop evidence.** It does not need confirming with a build. If diagnostics
 say `Imports are out of date`, they are not current: probe, build the narrow
-target, restart the server, and read them again — that is the repair, not a
-reason to distrust the tool.
+target, refresh that file's worker (query two other Lean files, then it again),
+and read them again — that is the repair, not a reason to distrust the tool.
 
 When a build exits 1 and the previous build of the same targets also failed
 within the repeat window, the JSON carries `hint: REPEAT_FAIL` naming the

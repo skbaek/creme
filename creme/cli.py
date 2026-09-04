@@ -321,6 +321,9 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
             memory_gib=arguments.memory_gib,
             contention=arguments.contention,
             wait_seconds=arguments.wait,
+            # A queued request blocks the caller's turn, so the arithmetic that
+            # decides it is printed before the wait begins, not after it fails.
+            announce=(print if arguments.wait is not None else None),
         ))
     if action in {"soft-release", "hard-release"}:
         kind = action.split("-", 1)[0]

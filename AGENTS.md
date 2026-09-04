@@ -54,7 +54,9 @@ There is one compilation owner: probe and build only through
 `~/creme/scripts/creme lake-build GOAL -- <narrow-targets>`, never through bare
 `lake build` or the removed MCP `lean_build`/`lean_profile_proof` tools. Keep narrow targets in the
 proof loop, build the catalogue-required full target at checkpoints, and
-restart the Lean server after a coordinated build.
+refresh a file's language-server worker after a build that rebuilt something it
+imports — query two other Lean files, then that file again, which evicts and
+reloads it under `LEAN_LSP_MAX_OPEN_FILES=2`.
 
 The inner loop is edit → `lean_diagnostic_messages` on the edited file →
 `lean_goal`/`lean_hover_info` for a type mismatch → repeat. Build only when a

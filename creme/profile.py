@@ -35,7 +35,7 @@ ADMISSION_DEFAULTS = {
     # member that elaborated for at least `heavy_module_seconds` in some broad
     # rebuild is a heavy module and keeps the task default instead.
     "narrow_default_gib": 4,
-    "heavy_module_seconds": 30,
+    "heavy_module_seconds": 20,
 }
 ADMISSION_RANGES = {
     "tolerant_module_count": (1, 4096),

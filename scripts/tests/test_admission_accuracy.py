@@ -287,7 +287,9 @@ class StaleSetSizingTest(unittest.TestCase):
 
     def test_the_narrow_default_and_heavy_seconds_are_profile_tunables(self) -> None:
         self.assertEqual(ADMISSION_DEFAULTS["narrow_default_gib"], 4)
-        self.assertEqual(ADMISSION_DEFAULTS["heavy_module_seconds"], 30)
+        # Every module under 20 s peaked at or below 2.7 GiB on its own row in
+        # B11; FmintSettles at 29 s peaked at 4.2 GiB, above the narrow default.
+        self.assertEqual(ADMISSION_DEFAULTS["heavy_module_seconds"], 20)
         facts = {"system": "Darwin", "machine": "arm64", "logical_cores": 10,
                  "physical_memory_bytes": 25769803776}
         from creme.profile import fingerprint

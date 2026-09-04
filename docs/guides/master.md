@@ -38,17 +38,22 @@ local. The record contains:
 | path | what it is | who writes it |
 |---|---|---|
 | `master/README.md` | the layout and the re-entry pointer back to this guide | master |
-| `master/board.md` | the current picture: lease holder, running and queued work, open decisions, open audit findings, next unit | master, rewritten at every event |
-| `master/log.md` | append-only events: `master`, `goal`, `merge`, `decision`, `procedure`, `audit`, `note` | master; auditor appends `audit` |
+| `master/.record.lock` | the private transaction lock | Creme's record writer |
+| `master/events.jsonl` | authoritative append-ordered `master`, `goal`, `merge`, `decision`, `procedure`, `audit`, and `note` events | authenticated master through Creme |
+| `master/board.json` | deterministic projection of the validated event log | authenticated master through Creme |
 | `master/intent/` | one statement per programme of what the user wants, in the user's words | **the user** |
 | `master/briefs/` | worker briefs the master writes when a full goal document is not worth it | master |
 | `master/audits/` | independent audit reports and the findings register | auditor; master may mark a finding addressed |
+| `master/migration.json`, `master/migration-backups/` | optional report and byte-identical originals from an explicit legacy migration | authenticated master through Creme |
 
-The log is the source of truth and the board is derived from it. Write the
-log entry first, then rewrite the board. Write at every event, not on a timer:
-a crash then loses at most the current turn. Goal documents, state briefs,
-reports, and evidence trees in the existing goal-store layout remain valid
-worker artifacts; the board points at whichever a piece of work uses.
+The event log is the source of truth and the board is derived from it. Creme
+commits the log first, then rewrites the board under the same record lock. A
+crash after the log commit therefore leaves an accepted event plus a stale
+board that the next authenticated writer repairs. Goal documents, state
+briefs, reports, and evidence trees in the existing goal-store layout remain
+valid worker artifacts; the board points at whichever a piece of work uses.
+The tracked [generic runtime layout](../../templates/master-runtime/README.md)
+documents this shape without containing a host record.
 
 Nothing the next master on this host needs may live only in a client's
 transcript, memory directory, session title, or terminal scrollback. A
@@ -72,7 +77,8 @@ anything else and whether or not the user mentions the role:
    resolves the configured goal store and verifies that its `master/`
    subtree is ignored and untracked. If no store is configured, or this
    privacy check fails, do not enter persistent master mode.
-2. Read `master/README.md`, `master/board.md`, the tail of `master/log.md`,
+2. Read `master/README.md`, `master/board.json`, the tail of
+   `master/events.jsonl`,
    every file in `master/intent/`, and the open findings in `master/audits/`.
 3. Try to take the lease:
 
@@ -210,8 +216,11 @@ to the [goal guide](goal.md) when the work is large enough to deserve one, or
 a short `master/briefs/<goal>.md` when it is not. It states the objective,
 the owned paths, the resource class, the gates that must be green on the
 candidate, the decisions the worker may make alone, and where its report
-goes. Choose each worker's model and effort for its hardest non-delegable
-judgment, as the goal guide describes.
+goes. Instantiate the tracked
+[generic worker brief](../../templates/master-runtime/worker-brief.md) so
+starting refs, coordination, pause/reacquisition, checkpoints, evidence, and
+the bounded return contract are explicit. Choose each worker's model and
+effort for its hardest non-delegable judgment, as the goal guide describes.
 
 A worker dies with the master. It therefore checkpoints to Git and its state
 brief at every green boundary, so that a successor master can respawn it from
@@ -253,7 +262,8 @@ order. Every step is evidence on the exact candidate, never on the branch
 5. Append a `merge` event: candidate commit, resulting default-branch commit,
    the gate evidence pointer, and whether the merge is audit-worthy (it
    touched anything in step 3's list, a published surface, or a claim count).
-6. A Blanc bump of its Jaune pin is itself a merge-class event. Rehearse it
+6. A Blanc bump of its Jaune pin is reserved for the user under the decision
+   table below and is itself a merge-class event after approval. Rehearse it
    with the owned-build wrapper's census mode in the goal's rehearsal tree
    before the bump commit exists on a branch.
 
@@ -286,13 +296,52 @@ Reserved for the user, and only these:
   that third parties already depend on;
 - a **product-semantics fork** where the relevant intent statement is
   silent, more than one option is defensible, and reversal would be costly;
-- anything an intent statement **explicitly reserves**.
+- anything an intent statement **explicitly reserves**; or
+- any integrity/provenance-sensitive change classified `reserved` by the
+  normative table below, even if a generator emitted it or the edit is locally
+  reversible.
 
 Everything else is the master's to decide. "Slightly risky" is not a
 criterion; "I would rather not be blamed" is not a criterion. If the master
 finds itself about to escalate, it first writes the decision entry as if it
-had decided, and escalates only if that entry would violate one of the three
+had decided, and escalates only if that entry would violate one of the four
 bullets above.
+
+### Registered provenance is a narrow exception
+
+<!-- provenance-rule:start -->
+> Registered-provenance exception: The master may approve a registered
+> generator's identity/provenance output caused solely by an already-authorized
+> source/input change if and only if the registered check is green, a relevant
+> falsifier bites, the diff is exact generator output, and no semantic reference
+> changes; generation never makes a reserved change autonomous, and an ambiguous
+> mixed diff must be separated or escalated as a decision packet.
+<!-- provenance-rule:end -->
+
+The table is normative. `autonomous` means the master may approve and log the
+change only after the rule above is satisfied. `reserved` means generation is
+irrelevant: the user retains the decision. `separate-or-escalate` means split
+the exact autonomous output from the reserved or uncertain part; if that
+cannot be done, send the whole dependent change as a decision packet.
+
+<!-- provenance-table:start -->
+| ID | Change | Classification | Required evidence or action |
+|---|---|---|---|
+| `registered-provenance` | Registered generator identity/provenance output caused solely by an already-authorized source/input change | `autonomous` | Green registered check, biting relevant falsifier, and exact generator-only diff with no semantic reference movement |
+| `pin-reference` | Pin or semantic reference movement | `reserved` | User decision, even when generated |
+| `baseline` | Baseline weakening | `reserved` | User decision, even when generated |
+| `budget` | Budget weakening | `reserved` | User decision, even when generated |
+| `allowlist` | Allowlist growth | `reserved` | User decision, even when generated |
+| `golden` | Golden change | `reserved` | User decision, even when generated |
+| `timeout` | Timeout change | `reserved` | User decision, even when generated |
+| `publication` | Publication or release action | `reserved` | User decision |
+| `public-claim-count` | Public claim or published count change | `reserved` | User decision, even when generated |
+| `license` | License choice or change | `reserved` | User decision |
+| `external-message` | External message or upstream comment in the user's name | `reserved` | User decision |
+| `spend` | Spend or paid external commitment | `reserved` | User decision |
+| `dependent-contract` | Change to a public contract already depended on externally | `reserved` | User decision, even when generated |
+| `ambiguous-mixed` | Mixed diff whose registered provenance and semantic or reserved parts are not exact | `separate-or-escalate` | Separate the diff or send a decision packet; never relabel it as provenance |
+<!-- provenance-table:end -->
 
 An escalation is a **decision packet**, never a bare question: the
 recommendation, the two to four options with their consequences, the sources
@@ -339,7 +388,7 @@ against itself, which is why those are user-authored.
 
 | kind | question | reads |
 |---|---|---|
-| intent drift | does what merged match what the user asked for, in meaning? | `intent/`, default branches, `log.md` |
+| intent drift | does what merged match what the user asked for, in meaning? | `intent/`, default branches, `events.jsonl` |
 | gate integrity | were baselines, pins, allowlists, budgets, or goldens changed to reach green? | sibling gate scripts, generated artifacts, merge events |
 | decision review | were self-resolved decisions actually the master's to make, and were any buried? | `decision` events, worker reports |
 | procedure review | what was retired, and was it load-bearing? | `procedure` events, `AGENTS.md`, guides |

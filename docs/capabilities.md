@@ -177,21 +177,35 @@ parent of the gate launched by the next, which made every manual gate hold a
 false positive. The capability never signals a process; reclamation's ownership
 boundary is unchanged.
 
-A hold is reported `IDLE_HOLD` when neither test finds work for the configured
-interval, and `STRANDED` only when its process is gone, its owned tree has no
-Lean work by the same attribution, and its lease has lapsed — a command-line
-hold normally outlives the process that took it, so a missing pid alone means
-nothing. When the process snapshot is unreadable, when the working-directory
-sample is unavailable, when a `lake`/`lean` pid cannot be placed, or when the
-goal's worktree scope itself is unreadable, the hold is reported
+A process counts as `lake` or `lean` by its executable — the basename of its
+first token, or an elan toolchain path — and never by the substring `lean`
+in an unrelated name. A hold is reported `IDLE_HOLD` when neither test finds
+work for the configured interval, and `STRANDED` only when its process is
+gone, its owned tree has no Lean work by the same attribution, and its lease
+has lapsed — a command-line hold normally outlives the process that took it,
+so a missing pid alone means nothing. An `exclusive` hold is exempt from
+`IDLE_HOLD` (timing gates and non-Lean lanes run under it without a Lean
+process); the status line says so and how long, and `STRANDED` still applies.
+When the process snapshot is unreadable, when the working-directory sample is
+unavailable, when a `lake`/`lean` pid cannot be placed, or when the goal's
+worktree scope itself is unreadable, the hold is reported
 `ATTRIBUTION_UNAVAILABLE` and the idle signal is suspended: an uninspectable
-hold is never called idle. A Lean worker is called idle only by comparing
-cumulative CPU seconds between two observations: a worker seen once is never
-idle, and one that consumed more than a small share of the window is busy even
-if it is blocked. `reclaim --idle-workers MIN` narrows the existing
-ownership-verifying plan to those pids; narrowing can only shrink a proven
-target set, and every worker outside the caller's client ancestry or goal
-worktree is reported with its owner rather than signalled.
+hold is never called idle. Each such condition is audited: one `attribution`
+row (`REFUSED`) in the coordination log names the processes and the cause when
+it begins or changes, and one `OK` row (`ATTRIBUTION_RESTORED`) when it clears.
+A Lean worker is called idle only by comparing cumulative CPU seconds between
+two observations: a worker seen once is never idle, and one that consumed
+more than a small share of the window is busy even if it is blocked. A
+worker's owner is the goal whose `.worktrees/GOAL` it is working in, read
+through the same working-directory capability; only a worker outside every
+goal worktree is attributed by hold ancestry or client family, because under
+the master model one client process is the ancestor of every session.
+`reclaim --idle-workers MIN --goal GOAL` narrows the existing
+ownership-verifying plan to idle workers inside that goal's worktrees;
+narrowing can only shrink a proven target set, and every worker outside the
+named goal's worktrees — or, without `--goal`, inside any goal worktree at
+all — is reported with its owner and the command that owner should run,
+rather than signalled.
 
 ### Master lease
 

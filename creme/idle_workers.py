@@ -87,12 +87,46 @@ def update_observations(
     return observations, derived
 
 
+_GOAL_WORKTREE = re.compile(r"/\.worktrees/([^/]+)(?:/|$)")
+_SANCTIONED_SUFFIXES = ("-control", "-mutation", "-rehearsal")
+
+
+def goal_of_directory(path: Optional[str]) -> Optional[str]:
+    """The goal a working directory belongs to: `<repo>/.worktrees/<goal>`.
+
+    A sanctioned disposable tree (`-control`, `-mutation`, `-rehearsal`) is
+    its goal's own.  Any other path — a shared main clone, a home directory —
+    belongs to no goal.
+    """
+    if not path:
+        return None
+    match = _GOAL_WORKTREE.search(path)
+    if match is None:
+        return None
+    name = match.group(1)
+    for suffix in _SANCTIONED_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 def owner_label(
     worker: dict[str, Any],
     hold_pids: dict[int, str],
     client_pattern: re.Pattern[str],
+    cwd: Optional[str] = None,
 ) -> str:
-    """Name who should reclaim this worker, from its own process ancestry."""
+    """Name who should reclaim this worker.
+
+    The goal worktree the worker is working in decides first: under the
+    master model every worker on the host is a subagent of one client
+    process, so a client pid names everyone and therefore no one.  Only a
+    worker outside any goal worktree falls back to the hold it descends from
+    or to its client family.
+    """
+    goal = goal_of_directory(cwd)
+    if goal is not None:
+        return f"goal {goal}"
     for ancestor in worker.get("ancestry") or []:
         pid = int(ancestor["pid"])
         if pid in hold_pids:

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import hmac
 import json
 import math
 import os
 import sys
 import subprocess
 import re
+import secrets
 import signal
+import socket
+import stat
 import tempfile
 import threading
 import time
@@ -2137,13 +2142,30 @@ def break_expired(label: str, reason: str, adapter: Optional[Adapter] = None) ->
 # ---------------------------------------------------------------------------
 
 MASTER_NAME = "master.json"
-MASTER_SCHEMA_VERSION = 1
+MASTER_SCHEMA_VERSION = 3
 MASTER_LEASE_SECONDS = 1800
-MASTER_KEYS = {
+MASTER_V1_KEYS = {
     "client", "client_pid", "pid", "uid", "note",
     "acquired_at", "renewed_at", "lease_seconds",
 }
+MASTER_V2_KEYS = MASTER_V1_KEYS | {
+    "session_digest", "liveness_digest", "lease_id",
+    "heartbeat_renewals", "direct_activity_at", "legacy_unbound",
+}
+MASTER_KEYS = MASTER_V2_KEYS | {
+    "heartbeat_launch_digest", "heartbeat_launch_expires_at",
+}
+MASTER_SESSION_DIGEST_DOMAIN = b"creme-master-session-v1\0"
+MASTER_LIVENESS_DIGEST_DOMAIN = b"creme-master-liveness-v1\0"
+MASTER_HEARTBEAT_LAUNCH_DIGEST_DOMAIN = b"creme-master-heartbeat-launch-v1\0"
+MASTER_HEARTBEAT_LAUNCH_SECONDS = 30
+MASTER_HEARTBEAT_CHILD_ENV = "CREME_MASTER_HEARTBEAT_CHILD"
+MASTER_UNVERIFIED_HEARTBEAT_RENEWALS = 2
+MASTER_UNVERIFIED_HEARTBEAT_GRACE_SECONDS = 3000
+MASTER_LIVENESS_FAILURE_LIMIT = 3
 CLIENT_LABEL = re.compile(r"[A-Za-z0-9_.-]{1,32}")
+HEX_32 = re.compile(r"[0-9a-f]{32}")
+HEX_64 = re.compile(r"[0-9a-f]{64}")
 
 
 def master_path(root: Optional[Path] = None) -> Path:
@@ -2154,15 +2176,60 @@ def _empty_master() -> dict[str, Any]:
     return {"schema_version": MASTER_SCHEMA_VERSION, "lease": None}
 
 
+def _upgrade_master_v1(data: dict[str, Any]) -> dict[str, Any]:
+    lease = data["lease"]
+    if lease is None:
+        return _empty_master()
+    identity = json.dumps(lease, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "schema_version": MASTER_SCHEMA_VERSION,
+        "lease": {
+            **lease,
+            "session_digest": None,
+            "liveness_digest": None,
+            "lease_id": hashlib.sha256(b"creme-master-lease-v1\0" + identity).hexdigest()[:32],
+            "heartbeat_renewals": 0,
+            # Schema 1 had no helper/direct distinction.  Its last renewal is
+            # therefore the only safe anchor until its verified holder writes.
+            "direct_activity_at": lease["renewed_at"],
+            "legacy_unbound": True,
+            "heartbeat_launch_digest": None,
+            "heartbeat_launch_expires_at": None,
+        },
+    }
+
+
+def _upgrade_master_v2(data: dict[str, Any]) -> dict[str, Any]:
+    lease = data["lease"]
+    if lease is None:
+        return _empty_master()
+    return {
+        "schema_version": MASTER_SCHEMA_VERSION,
+        "lease": {
+            **lease,
+            "heartbeat_launch_digest": None,
+            "heartbeat_launch_expires_at": None,
+        },
+    }
+
+
 def _validate_master(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict) or set(data) != {"schema_version", "lease"}:
         raise SemaphoreError("master lease state has an unexpected shape")
-    if data["schema_version"] != MASTER_SCHEMA_VERSION:
+    version = data["schema_version"]
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise SemaphoreError("master lease schema must be a non-boolean integer")
+    if version not in {1, 2, MASTER_SCHEMA_VERSION}:
         raise SemaphoreError("master lease schema is unsupported")
     lease = data["lease"]
     if lease is None:
-        return data
-    if not isinstance(lease, dict) or set(lease) != MASTER_KEYS:
+        return _empty_master() if version in {1, 2} else data
+    expected_keys = (
+        MASTER_V1_KEYS if version == 1
+        else MASTER_V2_KEYS if version == 2
+        else MASTER_KEYS
+    )
+    if not isinstance(lease, dict) or set(lease) != expected_keys:
         raise SemaphoreError("master lease has an unexpected shape")
     if not isinstance(lease["client"], str) or CLIENT_LABEL.fullmatch(lease["client"]) is None:
         raise SemaphoreError("master lease client must be a short label")
@@ -2186,6 +2253,55 @@ def _validate_master(data: Any) -> dict[str, Any]:
         raise SemaphoreError("master lease lease_seconds is outside the supported range")
     if lease["renewed_at"] < lease["acquired_at"]:
         raise SemaphoreError("master lease renewed_at predates acquired_at")
+    if version == 1:
+        return _upgrade_master_v1(data)
+    if version == 2:
+        data = _upgrade_master_v2(data)
+        lease = data["lease"]
+    for key in ("session_digest", "liveness_digest"):
+        digest = lease[key]
+        if digest is not None and (
+            not isinstance(digest, str) or HEX_64.fullmatch(digest) is None
+        ):
+            raise SemaphoreError(f"master lease {key} must be a SHA-256 digest or null")
+    if not isinstance(lease["lease_id"], str) or HEX_32.fullmatch(lease["lease_id"]) is None:
+        raise SemaphoreError("master lease lease_id must be a 128-bit hexadecimal identifier")
+    renewals = lease["heartbeat_renewals"]
+    if isinstance(renewals, bool) or not isinstance(renewals, int) or renewals < 0:
+        raise SemaphoreError("master lease heartbeat_renewals must be a non-negative integer")
+    direct_activity = lease["direct_activity_at"]
+    if (
+        isinstance(direct_activity, bool)
+        or not isinstance(direct_activity, (int, float))
+        or not math.isfinite(direct_activity)
+        or direct_activity <= 0
+    ):
+        raise SemaphoreError("master lease direct_activity_at must be a positive finite number")
+    if not lease["acquired_at"] <= direct_activity <= lease["renewed_at"]:
+        raise SemaphoreError(
+            "master lease direct_activity_at must be between acquisition and renewal"
+        )
+    if not isinstance(lease["legacy_unbound"], bool):
+        raise SemaphoreError("master lease legacy_unbound must be boolean")
+    launch_digest = lease["heartbeat_launch_digest"]
+    launch_expires = lease["heartbeat_launch_expires_at"]
+    if launch_digest is not None and (
+        not isinstance(launch_digest, str) or HEX_64.fullmatch(launch_digest) is None
+    ):
+        raise SemaphoreError(
+            "master lease heartbeat_launch_digest must be a SHA-256 digest or null"
+        )
+    if launch_expires is not None and (
+        isinstance(launch_expires, bool)
+        or not isinstance(launch_expires, (int, float))
+        or not math.isfinite(launch_expires)
+        or launch_expires <= 0
+    ):
+        raise SemaphoreError(
+            "master lease heartbeat_launch_expires_at must be a positive finite number or null"
+        )
+    if (launch_digest is None) != (launch_expires is None):
+        raise SemaphoreError("master lease heartbeat launch fields must both be set or null")
     return data
 
 
@@ -2200,8 +2316,8 @@ def _load_master(root: Path) -> dict[str, Any]:
 
 
 def _save_master(root: Path, data: dict[str, Any]) -> None:
-    _validate_master(data)
-    _write_json(master_path(root), data)
+    validated = _validate_master(data)
+    _write_json(master_path(root), validated)
 
 
 def master_snapshot() -> dict[str, Any]:
@@ -2267,12 +2383,78 @@ def _client_family(command: str, pattern: Any) -> Optional[str]:
     return "agent"
 
 
+class _ClientSession(NamedTuple):
+    digest: Optional[str]
+    liveness_digest: Optional[str]
+    liveness_socket: Optional[str]
+    detail: str
+
+
+def _digest_session_value(domain: bytes, value: str) -> str:
+    return hashlib.sha256(domain + value.encode("utf-8")).hexdigest()
+
+
+def _client_session(client: Optional[str]) -> _ClientSession:
+    """Return an opaque session identity and optional liveness socket.
+
+    Client adapters inject high-entropy identifiers through the environment.
+    The generic lease stores only domain-separated digests and never returns or
+    logs the raw identifier or socket path. ``CREME_MASTER_*`` is the stable
+    neutral interface. Codex's internal task-id aliases are accepted only as
+    identity hints; they have no public lifetime contract. In particular, the
+    Desktop app-tools pipe is app-global and must never be treated as task
+    liveness.
+    """
+    raw_identity = os.environ.get("CREME_MASTER_SESSION_ID", "")
+    raw_socket = os.environ.get("CREME_MASTER_LIVENESS_SOCKET", "")
+    source = "client adapter"
+    if not raw_identity and client in {None, "codex"}:
+        raw_identity = (
+            os.environ.get("CODEX_SESSION_ID", "")
+            or os.environ.get("CODEX_THREAD_ID", "")
+        )
+        source = "Codex compatibility alias"
+    if not raw_identity:
+        return _ClientSession(None, None, None, "no stable session identity available")
+    digest = _digest_session_value(MASTER_SESSION_DIGEST_DOMAIN, raw_identity)
+    liveness_digest = None
+    liveness_socket = None
+    if raw_socket and os.path.isabs(raw_socket):
+        try:
+            mode = os.stat(raw_socket).st_mode
+        except OSError:
+            mode = 0
+        if stat.S_ISSOCK(mode):
+            liveness_digest = _digest_session_value(MASTER_LIVENESS_DIGEST_DOMAIN, raw_socket)
+            liveness_socket = raw_socket
+    suffix = " with liveness socket" if liveness_digest else ""
+    return _ClientSession(digest, liveness_digest, liveness_socket, f"{source} identity{suffix}")
+
+
+def _session_socket_live(path: Optional[str]) -> bool:
+    """Conservatively prove that an explicitly task-owned listener accepts."""
+    if not path or not os.path.isabs(path):
+        return False
+    try:
+        if not stat.S_ISSOCK(os.stat(path).st_mode):
+            return False
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(0.25)
+            probe.connect(path)
+            return True
+        finally:
+            probe.close()
+    except OSError:
+        return False
+
+
 def _master_view(lease: Optional[dict[str, Any]], now: float) -> dict[str, Any]:
     """Classify the lease: ``none``, ``live``, ``lapsed``, or ``stranded``."""
     if lease is None:
         return {"lease": None, "state": "none"}
     expired = _expired(lease, now)
-    client_pid = lease["client_pid"]
+    client_pid = _trusted_master_client_pid(lease)
     client_alive = _pid_alive(int(client_pid)) if client_pid is not None else None
     if client_alive is False:
         # The session that took the lease is gone: nothing legitimate can
@@ -2301,14 +2483,49 @@ def _master_view(lease: Optional[dict[str, Any]], now: float) -> dict[str, Any]:
 def _master_holder_text(lease: dict[str, Any]) -> str:
     client_pid = lease["client_pid"]
     where = f"client_pid={client_pid}" if client_pid is not None else "client process unknown"
+    if lease["session_digest"] is not None:
+        where += ", session identity recorded"
     return f"client {lease['client']} ({where}, taken by pid {lease['pid']}, note={lease['note']!r})"
 
 
-def _same_client(lease: dict[str, Any], client_pid: Optional[int]) -> Optional[bool]:
+def _same_client(
+    lease: dict[str, Any],
+    client_pid: Optional[int],
+    session_digest: Optional[str],
+    client_family: Optional[str] = None,
+) -> Optional[bool]:
     """Is this invocation the lease holder's session? ``None`` when unverifiable."""
-    if client_pid is None or lease["client_pid"] is None:
+    recorded_digest = lease["session_digest"]
+    if recorded_digest is not None:
+        if session_digest is None:
+            return False
+        return hmac.compare_digest(recorded_digest, session_digest)
+    recorded_pid = _trusted_master_client_pid(lease, client_family)
+    if client_pid is None or recorded_pid is None:
         return None
-    return int(client_pid) == int(lease["client_pid"])
+    return int(client_pid) == int(recorded_pid)
+
+
+def _trusted_master_client_pid(
+    lease: dict[str, Any],
+    current_family: Optional[str] = None,
+) -> Optional[int]:
+    """Return a task-scoped holder pid, never an app-global Codex ancestor."""
+    if (
+        lease["client"].casefold() in {"codex", "chatgpt"}
+        or current_family == "codex"
+    ):
+        return None
+    client_pid = lease["client_pid"]
+    return int(client_pid) if client_pid is not None else None
+
+
+def _bounded_master_heartbeat(lease: dict[str, Any]) -> bool:
+    """Whether renewal lacks independently task-scoped liveness evidence."""
+    return (
+        lease["liveness_digest"] is None
+        and _trusted_master_client_pid(lease) is None
+    )
 
 
 def _master_lines(root: Path, now: float) -> list[str]:
@@ -2324,6 +2541,7 @@ def _master_lines(root: Path, now: float) -> list[str]:
         f"master: {lease['client']} ({view['state']}) client_pid={lease['client_pid']} "
         f"pid={lease['pid']} held={int(view['held'])}s "
         f"renewed={int(view['since_renewal'])}s ago lease={lease['lease_seconds']}s "
+        f"identity={'session' if lease['session_digest'] else 'process' if lease['client_pid'] else 'unverified'} "
         f"note={lease['note']!r}"
     ]
     if view["state"] == "lapsed":
@@ -2356,6 +2574,14 @@ def master_acquire(
         return False, "a non-empty --note is required"
     selected = adapter or get_adapter()
     client_pid, family, found = _client_process(selected)
+    # Process discovery determines the adapter family even when --client is a
+    # cosmetic label.  Preserve its compatibility identity while keeping the
+    # user-supplied label as the public lease label.
+    session = _client_session(family or client)
+    if family is None and session.digest is not None and (
+        os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+    ):
+        family = "codex"
     if client is None:
         client = family
     if client is None or CLIENT_LABEL.fullmatch(client) is None:
@@ -2388,15 +2614,35 @@ def master_acquire(
                 _log("master-acquire", client, "REFUSED", detail)
                 return False, detail
             replaced = (view["state"], holder)
+        # A Codex Desktop task may share its visible app ancestor with other
+        # tasks. Retain process discovery for diagnostics, but never persist
+        # that shared pid as holder identity or liveness evidence.
+        shared_codex_process = (
+            family == "codex"
+            or client.casefold() in {"codex", "chatgpt"}
+        )
+        recorded_client_pid = None if shared_codex_process else client_pid
         data["lease"] = {
             "client": client,
-            "client_pid": client_pid,
+            "client_pid": recorded_client_pid,
             "pid": os.getpid(),
             "uid": os.getuid(),
             "note": note,
             "acquired_at": now,
             "renewed_at": now,
             "lease_seconds": lease,
+            "session_digest": session.digest,
+            "liveness_digest": (
+                session.liveness_digest
+                if _session_socket_live(session.liveness_socket)
+                else None
+            ),
+            "lease_id": uuid.uuid4().hex,
+            "heartbeat_renewals": 0,
+            "direct_activity_at": now,
+            "legacy_unbound": False,
+            "heartbeat_launch_digest": None,
+            "heartbeat_launch_expires_at": None,
         }
         _save_master(root, data)
     if replaced:
@@ -2406,57 +2652,175 @@ def master_acquire(
             f"master lease taken over from {holder} ({state_word}); this session is "
             f"the master as {found}; renew within {lease}s"
         )
-    _log("master-acquire", client, "OK", f"{found}; lease={lease}; {note}")
-    return True, f"master lease acquired by client {client} ({found}); renew within {lease}s"
+    identity = session.detail if session.digest else found
+    _log("master-acquire", client, "OK", f"{found}; {identity}; lease={lease}; {note}")
+    return True, f"master lease acquired by client {client} ({identity}); renew within {lease}s"
 
 
-def master_renew(
-    lease: Optional[int] = None,
+class _HeartbeatBinding(NamedTuple):
+    lease_id: str
+    client: str
+    client_pid: Optional[int]
+    session_digest: Optional[str]
+    liveness_digest: Optional[str]
+    liveness_socket: Optional[str]
+
+
+class _PreparedHeartbeatLaunch(NamedTuple):
+    lease_id: str
+    client: str
+    capability: str
+    capability_digest: str
+
+
+def _heartbeat_binding(
+    current: dict[str, Any],
+    session: _ClientSession,
+) -> tuple[Optional[_HeartbeatBinding], Optional[str]]:
+    recorded_session_digest = current["session_digest"]
+    if recorded_session_digest is not None and (
+        session.digest is None
+        or not hmac.compare_digest(recorded_session_digest, session.digest)
+    ):
+        return None, "heartbeat session identity does not match the master lease"
+    session_digest = recorded_session_digest
+    liveness_digest = current["liveness_digest"]
+    liveness_socket = None
+    if liveness_digest is not None:
+        if session.liveness_digest is None or not hmac.compare_digest(
+            liveness_digest, session.liveness_digest
+        ):
+            return None, "heartbeat liveness identity does not match the master lease"
+        liveness_socket = session.liveness_socket
+    elif current["legacy_unbound"] and session.digest is not None:
+        # A process-authenticated schema-1 holder may bind the same adapter
+        # identity a direct verified renewal would bind on its first beat.
+        session_digest = session.digest
+        liveness_digest = session.liveness_digest
+        liveness_socket = session.liveness_socket
+    return _HeartbeatBinding(
+        current["lease_id"],
+        current["client"],
+        _trusted_master_client_pid(current),
+        session_digest,
+        liveness_digest,
+        liveness_socket,
+    ), None
+
+
+def _renew_master(
+    lease: Optional[int],
     *,
-    adapter: Optional[Adapter] = None,
-    as_client_pid: Optional[int] = None,
+    adapter: Optional[Adapter],
+    heartbeat_binding: Optional[_HeartbeatBinding],
 ) -> tuple[bool, str]:
     if lease is not None and (lease < 1 or lease > MAX_LEASE_SECONDS):
         return False, f"lease must be 1..{MAX_LEASE_SECONDS} seconds"
     selected = adapter or get_adapter()
-    if as_client_pid is not None:
-        # The detached heartbeat is orphaned to the init process and cannot
-        # find a client above itself; it acts for the holder it read from
-        # the lease, and it exits the moment that holder's process is gone.
-        client_pid, found = as_client_pid, f"heartbeat for client pid {as_client_pid}"
+    if heartbeat_binding is None:
+        client_pid, client_family, found = _client_process(selected)
+        session = _client_session(client_family)
+        session_digest = session.digest
     else:
-        client_pid, _family, found = _client_process(selected)
+        client_pid = heartbeat_binding.client_pid
+        client_family = None
+        found = "parent-authorized heartbeat"
+        session_digest = heartbeat_binding.session_digest
+        session = _ClientSession(
+            session_digest,
+            heartbeat_binding.liveness_digest,
+            heartbeat_binding.liveness_socket,
+            found,
+        )
     with locked_state() as (path, _state):
         root = path.parent
         data = _load_master(root)
         current = data["lease"]
         if current is None:
             return False, "no master lease exists; run master-acquire"
+        if heartbeat_binding is not None and not hmac.compare_digest(
+            current["lease_id"], heartbeat_binding.lease_id
+        ):
+            return False, "the master lease changed; this heartbeat belongs to its predecessor"
         now = _now()
         view = _master_view(current, now)
         holder = _master_holder_text(current)
-        same = _same_client(current, client_pid)
-        if view["state"] == "live" and same is False:
+        same = _same_client(current, client_pid, session_digest, client_family)
+        heartbeat = heartbeat_binding is not None
+        authorized = heartbeat or same is True
+        if heartbeat and client_pid is not None and not _pid_alive(int(client_pid)):
+            return False, "the holding client process is gone"
+        if view["state"] == "live" and not authorized:
             detail = f"the master lease belongs to {holder}; this invocation: {found}"
             _log("master-renew", current["client"], "REFUSED", detail)
             return False, detail
-        if view["state"] != "live" and same is not True:
+        if view["state"] != "live" and not authorized:
             detail = (
                 f"the master lease is {view['state'].upper()} and this invocation "
                 f"({found}) is not its holder; use `master-acquire --take-over`"
             )
             _log("master-renew", current["client"], "REFUSED", detail)
             return False, detail
+        if (
+            heartbeat
+            and _bounded_master_heartbeat(current)
+        ):
+            if now > (
+                current["direct_activity_at"]
+                + MASTER_UNVERIFIED_HEARTBEAT_GRACE_SECONDS
+            ):
+                return False, "unverified heartbeat direct-activity deadline passed"
+            if current["heartbeat_renewals"] >= MASTER_UNVERIFIED_HEARTBEAT_RENEWALS:
+                return False, "unverified heartbeat self-renewal budget exhausted"
+        if current["legacy_unbound"] and authorized:
+            current["legacy_unbound"] = False
+            current["session_digest"] = session_digest
+            if session_digest is not None and _session_socket_live(session.liveness_socket):
+                current["liveness_digest"] = session.liveness_digest
         current["renewed_at"] = now
         if lease is not None:
             current["lease_seconds"] = lease
+        if heartbeat:
+            current["heartbeat_renewals"] += 1
+        else:
+            current["heartbeat_renewals"] = 0
+            # Reaching this branch required same=True.  Only this direct,
+            # verified holder action advances the absolute fallback anchor;
+            # helper renewals never do.
+            current["direct_activity_at"] = now
+            if (
+                authorized
+                and session_digest is not None
+                and current["session_digest"] is not None
+                and hmac.compare_digest(session_digest, current["session_digest"])
+                and _session_socket_live(session.liveness_socket)
+            ):
+                current["liveness_digest"] = session.liveness_digest
         _save_master(root, data)
-    verified = "holder verified" if same else "holder unverified"
+    verified = "holder verified" if authorized else "holder unverified"
     _log("master-renew", current["client"], "OK", f"lease={current['lease_seconds']}; {verified}")
     return True, (
         f"master lease renewed for client {current['client']} ({verified}); "
         f"{current['lease_seconds']}s window"
     )
+
+
+def master_renew(
+    lease: Optional[int] = None,
+    *,
+    adapter: Optional[Adapter] = None,
+) -> tuple[bool, str]:
+    """Renew only after authenticating this direct invocation as the holder."""
+    return _renew_master(lease, adapter=adapter, heartbeat_binding=None)
+
+
+def _renew_master_heartbeat(
+    binding: _HeartbeatBinding,
+    *,
+    adapter: Optional[Adapter] = None,
+) -> tuple[bool, str]:
+    """Renew for one exact lease after its heartbeat start was authenticated."""
+    return _renew_master(None, adapter=adapter, heartbeat_binding=binding)
 
 
 def master_release(
@@ -2466,7 +2830,8 @@ def master_release(
     adapter: Optional[Adapter] = None,
 ) -> tuple[bool, str]:
     selected = adapter or get_adapter()
-    client_pid, _family, found = _client_process(selected)
+    client_pid, family, found = _client_process(selected)
+    session = _client_session(family)
     with locked_state() as (path, _state):
         root = path.parent
         data = _load_master(root)
@@ -2475,7 +2840,7 @@ def master_release(
             return False, "no master lease exists"
         view = _master_view(current, _now())
         holder = _master_holder_text(current)
-        same = _same_client(current, client_pid)
+        same = _same_client(current, client_pid, session.digest, family)
         if view["state"] == "live" and same is not True and not force:
             detail = (
                 f"the master lease is live and belongs to {holder}; this invocation: "
@@ -2496,6 +2861,162 @@ def master_release(
     return True, f"master lease of {holder} released {how}"
 
 
+def _master_heartbeat_starter_authorized(
+    current: dict[str, Any],
+    client_pid: Optional[int],
+    session_digest: Optional[str],
+    client_family: Optional[str],
+) -> bool:
+    """Return true only when the direct parent/foreground caller is the holder."""
+    return _same_client(current, client_pid, session_digest, client_family) is True
+
+
+def _authenticate_master_heartbeat_start(
+    adapter: Optional[Adapter] = None,
+) -> tuple[bool, str, Optional[_HeartbeatBinding]]:
+    """Authenticate a foreground starter before adopting recorded holder data."""
+    selected = adapter or get_adapter()
+    client_pid, family, found = _client_process(selected)
+    session = _client_session(family)
+    with locked_state() as (path, _state):
+        current = _load_master(path.parent)["lease"]
+        if current is None:
+            return False, "no master lease exists; run master-acquire first", None
+        if not _master_heartbeat_starter_authorized(
+            current, client_pid, session.digest, family
+        ):
+            detail = (
+                f"the master lease belongs to {_master_holder_text(current)}; "
+                f"heartbeat start from this invocation is not authorized: {found}"
+            )
+            _log("master-heartbeat", current["client"], "REFUSED", detail)
+            return False, detail, None
+        binding, error = _heartbeat_binding(current, session)
+        if binding is None:
+            detail = error or "heartbeat binding could not be established"
+            _log("master-heartbeat", current["client"], "REFUSED", detail)
+            return False, detail, None
+    return True, "heartbeat starter verified as the holder", binding
+
+
+def _prepare_master_heartbeat_launch(
+    adapter: Optional[Adapter] = None,
+) -> tuple[bool, str, Optional[_PreparedHeartbeatLaunch]]:
+    """Persist a one-time digest after authenticating the detached parent."""
+    selected = adapter or get_adapter()
+    client_pid, family, found = _client_process(selected)
+    session = _client_session(family)
+    with locked_state() as (path, _state):
+        root = path.parent
+        data = _load_master(root)
+        current = data["lease"]
+        if current is None:
+            return False, "no master lease exists; run master-acquire first", None
+        if not _master_heartbeat_starter_authorized(
+            current, client_pid, session.digest, family
+        ):
+            detail = (
+                f"the master lease belongs to {_master_holder_text(current)}; "
+                f"detached heartbeat start from this invocation is not authorized: {found}"
+            )
+            _log("master-heartbeat", current["client"], "REFUSED", detail)
+            return False, detail, None
+        now = _now()
+        if (
+            current["heartbeat_launch_digest"] is not None
+            and current["heartbeat_launch_expires_at"] is not None
+            and now <= current["heartbeat_launch_expires_at"]
+        ):
+            detail = "another detached heartbeat launch is still pending"
+            _log("master-heartbeat", current["client"], "REFUSED", detail)
+            return False, detail, None
+        capability = secrets.token_hex(32)
+        capability_digest = _digest_session_value(
+            MASTER_HEARTBEAT_LAUNCH_DIGEST_DOMAIN, capability
+        )
+        current["heartbeat_launch_digest"] = capability_digest
+        current["heartbeat_launch_expires_at"] = now + MASTER_HEARTBEAT_LAUNCH_SECONDS
+        if current["legacy_unbound"]:
+            # Persisting launch authority is a holder-authenticated write.  It
+            # may bind a verified legacy process, but it is not a renewal and
+            # therefore never advances the direct-activity deadline.
+            current["legacy_unbound"] = False
+            current["session_digest"] = session.digest
+            if session.digest is not None and _session_socket_live(session.liveness_socket):
+                current["liveness_digest"] = session.liveness_digest
+        _save_master(root, data)
+        prepared = _PreparedHeartbeatLaunch(
+            current["lease_id"],
+            current["client"],
+            capability,
+            capability_digest,
+        )
+    return True, "one-time detached heartbeat launch prepared", prepared
+
+
+def _clear_master_heartbeat_launch(prepared: _PreparedHeartbeatLaunch) -> None:
+    """Invalidate an unconsumed capability after a parent-side launch failure."""
+    with locked_state() as (path, _state):
+        root = path.parent
+        data = _load_master(root)
+        current = data["lease"]
+        if current is None or not hmac.compare_digest(
+            current["lease_id"], prepared.lease_id
+        ):
+            return
+        digest = current["heartbeat_launch_digest"]
+        if digest is None or not hmac.compare_digest(digest, prepared.capability_digest):
+            return
+        current["heartbeat_launch_digest"] = None
+        current["heartbeat_launch_expires_at"] = None
+        _save_master(root, data)
+
+
+def _consume_master_heartbeat_launch(
+    capability: str,
+) -> tuple[bool, str, Optional[_HeartbeatBinding]]:
+    """Atomically consume one exact lease's launch capability in the child."""
+    if not isinstance(capability, str) or HEX_64.fullmatch(capability) is None:
+        return False, "heartbeat launch capability is malformed", None
+    supplied_digest = _digest_session_value(
+        MASTER_HEARTBEAT_LAUNCH_DIGEST_DOMAIN, capability
+    )
+    session = _client_session(None)
+    with locked_state() as (path, _state):
+        root = path.parent
+        data = _load_master(root)
+        current = data["lease"]
+        if current is None:
+            return False, "no master lease exists; run master-acquire first", None
+        recorded_digest = current["heartbeat_launch_digest"]
+        expires_at = current["heartbeat_launch_expires_at"]
+        if recorded_digest is None or expires_at is None:
+            return False, "no detached heartbeat launch is pending", None
+        if not hmac.compare_digest(recorded_digest, supplied_digest):
+            return False, "heartbeat launch capability is not authorized", None
+        current["heartbeat_launch_digest"] = None
+        current["heartbeat_launch_expires_at"] = None
+        _save_master(root, data)
+        if _now() > expires_at:
+            return False, "heartbeat launch capability expired before child startup", None
+        binding, error = _heartbeat_binding(current, session)
+        if binding is None:
+            return False, error or "heartbeat binding could not be established", None
+    return True, "one-time detached heartbeat launch consumed", binding
+
+
+def read_master_heartbeat_launch_capability() -> tuple[bool, str]:
+    """Read the detached child's one-time capability from inherited stdin."""
+    try:
+        payload = sys.stdin.buffer.read(65)
+        capability = payload.decode("ascii")
+    except (AttributeError, OSError, UnicodeDecodeError):
+        return False, "heartbeat launch capability pipe could not be read"
+    if len(payload) != 64 or HEX_64.fullmatch(capability) is None:
+        return False, "heartbeat launch capability pipe was malformed"
+    return True, capability
+
+
 HEARTBEAT_SLICE_SECONDS = 60
 
 
@@ -2503,6 +3024,7 @@ def master_heartbeat(
     interval: int,
     *,
     adapter: Optional[Adapter] = None,
+    launch_capability: Optional[str] = None,
     sleep: Callable[[float], None] = time.sleep,
     max_beats: Optional[int] = None,
     clock: Callable[[], float] = time.time,
@@ -2512,7 +3034,14 @@ def master_heartbeat(
     The loop is the sanctioned heartbeat: it exits when a renewal is refused,
     when the lease is gone, or when the client process that holds it is no
     longer alive — an orphaned heartbeat must never make a dead master look
-    live to the next session.
+    live to the next session.  Every loop is bound to one lease id and one
+    opaque session identity.  When process liveness is unavailable, a
+    task-owned listener proves liveness; without that or a task-scoped process,
+    the heartbeat has a small persisted self-renewal budget plus an absolute
+    deadline anchored to the last verified direct holder activity.  It never
+    advances that anchor.  A foreground caller must authenticate directly.
+    A detached child instead atomically consumes the one-time launch capability
+    prepared by its authenticated parent before it may adopt holder data.
 
     It sleeps in short slices and judges "due" by the wall clock.  A system
     sleep freezes the process, and a frozen ``nanosleep`` resumes with its
@@ -2524,7 +3053,20 @@ def master_heartbeat(
     if interval < 1 or interval > MAX_LEASE_SECONDS:
         return False, f"interval must be 1..{MAX_LEASE_SECONDS} seconds"
     selected = adapter or get_adapter()
+    try:
+        if launch_capability is None:
+            ok, detail, binding = _authenticate_master_heartbeat_start(selected)
+        else:
+            ok, detail, binding = _consume_master_heartbeat_launch(launch_capability)
+    except SemaphoreError as exc:
+        return False, str(exc)
+    if not ok or binding is None:
+        return False, detail
+    lease_id = binding.lease_id
+    client_pid = binding.client_pid
+    liveness_socket = binding.liveness_socket
     beats = 0
+    liveness_failures = 0
     last: Optional[float] = None
     while True:
         try:
@@ -2534,15 +3076,45 @@ def master_heartbeat(
         lease = data["lease"]
         if lease is None:
             return True, f"heartbeat stopped after {beats} renewal(s): no master lease exists"
-        client_pid = lease["client_pid"]
+        if not hmac.compare_digest(lease["lease_id"], lease_id):
+            return True, f"heartbeat stopped after {beats} renewal(s): the master lease changed"
         if client_pid is not None and not _pid_alive(int(client_pid)):
             return True, (
                 f"heartbeat stopped after {beats} renewal(s): the holding client "
                 f"pid {client_pid} is gone; the lease will read STRANDED"
             )
+        if lease["liveness_digest"] is not None:
+            if liveness_socket is None:
+                refreshed_session = _client_session(lease["client"])
+                if (
+                    refreshed_session.liveness_digest is not None
+                    and hmac.compare_digest(
+                        lease["liveness_digest"], refreshed_session.liveness_digest
+                    )
+                ):
+                    liveness_socket = refreshed_session.liveness_socket
+            if not _session_socket_live(liveness_socket):
+                liveness_failures += 1
+                if liveness_failures >= MASTER_LIVENESS_FAILURE_LIMIT:
+                    return True, (
+                        f"heartbeat stopped after {beats} renewal(s): the holding "
+                        "session listener is gone; the lease will lapse"
+                    )
+                sleep(float(HEARTBEAT_SLICE_SECONDS))
+                continue
+            liveness_failures = 0
+        elif (
+            _bounded_master_heartbeat(lease)
+            and lease["heartbeat_renewals"] >= MASTER_UNVERIFIED_HEARTBEAT_RENEWALS
+        ):
+            # Stay alive but stop extending the lease.  A direct, identity-
+            # checked renewal proves holder activity and resets the persisted
+            # budget; a successor take-over changes lease_id and ends us.
+            sleep(float(HEARTBEAT_SLICE_SECONDS))
+            continue
         now = clock()
         if last is None or now - last >= interval:
-            ok, detail = master_renew(adapter=selected, as_client_pid=client_pid)
+            ok, detail = _renew_master_heartbeat(binding, adapter=selected)
             if not ok:
                 return False, f"heartbeat stopped after {beats} renewal(s): {detail}"
             beats += 1
@@ -2558,31 +3130,68 @@ def master_heartbeat_detached(interval: int) -> tuple[bool, str]:
 
     A client's tool call is reaped when it ends or times out, and macOS has no
     ``setsid`` binary, so the launcher detaches itself: the child starts a new
-    session, reads and writes nothing on the caller's descriptors, and logs to
-    ``heartbeat.log`` beside the lease state.  It still exits on its own when
-    the holding client process is gone or a renewal is refused.
+    session and logs to ``heartbeat.log`` beside the lease state.  The parent
+    first authenticates directly, then persists only a short-lived digest and
+    sends the raw one-time capability over the child's inherited stdin pipe.
+    Neither the capability nor the random lease id, session identity, or
+    liveness path appears in argv.  The child consumes the capability under
+    the mutex before adopting holder data, and still exits when the holding
+    process is gone, the lease id changes, or a renewal is refused.
     """
     if interval < 1 or interval > MAX_LEASE_SECONDS:
         return False, f"interval must be 1..{MAX_LEASE_SECONDS} seconds"
-    with locked_state() as (path, _state):
-        root = path.parent
-        lease = _load_master(root)["lease"]
-    if lease is None:
-        return False, "no master lease exists; run master-acquire first"
+    try:
+        ok, detail, prepared = _prepare_master_heartbeat_launch()
+    except SemaphoreError as exc:
+        return False, str(exc)
+    if not ok or prepared is None:
+        return False, detail
+    root = state_root()
     launcher = canonical_creme_root() / NEUTRAL_STATE_RELATIVE.parent / "semaphore"
     log = root / "heartbeat.log"
-    fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    log_fd: Optional[int] = None
+    read_fd: Optional[int] = None
+    write_fd: Optional[int] = None
     try:
-        os.fchmod(fd, 0o600)
+        read_fd, write_fd = os.pipe()
+        payload = prepared.capability.encode("ascii")
+        written = 0
+        while written < len(payload):
+            written += os.write(write_fd, payload[written:])
+        os.close(write_fd)
+        write_fd = None
+        log_fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        os.fchmod(log_fd, 0o600)
+        child_environment = os.environ.copy()
+        child_environment[MASTER_HEARTBEAT_CHILD_ENV] = "1"
         process = subprocess.Popen(
-            [sys.executable, str(launcher), "master-renew", "--heartbeat", str(interval)],
-            stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
+            [
+                sys.executable,
+                str(launcher),
+                "master-renew",
+                "--heartbeat",
+                str(interval),
+            ],
+            stdin=read_fd, stdout=log_fd, stderr=log_fd,
             start_new_session=True, close_fds=True,
+            env=child_environment,
         )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _clear_master_heartbeat_launch(prepared)
+        detail = f"could not start detached heartbeat: {exc}"
+        _log("master-heartbeat", prepared.client, "REFUSED", detail)
+        return False, detail
     finally:
-        os.close(fd)
-    _log("master-heartbeat", lease["client"], "OK", f"detached pid {process.pid}; interval={interval}")
+        for descriptor in (write_fd, read_fd, log_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+    _log(
+        "master-heartbeat",
+        prepared.client,
+        "OK",
+        f"detached pid {process.pid}; interval={interval}; one-time launch authorized",
+    )
     return True, (
         f"heartbeat detached as pid {process.pid}, renewing every {interval}s for "
-        f"client {lease['client']}; log: {log}"
+        f"client {prepared.client}; log: {log}"
     )

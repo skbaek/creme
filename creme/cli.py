@@ -415,9 +415,23 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
         ))
     if action == "master-renew":
         if arguments.heartbeat is not None:
+            child_mode = os.environ.pop(semaphore.MASTER_HEARTBEAT_CHILD_ENV, None)
             if arguments.detach:
+                if child_mode is not None:
+                    return _sem_result(False, "a detached heartbeat child cannot detach again")
                 return _sem_result(*semaphore.master_heartbeat_detached(arguments.heartbeat))
-            return _sem_result(*semaphore.master_heartbeat(arguments.heartbeat))
+            launch_capability = None
+            if child_mode is not None:
+                if child_mode != "1":
+                    return _sem_result(False, "detached heartbeat child marker is malformed")
+                ok, capability = semaphore.read_master_heartbeat_launch_capability()
+                if not ok:
+                    return _sem_result(False, capability)
+                launch_capability = capability
+            return _sem_result(*semaphore.master_heartbeat(
+                arguments.heartbeat,
+                launch_capability=launch_capability,
+            ))
         return _sem_result(*semaphore.master_renew(arguments.lease))
     if action == "master-release":
         return _sem_result(*semaphore.master_release(
@@ -818,7 +832,7 @@ def parser() -> argparse.ArgumentParser:
         metavar="SECS",
         help=(
             "run in the background: renew every SECS seconds until the lease is gone, "
-            "a renewal is refused, or the holding client process exits"
+            "the bound session disappears, or bounded fallback renewal becomes passive"
         ),
     )
     master_renew.add_argument(

@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from creme import semaphore
+from creme import cli, semaphore
 from creme.adapters.base import Adapter
 
 
@@ -1302,7 +1302,14 @@ class MasterLeaseTest(unittest.TestCase):
             "profile_status": "VALID",
         }
         for patcher in (
-            mock.patch.dict(os.environ, {"CREME_SEMAPHORE_DIR": self.tmp.name}, clear=False),
+            mock.patch.dict(os.environ, {
+                "CREME_SEMAPHORE_DIR": self.tmp.name,
+                "CREME_MASTER_SESSION_ID": "",
+                "CREME_MASTER_LIVENESS_SOCKET": "",
+                "CODEX_SESSION_ID": "",
+                "CODEX_THREAD_ID": "",
+                "CODEX_APP_TOOLS_PIPE_PATH": "",
+            }, clear=False),
             mock.patch("creme.semaphore.get_adapter", return_value=self.adapter),
             mock.patch("creme.semaphore._runtime_admission_policy", return_value=self.policy),
         ):
@@ -1323,6 +1330,7 @@ class MasterLeaseTest(unittest.TestCase):
         data = json.loads(path.read_text(encoding="utf-8"))
         data["lease"]["acquired_at"] = 1.0
         data["lease"]["renewed_at"] = 1.0
+        data["lease"]["direct_activity_at"] = 1.0
         path.write_text(json.dumps(data), encoding="utf-8")
 
     def dead_pid(self):
@@ -1333,6 +1341,26 @@ class MasterLeaseTest(unittest.TestCase):
     def log_actions(self):
         rows = (self.root / "log.jsonl").read_text(encoding="utf-8").splitlines()
         return [json.loads(row)["action"] for row in rows]
+
+    def heartbeat_binding(self):
+        ok, detail, binding = semaphore._authenticate_master_heartbeat_start(self.adapter)
+        self.assertTrue(ok, detail)
+        self.assertIsNotNone(binding)
+        return binding
+
+    def capture_detached_launch(self, interval=1500):
+        captured = {}
+
+        def spawn(command, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+            captured["capability"] = os.read(kwargs["stdin"], 65).decode("ascii")
+            return mock.Mock(pid=424242)
+
+        with mock.patch("creme.semaphore.subprocess.Popen", side_effect=spawn) as popen:
+            ok, detail = semaphore.master_heartbeat_detached(interval)
+        captured["popen"] = popen
+        return ok, detail, captured
 
     def test_acquire_then_a_second_acquire_is_refused_and_names_the_holder(self):
         ok, detail = semaphore.master_acquire("claude", "first master")
@@ -1433,6 +1461,621 @@ class MasterLeaseTest(unittest.TestCase):
         self.expire()
         self.assertIn("(stranded)", semaphore.status_text(self.adapter))
 
+    def test_stable_session_identity_replaces_an_unavailable_process_snapshot(self):
+        self.as_client(None, None)
+        raw = "codex-session-high-entropy-value"
+        with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": raw}, clear=False):
+            ok, detail = semaphore.master_acquire("codex", "sandboxed master")
+            self.assertTrue(ok, detail)
+            self.assertIn("identity", detail)
+            lease = semaphore.master_snapshot()["lease"]
+            self.assertIsNone(lease["client_pid"])
+            self.assertIsNotNone(lease["session_digest"])
+            serialized = (self.root / "master.json").read_text(encoding="utf-8")
+            self.assertNotIn(raw, serialized)
+            self.assertNotIn(raw, semaphore.status_text(self.adapter))
+            self.assertNotIn(raw, (self.root / "log.jsonl").read_text(encoding="utf-8"))
+            ok, detail = semaphore.master_renew()
+            self.assertTrue(ok, detail)
+            self.assertIn("holder verified", detail)
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                sleep=lambda _seconds: None,
+                max_beats=1,
+            )
+            self.assertTrue(ok, detail)
+            self.assertIn("beat limit reached", detail)
+            ok, detail, captured = self.capture_detached_launch()
+            self.assertTrue(ok, detail)
+            command = captured["command"]
+            self.assertNotIn(semaphore.master_snapshot()["lease"]["lease_id"], command)
+            self.assertNotIn(raw, command)
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                launch_capability=captured["capability"],
+                sleep=lambda _seconds: None,
+                max_beats=1,
+            )
+            self.assertTrue(ok, detail)
+            self.assertIn("beat limit reached", detail)
+            ok, detail = semaphore.master_release()
+            self.assertTrue(ok, detail)
+            self.assertIn("by its holder", detail)
+
+    def test_a_different_session_identity_cannot_impersonate_the_same_client(self):
+        # Desktop tasks can share a visible app ancestor; the per-task digest
+        # therefore takes precedence even when process discovery returns the
+        # same client pid for both invocations.
+        self.as_client(os.getpid(), "codex")
+        with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False):
+            semaphore.master_acquire("codex", "first")
+        with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-b"}, clear=False):
+            ok, detail = semaphore.master_renew()
+            self.assertFalse(ok)
+            self.assertIn("belongs to client codex", detail)
+            ok, detail = semaphore.master_release()
+            self.assertFalse(ok)
+            self.assertIn("--force", detail)
+            ok, detail = semaphore.master_acquire("codex", "second", take_over=True)
+            self.assertFalse(ok)
+            self.assertIn("live", detail)
+
+    def test_codex_app_pipe_is_never_task_liveness(self):
+        raw_pipe = str(self.root / "app-global-codex-tools.sock")
+        listener = semaphore.socket.socket(semaphore.socket.AF_UNIX, semaphore.socket.SOCK_STREAM)
+        listener.bind(raw_pipe)
+        listener.listen()
+        try:
+            with mock.patch.dict(os.environ, {
+                "CREME_MASTER_SESSION_ID": "",
+                "CREME_MASTER_LIVENESS_SOCKET": "",
+                "CODEX_SESSION_ID": "session-a",
+                "CODEX_THREAD_ID": "",
+                "CODEX_APP_TOOLS_PIPE_PATH": raw_pipe,
+            }, clear=False):
+                session = semaphore._client_session("codex")
+        finally:
+            listener.close()
+        self.assertIsNotNone(session.digest)
+        self.assertIsNone(session.liveness_digest)
+        self.assertIsNone(session.liveness_socket)
+        self.assertNotIn(raw_pipe, session.detail)
+
+    def test_codex_without_identity_never_trusts_a_shared_app_pid(self):
+        self.as_client(os.getpid(), "codex")
+        ok, detail = semaphore.master_acquire("codex", "no identity")
+        self.assertTrue(ok, detail)
+        lease = semaphore.master_snapshot()["lease"]
+        self.assertIsNone(lease["client_pid"])
+
+        # Another task has the same observable app pid. Direct holder actions
+        # must fail closed because that pid is not task identity.
+        ok, detail = semaphore.master_renew()
+        self.assertFalse(ok)
+        self.assertIn("belongs to client codex", detail)
+        ok, detail = semaphore.master_release()
+        self.assertFalse(ok)
+        self.assertIn("--force", detail)
+
+        # Without any task identity the caller cannot authenticate heartbeat
+        # startup either; a persisted lease id is deliberately insufficient.
+        ok, detail = semaphore.master_heartbeat(
+            1500, sleep=lambda _seconds: None, max_beats=1
+        )
+        self.assertFalse(ok)
+        self.assertIn("not authorized", detail)
+        ok, detail = semaphore.master_heartbeat_detached(1500)
+        self.assertFalse(ok)
+        self.assertIn("not authorized", detail)
+        semaphore.master_release(force=True, reason="test cleanup")
+
+        # A cosmetic --client label cannot turn the discovered Codex app
+        # ancestor back into task-scoped process evidence.
+        ok, detail = semaphore.master_acquire("custom-client", "renamed codex")
+        self.assertTrue(ok, detail)
+        self.assertIsNone(semaphore.master_snapshot()["lease"]["client_pid"])
+        semaphore.master_release(force=True, reason="test cleanup")
+
+    def test_cosmetic_label_preserves_discovered_codex_compatibility_identity(self):
+        self.as_client(os.getpid(), "codex")
+        with mock.patch.dict(os.environ, {"CODEX_SESSION_ID": "session-a"}, clear=False):
+            ok, detail = semaphore.master_acquire("custom-client", "renamed codex")
+            self.assertTrue(ok, detail)
+            lease = semaphore.master_snapshot()["lease"]
+            self.assertEqual(lease["client"], "custom-client")
+            self.assertIsNone(lease["client_pid"])
+            self.assertIsNotNone(lease["session_digest"])
+            self.assertIn("Codex compatibility alias identity", detail)
+            ok, detail = semaphore.master_renew()
+            self.assertTrue(ok, detail)
+            self.assertIn("holder verified", detail)
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                sleep=lambda _seconds: None,
+                max_beats=1,
+            )
+            self.assertTrue(ok, detail)
+            self.assertIn("beat limit reached", detail)
+            ok, detail, captured = self.capture_detached_launch()
+            self.assertTrue(ok, detail)
+            command = captured["command"]
+            self.assertNotIn(semaphore.master_snapshot()["lease"]["lease_id"], command)
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                launch_capability=captured["capability"],
+                sleep=lambda _seconds: None,
+                max_beats=1,
+            )
+            self.assertTrue(ok, detail)
+            self.assertIn("beat limit reached", detail)
+
+    def test_identity_holder_recovers_after_sleep_without_process_or_socket(self):
+        self.as_client(None, None)
+        with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False):
+            ok, detail = semaphore.master_acquire("codex", "sleeping master")
+            self.assertTrue(ok, detail)
+            self.expire()
+            self.assertIn("(stranded)", semaphore.status_text(self.adapter))
+            ok, detail = semaphore.master_renew()
+            self.assertTrue(ok, detail)
+            self.assertIn("holder verified", detail)
+            ok, detail = semaphore.master_release()
+            self.assertTrue(ok, detail)
+
+    def test_session_listener_loss_stops_an_orphaned_heartbeat(self):
+        self.as_client(None, None)
+        session_digest = semaphore._digest_session_value(
+            semaphore.MASTER_SESSION_DIGEST_DOMAIN, "session-a"
+        )
+        liveness_digest = semaphore._digest_session_value(
+            semaphore.MASTER_LIVENESS_DIGEST_DOMAIN, "/tmp/session-a.sock"
+        )
+        session = semaphore._ClientSession(
+            session_digest, liveness_digest, "/tmp/session-a.sock", "test session"
+        )
+        with (
+            mock.patch("creme.semaphore._client_session", return_value=session),
+            mock.patch("creme.semaphore._session_socket_live", side_effect=[True, False, False, False]),
+        ):
+            ok, detail = semaphore.master_acquire("codex", "master")
+            self.assertTrue(ok, detail)
+            self.assertNotIn(
+                session.liveness_socket,
+                (self.root / "master.json").read_text(encoding="utf-8"),
+            )
+            self.assertNotIn(session.liveness_socket, semaphore.status_text(self.adapter))
+            self.assertNotIn(
+                session.liveness_socket,
+                (self.root / "log.jsonl").read_text(encoding="utf-8"),
+            )
+            before = semaphore.master_snapshot()["lease"]["renewed_at"]
+            ok, detail = semaphore.master_heartbeat(
+                5, sleep=lambda _seconds: None, max_beats=1
+            )
+        self.assertTrue(ok, detail)
+        self.assertIn("session listener is gone", detail)
+        self.assertEqual(semaphore.master_snapshot()["lease"]["renewed_at"], before)
+        self.expire()
+        self.assertIn("(stranded)", semaphore.status_text(self.adapter))
+
+    def test_session_listener_recovers_an_expired_lease_within_one_wake_slice(self):
+        self.as_client(None, None)
+        session_digest = semaphore._digest_session_value(
+            semaphore.MASTER_SESSION_DIGEST_DOMAIN, "session-a"
+        )
+        liveness_digest = semaphore._digest_session_value(
+            semaphore.MASTER_LIVENESS_DIGEST_DOMAIN, "/tmp/session-a.sock"
+        )
+        session = semaphore._ClientSession(
+            session_digest, liveness_digest, "/tmp/session-a.sock", "test session"
+        )
+        wall = [1_000.0]
+        naps = []
+
+        def nap(seconds):
+            naps.append(seconds)
+            wall[0] += 10_000 if len(naps) == 1 else seconds
+
+        with (
+            mock.patch("creme.semaphore._client_session", return_value=session),
+            mock.patch("creme.semaphore._session_socket_live", return_value=True),
+            mock.patch("creme.semaphore._now", side_effect=lambda: wall[0]),
+        ):
+            ok, detail = semaphore.master_acquire("codex", "master")
+            self.assertTrue(ok, detail)
+            ok, detail = semaphore.master_heartbeat(
+                1500, sleep=nap, max_beats=2, clock=lambda: wall[0]
+            )
+        self.assertTrue(ok, detail)
+        self.assertEqual(naps, [60])
+        lease = semaphore.master_snapshot()["lease"]
+        self.assertEqual(lease["renewed_at"], 11_000.0)
+        self.assertEqual(lease["direct_activity_at"], 1_000.0)
+
+    def test_task_owned_listener_survives_parent_authorized_detached_start(self):
+        self.as_client(None, None)
+        session = semaphore._ClientSession(
+            semaphore._digest_session_value(
+                semaphore.MASTER_SESSION_DIGEST_DOMAIN, "session-a"
+            ),
+            semaphore._digest_session_value(
+                semaphore.MASTER_LIVENESS_DIGEST_DOMAIN, "/tmp/session-a.sock"
+            ),
+            "/tmp/session-a.sock",
+            "test session",
+        )
+        with (
+            mock.patch("creme.semaphore._client_session", return_value=session),
+            mock.patch("creme.semaphore._session_socket_live", return_value=True),
+        ):
+            ok, detail = semaphore.master_acquire("codex", "master")
+            self.assertTrue(ok, detail)
+            ok, detail, captured = self.capture_detached_launch()
+            self.assertTrue(ok, detail)
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                launch_capability=captured["capability"],
+                sleep=lambda _seconds: None,
+                max_beats=1,
+            )
+        self.assertTrue(ok, detail)
+        lease = semaphore.master_snapshot()["lease"]
+        self.assertEqual(lease["heartbeat_renewals"], 1)
+        self.assertIsNotNone(lease["liveness_digest"])
+
+    def test_unverified_heartbeat_budget_is_reset_only_by_direct_holder_activity(self):
+        self.as_client(None, None)
+        with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False):
+            semaphore.master_acquire("codex", "master")
+            binding = self.heartbeat_binding()
+            for _ in range(semaphore.MASTER_UNVERIFIED_HEARTBEAT_RENEWALS):
+                ok, detail = semaphore._renew_master_heartbeat(binding)
+                self.assertTrue(ok, detail)
+            ok, detail = semaphore._renew_master_heartbeat(binding)
+            self.assertFalse(ok)
+            self.assertIn("budget exhausted", detail)
+            ok, detail = semaphore.master_renew()
+            self.assertTrue(ok, detail)
+            lease = semaphore.master_snapshot()["lease"]
+            self.assertEqual(lease["heartbeat_renewals"], 0)
+            self.assertEqual(lease["direct_activity_at"], lease["renewed_at"])
+
+    def test_standard_fallback_expires_within_4800_seconds_of_direct_activity(self):
+        self.as_client(None, None)
+        wall = [1_000.0]
+        with (
+            mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False),
+            mock.patch("creme.semaphore._now", side_effect=lambda: wall[0]),
+        ):
+            ok, detail = semaphore.master_acquire("codex", "bounded master")
+            self.assertTrue(ok, detail)
+            wall[0] = 1_001.0
+            ok, detail = semaphore.master_renew()
+            self.assertTrue(ok, detail)
+            direct = wall[0]
+            lease = semaphore.master_snapshot()["lease"]
+            binding = self.heartbeat_binding()
+
+            # Place each permitted helper beat as late as a 1,500-second
+            # schedule allows after the direct renewal.
+            for elapsed in (1_499.9, 2_999.9):
+                wall[0] = direct + elapsed
+                ok, detail = semaphore._renew_master_heartbeat(binding)
+                self.assertTrue(ok, detail)
+            wall[0] = direct + 4_499.9
+            ok, detail = semaphore._renew_master_heartbeat(binding)
+            self.assertFalse(ok)
+            self.assertIn("direct-activity deadline passed", detail)
+
+            final = semaphore.master_snapshot()["lease"]
+            expires_after = final["renewed_at"] + final["lease_seconds"] - direct
+            self.assertLessEqual(expires_after, 4_800)
+            self.assertEqual(final["direct_activity_at"], direct)
+
+    def test_unverified_heartbeat_does_not_renew_after_a_10000_second_wake(self):
+        self.as_client(None, None)
+        wall = [1_000.0]
+        naps = []
+
+        def nap(seconds):
+            naps.append(seconds)
+            wall[0] += 10_000.0 if len(naps) == 1 else seconds
+
+        with (
+            mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False),
+            mock.patch("creme.semaphore._now", side_effect=lambda: wall[0]),
+        ):
+            ok, detail = semaphore.master_acquire("codex", "bounded master")
+            self.assertTrue(ok, detail)
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                sleep=nap,
+                max_beats=2,
+                clock=lambda: wall[0],
+            )
+        self.assertFalse(ok)
+        self.assertIn("direct-activity deadline passed", detail)
+        self.assertEqual(naps, [60])
+        lease = semaphore.master_snapshot()["lease"]
+        self.assertEqual(lease["heartbeat_renewals"], 1)
+        self.assertEqual(lease["renewed_at"], 1_000.0)
+        self.assertLessEqual(
+            lease["renewed_at"] + lease["lease_seconds"] - lease["direct_activity_at"],
+            4_800,
+        )
+
+    def test_unverified_heartbeat_cannot_spend_its_budget_after_starting_late(self):
+        self.as_client(None, None)
+        wall = [1_000.0]
+        with (
+            mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False),
+            mock.patch("creme.semaphore._now", side_effect=lambda: wall[0]),
+        ):
+            ok, detail = semaphore.master_acquire("codex", "bounded master")
+            self.assertTrue(ok, detail)
+            lease = semaphore.master_snapshot()["lease"]
+            wall[0] = lease["direct_activity_at"] + 3_000.1
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                sleep=lambda _seconds: None,
+                max_beats=1,
+                clock=lambda: wall[0],
+            )
+        self.assertFalse(ok)
+        self.assertIn("direct-activity deadline passed", detail)
+        final = semaphore.master_snapshot()["lease"]
+        self.assertEqual(final["heartbeat_renewals"], 0)
+        self.assertEqual(final["renewed_at"], 1_000.0)
+
+    def test_direct_post_sleep_recovery_resets_the_absolute_deadline(self):
+        self.as_client(None, None)
+        wall = [1_000.0]
+        with (
+            mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False),
+            mock.patch("creme.semaphore._now", side_effect=lambda: wall[0]),
+        ):
+            ok, detail = semaphore.master_acquire("codex", "sleeping master")
+            self.assertTrue(ok, detail)
+            lease = semaphore.master_snapshot()["lease"]
+            wall[0] = 11_000.0
+            binding = self.heartbeat_binding()
+            ok, detail = semaphore._renew_master_heartbeat(binding)
+            self.assertFalse(ok)
+            self.assertIn("direct-activity deadline passed", detail)
+
+            ok, detail = semaphore.master_renew()
+            self.assertTrue(ok, detail)
+            recovered = semaphore.master_snapshot()["lease"]
+            self.assertEqual(recovered["direct_activity_at"], 11_000.0)
+            self.assertEqual(recovered["heartbeat_renewals"], 0)
+
+            wall[0] = 13_999.9
+            binding = self.heartbeat_binding()
+            ok, detail = semaphore._renew_master_heartbeat(binding)
+            self.assertTrue(ok, detail)
+            final = semaphore.master_snapshot()["lease"]
+            self.assertEqual(final["direct_activity_at"], 11_000.0)
+            self.assertLessEqual(
+                final["renewed_at"] + final["lease_seconds"]
+                - final["direct_activity_at"],
+                4_800,
+            )
+
+    def test_multiple_unverified_helpers_share_one_deadline_and_budget(self):
+        self.as_client(None, None)
+        wall = [1_000.0]
+        with (
+            mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False),
+            mock.patch("creme.semaphore._now", side_effect=lambda: wall[0]),
+        ):
+            ok, detail = semaphore.master_acquire("codex", "bounded master")
+            self.assertTrue(ok, detail)
+            lease = semaphore.master_snapshot()["lease"]
+            binding = self.heartbeat_binding()
+            anchor = lease["direct_activity_at"]
+            for elapsed in (1_499.9, 2_999.9):
+                wall[0] = anchor + elapsed
+                ok, detail = semaphore._renew_master_heartbeat(binding)
+                self.assertTrue(ok, detail)
+            ok, detail = semaphore._renew_master_heartbeat(binding)
+            self.assertFalse(ok)
+            self.assertIn("budget exhausted", detail)
+        final = semaphore.master_snapshot()["lease"]
+        self.assertEqual(final["heartbeat_renewals"], 2)
+        self.assertEqual(final["direct_activity_at"], anchor)
+        self.assertLessEqual(
+            final["renewed_at"] + final["lease_seconds"] - anchor,
+            4_800,
+        )
+
+    def test_predecessor_heartbeat_cannot_renew_a_successor_lease(self):
+        self.as_client(None, None)
+        with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False):
+            semaphore.master_acquire("codex", "first")
+            predecessor = semaphore.master_snapshot()["lease"]
+            binding = self.heartbeat_binding()
+            ok, detail = semaphore.master_release()
+            self.assertTrue(ok, detail)
+            ok, detail = semaphore.master_acquire("codex", "successor", take_over=True)
+            self.assertTrue(ok, detail)
+            ok, detail = semaphore._renew_master_heartbeat(binding)
+        self.assertFalse(ok)
+        self.assertIn("lease changed", detail)
+        self.assertEqual(semaphore.master_snapshot()["lease"]["note"], "successor")
+
+    def test_schema_one_live_lease_upgrades_on_holder_renewal(self):
+        legacy_lease = {
+            "client": "claude",
+            "client_pid": os.getpid(),
+            "pid": os.getpid(),
+            "uid": os.getuid(),
+            "note": "legacy live master",
+            "acquired_at": time.time() - 10,
+            "renewed_at": time.time() - 5,
+            "lease_seconds": 1800,
+        }
+        (self.root / "master.json").write_text(json.dumps({
+            "schema_version": 1,
+            "lease": legacy_lease,
+        }), encoding="utf-8")
+        snapshot = semaphore.master_snapshot()
+        self.assertEqual(snapshot["schema_version"], 3)
+        self.assertEqual(snapshot["lease"]["acquired_at"], legacy_lease["acquired_at"])
+        self.assertEqual(snapshot["lease"]["direct_activity_at"], legacy_lease["renewed_at"])
+        self.assertTrue(snapshot["lease"]["legacy_unbound"])
+        ok, detail = semaphore.master_renew()
+        self.assertTrue(ok, detail)
+        persisted = json.loads((self.root / "master.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["schema_version"], 3)
+        self.assertFalse(persisted["lease"]["legacy_unbound"])
+        self.assertEqual(persisted["lease"]["client"], "claude")
+
+    def test_schema_one_process_unknown_live_lease_is_preserved_but_unwritable(self):
+        self.as_client(None, None)
+        legacy_lease = {
+            "client": "codex",
+            "client_pid": None,
+            "pid": os.getpid(),
+            "uid": os.getuid(),
+            "note": "legacy unknown master",
+            "acquired_at": time.time() - 10,
+            "renewed_at": time.time() - 5,
+            "lease_seconds": 1800,
+        }
+        path = self.root / "master.json"
+        path.write_text(json.dumps({
+            "schema_version": 1,
+            "lease": legacy_lease,
+        }), encoding="utf-8")
+        snapshot = semaphore.master_snapshot()
+        self.assertTrue(snapshot["lease"]["legacy_unbound"])
+        self.assertEqual(snapshot["lease"]["renewed_at"], legacy_lease["renewed_at"])
+        ok, detail = semaphore.master_renew()
+        self.assertFalse(ok)
+        ok, detail = semaphore.master_release()
+        self.assertFalse(ok)
+        # Refusals do not opportunistically persist or invalidate the legacy
+        # record; it remains schema 1 until a legitimate write is possible.
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 1)
+
+    def test_schema_one_cosmetic_label_never_trusts_a_shared_codex_pid(self):
+        self.as_client(os.getpid(), "codex")
+        legacy = {
+            "schema_version": 1,
+            "lease": {
+                "client": "custom-client",
+                "client_pid": os.getpid(),
+                "pid": os.getpid(),
+                "uid": os.getuid(),
+                "note": "legacy cosmetic Codex master",
+                "acquired_at": time.time() - 10,
+                "renewed_at": time.time() - 5,
+                "lease_seconds": 1800,
+            },
+        }
+        path = self.root / "master.json"
+        original = json.dumps(legacy, separators=(",", ":"))
+        path.write_text(original, encoding="utf-8")
+        with mock.patch.dict(os.environ, {"CODEX_SESSION_ID": "different-task"}, clear=False):
+            ok, detail = semaphore.master_renew()
+            self.assertFalse(ok, detail)
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+            ok, detail = semaphore.master_release()
+            self.assertFalse(ok, detail)
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+            ok, detail = semaphore.master_heartbeat(
+                5, sleep=lambda _seconds: None, max_beats=1
+            )
+            self.assertFalse(ok, detail)
+            ok, detail = semaphore.master_heartbeat_detached(5)
+            self.assertFalse(ok, detail)
+        self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_schema_one_cosmetic_label_preserves_a_task_scoped_claude_process(self):
+        legacy = {
+            "schema_version": 1,
+            "lease": {
+                "client": "custom-client",
+                "client_pid": os.getpid(),
+                "pid": os.getpid(),
+                "uid": os.getuid(),
+                "note": "legacy cosmetic Claude master",
+                "acquired_at": time.time() - 10,
+                "renewed_at": time.time() - 5,
+                "lease_seconds": 1800,
+            },
+        }
+        (self.root / "master.json").write_text(json.dumps(legacy), encoding="utf-8")
+        self.as_client(os.getpid(), "claude")
+        ok, detail = semaphore.master_renew()
+        self.assertTrue(ok, detail)
+        persisted = json.loads((self.root / "master.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["schema_version"], 3)
+        self.assertFalse(persisted["lease"]["legacy_unbound"])
+        self.assertEqual(persisted["lease"]["client_pid"], os.getpid())
+
+    def test_schema_two_upgrades_with_empty_launch_authority(self):
+        semaphore.master_acquire("claude", "schema two candidate")
+        path = self.root / "master.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["schema_version"] = 2
+        del data["lease"]["heartbeat_launch_digest"]
+        del data["lease"]["heartbeat_launch_expires_at"]
+        path.write_text(json.dumps(data), encoding="utf-8")
+        snapshot = semaphore.master_snapshot()
+        self.assertEqual(snapshot["schema_version"], 3)
+        self.assertIsNone(snapshot["lease"]["heartbeat_launch_digest"])
+        ok, detail = semaphore.master_renew()
+        self.assertTrue(ok, detail)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 3)
+
+    def test_boolean_and_float_schema_versions_are_preserved_and_refused(self):
+        path = self.root / "master.json"
+        legacy_lease = {
+            "client": "claude",
+            "client_pid": os.getpid(),
+            "pid": os.getpid(),
+            "uid": os.getuid(),
+            "note": "typed corrupt master",
+            "acquired_at": time.time() - 10,
+            "renewed_at": time.time() - 5,
+            "lease_seconds": 1800,
+        }
+        for invalid_version in (True, 1.0):
+            malformed = json.dumps({
+                "schema_version": invalid_version,
+                "lease": legacy_lease,
+            }, separators=(",", ":"))
+            path.write_text(malformed, encoding="utf-8")
+            for operation in (
+                semaphore.master_snapshot,
+                lambda: semaphore.master_acquire("claude", "replacement"),
+                semaphore.master_renew,
+                semaphore.master_release,
+            ):
+                with self.assertRaises(semaphore.SemaphoreError):
+                    operation()
+                self.assertEqual(path.read_text(encoding="utf-8"), malformed)
+            ok, detail = semaphore.master_heartbeat(
+                5, sleep=lambda _seconds: None, max_beats=1
+            )
+            self.assertFalse(ok, detail)
+            self.assertEqual(path.read_text(encoding="utf-8"), malformed)
+            ok, detail = semaphore.master_heartbeat_detached(5)
+            self.assertFalse(ok, detail)
+            self.assertEqual(path.read_text(encoding="utf-8"), malformed)
+
+    def test_malformed_schema_three_launch_fields_are_preserved(self):
+        semaphore.master_acquire("claude", "master")
+        path = self.root / "master.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["lease"]["heartbeat_launch_digest"] = "a" * 64
+        malformed = json.dumps(data)
+        path.write_text(malformed, encoding="utf-8")
+        with self.assertRaises(semaphore.SemaphoreError):
+            semaphore.master_snapshot()
+        self.assertEqual(path.read_text(encoding="utf-8"), malformed)
+
     def test_the_lease_lives_beside_the_hold_state_and_changes_no_verdict(self):
         semaphore.master_acquire("claude", "master")
         path = self.root / "master.json"
@@ -1460,6 +2103,17 @@ class MasterLeaseTest(unittest.TestCase):
             semaphore.master_acquire("claude", "master")
         self.assertEqual(path.read_text(encoding="utf-8"), "{not json")
         self.assertIn("refusing to replace corrupt master lease state", semaphore.status_text(self.adapter))
+
+    def test_invalid_direct_activity_anchor_is_reported_not_reset(self):
+        semaphore.master_acquire("claude", "master")
+        path = self.root / "master.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["lease"]["direct_activity_at"] = data["lease"]["renewed_at"] + 1
+        malformed = json.dumps(data)
+        path.write_text(malformed, encoding="utf-8")
+        with self.assertRaises(semaphore.SemaphoreError):
+            semaphore.master_snapshot()
+        self.assertEqual(path.read_text(encoding="utf-8"), malformed)
 
     def test_the_client_walk_finds_the_session_above_the_launcher(self):
         self._client_patch.stop()
@@ -1498,8 +2152,10 @@ class MasterLeaseTest(unittest.TestCase):
         # An orphaned heartbeat must not keep a dead master alive.
         path = self.root / "master.json"
         data = json.loads(path.read_text(encoding="utf-8"))
-        data["lease"]["client_pid"] = self.dead_pid()
+        dead = self.dead_pid()
+        data["lease"]["client_pid"] = dead
         path.write_text(json.dumps(data), encoding="utf-8")
+        self.as_client(dead, "claude")
         ok, detail = semaphore.master_heartbeat(5, sleep=naps.append, max_beats=5)
         self.assertTrue(ok, detail)
         self.assertIn("is gone", detail)
@@ -1539,34 +2195,258 @@ class MasterLeaseTest(unittest.TestCase):
         self.assertTrue(ok, detail)
         self.assertIn("stranded", detail)
 
-    def test_an_orphaned_heartbeat_renews_for_the_holder_it_read(self):
+    def test_a_nonholder_cannot_start_process_bound_foreground_or_detached_heartbeat(self):
         semaphore.master_acquire("claude", "master")
-        self.as_client(None, None)          # orphaned: no client above the heartbeat
-        ok, detail = semaphore.master_heartbeat(5, sleep=lambda s: None, max_beats=1)
-        self.assertTrue(ok, detail)
-        self.assertEqual(self.log_actions().count("master-renew"), 1)
-        # A stranger without the holder assertion is still refused once lapsed.
-        self.expire()
-        ok, detail = semaphore.master_renew()
-        self.assertFalse(ok)
+        before = semaphore.master_snapshot()["lease"]
+        self.as_client(os.getpid() + 100000, "claude")
+        renew_ok, renew_detail = semaphore.master_renew()
+        foreground_ok, foreground_detail = semaphore.master_heartbeat(
+            5, sleep=lambda s: None, max_beats=1
+        )
+        with mock.patch("creme.semaphore.subprocess.Popen") as popen:
+            popen.return_value.pid = 424242
+            detached_ok, detached_detail = semaphore.master_heartbeat_detached(5)
+        self.assertFalse(renew_ok, renew_detail)
+        self.assertFalse(foreground_ok)
+        self.assertIn("not authorized", foreground_detail)
+        self.assertFalse(detached_ok)
+        self.assertIn("not authorized", detached_detail)
+        popen.assert_not_called()
+        after = semaphore.master_snapshot()["lease"]
+        self.assertEqual(after["renewed_at"], before["renewed_at"])
+        self.assertEqual(after["heartbeat_renewals"], 0)
+        self.assertIsNone(after["heartbeat_launch_digest"])
 
     def test_the_detached_heartbeat_starts_its_own_session(self):
         semaphore.master_acquire("claude", "master")
-        with mock.patch("creme.semaphore.subprocess.Popen") as popen:
-            popen.return_value.pid = 424242
-            ok, detail = semaphore.master_heartbeat_detached(1500)
+        lease = semaphore.master_snapshot()["lease"]
+        ok, detail, captured = self.capture_detached_launch()
         self.assertTrue(ok, detail)
         self.assertIn("pid 424242", detail)
-        args, kwargs = popen.call_args
-        self.assertEqual(args[0][-3:], ["master-renew", "--heartbeat", "1500"])
-        self.assertTrue(args[0][1].endswith("/.semaphore/semaphore"))
+        command = captured["command"]
+        kwargs = captured["kwargs"]
+        self.assertEqual(
+            command[-3:],
+            ["master-renew", "--heartbeat", "1500"],
+        )
+        self.assertNotIn(lease["lease_id"], command)
+        self.assertNotIn(captured["capability"], command)
+        self.assertNotIn(captured["capability"], kwargs["env"].values())
+        self.assertTrue(command[1].endswith("/.semaphore/semaphore"))
         self.assertTrue(kwargs["start_new_session"])
-        self.assertEqual(kwargs["stdin"], semaphore.subprocess.DEVNULL)
+        self.assertIsInstance(kwargs["stdin"], int)
+        self.assertEqual(kwargs["env"][semaphore.MASTER_HEARTBEAT_CHILD_ENV], "1")
         self.assertIn("master-heartbeat", self.log_actions())
         self.assertEqual(stat.S_IMODE((self.root / "heartbeat.log").stat().st_mode), 0o600)
+        pending = semaphore.master_snapshot()["lease"]
+        capability_digest = semaphore._digest_session_value(
+            semaphore.MASTER_HEARTBEAT_LAUNCH_DIGEST_DOMAIN,
+            captured["capability"],
+        )
+        self.assertEqual(
+            pending["heartbeat_launch_digest"],
+            capability_digest,
+        )
+        serialized = (self.root / "master.json").read_text(encoding="utf-8")
+        log_text = (self.root / "log.jsonl").read_text(encoding="utf-8")
+        status = semaphore.status_text(self.adapter)
+        self.assertNotIn(captured["capability"], serialized + log_text + status)
+        self.assertNotIn(capability_digest, " ".join(command) + log_text + status)
+        self.assertNotIn(lease["lease_id"], " ".join(command) + log_text + status)
         semaphore.master_release()
         ok, detail = semaphore.master_heartbeat_detached(1500)
         self.assertFalse(ok)
+
+    def test_detached_launch_capability_is_consumed_once_and_cannot_be_replayed(self):
+        semaphore.master_acquire("claude", "master")
+        ok, detail, captured = self.capture_detached_launch()
+        self.assertTrue(ok, detail)
+        ok, detail = semaphore.master_heartbeat(
+            1500,
+            launch_capability=captured["capability"],
+            sleep=lambda _seconds: None,
+            max_beats=1,
+        )
+        self.assertTrue(ok, detail)
+        once = semaphore.master_snapshot()["lease"]
+        self.assertIsNone(once["heartbeat_launch_digest"])
+        self.assertIsNone(once["heartbeat_launch_expires_at"])
+        self.assertEqual(once["heartbeat_renewals"], 1)
+        ok, detail = semaphore.master_heartbeat(
+            1500,
+            launch_capability=captured["capability"],
+            sleep=lambda _seconds: None,
+            max_beats=1,
+        )
+        self.assertFalse(ok, detail)
+        self.assertIn("no detached heartbeat launch", detail)
+        self.assertEqual(
+            semaphore.master_snapshot()["lease"]["heartbeat_renewals"], 1
+        )
+
+    def test_malformed_launch_capability_cannot_consume_a_pending_launch(self):
+        semaphore.master_acquire("claude", "master")
+        ok, detail, captured = self.capture_detached_launch()
+        self.assertTrue(ok, detail)
+        path = self.root / "master.json"
+        pending = path.read_bytes()
+        ok, detail = semaphore.master_heartbeat(
+            1500,
+            launch_capability="not-a-capability",
+            sleep=lambda _seconds: None,
+            max_beats=1,
+        )
+        self.assertFalse(ok, detail)
+        self.assertIn("malformed", detail)
+        self.assertEqual(path.read_bytes(), pending)
+        ok, detail = semaphore.master_heartbeat(
+            1500,
+            launch_capability=captured["capability"],
+            sleep=lambda _seconds: None,
+            max_beats=1,
+        )
+        self.assertTrue(ok, detail)
+
+    def test_delayed_child_cannot_consume_an_expired_launch_capability(self):
+        wall = [1_000.0]
+        with mock.patch("creme.semaphore._now", side_effect=lambda: wall[0]):
+            semaphore.master_acquire("claude", "master")
+            ok, detail, captured = self.capture_detached_launch()
+            self.assertTrue(ok, detail)
+            before = semaphore.master_snapshot()["lease"]["renewed_at"]
+            wall[0] += semaphore.MASTER_HEARTBEAT_LAUNCH_SECONDS + 0.1
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                launch_capability=captured["capability"],
+                sleep=lambda _seconds: None,
+                max_beats=1,
+            )
+        self.assertFalse(ok, detail)
+        self.assertIn("expired before child startup", detail)
+        lease = semaphore.master_snapshot()["lease"]
+        self.assertIsNone(lease["heartbeat_launch_digest"])
+        self.assertIsNone(lease["heartbeat_launch_expires_at"])
+        self.assertEqual(lease["renewed_at"], before)
+
+    def test_spawn_failure_invalidates_the_one_time_launch_capability(self):
+        capability = "f" * 64
+        semaphore.master_acquire("claude", "master")
+        with (
+            mock.patch("creme.semaphore.secrets.token_hex", return_value=capability),
+            mock.patch(
+                "creme.semaphore.subprocess.Popen",
+                side_effect=OSError("synthetic spawn failure"),
+            ),
+        ):
+            ok, detail = semaphore.master_heartbeat_detached(1500)
+        self.assertFalse(ok, detail)
+        self.assertIn("could not start", detail)
+        lease = semaphore.master_snapshot()["lease"]
+        self.assertIsNone(lease["heartbeat_launch_digest"])
+        self.assertIsNone(lease["heartbeat_launch_expires_at"])
+        surfaces = (
+            (self.root / "master.json").read_text(encoding="utf-8")
+            + (self.root / "log.jsonl").read_text(encoding="utf-8")
+            + semaphore.status_text(self.adapter)
+        )
+        self.assertNotIn(capability, surfaces)
+        self.assertNotIn(
+            semaphore._digest_session_value(
+                semaphore.MASTER_HEARTBEAT_LAUNCH_DIGEST_DOMAIN, capability
+            ),
+            surfaces,
+        )
+
+    def test_heartbeat_cli_reads_child_authority_only_from_inherited_pipe(self):
+        capability = "a" * 64
+        with (
+            mock.patch.dict(
+                os.environ,
+                {semaphore.MASTER_HEARTBEAT_CHILD_ENV: "1"},
+                clear=False,
+            ),
+            mock.patch(
+                "creme.cli.semaphore.read_master_heartbeat_launch_capability",
+                return_value=(True, capability),
+            ),
+            mock.patch(
+                "creme.cli.semaphore.master_heartbeat",
+                return_value=(True, "bound heartbeat"),
+            ) as heartbeat,
+            mock.patch("builtins.print"),
+        ):
+            code = cli.main([
+                "semaphore",
+                "master-renew",
+                "--heartbeat",
+                "1500",
+            ])
+        self.assertEqual(code, 0)
+        heartbeat.assert_called_once_with(1500, launch_capability=capability)
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            cli.parser().parse_args([
+                "semaphore",
+                "master-renew",
+                "--heartbeat",
+                "1500",
+                "--heartbeat-lease-id",
+                "b" * 32,
+            ])
+
+    def test_delayed_detached_child_stops_after_release_and_reacquire(self):
+        self.as_client(None, None)
+        with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False):
+            semaphore.master_acquire("codex", "first")
+            first = semaphore.master_snapshot()["lease"]
+            ok, detail, captured = self.capture_detached_launch()
+            self.assertTrue(ok, detail)
+
+            ok, detail = semaphore.master_release()
+            self.assertTrue(ok, detail)
+            ok, detail = semaphore.master_acquire("codex", "successor")
+            self.assertTrue(ok, detail)
+            successor = semaphore.master_snapshot()["lease"]
+            self.assertNotEqual(successor["lease_id"], first["lease_id"])
+
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                launch_capability=captured["capability"],
+                sleep=lambda _seconds: None,
+                max_beats=1,
+            )
+        self.assertFalse(ok, detail)
+        self.assertIn("no detached heartbeat launch", detail)
+        final = semaphore.master_snapshot()["lease"]
+        self.assertEqual(final["lease_id"], successor["lease_id"])
+        self.assertEqual(final["heartbeat_renewals"], 0)
+
+    def test_delayed_detached_child_stops_after_same_digest_take_over(self):
+        self.as_client(None, None)
+        with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False):
+            semaphore.master_acquire("codex", "first")
+            first = semaphore.master_snapshot()["lease"]
+            ok, detail, captured = self.capture_detached_launch()
+            self.assertTrue(ok, detail)
+
+            self.expire()
+            ok, detail = semaphore.master_acquire(
+                "codex", "successor", take_over=True
+            )
+            self.assertTrue(ok, detail)
+            successor = semaphore.master_snapshot()["lease"]
+            self.assertNotEqual(successor["lease_id"], first["lease_id"])
+
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                launch_capability=captured["capability"],
+                sleep=lambda _seconds: None,
+                max_beats=1,
+            )
+        self.assertFalse(ok, detail)
+        self.assertIn("no detached heartbeat launch", detail)
+        final = semaphore.master_snapshot()["lease"]
+        self.assertEqual(final["lease_id"], successor["lease_id"])
+        self.assertEqual(final["heartbeat_renewals"], 0)
 
     def test_the_heartbeat_renews_within_a_slice_of_waking_from_system_sleep(self):
         semaphore.master_acquire("claude", "master")

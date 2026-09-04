@@ -222,28 +222,81 @@ rather than signalled.
 ### Master lease
 
 `master.json` beside the hold state records at most one master lease: the
-client family and client process, the pid and uid that took it, a note, and
-the acquire/renew times with the lease window. It is written under the same
+client family and client process, opaque digests of any adapter-supplied
+session identity and liveness socket, a per-acquisition lease id, the pid and
+uid that took it, a note, the last verified direct-holder activity, and the
+acquire/renew times with the lease window. While a detached child is starting,
+it may also contain a short-lived one-time launch-capability digest and its
+expiry. The raw capability exists only in the parent-to-child pipe and is
+atomically consumed before the child adopts holder data.
+Raw session identifiers and socket paths are never persisted, printed, or
+logged. It is written under the same
 mutex as the holds and never read by admission, so it cannot change any
 verdict. The file is separate from `state.json` for the same reason the queue
 is: hold-state validation rejects unknown keys, and a pre-update reader must
 still validate the hold state.
 
+The neutral adapter inputs are `CREME_MASTER_SESSION_ID` and
+`CREME_MASTER_LIVENESS_SOCKET`. A client integration may supply both without
+asking the user to copy a token between commands. The latter is trusted only
+under the explicit contract that its Unix listener belongs to this task and
+disappears with it. Codex's internal session/thread aliases are accepted as
+best-effort identity hints, but they are not a documented public interface.
+Codex Desktop's app-tools pipe is app-global and thread-multiplexed, so Creme
+never treats it—or the shared app pid—as task identity or liveness. Missing or
+malformed task identity fails closed for direct holder writes and heartbeat
+startup. A verified session that lacks process/listener liveness may use the
+bounded fallback; an invocation with no holder identity cannot start it merely
+by reading the persisted random lease id.
+
 `master-acquire` refuses while a lease is live, naming the holder and the
-command that ends it. A lease is *stranded* as soon as the client process
-that took it is gone — a closed session cannot renew — or once its window
-passes with that process never identified, and *lapsed* when the window
-passes while the process is still alive; `status` prints the take-over
-command, and
+command that ends it. When process discovery is unavailable, a stable
+adapter-supplied session identity still distinguishes the holder from another
+task of the same client; the digest takes precedence even when two desktop
+tasks share a visible app-process ancestor. A matching holder can renew an
+expired lease after system sleep, unless a successor already took it over.
+A lease is *stranded* as soon as the identified client process is gone, or
+once its window passes with process liveness unavailable, and *lapsed* when
+the window passes while the process is still alive; `status` prints the
+take-over command, and
 `master-acquire --take-over` replaces only a lapsed or stranded lease, logging
 whose lease it replaced. `master-release` from the holding client is the
 normal end; from another client it succeeds only against a lapsed or stranded
 lease, or with an explicit, logged `--force`. `master-renew` from a client
-other than the holder is refused while the lease is live. Corrupt lease state
-is reported and never reset. A missing process snapshot leaves the client
-process unknown; such a lease is treated as stranded once its window passes,
-so a sandbox that denies `ps` degrades toward take-over, never toward two
-masters.
+other than the holder is refused while the lease is live, even if it supplies
+the same client label or shares a discovered app pid. Corrupt lease state is
+reported and never reset. Schema-1 and pre-launch-capability schema-2 leases
+are validated and upgraded in memory, then persisted as schema 3 on the next legitimate write without
+changing their holder or times. A process-unknown schema-1 lease remains live
+but unverifiable: no unknown invocation may renew or release it, and it becomes
+take-overable when its original window lapses. A process-verified, task-scoped
+legacy holder may upgrade normally.
+
+Heartbeat startup itself is authenticated. A foreground starter must directly
+match the holder; a detached parent must do the same before minting a random,
+one-time capability. The raw value crosses only an inherited stdin pipe, while
+the lease stores only a digest and expiry under the mutex. The child consumes
+it once before adopting the recorded holder process and exact lease id, so a
+non-holder, delayed predecessor, duplicate, or replay cannot start a helper.
+With no usable task-scoped process it may actively probe an explicitly supplied task-owned
+Unix listener; three consecutive failed probes stop renewal, so an abruptly
+closed task is take-overable no later than the lease window after its last
+successful beat. If no such listener or task-scoped process exists, the safe
+fallback permits only two persisted self-renewals and then becomes passive
+until a direct, identity-checked holder renewal resets the budget and its
+absolute activity anchor. A helper never advances that anchor and may not
+self-renew more than 3,000 seconds after it, even if the helper starts late or
+wakes after a long system sleep. With the prescribed 1,500-second heartbeat
+and 1,800-second lease, automatic expiry is therefore no later than 4,800
+seconds after the last direct activity. A successor's new lease id ends the
+old passive heartbeat. Neither the random lease id nor the one-time capability,
+raw session identity, or liveness path appears in child argv, status, or logs.
+The lease id is an acquisition binding, not starter authority. Missing capabilities therefore degrade
+toward bounded take-over, never indefinite orphan renewal or two masters. A
+matching session digest can still renew directly after sleep if no successor
+has taken over; that direct action resets the anchor. An automatic post-wake
+renewal beyond the bounded fallback requires the explicit task-owned listener
+contract.
 
 Fresh installations store mutex, state, and audit log under the canonical
 checkout's ignored `.semaphore/state/`. Linked Git worktrees resolve through

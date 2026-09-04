@@ -84,7 +84,10 @@ path exists, `doctor` requires the complete installed set to match.
 Before real work, read [AGENTS.md](AGENTS.md), the appropriate sibling's
 `scripts/GATES.md`, and [the execution guide](docs/guides/execution.md).
 New goal documents use [the public goal-writing guide](docs/guides/goal.md),
-even when a concrete goal is stored in a private repository.
+even when a concrete goal is stored in a private repository. One session at a
+time holds the master role described in
+[the master guide](docs/guides/master.md); it owns goals, workers, merges, and
+pushes, and it is the only session that takes the `master-*` lease.
 Client discovery and its negative control are documented in
 [docs/client-discovery.md](docs/client-discovery.md).
 
@@ -101,6 +104,9 @@ python3 -m creme python-runtime 3.11.9
 ./.semaphore/semaphore status
 ./.semaphore/semaphore adaptive-acquire GOAL --note "proof loop" --memory-gib 4
 ./.semaphore/semaphore adaptive-acquire GOAL --note "queued" --wait 600
+./.semaphore/semaphore master-acquire --client claude --note "master session"
+./.semaphore/semaphore master-renew
+./.semaphore/semaphore master-release
 python3 -m creme tempdir
 python3 -m creme cache-copy SOURCE DESTINATION
 python3 -m creme reclaim --dry-run

@@ -78,6 +78,7 @@ def propose(
     creme_root: Path,
     workspace_root: Optional[Path] = None,
     adapter: Optional[Adapter] = None,
+    goal_store: Optional[str] = None,
 ) -> dict[str, Any]:
     selected = adapter or get_adapter()
     facts_result = selected.static_facts()
@@ -93,7 +94,7 @@ def propose(
             "root": str(root),
             "jaune": "jaune",
             "blanc": "blanc",
-            "goal_store": None,
+            "goal_store": goal_store,
         },
         "policy": derive_policy(facts),
         "overrides": {

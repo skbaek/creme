@@ -23,7 +23,9 @@ never falls through to a Darwin implementation.
 - Jaune and Blanc own source architecture, proof doctrine, generated-artifact
   rules, gate commands, budgets, and pass criteria.
 - A goal store owns concrete goals, state briefs, reports, and private
-  portfolio decisions. It is optional and is not a Creme runtime dependency.
+  portfolio decisions, and under `master/` the durable state of the master
+  role: board, log, intent statements, briefs, and audits. It is optional and
+  is not a Creme runtime dependency.
 - Blanc consumes Jaune only through its Git-pinned Lake dependency. Sibling
   checkout paths are for coordinated editing, not build substitution.
 
@@ -46,7 +48,9 @@ reclamation; they are not a second implementation or state authority. The
 tracked launcher performs adaptive admission from the process-free aggregate
 headroom capability, so a denied process snapshot does not disable the memory
 floor. Admission thresholds live in shared coordination policy, not in an OS
-adapter or a transient host profile sample.
+adapter or a transient host profile sample. The same launcher holds the single
+master lease in `master.json`; it charges no memory and exists only so that
+two master sessions cannot coexist (see [the master guide](guides/master.md)).
 
 See [client discovery](client-discovery.md) for current official discovery
 semantics and the permission-is-not-discovery negative control.

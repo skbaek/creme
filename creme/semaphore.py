@@ -4,6 +4,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import signal
 import tempfile
 import threading
@@ -206,11 +207,16 @@ def locked_state() -> Iterator[tuple[Path, dict[str, Any]]]:
 
 def _save(path: Path, state: dict[str, Any]) -> None:
     _validate(state)
-    fd, temporary = tempfile.mkstemp(prefix="state-", suffix=".json", dir=str(path.parent))
+    _write_json(path, state)
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically replace ``path`` with ``data`` as private, pretty JSON."""
+    fd, temporary = tempfile.mkstemp(prefix=path.stem + "-", suffix=".json", dir=str(path.parent))
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2, sort_keys=True)
+            json.dump(data, handle, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -1154,6 +1160,7 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
         root = path.parent
         state = json.loads(json.dumps(state))
         derived = _refresh_signals(root, state, selected, now)
+        master_lines = _master_lines(root, now)
         signals = derived["holds"]
         worker_report = derived["lean_workers"]
         queue, queue_notes = _load_queue(root)
@@ -1189,7 +1196,7 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
         default_memory_gib = int((policy or {})["task_memory_gib"])
     except (KeyError, TypeError, ValueError):
         default_memory_gib = 2
-    lines = []
+    lines = list(master_lines)
     hard = state["hard"]
     if hard:
         state_word = "expired-blocking" if _expired(hard, now) else "live"
@@ -1947,3 +1954,404 @@ def break_expired(label: str, reason: str, adapter: Optional[Adapter] = None) ->
         _save(path, state)
     _log("break", label, "OK", reason)
     return True, "expired hold broken after fail-closed quiet-host certification"
+
+
+# ---------------------------------------------------------------------------
+# Master lease
+#
+# One session at a time represents the user for all sibling work on a host
+# (docs/guides/master.md).  The lease lives in ``master.json`` beside the hold
+# state, under the same mutex, and is never read by admission: it charges no
+# memory and changes no verdict.  It is a separate file for the reason the
+# queue is — hold-state validation rejects unknown keys, and a pre-update
+# reader must still validate ``state.json``.
+# ---------------------------------------------------------------------------
+
+MASTER_NAME = "master.json"
+MASTER_SCHEMA_VERSION = 1
+MASTER_LEASE_SECONDS = 1800
+MASTER_KEYS = {
+    "client", "client_pid", "pid", "uid", "note",
+    "acquired_at", "renewed_at", "lease_seconds",
+}
+CLIENT_LABEL = re.compile(r"[A-Za-z0-9_.-]{1,32}")
+
+
+def master_path(root: Optional[Path] = None) -> Path:
+    return (root or state_root()) / MASTER_NAME
+
+
+def _empty_master() -> dict[str, Any]:
+    return {"schema_version": MASTER_SCHEMA_VERSION, "lease": None}
+
+
+def _validate_master(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict) or set(data) != {"schema_version", "lease"}:
+        raise SemaphoreError("master lease state has an unexpected shape")
+    if data["schema_version"] != MASTER_SCHEMA_VERSION:
+        raise SemaphoreError("master lease schema is unsupported")
+    lease = data["lease"]
+    if lease is None:
+        return data
+    if not isinstance(lease, dict) or set(lease) != MASTER_KEYS:
+        raise SemaphoreError("master lease has an unexpected shape")
+    if not isinstance(lease["client"], str) or CLIENT_LABEL.fullmatch(lease["client"]) is None:
+        raise SemaphoreError("master lease client must be a short label")
+    client_pid = lease["client_pid"]
+    if client_pid is not None and (
+        isinstance(client_pid, bool) or not isinstance(client_pid, int) or client_pid < 1
+    ):
+        raise SemaphoreError("master lease client_pid must be a positive integer or null")
+    if not isinstance(lease["pid"], int) or isinstance(lease["pid"], bool) or lease["pid"] < 1:
+        raise SemaphoreError("master lease pid must be a positive integer")
+    if not isinstance(lease["uid"], int) or isinstance(lease["uid"], bool) or lease["uid"] < 0:
+        raise SemaphoreError("master lease uid must be a non-negative integer")
+    if not isinstance(lease["note"], str):
+        raise SemaphoreError("master lease note must be a string")
+    for key in ("acquired_at", "renewed_at"):
+        value = lease[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise SemaphoreError(f"master lease {key} must be a positive finite number")
+    window = lease["lease_seconds"]
+    if isinstance(window, bool) or not isinstance(window, int) or not 1 <= window <= MAX_LEASE_SECONDS:
+        raise SemaphoreError("master lease lease_seconds is outside the supported range")
+    if lease["renewed_at"] < lease["acquired_at"]:
+        raise SemaphoreError("master lease renewed_at predates acquired_at")
+    return data
+
+
+def _load_master(root: Path) -> dict[str, Any]:
+    path = master_path(root)
+    if not path.exists():
+        return _empty_master()
+    try:
+        return _validate_master(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, SemaphoreError) as exc:
+        raise SemaphoreError(f"refusing to replace corrupt master lease state: {exc}")
+
+
+def _save_master(root: Path, data: dict[str, Any]) -> None:
+    _validate_master(data)
+    _write_json(master_path(root), data)
+
+
+def master_snapshot() -> dict[str, Any]:
+    with locked_state() as (path, _state):
+        return _load_master(path.parent)
+
+
+def _client_process(
+    adapter: Adapter,
+    start_pid: Optional[int] = None,
+) -> tuple[Optional[int], Optional[str], str]:
+    """Find the agent client above this invocation: ``(pid, family, detail)``.
+
+    The launcher's own pid dies with the command, so the lease records the
+    client process — the Claude Code or Codex session — found by walking the
+    process table upwards from the launcher's parent.  A snapshot the sandbox
+    denies leaves the client unknown; the lease then degrades toward
+    take-over once its window passes, never toward two masters.
+    """
+    result = adapter.process_snapshot()
+    if result.status != "OK" or not isinstance(result.data, dict):
+        return None, None, f"no client identified (process snapshot unavailable: {result.detail})"
+    rows = result.data.get("processes")
+    if not isinstance(rows, list):
+        return None, None, "no client identified (process snapshot carried no process table)"
+    table: dict[int, tuple[int, str]] = {}
+    for row in rows:
+        try:
+            table[int(row["pid"])] = (int(row["ppid"]), str(row["command"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    pattern = getattr(adapter, "client_pattern", _NEVER_MATCHES)
+    pid = os.getppid() if start_pid is None else start_pid
+    seen: set[int] = set()
+    while pid and pid not in seen and pid in table:
+        seen.add(pid)
+        ppid, command = table[pid]
+        family = _client_family(command, pattern)
+        if family:
+            return pid, family, f"client {family} pid {pid}"
+        pid = ppid
+    return None, None, "no client identified above this invocation"
+
+
+def _client_family(command: str, pattern: Any) -> Optional[str]:
+    """Name the agent client a process command belongs to, or ``None``.
+
+    A snapshot may carry a full command line (Linux ``ps -o args``) or only
+    the executable name (Darwin ``ps -o comm``), so the adapter's path-shaped
+    pattern is tried first and the bare executable name second.
+    """
+    match = pattern.search(command)
+    matched = match.group(0).lower() if match else ""
+    if not matched:
+        first = command.split(None, 1)[0] if command.strip() else ""
+        matched = os.path.basename(first).lower()
+        if matched not in {"claude", "codex", "chatgpt"}:
+            return None
+    if "claude" in matched:
+        return "claude"
+    if "codex" in matched or "chatgpt" in matched:
+        return "codex"
+    return "agent"
+
+
+def _master_view(lease: Optional[dict[str, Any]], now: float) -> dict[str, Any]:
+    """Classify the lease: ``none``, ``live``, ``lapsed``, or ``stranded``."""
+    if lease is None:
+        return {"lease": None, "state": "none"}
+    expired = _expired(lease, now)
+    client_pid = lease["client_pid"]
+    client_alive = _pid_alive(int(client_pid)) if client_pid is not None else None
+    if not expired:
+        state = "live"
+    elif client_alive:
+        # The window passed but the session that took the lease is still a
+        # process: an idle tab nobody wound down, or a master that stopped
+        # renewing.  Either way it is not a second master's to assume.
+        state = "lapsed"
+    else:
+        state = "stranded"
+    return {
+        "lease": lease,
+        "state": state,
+        "expired": expired,
+        "client_alive": client_alive,
+        "held": now - float(lease["acquired_at"]),
+        "since_renewal": now - float(lease["renewed_at"]),
+        "remaining": float(lease["renewed_at"]) + int(lease["lease_seconds"]) - now,
+    }
+
+
+def _master_holder_text(lease: dict[str, Any]) -> str:
+    client_pid = lease["client_pid"]
+    where = f"client_pid={client_pid}" if client_pid is not None else "client process unknown"
+    return f"client {lease['client']} ({where}, taken by pid {lease['pid']}, note={lease['note']!r})"
+
+
+def _same_client(lease: dict[str, Any], client_pid: Optional[int]) -> Optional[bool]:
+    """Is this invocation the lease holder's session? ``None`` when unverifiable."""
+    if client_pid is None or lease["client_pid"] is None:
+        return None
+    return int(client_pid) == int(lease["client_pid"])
+
+
+def _master_lines(root: Path, now: float) -> list[str]:
+    try:
+        data = _load_master(root)
+    except SemaphoreError as exc:
+        return [f"master: {exc}"]
+    view = _master_view(data["lease"], now)
+    if view["state"] == "none":
+        return ["master: none"]
+    lease = view["lease"]
+    lines = [
+        f"master: {lease['client']} ({view['state']}) client_pid={lease['client_pid']} "
+        f"pid={lease['pid']} held={int(view['held'])}s "
+        f"renewed={int(view['since_renewal'])}s ago lease={lease['lease_seconds']}s "
+        f"note={lease['note']!r}"
+    ]
+    if view["state"] == "lapsed":
+        lines.append(
+            "  LAPSED: the lease window passed but the client process is alive; "
+            "wind that session down and run `master-release` from it, or replace "
+            "it with `~/creme/.semaphore/semaphore master-acquire --take-over "
+            "--client CLIENT --note \"...\"`"
+        )
+    elif view["state"] == "stranded":
+        lines.append(
+            "  STRANDED: the lease window passed and the client process is gone; "
+            "run `~/creme/.semaphore/semaphore master-acquire --take-over "
+            "--client CLIENT --note \"...\"`"
+        )
+    return lines
+
+
+def master_acquire(
+    client: Optional[str],
+    note: str,
+    lease: int = MASTER_LEASE_SECONDS,
+    *,
+    take_over: bool = False,
+    adapter: Optional[Adapter] = None,
+) -> tuple[bool, str]:
+    if lease < 1 or lease > MAX_LEASE_SECONDS:
+        return False, f"lease must be 1..{MAX_LEASE_SECONDS} seconds"
+    if not isinstance(note, str) or not note.strip():
+        return False, "a non-empty --note is required"
+    selected = adapter or get_adapter()
+    client_pid, family, found = _client_process(selected)
+    if client is None:
+        client = family
+    if client is None or CLIENT_LABEL.fullmatch(client) is None:
+        return False, (
+            f"the agent client could not be identified ({found}); "
+            "pass --client claude, codex, or human"
+        )
+    with locked_state() as (path, _state):
+        root = path.parent
+        data = _load_master(root)
+        now = _now()
+        view = _master_view(data["lease"], now)
+        replaced: Optional[tuple[str, str]] = None
+        if data["lease"] is not None:
+            holder = _master_holder_text(data["lease"])
+            if view["state"] == "live":
+                detail = (
+                    f"the master lease is live: {holder}, renewed "
+                    f"{int(view['since_renewal'])}s ago with {int(view['remaining'])}s left; "
+                    "end it from that session with `master-release`, or wait for the "
+                    "lease to lapse; never edit master.json"
+                )
+                _log("master-acquire", client, "REFUSED", detail)
+                return False, detail
+            if not take_over:
+                detail = (
+                    f"the master lease is {view['state'].upper()}: {holder}; replace it "
+                    f"with `master-acquire --take-over --client {client} --note ...`"
+                )
+                _log("master-acquire", client, "REFUSED", detail)
+                return False, detail
+            replaced = (view["state"], holder)
+        data["lease"] = {
+            "client": client,
+            "client_pid": client_pid,
+            "pid": os.getpid(),
+            "uid": os.getuid(),
+            "note": note,
+            "acquired_at": now,
+            "renewed_at": now,
+            "lease_seconds": lease,
+        }
+        _save_master(root, data)
+    if replaced:
+        state_word, holder = replaced
+        _log("master-take-over", client, "OK", f"replaced {state_word} lease of {holder}; {found}; {note}")
+        return True, (
+            f"master lease taken over from {holder} ({state_word}); this session is "
+            f"the master as {found}; renew within {lease}s"
+        )
+    _log("master-acquire", client, "OK", f"{found}; lease={lease}; {note}")
+    return True, f"master lease acquired by client {client} ({found}); renew within {lease}s"
+
+
+def master_renew(
+    lease: Optional[int] = None,
+    *,
+    adapter: Optional[Adapter] = None,
+) -> tuple[bool, str]:
+    if lease is not None and (lease < 1 or lease > MAX_LEASE_SECONDS):
+        return False, f"lease must be 1..{MAX_LEASE_SECONDS} seconds"
+    selected = adapter or get_adapter()
+    client_pid, _family, found = _client_process(selected)
+    with locked_state() as (path, _state):
+        root = path.parent
+        data = _load_master(root)
+        current = data["lease"]
+        if current is None:
+            return False, "no master lease exists; run master-acquire"
+        now = _now()
+        view = _master_view(current, now)
+        holder = _master_holder_text(current)
+        same = _same_client(current, client_pid)
+        if view["state"] == "live" and same is False:
+            detail = f"the master lease belongs to {holder}; this invocation: {found}"
+            _log("master-renew", current["client"], "REFUSED", detail)
+            return False, detail
+        if view["state"] != "live" and same is not True:
+            detail = (
+                f"the master lease is {view['state'].upper()} and this invocation "
+                f"({found}) is not its holder; use `master-acquire --take-over`"
+            )
+            _log("master-renew", current["client"], "REFUSED", detail)
+            return False, detail
+        current["renewed_at"] = now
+        if lease is not None:
+            current["lease_seconds"] = lease
+        _save_master(root, data)
+    verified = "holder verified" if same else "holder unverified"
+    _log("master-renew", current["client"], "OK", f"lease={current['lease_seconds']}; {verified}")
+    return True, (
+        f"master lease renewed for client {current['client']} ({verified}); "
+        f"{current['lease_seconds']}s window"
+    )
+
+
+def master_release(
+    *,
+    force: bool = False,
+    reason: str = "",
+    adapter: Optional[Adapter] = None,
+) -> tuple[bool, str]:
+    selected = adapter or get_adapter()
+    client_pid, _family, found = _client_process(selected)
+    with locked_state() as (path, _state):
+        root = path.parent
+        data = _load_master(root)
+        current = data["lease"]
+        if current is None:
+            return False, "no master lease exists"
+        view = _master_view(current, _now())
+        holder = _master_holder_text(current)
+        same = _same_client(current, client_pid)
+        if view["state"] == "live" and same is not True and not force:
+            detail = (
+                f"the master lease is live and belongs to {holder}; this invocation: "
+                f"{found}; release it from that session, wait for it to lapse, or pass "
+                "--force with --reason"
+            )
+            _log("master-release", current["client"], "REFUSED", detail)
+            return False, detail
+        data["lease"] = None
+        _save_master(root, data)
+    if same:
+        how = "by its holder"
+    elif force and view["state"] == "live":
+        how = "by force"
+    else:
+        how = f"after it {view['state']}"
+    _log("master-release", current["client"], "OK", f"released {how}; {found}; {reason}")
+    return True, f"master lease of {holder} released {how}"
+
+
+def master_heartbeat(
+    interval: int,
+    *,
+    adapter: Optional[Adapter] = None,
+    sleep: Callable[[float], None] = time.sleep,
+    max_beats: Optional[int] = None,
+) -> tuple[bool, str]:
+    """Renew the master lease every ``interval`` seconds from a background process.
+
+    The loop is the sanctioned heartbeat: it exits when a renewal is refused,
+    when the lease is gone, or when the client process that holds it is no
+    longer alive — an orphaned heartbeat must never make a dead master look
+    live to the next session.
+    """
+    if interval < 1 or interval > MAX_LEASE_SECONDS:
+        return False, f"interval must be 1..{MAX_LEASE_SECONDS} seconds"
+    selected = adapter or get_adapter()
+    beats = 0
+    while True:
+        try:
+            data = master_snapshot()
+        except SemaphoreError as exc:
+            return False, str(exc)
+        lease = data["lease"]
+        if lease is None:
+            return True, f"heartbeat stopped after {beats} renewal(s): no master lease exists"
+        client_pid = lease["client_pid"]
+        if client_pid is not None and not _pid_alive(int(client_pid)):
+            return True, (
+                f"heartbeat stopped after {beats} renewal(s): the holding client "
+                f"pid {client_pid} is gone; the lease will lapse and read STRANDED"
+            )
+        ok, detail = master_renew(adapter=selected)
+        if not ok:
+            return False, f"heartbeat stopped after {beats} renewal(s): {detail}"
+        beats += 1
+        if max_beats is not None and beats >= max_beats:
+            return True, f"heartbeat stopped after {beats} renewal(s): beat limit reached"
+        sleep(interval)

@@ -2,7 +2,9 @@
 
 This guide is the shared lead method for substantial Jaune/Blanc work. The
 named goal defines product semantics; sibling `scripts/GATES.md` files define
-repository verification; Creme defines execution and evidence discipline.
+repository verification; Creme defines execution and evidence discipline. The
+layer above it — one master session that owns goals, workers, merges, and
+pushes on a host — is [the master guide](master.md).
 
 ## Start and reconcile
 
@@ -173,6 +175,15 @@ language-server memory is resident. When the host cannot be attributed at all,
 the line says `ATTRIBUTION_UNAVAILABLE` and no hold is called idle. A `LIGHT_ONLY` refusal for headroom names that memory and its owner;
 reclaim your own with `python3 -m creme reclaim --idle-workers MIN`, which
 reports every worker outside your ownership boundary instead of killing it.
+
+A hold's recorded pid is the launcher's and is normally gone the moment the
+hold exists, and `reclaim --dry-run` sees only the calling session's own Lean
+processes. Neither is evidence that another goal's hold is stale: only its
+owner's `wind-down` row in the log or a `STRANDED` line frees it. Between two
+`status` calls a changing pid or note means a live session moving between
+phases. For your own holds the same fact makes `STRANDED` and `IDLE_HOLD`
+false positives when you acquire in one shell call and work in another; keep
+the acquiring process alive across the unit or use the wrapper, which does.
 
 `python3 -m creme memory-headroom` is a read-only planning sample. It can
 justify moving light packets ahead of heavy ones, but only `adaptive-acquire`
@@ -379,9 +390,10 @@ It takes host exclusivity, keeps the dependency Git-pinned, and records the
 resolved revision on its ledger row.
 
 Inspect the full diff and status, stage only owned paths, commit coherent green
-checkpoints, and push only an authorized non-protected branch. Never
-force-push. Default/protected branch merges remain user-owned unless the goal
-explicitly authorizes a named exception.
+checkpoints, and push the goal's non-protected branch. Never force-push.
+Default/protected branch merges belong to the master under the merge policy in
+[the master guide](master.md); a worker hands its green candidate to the
+master rather than merging it.
 
 ## Context and completion
 
@@ -394,5 +406,5 @@ completed task list. Re-run drift-prone checks, close independent review
 findings, account for compatibility paths, and report branch/worktree/push
 state. Where the repository supports it, the verification evidence is a
 complete content-valid manifest rather than a claim that every body happened
-to re-execute. If a user-owned publication, license, or protected-merge gate
-remains, the goal remains open.
+to re-execute. If a user-owned publication or license gate remains, or the master has not
+yet merged the candidate under its policy, the goal remains open.

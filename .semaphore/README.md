@@ -30,8 +30,21 @@ reclaims only Lean candidates whose cwd is inside those roots, verifies that
 scope, and releases only the matching label. Other soft holders may wind down
 in any order; an uninspectable candidate fails closed before signalling.
 
-Existing installations keep using the legacy state directory until an explicit
-migration:
+One session at a time holds the master lease, kept in `state/master.json`
+under the same mutex. It charges no memory and never affects admission:
+
+```sh
+~/creme/.semaphore/semaphore master-acquire --client claude --note "why"
+~/creme/.semaphore/semaphore master-renew
+~/creme/.semaphore/semaphore master-release
+```
+
+A second `master-acquire` is refused while the lease is live. A lease whose
+window has passed is *lapsed* while its client process is still alive and
+*stranded* once that process is gone; `status` prints the take-over command,
+and `master-acquire --take-over` replaces only a lapsed or stranded lease.
+
+Existing installations keep using the legacy state directory until an explicit migration:
 
 ```sh
 ~/creme/.semaphore/semaphore migrate-state

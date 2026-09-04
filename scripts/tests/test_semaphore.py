@@ -2199,14 +2199,19 @@ class MasterLeaseTest(unittest.TestCase):
         semaphore.master_acquire("claude", "master")
         before = semaphore.master_snapshot()["lease"]
         self.as_client(os.getpid() + 100000, "claude")
-        ok, detail = semaphore.master_renew()
-        self.assertFalse(ok, detail)
-        ok, detail = semaphore.master_heartbeat(5, sleep=lambda s: None, max_beats=1)
-        self.assertFalse(ok)
-        self.assertIn("not authorized", detail)
-        ok, detail = semaphore.master_heartbeat_detached(5)
-        self.assertFalse(ok)
-        self.assertIn("not authorized", detail)
+        renew_ok, renew_detail = semaphore.master_renew()
+        foreground_ok, foreground_detail = semaphore.master_heartbeat(
+            5, sleep=lambda s: None, max_beats=1
+        )
+        with mock.patch("creme.semaphore.subprocess.Popen") as popen:
+            popen.return_value.pid = 424242
+            detached_ok, detached_detail = semaphore.master_heartbeat_detached(5)
+        self.assertFalse(renew_ok, renew_detail)
+        self.assertFalse(foreground_ok)
+        self.assertIn("not authorized", foreground_detail)
+        self.assertFalse(detached_ok)
+        self.assertIn("not authorized", detached_detail)
+        popen.assert_not_called()
         after = semaphore.master_snapshot()["lease"]
         self.assertEqual(after["renewed_at"], before["renewed_at"])
         self.assertEqual(after["heartbeat_renewals"], 0)

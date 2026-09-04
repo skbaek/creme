@@ -22,6 +22,7 @@ from .host_wrappers import (
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import idle_workers
 from . import master_operations
+from . import master_reconcile
 from . import master_runtime
 from . import semaphore
 from .task_wind_down import WorktreeScopeError, _goal_worktree_roots, wind_down
@@ -218,6 +219,7 @@ def cmd_master_start(arguments: argparse.Namespace) -> int:
         _json({"status": status, "detail": plan.detail})
         return 2
     try:
+        reconciliation = master_operations.reconcile_location(location)
         result = master_operations.start_master(
             location.record_root,
             client=arguments.client,
@@ -225,8 +227,13 @@ def cmd_master_start(arguments: argparse.Namespace) -> int:
             effort=arguments.effort,
             note=arguments.note,
             take_over=arguments.take_over,
+            reconciliation=reconciliation,
         )
-    except (master_operations.MasterOperationError, master_runtime.MasterRecordError) as exc:
+    except (
+        master_operations.MasterOperationError,
+        master_reconcile.ReconciliationError,
+        master_runtime.MasterRecordError,
+    ) as exc:
         _json({"status": "unavailable", "detail": str(exc)})
         return 2
     _json(result)
@@ -291,14 +298,24 @@ def cmd_master_digest(arguments: argparse.Namespace) -> int:
         _json({"schema_version": 1, "status": status, "detail": plan.detail})
         return 2
     try:
+        reconciliation = (
+            master_operations.reconcile_location(location)
+            if arguments.reconcile
+            else None
+        )
         digest = master_operations.digest_record(
             location.record_root,
             goals_limit=arguments.goals_limit,
             decisions_limit=arguments.decisions_limit,
             findings_limit=arguments.findings_limit,
             discrepancies_limit=arguments.discrepancies_limit,
+            live_reconciliation=reconciliation,
         )
-    except (master_operations.MasterOperationError, master_runtime.MasterRecordError) as exc:
+    except (
+        master_operations.MasterOperationError,
+        master_reconcile.ReconciliationError,
+        master_runtime.MasterRecordError,
+    ) as exc:
         _json({"schema_version": 1, "status": "unavailable", "detail": str(exc)})
         return 2
     if arguments.human:
@@ -821,6 +838,11 @@ def parser() -> argparse.ArgumentParser:
     master_digest.add_argument("--decisions-limit", type=_nonnegative, default=20)
     master_digest.add_argument("--findings-limit", type=_nonnegative, default=20)
     master_digest.add_argument("--discrepancies-limit", type=_nonnegative, default=20)
+    master_digest.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="compare the current board with configured Git/worktree facts without mutation",
+    )
     master_digest.add_argument("--human", action="store_true")
     master_digest.set_defaults(func=cmd_master_digest)
 

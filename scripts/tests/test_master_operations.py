@@ -130,6 +130,15 @@ class MasterOperationsTest(unittest.TestCase):
             self.creme, adapter=self.adapter
         )
         self.assertEqual(location.record_root, self.store / "master")
+        self.assertEqual(
+            dict(location.repository_roots),
+            {
+                "creme": self.creme,
+                "jaune": self.workspace / "jaune",
+                "blanc": self.workspace / "blanc",
+                "goal-store": self.store,
+            },
+        )
 
         self.write_profile(None)
         with self.assertRaisesRegex(master_operations.MasterOperationError, "not configured"):

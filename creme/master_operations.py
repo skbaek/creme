@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Union
 
-from . import master_runtime, semaphore
+from . import master_reconcile, master_runtime, semaphore
 from .adapters import Adapter, get_adapter
 from .doctor import STATUS_FAIL, check_goal_store
 from .profile import DEFAULT_RELATIVE_PROFILE, load as load_profile
@@ -29,6 +29,7 @@ class RuntimeLocation:
     workspace_root: Path
     goal_store: Path
     record_root: Path
+    repository_roots: tuple[tuple[str, Path], ...]
 
 
 @dataclass(frozen=True)
@@ -115,7 +116,25 @@ def resolve_runtime_location(
     record_root = _reject_symlink_traversal(store / "master", "master record root")
     if record_root.exists() and not record_root.is_dir():
         raise MasterOperationError("master record root exists with the wrong file type")
-    return RuntimeLocation(shared_root, workspace, store, record_root)
+    repository_roots = (
+        ("creme", shared_root),
+        ("jaune", _logical_absolute(workspace / profile["workspace"]["jaune"])),
+        ("blanc", _logical_absolute(workspace / profile["workspace"]["blanc"])),
+        ("goal-store", store),
+    )
+    return RuntimeLocation(shared_root, workspace, store, record_root, repository_roots)
+
+
+def reconcile_location(
+    location: RuntimeLocation,
+    *,
+    runner: master_reconcile.GitRunner = master_reconcile.run_git,
+) -> master_reconcile.ReconciliationResult:
+    return master_reconcile.reconcile_record(
+        location.record_root,
+        dict(location.repository_roots),
+        runner=runner,
+    )
 
 
 def _standard_actions(action: str, detail: str) -> tuple[InitAction, ...]:
@@ -281,6 +300,7 @@ def digest_record(
     decisions_limit: int = DEFAULT_DIGEST_LIMIT,
     findings_limit: int = DEFAULT_DIGEST_LIMIT,
     discrepancies_limit: int = DEFAULT_DIGEST_LIMIT,
+    live_reconciliation: Optional[master_reconcile.ReconciliationResult] = None,
     lease_snapshot: Snapshot = semaphore.master_snapshot,
     lease_status: LeaseStatus = semaphore.status_text,
 ) -> dict[str, Any]:
@@ -329,7 +349,7 @@ def digest_record(
         if master["action"] == "end"
         else "master"
     )
-    return {
+    digest = {
         "schema_version": DIGEST_SCHEMA_VERSION,
         "status": "OK",
         "role": {"recorded": recorded_role, "authoritative": False},
@@ -353,6 +373,17 @@ def digest_record(
         "last_durable_event": board["last_event"],
         "next_unit": board["next_unit"],
     }
+    if live_reconciliation is not None:
+        digest["live_reconciliation"] = {
+            "schema_version": master_reconcile.RECONCILIATION_SCHEMA_VERSION,
+            "repositories": list(live_reconciliation.repositories),
+            "discrepancies": _bounded(
+                live_reconciliation.discrepancies,
+                discrepancies_limit,
+                lambda row: f"{row['repository']}:{row['kind']}:{row['subject']}",
+            ),
+        }
+    return digest
 
 
 def render_digest_human(digest: dict[str, Any]) -> str:
@@ -368,6 +399,11 @@ def render_digest_human(digest: dict[str, Any]) -> str:
     for name in ("goals", "open_decisions", "open_audit_findings", "reconciliation_discrepancies"):
         section = digest[name]
         lines.append(f"{name}: {len(section['items'])} shown, {section['omitted']} omitted")
+    if "live_reconciliation" in digest:
+        live = digest["live_reconciliation"]["discrepancies"]
+        lines.append(
+            f"live_reconciliation: {len(live['items'])} shown, {live['omitted']} omitted"
+        )
     lines.append(f"next unit: {digest['next_unit'] or '<none>'}")
     return "\n".join(lines) + "\n"
 
@@ -398,6 +434,7 @@ def start_master(
     effort: str,
     note: str,
     take_over: bool = False,
+    reconciliation: Optional[master_reconcile.ReconciliationResult] = None,
     acquire: Acquire = semaphore.master_acquire,
     renew: Renew = semaphore.master_renew,
     release: Release = semaphore.master_release,
@@ -407,16 +444,18 @@ def start_master(
 ) -> dict[str, Any]:
     if not isinstance(client, str) or semaphore.CLIENT_LABEL.fullmatch(client) is None:
         raise MasterOperationError("client must be a short client label")
+    reconciliation_rows = [] if reconciliation is None else list(reconciliation.discrepancies)
     master_runtime.validate_payload("master", {
         "action": "start",
         "model": model,
         "effort": effort,
         "note": note,
         "next_unit": "",
-        "reconciliation": [],
+        "reconciliation": reconciliation_rows,
     })
     # Record validation happens before any lease operation.
-    master_runtime.read_record(root)
+    record_before = master_runtime.read_record(root)
+    next_unit = record_before.expected_board["next_unit"] or ""
     try:
         before = lease_snapshot()
     except Exception as exc:
@@ -443,7 +482,10 @@ def start_master(
                     holder = _holder(lease_snapshot(), "live" if state == "reader" else state)
                 except Exception:
                     holder = {"client": "unknown", "state": state}
-                return {"status": state, "holder": holder}
+                result = {"status": state, "holder": holder}
+                if reconciliation is not None:
+                    result["reconciliation"] = reconciliation.to_dict()
+                return result
             acquired_now = True
             mode = "taken-over" if take_over else "acquired"
     else:
@@ -457,7 +499,10 @@ def start_master(
                 holder = _holder(lease_snapshot(), "live" if state == "reader" else state)
             except Exception:
                 holder = {"client": "unknown", "state": state}
-            return {"status": state, "holder": holder}
+            result = {"status": state, "holder": holder}
+            if reconciliation is not None:
+                result["reconciliation"] = reconciliation.to_dict()
+            return result
         acquired_now = True
         mode = "acquired"
 
@@ -466,8 +511,8 @@ def start_master(
         "model": model,
         "effort": effort,
         "note": note,
-        "next_unit": "",
-        "reconciliation": [],
+        "next_unit": next_unit,
+        "reconciliation": reconciliation_rows,
     }
     writer = master_runtime.RecordWriter(
         root,
@@ -514,6 +559,7 @@ def start_master(
         )
     digest = digest_record(
         root,
+        live_reconciliation=reconciliation,
         lease_snapshot=lease_snapshot,
         lease_status=lease_status,
     )

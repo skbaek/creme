@@ -1506,7 +1506,9 @@ class MasterLeaseTest(unittest.TestCase):
                 (self.root / "log.jsonl").read_text(encoding="utf-8"),
             )
             before = semaphore.master_snapshot()["lease"]["renewed_at"]
-            ok, detail = semaphore.master_heartbeat(5, sleep=lambda _seconds: None)
+            ok, detail = semaphore.master_heartbeat(
+                5, sleep=lambda _seconds: None, max_beats=1
+            )
         self.assertTrue(ok, detail)
         self.assertIn("session listener is gone", detail)
         self.assertEqual(semaphore.master_snapshot()["lease"]["renewed_at"], before)
@@ -1573,15 +1575,15 @@ class MasterLeaseTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-a"}, clear=False):
             semaphore.master_acquire("codex", "first")
             predecessor = semaphore.master_snapshot()["lease"]
-        self.expire()
-        with mock.patch.dict(os.environ, {"CREME_MASTER_SESSION_ID": "session-b"}, clear=False):
+            ok, detail = semaphore.master_release()
+            self.assertTrue(ok, detail)
             ok, detail = semaphore.master_acquire("codex", "successor", take_over=True)
             self.assertTrue(ok, detail)
-        ok, detail = semaphore.master_renew(
-            as_session_digest=predecessor["session_digest"],
-            expected_lease_id=predecessor["lease_id"],
-            heartbeat=True,
-        )
+            ok, detail = semaphore.master_renew(
+                as_session_digest=predecessor["session_digest"],
+                expected_lease_id=predecessor["lease_id"],
+                heartbeat=True,
+            )
         self.assertFalse(ok)
         self.assertIn("lease changed", detail)
         self.assertEqual(semaphore.master_snapshot()["lease"]["note"], "successor")

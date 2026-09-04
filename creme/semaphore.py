@@ -2861,6 +2861,16 @@ def master_release(
     return True, f"master lease of {holder} released {how}"
 
 
+def _master_heartbeat_starter_authorized(
+    current: dict[str, Any],
+    client_pid: Optional[int],
+    session_digest: Optional[str],
+    client_family: Optional[str],
+) -> bool:
+    """Return true only when the direct parent/foreground caller is the holder."""
+    return _same_client(current, client_pid, session_digest, client_family) is True
+
+
 def _authenticate_master_heartbeat_start(
     adapter: Optional[Adapter] = None,
 ) -> tuple[bool, str, Optional[_HeartbeatBinding]]:
@@ -2872,8 +2882,9 @@ def _authenticate_master_heartbeat_start(
         current = _load_master(path.parent)["lease"]
         if current is None:
             return False, "no master lease exists; run master-acquire first", None
-        same = _same_client(current, client_pid, session.digest, family)
-        if same is not True:
+        if not _master_heartbeat_starter_authorized(
+            current, client_pid, session.digest, family
+        ):
             detail = (
                 f"the master lease belongs to {_master_holder_text(current)}; "
                 f"heartbeat start from this invocation is not authorized: {found}"
@@ -2901,8 +2912,9 @@ def _prepare_master_heartbeat_launch(
         current = data["lease"]
         if current is None:
             return False, "no master lease exists; run master-acquire first", None
-        same = _same_client(current, client_pid, session.digest, family)
-        if same is not True:
+        if not _master_heartbeat_starter_authorized(
+            current, client_pid, session.digest, family
+        ):
             detail = (
                 f"the master lease belongs to {_master_holder_text(current)}; "
                 f"detached heartbeat start from this invocation is not authorized: {found}"

@@ -4,8 +4,10 @@ import contextlib
 import fcntl
 import hashlib
 import os
+import re
 import secrets
 import shutil
+import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Optional, Sequence
@@ -23,6 +25,11 @@ LEGACY_CORE_FILES = ("README.md", "board.md", "log.md")
 LEGACY_DIRECTORIES = master_runtime.PRIVATE_DIRECTORIES
 MAX_LEGACY_FILES = 4096
 MAX_LEGACY_BYTES = master_runtime.MAX_LOG_BYTES
+
+_ROOT_TEMP = re.compile(
+    r"^\.(?:migration\.json|README\.md|events\.jsonl|board\.json)\.[0-9a-f]{16}\.tmp$"
+)
+_BACKUP_TEMP = re.compile(r"^\.[0-9a-f]{64}\.[0-9a-f]{16}\.tmp$")
 
 
 class MigrationError(RuntimeError):
@@ -215,6 +222,46 @@ def _interpreted_snapshot(
     )
 
 
+def _orphan_temp_paths(root: Path) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    try:
+        root_entries = list(root.iterdir())
+    except OSError as exc:
+        raise MigrationError(f"could not inventory migration temporaries: {exc}") from exc
+    for entry in root_entries:
+        if _ROOT_TEMP.fullmatch(entry.name):
+            _private_file(entry)
+            paths.append(entry)
+    backup_root = root / BACKUP_ROOT_NAME
+    if backup_root.exists():
+        _private_directory(backup_root)
+        try:
+            backup_entries = list(backup_root.iterdir())
+        except OSError as exc:
+            raise MigrationError(f"could not inventory backup temporaries: {exc}") from exc
+        for entry in backup_entries:
+            if _BACKUP_TEMP.fullmatch(entry.name):
+                _private_directory(entry)
+                master_runtime._validate_private_tree(entry)
+                paths.append(entry)
+    return tuple(sorted(paths, key=lambda path: str(path)))
+
+
+def _cleanup_orphan_temps(
+    root: Path,
+    *,
+    fault: Optional[FaultInjector],
+) -> None:
+    for index, path in enumerate(_orphan_temp_paths(root)):
+        _fault(fault, f"recovery-temp-{index}:before-remove")
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        master_runtime._fsync_directory(path.parent)
+        _fault(fault, f"recovery-temp-{index}:after-remove")
+
+
 def _scan_legacy(root: Path) -> LegacySnapshot:
     root = master_runtime._normalized_root(root)
     _private_directory(root)
@@ -228,7 +275,10 @@ def _scan_legacy(root: Path) -> LegacySnapshot:
         top_level = sorted(root.iterdir(), key=lambda path: path.name)
     except OSError as exc:
         raise MigrationError(f"could not inventory legacy record: {exc}") from exc
+    orphan_names = {path.name for path in _orphan_temp_paths(root) if path.parent == root}
     for entry in top_level:
+        if entry.name in orphan_names:
+            continue
         if entry.name in {
             MIGRATION_REPORT_NAME,
             master_runtime.EVENTS_NAME,
@@ -493,7 +543,11 @@ def _verified_report(root: Path) -> tuple[dict[str, Any], bytes, LegacySnapshot]
     backup_root = root / BACKUP_ROOT_NAME
     _private_directory(backup_root)
     try:
-        backup_entries = sorted(entry.name for entry in backup_root.iterdir())
+        backup_entries = sorted(
+            entry.name
+            for entry in backup_root.iterdir()
+            if _BACKUP_TEMP.fullmatch(entry.name) is None
+        )
     except OSError as exc:
         raise MigrationError(f"could not inspect migration backup namespace: {exc}") from exc
     if backup_entries != [report["backup"]["id"]]:
@@ -513,6 +567,142 @@ def _verified_report(root: Path) -> tuple[dict[str, Any], bytes, LegacySnapshot]
     if report != expected:
         raise MigrationError("migration report does not match the verified backup interpretation")
     return report, report_bytes, snapshot
+
+
+def _read_private_bytes(path: Path, context: str) -> bytes:
+    _private_file(path)
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise MigrationError(f"could not read {context}: {exc}") from exc
+
+
+def _verify_snapshot_boundary(
+    root: Path,
+    snapshot: LegacySnapshot,
+    *,
+    current_readme: bool,
+) -> None:
+    """Verify the legacy source on the prepared side of the authority marker.
+
+    The complete migration report is the atomic handoff marker.  This check is
+    run on both sides of publishing it, so a writer in any publication window
+    either changes the prepared source and refuses or lands after the handoff
+    as a separately owned current-runtime input.  Root legacy core files remain
+    sealed against the backup after completion as well.
+    """
+    expected_files = {item.path: item for item in snapshot.files}
+    known_root_names = {
+        *LEGACY_CORE_FILES,
+        *LEGACY_DIRECTORIES,
+        master_runtime.LOCK_NAME,
+        master_runtime.EVENTS_NAME,
+        master_runtime.BOARD_NAME,
+        MIGRATION_REPORT_NAME,
+        BACKUP_ROOT_NAME,
+    }
+    known_root_names.update(
+        path.name for path in _orphan_temp_paths(root) if path.parent == root
+    )
+    try:
+        observed_root_names = {entry.name for entry in root.iterdir()}
+    except OSError as exc:
+        raise MigrationError(f"could not inventory prepared migration root: {exc}") from exc
+    unexpected = sorted(observed_root_names - known_root_names)
+    if unexpected:
+        raise MigrationError(f"unexpected path appeared during migration: {unexpected[0]}")
+
+    readme = root / master_runtime.README_NAME
+    legacy_readme = expected_files.get(master_runtime.README_NAME)
+    if readme.exists():
+        data = _read_private_bytes(readme, "migration README")
+        permitted = {master_runtime._README.encode("utf-8")}
+        if not current_readme and legacy_readme is not None:
+            permitted.add(legacy_readme.data)
+        if data not in permitted:
+            raise MigrationError("migration README changed outside the authority handoff")
+    elif current_readme or legacy_readme is not None:
+        raise MigrationError("migration README disappeared during authority handoff")
+
+    for name in ("log.md", "board.md"):
+        expected = expected_files.get(name)
+        path = root / name
+        if expected is None:
+            if path.exists() or path.is_symlink():
+                raise MigrationError(f"legacy source {name} appeared during migration")
+            continue
+        if _read_private_bytes(path, f"legacy source {name}") != expected.data:
+            raise MigrationError(f"legacy source {name} changed during migration")
+
+    expected_private_files = {
+        path: item
+        for path, item in expected_files.items()
+        if PurePosixPath(path).parts[0] in LEGACY_DIRECTORIES
+    }
+    expected_private_directories = set(snapshot.directories) | set(LEGACY_DIRECTORIES)
+    observed_private_files: dict[str, bytes] = {}
+    observed_private_directories: set[str] = set()
+    for name in LEGACY_DIRECTORIES:
+        top = root / name
+        if not top.exists():
+            raise MigrationError(f"private migration directory {name} is missing")
+        _private_directory(top)
+        observed_private_directories.add(name)
+        pending = [top]
+        while pending:
+            directory = pending.pop()
+            try:
+                entries = list(os.scandir(directory))
+            except OSError as exc:
+                raise MigrationError(
+                    f"could not inventory private migration directory {directory.name}: {exc}"
+                ) from exc
+            for entry in entries:
+                path = Path(entry.path)
+                relative = path.relative_to(root).as_posix()
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise MigrationError(
+                        f"could not inspect legacy path {relative}: {exc}"
+                    ) from exc
+                if stat.S_ISLNK(info.st_mode):
+                    raise MigrationError(f"legacy path {relative} must not be a symlink")
+                if stat.S_ISDIR(info.st_mode):
+                    _private_directory(path)
+                    observed_private_directories.add(relative)
+                    pending.append(path)
+                elif stat.S_ISREG(info.st_mode):
+                    observed_private_files[relative] = _read_private_bytes(
+                        path, f"legacy path {relative}"
+                    )
+                else:
+                    raise MigrationError(
+                        f"legacy path {relative} must be a regular file or directory"
+                    )
+    if observed_private_directories != expected_private_directories:
+        raise MigrationError("legacy private directory population changed during migration")
+    if set(observed_private_files) != set(expected_private_files):
+        raise MigrationError("legacy private file population changed during migration")
+    for relative, expected in expected_private_files.items():
+        if observed_private_files[relative] != expected.data:
+            raise MigrationError(f"legacy source {relative} changed during migration")
+
+
+def _verify_completed_legacy_core(root: Path, snapshot: LegacySnapshot) -> None:
+    """Keep obsolete root-level writer paths sealed after the handoff."""
+    expected = {item.path: item for item in snapshot.files}
+    readme = _read_private_bytes(root / master_runtime.README_NAME, "migration README")
+    if readme != master_runtime._README.encode("utf-8"):
+        raise MigrationError("current migration README does not match the runtime guide")
+    for name in ("log.md", "board.md"):
+        item = expected.get(name)
+        path = root / name
+        if item is None:
+            if path.exists() or path.is_symlink():
+                raise MigrationError(f"obsolete legacy writer path {name} reappeared")
+        elif _read_private_bytes(path, f"retained legacy source {name}") != item.data:
+            raise MigrationError(f"retained legacy source {name} changed after migration")
 
 
 def _current_view(root: Path) -> Optional[master_runtime.RecordView]:
@@ -548,9 +738,25 @@ def _idempotent_plan(root: Path) -> Optional[MigrationPlan]:
         return MigrationPlan("REFUSED", str(exc), None, None, (), (), (), ())
     backup_id = report["backup"]["id"]
     if current is None:
+        if report["status"] == "prepared":
+            return MigrationPlan(
+                "FINALIZE",
+                "prepared migration and backup verify; reconstruct and complete with --apply",
+                report["source_snapshot_sha256"],
+                backup_id,
+                (
+                    MigrationAction(master_runtime.README_NAME, "create-or-replace", "current runtime guide"),
+                    MigrationAction(master_runtime.EVENTS_NAME, "create-or-keep", "translated event log"),
+                    MigrationAction(master_runtime.BOARD_NAME, "create-or-keep", "deterministic board"),
+                    MigrationAction(MIGRATION_REPORT_NAME, "replace", "mark prepared report complete"),
+                ),
+                tuple(report["translations"]),
+                tuple(report["retained_artifacts"]),
+                tuple(report["ambiguities"]),
+            )
         return MigrationPlan(
             "REFUSED",
-            "prepared migration is incomplete; legacy source remains authoritative",
+            "complete migration has no verifiable structured record",
             report["source_snapshot_sha256"],
             backup_id,
             (),
@@ -570,12 +776,38 @@ def _idempotent_plan(root: Path) -> Optional[MigrationPlan]:
             tuple(report["ambiguities"]),
         )
     if report["status"] == "prepared":
+        try:
+            _verify_snapshot_boundary(root, snapshot, current_readme=True)
+        except MigrationError as exc:
+            return MigrationPlan(
+                "REFUSED",
+                str(exc),
+                report["source_snapshot_sha256"],
+                backup_id,
+                (),
+                tuple(report["translations"]),
+                tuple(report["retained_artifacts"]),
+                tuple(report["ambiguities"]),
+            )
         return MigrationPlan(
             "FINALIZE",
             "structured record and backup verify; complete the prepared report with --apply",
             report["source_snapshot_sha256"],
             backup_id,
             (MigrationAction(MIGRATION_REPORT_NAME, "replace", "mark prepared report complete"),),
+            tuple(report["translations"]),
+            tuple(report["retained_artifacts"]),
+            tuple(report["ambiguities"]),
+        )
+    try:
+        _verify_completed_legacy_core(root, snapshot)
+    except MigrationError as exc:
+        return MigrationPlan(
+            "REFUSED",
+            str(exc),
+            report["source_snapshot_sha256"],
+            backup_id,
+            (),
             tuple(report["translations"]),
             tuple(report["retained_artifacts"]),
             tuple(report["ambiguities"]),
@@ -598,7 +830,11 @@ def _backup_namespace_is_available(root: Path, backup_id: str) -> bool:
         return True
     _private_directory(backup_root)
     try:
-        entries = list(backup_root.iterdir())
+        entries = [
+            entry
+            for entry in backup_root.iterdir()
+            if _BACKUP_TEMP.fullmatch(entry.name) is None
+        ]
     except OSError as exc:
         raise MigrationError(f"could not inspect backup namespace: {exc}") from exc
     if not entries:
@@ -685,9 +921,46 @@ def plan_migration(root: Path) -> MigrationPlan:
     try:
         root = master_runtime._normalized_root(root)
         _private_directory(root)
+        orphan_temps = _orphan_temp_paths(root)
         idempotent = _idempotent_plan(root)
         if idempotent is not None:
-            return idempotent
+            if not orphan_temps:
+                return idempotent
+            if idempotent.status == "CURRENT":
+                return MigrationPlan(
+                    "FINALIZE",
+                    "remove verified orphaned migration temporaries with --apply",
+                    idempotent.source_snapshot_sha256,
+                    idempotent.backup_id,
+                    tuple(
+                        MigrationAction(
+                            path.relative_to(root).as_posix(),
+                            "remove",
+                            "verified private temporary from an interrupted migration",
+                        )
+                        for path in orphan_temps
+                    ),
+                    idempotent.translations,
+                    idempotent.retained_artifacts,
+                    idempotent.ambiguities,
+                )
+            return MigrationPlan(
+                idempotent.status,
+                idempotent.detail,
+                idempotent.source_snapshot_sha256,
+                idempotent.backup_id,
+                tuple(
+                    MigrationAction(
+                        path.relative_to(root).as_posix(),
+                        "remove",
+                        "verified private temporary from an interrupted migration",
+                    )
+                    for path in orphan_temps
+                ) + idempotent.actions,
+                idempotent.translations,
+                idempotent.retained_artifacts,
+                idempotent.ambiguities,
+            )
         snapshot = _scan_legacy(root)
         backup_id = snapshot.source_snapshot_sha256
         create_backup = _backup_namespace_is_available(root, backup_id)
@@ -696,7 +969,14 @@ def plan_migration(root: Path) -> MigrationPlan:
             "legacy migration preview; rerun with --apply while holding the schema-3 lease",
             snapshot.source_snapshot_sha256,
             backup_id,
-            _migration_actions(snapshot, backup_id, create_backup=create_backup),
+            tuple(
+                MigrationAction(
+                    path.relative_to(root).as_posix(),
+                    "remove",
+                    "verified private temporary from an interrupted migration",
+                )
+                for path in orphan_temps
+            ) + _migration_actions(snapshot, backup_id, create_backup=create_backup),
             snapshot.translations,
             snapshot.retained_artifacts,
             snapshot.ambiguities,
@@ -833,6 +1113,75 @@ def _atomic_report(
     )
 
 
+def _publish_or_keep(
+    path: Path,
+    data: bytes,
+    *,
+    label: str,
+    fault: Optional[FaultInjector],
+) -> None:
+    if path.exists() or path.is_symlink():
+        if _read_private_bytes(path, label) != data:
+            raise MigrationError(f"existing {path.name} conflicts with prepared migration")
+        return
+    master_runtime._atomic_replace(path, data, label=label, fault=fault)
+
+
+def _publish_prepared_runtime(
+    root: Path,
+    snapshot: LegacySnapshot,
+    *,
+    fault: Optional[FaultInjector],
+) -> master_runtime.RecordView:
+    for index, directory in enumerate(LEGACY_DIRECTORIES):
+        path = root / directory
+        if not path.exists():
+            _fault(fault, f"runtime-directory-{index}:before-create")
+            _mkdir_private(path)
+            master_runtime._fsync_directory(root)
+            _fault(fault, f"runtime-directory-{index}:after-create")
+        else:
+            _private_directory(path)
+
+    _verify_snapshot_boundary(root, snapshot, current_readme=False)
+    readme_path = root / master_runtime.README_NAME
+    readme_bytes = master_runtime._README.encode("utf-8")
+    if not readme_path.exists() or _read_private_bytes(readme_path, "migration README") != readme_bytes:
+        master_runtime._atomic_replace(
+            readme_path,
+            readme_bytes,
+            label="migration-readme",
+            fault=fault,
+        )
+
+    events: list[dict[str, Any]] = []
+    for row in snapshot.translated_log.splitlines(keepends=True):
+        events.append(
+            master_runtime.validate_event(
+                master_runtime._strict_json(row, "translated event")
+            )
+        )
+    board_bytes = master_runtime.render_board(events)
+    _publish_or_keep(
+        root / master_runtime.EVENTS_NAME,
+        snapshot.translated_log,
+        label="migration-log",
+        fault=fault,
+    )
+    _fault(fault, "migration:after-log-commit")
+    _publish_or_keep(
+        root / master_runtime.BOARD_NAME,
+        board_bytes,
+        label="migration-board",
+        fault=fault,
+    )
+    _verify_snapshot_boundary(root, snapshot, current_readme=True)
+    current = master_runtime.read_record(root)
+    if not current.board_current or current.log_bytes != snapshot.translated_log:
+        raise MigrationError("published structured record does not match prepared migration")
+    return current
+
+
 def _finalize_prepared(
     root: Path,
     *,
@@ -841,14 +1190,22 @@ def _finalize_prepared(
     report, _, snapshot = _verified_report(root)
     if report["status"] != "prepared":
         raise MigrationError("migration report is not prepared")
-    current = master_runtime.read_record(root)
-    if current.log_bytes != snapshot.translated_log:
+    current = _publish_prepared_runtime(root, snapshot, fault=fault)
+    if current.expected_board["source"]["log_digest"] != report["translated_log_sha256"]:
         raise MigrationError("structured log does not match prepared migration report")
+    # This is the last check on the prepared side.  The atomic report replace
+    # below is the authority handoff; the same snapshot is checked immediately
+    # after it so every injected publication window is covered on one side.
+    _verify_snapshot_boundary(root, snapshot, current_readme=True)
     complete = {**report, "status": "complete"}
     _atomic_report(root, complete, label="migration-report-complete", fault=fault)
     verified, _, _ = _verified_report(root)
     if verified["status"] != "complete":
         raise MigrationError("migration report did not become complete")
+    _verify_snapshot_boundary(root, snapshot, current_readme=True)
+    current = master_runtime.read_record(root)
+    if not current.board_current or current.log_bytes != snapshot.translated_log:
+        raise MigrationError("completed structured record no longer matches its handoff")
     return MigrationPlan(
         "OK",
         "prepared migration report completed and verified",
@@ -885,7 +1242,19 @@ def migrate(
     try:
         _renew_or_refuse(renew)
         with _migration_lock(root, renew, fault):
+            _cleanup_orphan_temps(root, fault=fault)
             locked = plan_migration(root)
+            if locked.status == "CURRENT" and preview.status == "FINALIZE":
+                return MigrationPlan(
+                    "OK",
+                    "orphaned migration temporaries removed; current record verified",
+                    locked.source_snapshot_sha256,
+                    locked.backup_id,
+                    preview.actions,
+                    locked.translations,
+                    locked.retained_artifacts,
+                    locked.ambiguities,
+                )
             if locked.status == "FINALIZE":
                 return _finalize_prepared(root, fault=fault)
             if locked.status != "PREVIEW":
@@ -917,60 +1286,12 @@ def migrate(
                 label="migration-report-prepared",
                 fault=fault,
             )
-            for index, directory in enumerate(LEGACY_DIRECTORIES):
-                path = root / directory
-                if not path.exists():
-                    _fault(fault, f"runtime-directory-{index}:before-create")
-                    _mkdir_private(path)
-                    master_runtime._fsync_directory(root)
-                    _fault(fault, f"runtime-directory-{index}:after-create")
-                else:
-                    _private_directory(path)
-            master_runtime._atomic_replace(
-                root / master_runtime.README_NAME,
-                master_runtime._README.encode("utf-8"),
-                label="migration-readme",
-                fault=fault,
-            )
-            events: list[dict[str, Any]] = []
-            for row in snapshot.translated_log.splitlines(keepends=True):
-                events.append(
-                    master_runtime.validate_event(
-                        master_runtime._strict_json(row, "translated event")
-                    )
-                )
-            board_bytes = master_runtime.render_board(events)
-            master_runtime._atomic_replace(
-                root / master_runtime.EVENTS_NAME,
-                snapshot.translated_log,
-                label="migration-log",
-                fault=fault,
-            )
-            _fault(fault, "migration:after-log-commit")
-            master_runtime._atomic_replace(
-                root / master_runtime.BOARD_NAME,
-                board_bytes,
-                label="migration-board",
-                fault=fault,
-            )
-            current = master_runtime.read_record(root)
-            if current.expected_board["source"]["log_digest"] != prepared["translated_log_sha256"]:
-                raise MigrationError("published structured record does not match migration report")
-            complete = {**prepared, "status": "complete"}
-            _atomic_report(
-                root,
-                complete,
-                label="migration-report-complete",
-                fault=fault,
-            )
-            verified, _, _ = _verified_report(root)
-            if verified["status"] != "complete":
-                raise MigrationError("completed migration did not verify")
+            completed = _finalize_prepared(root, fault=fault)
             return MigrationPlan(
                 "OK",
                 "legacy record migrated with a verified byte-identical backup",
-                snapshot.source_snapshot_sha256,
-                backup_id,
+                completed.source_snapshot_sha256,
+                completed.backup_id,
                 tuple(
                     MigrationAction(
                         action.path,
@@ -985,9 +1306,9 @@ def migrate(
                     )
                     for action in locked.actions
                 ),
-                snapshot.translations,
-                snapshot.retained_artifacts,
-                snapshot.ambiguities,
+                completed.translations,
+                completed.retained_artifacts,
+                completed.ambiguities,
             )
     except Exception as exc:
         return MigrationPlan(

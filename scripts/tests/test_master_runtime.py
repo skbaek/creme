@@ -366,6 +366,54 @@ class MasterRuntimeTest(unittest.TestCase):
             self.writer().append("note", self.note_payload())
         self.assertEqual(self.core_bytes(), before)
 
+    def test_unsafe_nested_private_nodes_refuse_current_without_mutation(self):
+        cases = ("symlink", "file-mode", "directory-mode", "hardlink", "fifo")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                master_runtime.initialize_empty_record(root)
+                nested = root / "intent" / "nested"
+                nested.mkdir(mode=0o700)
+                outside = root.parent / f"outside-{case}"
+                outside.write_bytes(b"private\n")
+                os.chmod(outside, 0o600)
+                candidate = nested / "candidate"
+                if case == "symlink":
+                    candidate.symlink_to(outside)
+                elif case == "file-mode":
+                    candidate.write_bytes(b"private\n")
+                    os.chmod(candidate, 0o644)
+                elif case == "directory-mode":
+                    candidate.mkdir(mode=0o755)
+                elif case == "hardlink":
+                    os.link(outside, candidate)
+                else:
+                    os.mkfifo(candidate, 0o600)
+
+                def snapshot():
+                    rows = []
+                    for path in [root, *sorted(root.rglob("*"))]:
+                        info = path.lstat()
+                        data = None
+                        if stat.S_ISREG(info.st_mode):
+                            data = path.read_bytes()
+                        elif stat.S_ISLNK(info.st_mode):
+                            data = os.readlink(path).encode("utf-8")
+                        rows.append(
+                            (
+                                path.relative_to(root).as_posix(),
+                                info.st_mode,
+                                info.st_nlink,
+                                data,
+                            )
+                        )
+                    return rows
+
+                before = snapshot()
+                with self.assertRaises(master_runtime.MasterRecordError):
+                    master_runtime.read_record(root)
+                self.assertEqual(snapshot(), before)
+
     def test_boolean_board_version_is_not_an_integer_schema(self):
         board_path = self.root / master_runtime.BOARD_NAME
         malformed = board_path.read_bytes().replace(b'"schema_version":1', b'"schema_version":true')

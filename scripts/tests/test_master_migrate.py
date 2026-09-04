@@ -352,22 +352,22 @@ class MasterMigrationTest(unittest.TestCase):
                 self.assertEqual(result.status, "REFUSED")
                 self.assertEqual((root / "log.md").read_bytes(), originals["log.md"])
                 classified = master_migrate.plan_migration(root)
-                self.assertIn(
-                    classified.status, {"PREVIEW", "FINALIZE", "CURRENT", "REFUSED"}
+                self.assertIn(classified.status, {"PREVIEW", "FINALIZE", "CURRENT"})
+                if classified.status != "CURRENT":
+                    recovered = master_migrate.migrate(
+                        root, apply=True, renew=lambda: (True, "holder")
+                    )
+                    self.assertEqual(recovered.status, "OK")
+                current = master_migrate.plan_migration(root)
+                self.assertEqual(current.status, "CURRENT")
+                self.assertEqual(
+                    master_operations.plan_initialization(
+                        SimpleNamespace(record_root=root)
+                    ).status,
+                    "CURRENT",
                 )
-                ordinary = master_operations.plan_initialization(
-                    SimpleNamespace(record_root=root)
-                )
-                if classified.status == "CURRENT":
-                    self.assertEqual(ordinary.status, "CURRENT")
-                    self.assertTrue(master_runtime.read_record(root).board_current)
-                    master_migrate.verify_backup(root, classified.backup_id)
-                elif classified.status == "FINALIZE":
-                    self.assertEqual(ordinary.status, "MIGRATION_REQUIRED")
-                    self.assertTrue(master_runtime.read_record(root).board_current)
-                    master_migrate.verify_backup(root, classified.backup_id)
-                else:
-                    self.assertNotEqual(ordinary.status, "CURRENT")
+                self.assertTrue(master_runtime.read_record(root).board_current)
+                master_migrate.verify_backup(root, current.backup_id)
 
     def test_process_death_at_every_boundary_leaves_legacy_or_verified_current(self):
         stages: list[str] = []
@@ -390,19 +390,16 @@ class MasterMigrationTest(unittest.TestCase):
                 self.assertEqual(process.exitcode, 73)
                 self.assertEqual((root / "log.md").read_bytes(), originals["log.md"])
                 classified = master_migrate.plan_migration(root)
-                self.assertIn(
-                    classified.status, {"PREVIEW", "FINALIZE", "CURRENT", "REFUSED"}
-                )
-                if classified.status in {"FINALIZE", "CURRENT"}:
-                    self.assertTrue(master_runtime.read_record(root).board_current)
-                    master_migrate.verify_backup(root, classified.backup_id)
-                else:
-                    self.assertNotEqual(
-                        master_operations.plan_initialization(
-                            SimpleNamespace(record_root=root)
-                        ).status,
-                        "CURRENT",
+                self.assertIn(classified.status, {"PREVIEW", "FINALIZE", "CURRENT"})
+                if classified.status != "CURRENT":
+                    recovered = master_migrate.migrate(
+                        root, apply=True, renew=lambda: (True, "holder")
                     )
+                    self.assertEqual(recovered.status, "OK")
+                current = master_migrate.plan_migration(root)
+                self.assertEqual(current.status, "CURRENT")
+                self.assertTrue(master_runtime.read_record(root).board_current)
+                master_migrate.verify_backup(root, current.backup_id)
 
     def test_ignored_fixture_git_state_is_unchanged_by_preview_and_apply(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -540,6 +537,53 @@ class MasterMigrationTest(unittest.TestCase):
             self.assertEqual(sorted(result.status for result in results), ["OK", "REFUSED"])
             self.assertEqual(master_migrate.plan_migration(root).status, "CURRENT")
             self.assertTrue(master_runtime.read_record(root).board_current)
+
+    def test_late_legacy_writes_cannot_cross_the_atomic_authority_handoff(self):
+        stages = (
+            "migration-readme:after-replace",
+            "migration-log:after-replace",
+            "migration-board:after-replace",
+            "migration-report-complete:after-replace",
+        )
+        for stage in stages:
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                originals = self.make_legacy(root)
+                late = self.event(3)
+
+                def write_late(candidate: str):
+                    if candidate == stage:
+                        (root / "log.md").write_bytes(originals["log.md"] + late)
+                        os.chmod(root / "log.md", 0o600)
+
+                result = master_migrate.migrate(
+                    root,
+                    apply=True,
+                    renew=lambda: (True, "holder"),
+                    fault=write_late,
+                )
+                self.assertEqual(result.status, "REFUSED")
+                self.assertEqual((root / "log.md").read_bytes(), originals["log.md"] + late)
+                self.assertEqual(master_migrate.plan_migration(root).status, "REFUSED")
+                self.assertNotEqual(
+                    master_operations.plan_initialization(
+                        SimpleNamespace(record_root=root)
+                    ).status,
+                    "CURRENT",
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / "master"
+            originals = self.make_legacy(root)
+            self.assertEqual(
+                master_migrate.migrate(
+                    root, apply=True, renew=lambda: (True, "holder")
+                ).status,
+                "OK",
+            )
+            (root / "log.md").write_bytes(originals["log.md"] + self.event(3))
+            os.chmod(root / "log.md", 0o600)
+            self.assertEqual(master_migrate.plan_migration(root).status, "REFUSED")
 
 
 if __name__ == "__main__":

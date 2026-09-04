@@ -257,7 +257,14 @@ def _branch_upstream(
         return upstream, missing, None, None
     counts = runner(root, ["rev-list", "--left-right", "--count", f"{ref}...{upstream}"])
     if counts.returncode != 0:
-        return upstream, True, None, None
+        # A nonzero rev-list is not evidence that the upstream disappeared.
+        # Recheck the exact ref with Git's quiet presence contract so permission,
+        # corruption, timeout-like, and other failures remain inaccessible.
+        presence = runner(root, ["show-ref", "--verify", "--quiet", upstream])
+        upstream_exists = _quiet_presence(presence, "Git upstream ref")
+        if not upstream_exists:
+            return upstream, True, None, None
+        raise ReconciliationError("Git ahead/behind counts are inaccessible")
     parts = _decode(counts.stdout).split()
     if len(parts) != 2 or not all(part.isdigit() for part in parts):
         raise ReconciliationError("Git returned malformed ahead/behind counts")
@@ -484,12 +491,23 @@ def _candidate_path(root: Path, recorded: str) -> Optional[Path]:
     return candidate
 
 
+def _quiet_presence(result: GitResult, what: str) -> bool:
+    if result.returncode == 0 and not result.stdout and not result.stderr:
+        return True
+    if result.returncode == 1 and not result.stdout and not result.stderr:
+        return False
+    raise ReconciliationError(f"{what} presence is inaccessible")
+
+
 def _ref_exists(root: Path, ref: str, runner: GitRunner) -> Optional[bool]:
     try:
         result = runner(root, ["show-ref", "--verify", "--quiet", f"refs/heads/{ref}"])
     except ReconciliationError:
         return None
-    return result.returncode == 0
+    try:
+        return _quiet_presence(result, "Git branch ref")
+    except ReconciliationError:
+        return None
 
 
 def _commit_exists(root: Path, commit: str, runner: GitRunner) -> Optional[bool]:
@@ -499,7 +517,12 @@ def _commit_exists(root: Path, commit: str, runner: GitRunner) -> Optional[bool]
         result = runner(root, ["cat-file", "-e", f"{commit}^{{commit}}"])
     except ReconciliationError:
         return None
-    return result.returncode == 0
+    if result.returncode == 0 and not result.stdout and not result.stderr:
+        return True
+    expected_missing = f"fatal: Not a valid object name {commit}^{{commit}}\n".encode("ascii")
+    if result.returncode == 128 and not result.stdout and result.stderr == expected_missing:
+        return False
+    return None
 
 
 def reconcile_record(

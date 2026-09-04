@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import json
 import random
 import tempfile
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional
 from unittest import mock
 
-from creme import master_operations, master_runtime, semaphore
+from creme import master_migrate, master_operations, master_runtime, semaphore
 from creme.adapters.base import Adapter
 
 
@@ -84,6 +85,8 @@ class ReferenceModel:
         self.events: list[tuple[str, int]] = []
         self.started: set[int] = set()
         self.board_current = True
+        self.lease_encoding = "current"
+        self.record_encoding = "current"
 
     def _principal(self, name: str) -> Principal:
         return self.principals[name]
@@ -127,14 +130,18 @@ class ReferenceModel:
             liveness_digest=liveness,
         )
         self.pending = None
+        self.lease_encoding = "current"
 
     def _direct_renew(self, name: str) -> bool:
+        if self.lease_encoding == "malformed":
+            return False
         if not self._same_holder(name):
             return False
         assert self.lease is not None
         self.lease.expires_at = self.now + LEASE_SECONDS
         self.lease.direct_activity_at = self.now
         self.lease.heartbeat_renewals = 0
+        self.lease_encoding = "current"
         return True
 
     def _record_event(self, kind: str) -> None:
@@ -144,6 +151,48 @@ class ReferenceModel:
 
     def transition(self, action: Action) -> str:
         name = action.principal
+        if action.operation == "kill":
+            pid = self._principal(name).pid
+            if pid is not None:
+                self.alive.discard(pid)
+            return "ok"
+        if action.operation == "legacy-lease":
+            if self.lease is not None or self.lease_encoding == "malformed":
+                return "refused"
+            if self._principal(name).pid is None:
+                return "refused"
+            self._new_lease(name)
+            self.lease_encoding = "legacy"
+            return "ok"
+        if action.operation == "malformed-lease":
+            if self.lease is not None:
+                return "refused"
+            self.lease_encoding = "malformed"
+            return "ok"
+        if action.operation == "legacy-record":
+            if self.record_encoding != "current":
+                return "refused"
+            self.record_encoding = "legacy"
+            self.board_current = False
+            return "ok"
+        if action.operation == "malformed-record":
+            if self.record_encoding != "current":
+                return "refused"
+            self.record_encoding = "malformed"
+            self.board_current = False
+            return "ok"
+        if action.operation == "post-log-crash":
+            if self.record_encoding != "current" or not self._direct_renew(name):
+                return "refused"
+            self._record_event("note")
+            self.board_current = False
+            return "crash"
+        if action.operation == "migrate-record":
+            if self.record_encoding != "legacy" or not self._direct_renew(name):
+                return "refused"
+            self.record_encoding = "current"
+            self.board_current = True
+            return "ok"
         if action.operation == "advance":
             self.now += float(action.argument)
             return "ok"
@@ -159,6 +208,10 @@ class ReferenceModel:
             if listener is not None:
                 self.listener_up.discard(listener)
             return "ok"
+        if self.lease_encoding == "malformed":
+            if action.operation in {"event", "recover"}:
+                return "refused"
+            return "error"
         if action.operation == "acquire":
             if self.lease is not None:
                 return "refused"
@@ -178,6 +231,7 @@ class ReferenceModel:
                 return "refused"
             self.lease = None
             self.pending = None
+            self.lease_encoding = "current"
             return "ok"
         if action.operation == "prepare":
             if not self._same_holder(name):
@@ -238,17 +292,23 @@ class ReferenceModel:
             self.lease.heartbeat_renewals += 1
             return "ok"
         if action.operation == "event" or action.operation == "recover":
+            if self.record_encoding != "current":
+                return "refused"
             if not self._direct_renew(name):
                 return "refused"
             self._record_event("note")
             return "ok"
         if action.operation == "digest":
-            return "ok"
+            return "ok" if self.record_encoding == "current" else "error"
         if action.operation == "stale-board":
+            if self.record_encoding != "current":
+                return "error"
             if self.events:
                 self.board_current = False
             return "ok"
         if action.operation == "start":
+            if self.record_encoding != "current":
+                return "error"
             take_over = action.argument == "takeover"
             if self.lease is None:
                 self._new_lease(name)
@@ -303,6 +363,8 @@ class ConcreteWorld:
         self.event_counter = 0
         self.event_counter_lock = threading.Lock()
         self.patchers: list[mock._patch] = []
+        self.lease_encoding = "current"
+        self.record_encoding = "current"
 
     def __enter__(self) -> "ConcreteWorld":
         self.patchers = [
@@ -403,11 +465,20 @@ class ConcreteWorld:
             "next_unit": f"unit-{index}",
         }
 
-    def record_bytes(self) -> tuple[bytes, bytes]:
-        return (
-            (self.record_root / master_runtime.EVENTS_NAME).read_bytes(),
-            (self.record_root / master_runtime.BOARD_NAME).read_bytes(),
-        )
+    def record_bytes(self) -> tuple[tuple[str, int, int, Optional[bytes]], ...]:
+        rows = []
+        for path in [self.record_root, *sorted(self.record_root.rglob("*"))]:
+            info = path.lstat()
+            data = path.read_bytes() if path.is_file() else None
+            rows.append(
+                (
+                    path.relative_to(self.record_root).as_posix(),
+                    info.st_mode,
+                    info.st_nlink,
+                    data,
+                )
+            )
+        return tuple(rows)
 
     def _register_lease(self) -> None:
         snapshot = semaphore.master_snapshot()
@@ -425,6 +496,106 @@ class ConcreteWorld:
 
     def execute(self, action: Action) -> str:
         self.select(action.principal)
+        if action.operation == "kill":
+            pid = self.active().pid
+            if pid is not None:
+                self.alive.discard(pid)
+            return "ok"
+        if action.operation == "legacy-lease":
+            if self.lease_encoding == "malformed":
+                return "refused"
+            try:
+                if semaphore.master_snapshot()["lease"] is not None or self.active().pid is None:
+                    return "refused"
+            except semaphore.SemaphoreError:
+                return "refused"
+            self.state_root.mkdir(parents=True, exist_ok=True)
+            lease_path = self.state_root / semaphore.MASTER_NAME
+            legacy = {
+                "schema_version": 1,
+                "lease": {
+                    "client": self.active().client,
+                    "client_pid": self.active().pid,
+                    "pid": 20_001,
+                    "uid": 501,
+                    "note": "synthetic legacy lease",
+                    "acquired_at": self.now - 10,
+                    "renewed_at": self.now - 5,
+                    "lease_seconds": LEASE_SECONDS,
+                },
+            }
+            lease_path.write_bytes(json.dumps(legacy, separators=(",", ":")).encode())
+            self.lease_encoding = "legacy"
+            self._register_lease()
+            return "ok"
+        if action.operation == "malformed-lease":
+            try:
+                if semaphore.master_snapshot()["lease"] is not None:
+                    return "refused"
+            except semaphore.SemaphoreError:
+                return "refused"
+            self.state_root.mkdir(parents=True, exist_ok=True)
+            (self.state_root / semaphore.MASTER_NAME).write_bytes(b"{malformed lease")
+            self.lease_encoding = "malformed"
+            return "ok"
+        if action.operation == "legacy-record":
+            if self.record_encoding != "current":
+                return "refused"
+            view = master_runtime.read_record(self.record_root)
+            for name in (
+                master_runtime.EVENTS_NAME,
+                master_runtime.BOARD_NAME,
+                master_runtime.README_NAME,
+            ):
+                (self.record_root / name).unlink()
+            (self.record_root / "README.md").write_bytes(b"# Synthetic legacy record\n")
+            (self.record_root / "log.md").write_bytes(view.log_bytes)
+            (self.record_root / "board.md").write_bytes(b"synthetic legacy board\n")
+            for name in ("README.md", "log.md", "board.md"):
+                (self.record_root / name).chmod(0o600)
+            self.record_encoding = "legacy"
+            return "ok"
+        if action.operation == "malformed-record":
+            if self.record_encoding != "current":
+                return "refused"
+            (self.record_root / master_runtime.EVENTS_NAME).write_bytes(
+                b"{malformed record"
+            )
+            self.record_encoding = "malformed"
+            return "ok"
+        if action.operation == "post-log-crash":
+            if self.record_encoding != "current":
+                return "refused"
+
+            def stop_after_log(stage: str) -> None:
+                if stage == "transaction:after-log-commit":
+                    raise RuntimeError("synthetic post-log crash")
+
+            try:
+                self.writer().append(
+                    "note",
+                    self.note_payload(self.event_counter + 1),
+                    fault=stop_after_log,
+                )
+            except RuntimeError as exc:
+                if str(exc) != "synthetic post-log crash":
+                    raise
+                return "crash"
+            except master_runtime.MasterRecordError:
+                return "refused"
+            raise AssertionError("post-log crash boundary was not reached")
+        if action.operation == "migrate-record":
+            if self.record_encoding != "legacy":
+                return "refused"
+            result = master_migrate.migrate(
+                self.record_root,
+                apply=True,
+                renew=self._renew,
+            )
+            if result.status == "OK":
+                self.record_encoding = "current"
+                return "ok"
+            return "refused"
         if action.operation == "advance":
             self.now += float(action.argument)
             return "ok"
@@ -444,6 +615,10 @@ class ConcreteWorld:
             if listener is not None:
                 self.listener_up.discard(listener)
             return "ok"
+        if self.lease_encoding == "malformed":
+            if action.operation in {"event", "recover"}:
+                return "refused"
+            return "error"
         if action.operation in {"acquire", "takeover"}:
             ok, _detail = self._acquire(
                 self.active().client,
@@ -455,9 +630,13 @@ class ConcreteWorld:
             return "ok" if ok else "refused"
         if action.operation == "renew":
             ok, _detail = self._renew()
+            if ok:
+                self.lease_encoding = "current"
             return "ok" if ok else "refused"
         if action.operation == "release":
             ok, _detail = self._release()
+            if ok:
+                self.lease_encoding = "current"
             return "ok" if ok else "refused"
         if action.operation == "prepare":
             ok, _detail, prepared = semaphore._prepare_master_heartbeat_launch(
@@ -487,6 +666,8 @@ class ConcreteWorld:
             )
             return "ok" if ok else "refused"
         if action.operation in {"event", "recover"}:
+            if self.record_encoding != "current":
+                return "refused"
             try:
                 self.writer().append(
                     "note", self.note_payload(self.event_counter + 1)
@@ -495,6 +676,8 @@ class ConcreteWorld:
                 return "refused"
             return "ok"
         if action.operation == "digest":
+            if self.record_encoding != "current":
+                return "error"
             try:
                 digest = master_operations.digest_record(
                     self.record_root,
@@ -507,12 +690,16 @@ class ConcreteWorld:
                 raise AssertionError("digest treated record role as authority")
             return "ok"
         if action.operation == "stale-board":
+            if self.record_encoding != "current":
+                return "error"
             view = master_runtime.read_record(self.record_root)
             if view.events:
                 prior = master_runtime.render_board(view.events[:-1])
                 (self.record_root / master_runtime.BOARD_NAME).write_bytes(prior)
             return "ok"
         if action.operation == "start":
+            if self.record_encoding != "current":
+                return "error"
             try:
                 result = master_operations.start_master(
                     self.record_root,
@@ -536,26 +723,61 @@ class ConcreteWorld:
         raise AssertionError(f"unknown concrete action: {action}")
 
     def state(self) -> dict[str, object]:
-        self._register_lease()
-        lease = semaphore.master_snapshot()["lease"]
+        lease_path = self.state_root / semaphore.MASTER_NAME
+        actual_lease_encoding = "current"
+        if lease_path.exists():
+            try:
+                raw_lease = json.loads(lease_path.read_bytes())
+                if raw_lease.get("schema_version") == 1:
+                    actual_lease_encoding = "legacy"
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                actual_lease_encoding = "malformed"
+        if actual_lease_encoding == "malformed":
+            lease = None
+        else:
+            self._register_lease()
+            lease = semaphore.master_snapshot()["lease"]
         generation = (
             None if lease is None else self.lease_generations.get(lease["lease_id"])
         )
-        view = master_runtime.read_record(self.record_root)
+        try:
+            view = master_runtime.read_record(self.record_root)
+            actual_record_encoding = "current"
+            events = view.events
+            board_current = view.board_current
+        except master_runtime.MasterRecordError:
+            if not (self.record_root / master_runtime.EVENTS_NAME).exists() and (
+                self.record_root / "log.md"
+            ).exists():
+                actual_record_encoding = "legacy"
+                data = (self.record_root / "log.md").read_bytes()
+                translated, _rows, ambiguity = master_migrate._recognize_log(data)
+                events = tuple(
+                    master_runtime.validate_event(
+                        master_runtime._strict_json(row, "synthetic legacy row")
+                    )
+                    for row in translated.splitlines(keepends=True)
+                ) if ambiguity is None else ()
+            else:
+                actual_record_encoding = "malformed"
+                events = ()
+            board_current = False
         event_rows = [
             (
                 event["kind"],
                 self.actor_generations.get(event["actor"]["acquisition_digest"], -1),
             )
-            for event in view.events
+            for event in events
         ]
         return {
+            "lease_encoding": actual_lease_encoding,
+            "record_encoding": actual_record_encoding,
             "lease_generation": generation,
             "lease_client": None if lease is None else lease["client"],
             "pending": False if lease is None else lease["heartbeat_launch_digest"] is not None,
             "events": event_rows,
-            "event_ids": [event["event_id"] for event in view.events],
-            "board_current": view.board_current,
+            "event_ids": [event["event_id"] for event in events],
+            "board_current": board_current,
         }
 
 
@@ -670,6 +892,74 @@ def generated_trace(seed: int, steps: int = 90) -> list[Action]:
     return trace
 
 
+def generated_recovery_traces(seed: int) -> list[tuple[str, list[Action]]]:
+    """Seeded corruption/death/crash traces, each in its own concrete world."""
+    rng = random.Random(seed)
+    malformed_lease_probes = [
+        Action("acquire", "process-b"),
+        Action("renew", "process-a"),
+        Action("digest", "anonymous"),
+        Action("event", "process-a"),
+    ]
+    malformed_record_probes = [
+        Action("digest", "anonymous"),
+        Action("start", "process-a"),
+        Action("event", "process-a"),
+    ]
+    rng.shuffle(malformed_lease_probes)
+    rng.shuffle(malformed_record_probes)
+    traces = [
+        (
+            "process-death",
+            [
+                Action("acquire", "process-a"),
+                Action("kill", "process-a"),
+                Action("takeover", "process-b"),
+                Action("event", "process-b"),
+            ],
+        ),
+        (
+            "legacy-lease",
+            [
+                Action("legacy-lease", "process-a"),
+                Action("renew", "process-a"),
+                Action("release", "process-a"),
+            ],
+        ),
+        (
+            "malformed-lease",
+            [Action("malformed-lease", "process-a"), *malformed_lease_probes],
+        ),
+        (
+            "post-log-crash",
+            [
+                Action("acquire", "session-a"),
+                Action("post-log-crash", "session-a"),
+                Action("digest", "anonymous"),
+                Action("recover", "session-a"),
+            ],
+        ),
+        (
+            "legacy-record",
+            [
+                Action("acquire", "process-a"),
+                Action("event", "process-a"),
+                Action("legacy-record", "process-a"),
+                Action("digest", "anonymous"),
+                Action("event", "process-a"),
+                Action("migrate-record", "process-a"),
+                Action("digest", "anonymous"),
+            ],
+        ),
+        (
+            "malformed-record",
+            [Action("malformed-record", "process-a"), *malformed_record_probes],
+        ),
+    ]
+    rng.shuffle(traces)
+    return traces
+
+
 class ModelMismatch(AssertionError):
     pass
 
@@ -689,6 +979,12 @@ class MasterTransitionModelTest(unittest.TestCase):
         actual = world.state()
         lease = model.lease
         self.assertEqual(
+            actual["lease_encoding"], model.lease_encoding, f"lease encoding after {action}"
+        )
+        self.assertEqual(
+            actual["record_encoding"], model.record_encoding, f"record encoding after {action}"
+        )
+        self.assertEqual(
             actual["lease_generation"],
             None if lease is None else lease.generation,
             f"lease generation after {action}",
@@ -699,9 +995,10 @@ class MasterTransitionModelTest(unittest.TestCase):
             f"lease holder after {action}",
         )
         self.assertEqual(actual["pending"], model.pending is not None, f"pending after {action}")
-        self.assertEqual(actual["events"], model.events, f"events after {action}")
-        event_ids = actual["event_ids"]
-        self.assertEqual(len(event_ids), len(set(event_ids)), f"duplicate event after {action}")
+        if model.record_encoding != "malformed":
+            self.assertEqual(actual["events"], model.events, f"events after {action}")
+            event_ids = actual["event_ids"]
+            self.assertEqual(len(event_ids), len(set(event_ids)), f"duplicate event after {action}")
         self.assertEqual(actual["board_current"], model.board_current, f"board after {action}")
 
     def run_trace(
@@ -768,6 +1065,29 @@ class MasterTransitionModelTest(unittest.TestCase):
             with self.subTest(seed=seed):
                 self.run_trace(generated_trace(seed), seed=seed)
 
+    def test_seeded_process_legacy_malformed_and_crash_traces_match_model(self):
+        required = {
+            "kill",
+            "legacy-lease",
+            "malformed-lease",
+            "legacy-record",
+            "malformed-record",
+            "post-log-crash",
+            "migrate-record",
+            "recover",
+        }
+        for seed in SEQUENTIAL_SEEDS:
+            traces = generated_recovery_traces(seed)
+            observed = {
+                action.operation
+                for _name, trace in traces
+                for action in trace
+            }
+            self.assertTrue(required.issubset(observed), f"seed={seed}")
+            for offset, (name, trace) in enumerate(traces):
+                with self.subTest(seed=seed, state_trace=name):
+                    self.run_trace(trace, seed=seed + offset + 1)
+
     def test_seeded_concurrent_consume_start_and_event_campaigns(self):
         rng = random.Random(CONCURRENT_SEED)
 
@@ -803,9 +1123,27 @@ class MasterTransitionModelTest(unittest.TestCase):
             self.assert_world_matches(model, world, actions[-1])
 
         with ConcreteWorld(CONCURRENT_SEED + 1) as world:
-            model = ReferenceModel(world.principals)
             names = ["process-a", "process-b", "session-a", "listener-a"]
             rng.shuffle(names)
+            serial_histories = []
+            for order in itertools.permutations(names):
+                candidate = ReferenceModel(world.principals)
+                outcome = {
+                    name: candidate.transition(Action("start", name))
+                    for name in order
+                }
+                serial_histories.append((order, outcome, candidate))
+            self.assertEqual(len(serial_histories), 24)
+            self.assertEqual(
+                {
+                    tuple(outcome[name] for name in names)
+                    for _order, outcome, _candidate in serial_histories
+                },
+                {
+                    tuple("master" if name == winner else "reader" for name in names)
+                    for winner in names
+                },
+            )
             barrier = threading.Barrier(len(names))
             start_results: list[tuple[str, str]] = []
             lock = threading.Lock()
@@ -825,12 +1163,35 @@ class MasterTransitionModelTest(unittest.TestCase):
             statuses = [status for _name, status in start_results]
             self.assertEqual(statuses.count("master"), 1, f"seed={CONCURRENT_SEED + 1}")
             self.assertEqual(statuses.count("reader"), 3, f"seed={CONCURRENT_SEED + 1}")
-            winner = next(name for name, status in start_results if status == "master")
-            self.assertEqual(model.transition(Action("start", winner)), "master")
-            for name, status in start_results:
-                if name != winner:
-                    self.assertEqual(model.transition(Action("start", name)), status)
-            self.assert_world_matches(model, world, Action("start", winner))
+            observed = dict(start_results)
+            matching = [
+                (order, candidate)
+                for order, outcome, candidate in serial_histories
+                if outcome == observed
+            ]
+            self.assertTrue(
+                matching,
+                f"seed={CONCURRENT_SEED + 1}: no legal serial history for {observed}",
+            )
+            final_state_matched = False
+            mismatches = []
+            for order, candidate in matching:
+                try:
+                    self.assert_world_matches(
+                        candidate,
+                        world,
+                        Action("start", ",".join(order)),
+                    )
+                except AssertionError as exc:
+                    mismatches.append(f"{order}: {exc}")
+                else:
+                    final_state_matched = True
+                    break
+            self.assertTrue(
+                final_state_matched,
+                "no response-compatible serial history matched final state:\n"
+                + "\n".join(mismatches),
+            )
             state = world.state()
             self.assertEqual(len(state["events"]), 1)
             self.assertEqual(state["events"][0][0], "master")
@@ -841,10 +1202,14 @@ class MasterTransitionModelTest(unittest.TestCase):
             self.assertEqual(model.transition(Action("acquire", "session-a")), "ok")
             count = 16
             barrier = threading.Barrier(count)
-            results = []
+            invoked: set[int] = set()
+            results: dict[int, str] = {}
+            completion_saw_all_invocations: dict[int, bool] = {}
             lock = threading.Lock()
 
             def append(index: int) -> None:
+                with lock:
+                    invoked.add(index)
                 barrier.wait()
                 world.select("session-a")
                 try:
@@ -853,7 +1218,8 @@ class MasterTransitionModelTest(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - failure diagnostic
                     result = repr(exc)
                 with lock:
-                    results.append(result)
+                    results[index] = result
+                    completion_saw_all_invocations[index] = len(invoked) == count
 
             threads = [threading.Thread(target=append, args=(index,)) for index in range(count)]
             for thread in threads:
@@ -861,9 +1227,28 @@ class MasterTransitionModelTest(unittest.TestCase):
             for thread in threads:
                 thread.join(5)
             self.assertTrue(all(not thread.is_alive() for thread in threads))
-            self.assertEqual(results, ["ok"] * count, f"seed={CONCURRENT_SEED + 2}: {results}")
-            for _index in range(count):
-                self.assertEqual(model.transition(Action("event", "session-a")), "ok")
+            self.assertEqual(invoked, set(range(count)))
+            self.assertEqual(
+                results,
+                {index: "ok" for index in range(count)},
+                f"seed={CONCURRENT_SEED + 2}: {results}",
+            )
+            self.assertTrue(all(completion_saw_all_invocations.values()))
+            events = master_runtime.read_record(world.record_root).events
+            logged_titles = [event["payload"]["title"] for event in events]
+            expected_titles = {f"model-note-{index}" for index in range(count)}
+            self.assertEqual(len(logged_titles), count)
+            self.assertEqual(set(logged_titles), expected_titles)
+            self.assertEqual(len(logged_titles), len(set(logged_titles)))
+            linearized = [
+                int(title.removeprefix("model-note-")) for title in logged_titles
+            ]
+            self.assertEqual(set(linearized), set(range(count)))
+            accepted_prefix = []
+            for index in linearized:
+                status = model.transition(Action("event", "session-a", str(index)))
+                self.assertEqual(status, "ok", f"rejected prefix {accepted_prefix + [index]}")
+                accepted_prefix.append(index)
             self.assert_world_matches(model, world, Action("event", "session-a"))
             state = world.state()
             self.assertEqual(len(state["events"]), count)

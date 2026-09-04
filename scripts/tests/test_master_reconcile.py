@@ -338,6 +338,25 @@ class MasterReconciliationTest(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(self.kinds(result), ["inaccessible-fact"])
 
+    def test_nonzero_git_fact_failures_are_inaccessible_not_missing(self):
+        failing_commands = ("status", "rev-list", "show-ref", "cat-file")
+        for command in failing_commands:
+            with self.subTest(command=command):
+                repository, _ = self.make_repository(f"denied-{command}")
+                record, writer = self.new_record(f"denied-{command}")
+                self.add_goal(writer, repository, goal_id=f"denied-{command}-goal")
+
+                def denied(root, arguments):
+                    if arguments[0] == command:
+                        return master_reconcile.GitResult(
+                            128, b"", b"fatal: permission denied\n"
+                        )
+                    return master_reconcile.run_git(root, arguments)
+
+                result = self.reconcile_unchanged(record, repository, runner=denied)
+                self.assertIn("inaccessible-fact", self.kinds(result))
+                self.assertNotIn("missing-ref", self.kinds(result))
+
     def test_stale_board_is_reported_without_repair(self):
         repository, _ = self.make_repository("stale")
         record, writer = self.new_record("stale")

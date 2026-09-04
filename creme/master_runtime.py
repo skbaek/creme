@@ -563,13 +563,64 @@ def _validate_owner_mode(path: Path, mode: int, *, directory: bool) -> os.stat_r
     return info
 
 
+def _validate_private_tree(root: Path) -> None:
+    """Validate one separately owned private subtree without following links."""
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                children = list(entries)
+        except OSError as exc:
+            raise MasterRecordError(
+                f"cannot inventory private path {directory.name}: {exc}"
+            ) from exc
+        for entry in children:
+            path = Path(entry.path)
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise MasterRecordError(
+                    f"cannot inspect private path {path.name}: {exc}"
+                ) from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise MasterRecordError(
+                    f"private path {path.name} must not be a symlink"
+                )
+            if info.st_uid != os.geteuid():
+                raise MasterRecordError(
+                    f"private path {path.name} is not owned by the current user"
+                )
+            if stat.S_ISDIR(info.st_mode):
+                if stat.S_IMODE(info.st_mode) != 0o700:
+                    raise MasterRecordError(
+                        f"private directory {path.name} must have mode 0700"
+                    )
+                pending.append(path)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise MasterRecordError(
+                    f"private path {path.name} must be a regular file or directory"
+                )
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                raise MasterRecordError(
+                    f"private file {path.name} must have mode 0600"
+                )
+            if info.st_nlink != 1:
+                raise MasterRecordError(
+                    f"private file {path.name} must not have hard links"
+                )
+
+
 def _validate_layout(root: Path) -> Path:
     root = _normalized_root(root)
     _validate_owner_mode(root, 0o700, directory=True)
     for name in (EVENTS_NAME, BOARD_NAME, LOCK_NAME, README_NAME):
         _validate_owner_mode(root / name, 0o600, directory=False)
     for name in PRIVATE_DIRECTORIES:
-        _validate_owner_mode(root / name, 0o700, directory=True)
+        private = root / name
+        _validate_owner_mode(private, 0o700, directory=True)
+        _validate_private_tree(private)
     return root
 
 

@@ -21,9 +21,19 @@ how the work is checked when nobody is reading reports.
 
 ## Durable state
 
-The state lives in the configured goal store under `master/`. It is plain
-text under Git, committed directly to that store's default branch so the
-next master finds it without knowing a branch name. It contains:
+The master-session record always lives at `$GOAL_STORE/master/`.
+`$GOAL_STORE` is a logical name here: Creme resolves its real path from the
+ignored host profile, so the record never has to contain the path needed to
+find itself. There is no repository-relative or home-directory fallback. If
+no goal store is configured, persistent master mode is unavailable.
+
+The entire `master/` subtree is host-local runtime state. If the goal store is
+a Git worktree, `/master/` must be ignored and no path beneath it may be
+tracked. `python3 -m creme doctor` enforces both conditions before a session
+uses the record. Do not stage, commit, or push this subtree. Creme tracks the
+client-neutral protocol and validation; concrete boards, logs, intent,
+briefs, audits, paths, capacity observations, and session identities stay
+local. The record contains:
 
 | path | what it is | who writes it |
 |---|---|---|
@@ -40,16 +50,18 @@ a crash then loses at most the current turn. Goal documents, state briefs,
 reports, and evidence trees in the existing goal-store layout remain valid
 worker artifacts; the board points at whichever a piece of work uses.
 
-Nothing the next master needs may live anywhere else: not in a client's
+Nothing the next master on this host needs may live only in a client's
 transcript, memory directory, session title, or terminal scrollback. A
-client-specific memory is a cache. Host-specific facts belong in the ignored
-`.creme/host-guidance.md`, which every client reads.
+client-specific memory is a cache. Host capability constraints that govern
+commands belong in the separately ignored `.creme/host-guidance.md`; the
+ignored host profile and semaphore state remain bootstrap/runtime
+infrastructure rather than part of the master record.
 
 The record is the **locus of continuity**. A master session is ephemeral by
 design: it is a view onto the record, and the test of the record is that a
-fresh session of any client can continue from it alone, with nothing
-reconstructed from a predecessor's memory. That test is run as the handoff
-rehearsal below and as the `continuity` audit kind.
+fresh session of any client on the same host can continue from it alone, with
+nothing reconstructed from a predecessor's memory. That test is run as the
+handoff rehearsal below and as the `continuity` audit kind.
 
 ## Session start: master or reader
 
@@ -57,7 +69,9 @@ Every session launched with Creme as its project runs this at start, before
 anything else and whether or not the user mentions the role:
 
 1. `python3 -m creme doctor` and `python3 -m creme host-guidance`. Doctor
-   prints the goal store and whether master state exists there.
+   resolves the configured goal store and verifies that its `master/`
+   subtree is ignored and untracked. If no store is configured, or this
+   privacy check fails, do not enter persistent master mode.
 2. Read `master/README.md`, `master/board.md`, the tail of `master/log.md`,
    every file in `master/intent/`, and the open findings in `master/audits/`.
 3. Try to take the lease:
@@ -290,8 +304,9 @@ or a retired procedure can all be wrong under green gates. The substitute for
 the user's eyes is a periodic audit that the master does not run and cannot
 close.
 
-**Independence.** The auditor is a session the user starts, from a different
-client or model where possible, with a different prompt each time, and
+**Independence.** The auditor is a session the user starts on the same host,
+from a different client or model where possible, with a different prompt each
+time, and
 without the master's instructions, skills, or memory. It shares what the
 master does not own: the repositories, the durable state, and the intent
 statements. Without the intent statements it can only check the master
@@ -337,13 +352,16 @@ that the master cannot steer it toward the safe ones.
 - Starting audits and reading their reports.
 - The reserved decisions above, answered from a packet.
 - Rotating credentials and verifying backups: the containment that makes
-  the rest safe.
+  the rest safe. Backing up the ignored master record, if desired, is an
+  explicit local or private operation rather than a repository side effect.
 
 Everything else is the agents' job.
 
 ## Client neutrality
 
-- The protocol depends on files, Git, and the tracked semaphore launcher.
+- The protocol depends on host-local files, Git for goal and worker artifacts,
+  and the tracked semaphore launcher. The master record itself is not Git
+  state.
   It never depends on one client's session listing, messaging, or memory.
   Workers use whatever subagent mechanism the client has; the brief, the
   worktree, and the checkpoint files are the same for every client.

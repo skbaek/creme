@@ -22,6 +22,12 @@ this host.
   `scripts/GATES.md` before selecting or running a gate.
 - A concrete goal, state brief, or report belongs in the configured goal store,
   which is optional and need not be Plans.
+- The enduring master-session record is always `$GOAL_STORE/master/`, where
+  the ignored host profile resolves `GOAL_STORE`. That whole runtime directory
+  is host-local, Git-ignored, and never staged, committed, or pushed. Creme
+  owns the client-neutral protocol, validation, and any reusable templates;
+  it never tracks a host's board, log, intent, briefs, audits, paths, or
+  capacity.
 - Blanc consumes Jaune through its Git-pinned Lake dependency. Never replace
   that dependency with a sibling path or symlink.
 
@@ -34,7 +40,8 @@ of choosing the convenient source.
 
 One session at a time is the user's representative for all Jaune/Blanc work
 on this host and holds the master lease. Every session launched with Creme as
-its project reads the goal store's `master/` record and then tries to take
+its project resolves the configured goal store, verifies its `master/` runtime
+directory is ignored and untracked, reads that record, and then tries to take
 the lease at start, before anything else:
 `~/creme/.semaphore/semaphore master-acquire --client claude --note "..."`.
 `OK` makes it the master, and it says so in its first reply; a refusal for a

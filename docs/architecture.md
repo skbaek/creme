@@ -23,9 +23,12 @@ never falls through to a Darwin implementation.
 - Jaune and Blanc own source architecture, proof doctrine, generated-artifact
   rules, gate commands, budgets, and pass criteria.
 - A goal store owns concrete goals, state briefs, reports, and private
-  portfolio decisions, and under `master/` the durable state of the master
-  role: board, log, intent statements, briefs, and audits. It is optional and
-  is not a Creme runtime dependency.
+  portfolio decisions. Its `master/` subtree is different: host-local runtime
+  state for the master role (board, log, intent statements, briefs, and
+  audits), ignored and untracked as a unit. The goal store is optional and is
+  not a Creme runtime dependency; without one, persistent master state is
+  unavailable. Creme owns the tracked protocol, schema, validation, and any
+  reusable templates, never a host's concrete master record.
 - Blanc consumes Jaune only through its Git-pinned Lake dependency. Sibling
   checkout paths are for coordinated editing, not build substitution.
 

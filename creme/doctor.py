@@ -180,20 +180,67 @@ def _load_mcp_surface(path: Path) -> dict[str, Any]:
 
 
 def check_goal_store(workspace: Path, profile: Optional[dict[str, Any]]) -> list[Check]:
-    """Report the configured goal store and whether master state exists there.
+    """Report the configured goal store and validate master-state privacy.
 
     The store is optional and never a runtime dependency.  When it is named,
-    the master role keeps its durable state under ``master/`` there, and a
-    session becoming the master needs to find it without knowing a path.
+    the master role keeps host-local durable state under ``master/`` there.
+    If the store is a Git worktree, that entire runtime directory must be
+    ignored and untracked; reusable protocol and any templates belong in Creme.
     """
     name = (profile or {}).get("workspace", {}).get("goal_store") if profile else None
     if not name:
-        return [Check("goal store", STATUS_OK, "not configured (optional; set with `init --goal-store NAME`)")]
+        return [Check(
+            "goal store",
+            STATUS_OK,
+            "not configured (optional; persistent master state unavailable; "
+            "set with `init --goal-store NAME`)",
+        )]
     store = (workspace / name).resolve()
     if not store.is_dir():
         return [Check("goal store", STATUS_FAIL, f"configured but missing: {store}")]
-    board = store / "master" / "board.md"
-    detail = f"{store} (master state {'present' if board.is_file() else 'absent'}: {board})"
+
+    master = store / "master"
+    board = master / "board.md"
+    state = f"master state {'present' if board.is_file() else 'absent'}: {board}"
+    git_probe = _git(store, "rev-parse", "--is-inside-work-tree")
+    if git_probe.returncode or git_probe.stdout.strip() != "true":
+        return [Check("goal store", STATUS_OK, f"{store} ({state}; not a Git worktree)")]
+
+    tracked = _git(store, "ls-files", "--", "master")
+    if tracked.returncode:
+        return [Check(
+            "goal store",
+            STATUS_FAIL,
+            f"{store} ({state}; could not inspect tracked master state: {tracked.stderr.strip()})",
+        )]
+    tracked_paths = [line for line in tracked.stdout.splitlines() if line]
+    if tracked_paths:
+        preview = tracked_paths[:5]
+        suffix = " ..." if len(tracked_paths) > len(preview) else ""
+        return [Check(
+            "goal store",
+            STATUS_FAIL,
+            f"{store} ({state}; master/ is Git-tracked: {preview}{suffix}; "
+            "remove it from the index without deleting the local files)",
+        )]
+
+    ignored = _git(
+        store,
+        "check-ignore",
+        "-q",
+        "--no-index",
+        "--",
+        "master/.creme-ignore-probe",
+    )
+    if ignored.returncode:
+        return [Check(
+            "goal store",
+            STATUS_FAIL,
+            f"{store} ({state}; master/ is not ignored; add `/master/` to the "
+            "goal store's .gitignore before creating runtime state)",
+        )]
+
+    detail = f"{store} ({state}; master/ is ignored and untracked)"
     return [Check("goal store", STATUS_OK, detail)]
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,6 +74,34 @@ class DoctorTest(unittest.TestCase):
             (workspace / "plans" / "master" / "board.md").write_text("# Board\n", encoding="utf-8")
             present = check_goal_store(workspace, profile)[0]
             self.assertIn("master state present", present.detail)
+
+    def test_git_goal_store_requires_master_state_to_be_ignored_and_untracked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            store = workspace / "plans"
+            store.mkdir()
+            subprocess.run(["git", "init", "-q", str(store)], check=True)
+            master = store / "master"
+            master.mkdir()
+            (master / "board.md").write_text("# Board\n", encoding="utf-8")
+            profile = {"workspace": {"goal_store": "plans"}}
+
+            unignored = check_goal_store(workspace, profile)[0]
+            self.assertEqual(unignored.status, STATUS_FAIL)
+            self.assertIn("not ignored", unignored.detail)
+
+            (store / ".gitignore").write_text("/master/\n", encoding="utf-8")
+            private = check_goal_store(workspace, profile)[0]
+            self.assertEqual(private.status, STATUS_OK)
+            self.assertIn("ignored and untracked", private.detail)
+
+            subprocess.run(
+                ["git", "-C", str(store), "add", "-f", "master/board.md"],
+                check=True,
+            )
+            tracked = check_goal_store(workspace, profile)[0]
+            self.assertEqual(tracked.status, STATUS_FAIL)
+            self.assertIn("Git-tracked", tracked.detail)
 
     def test_neutral_semaphore_interface_is_complete(self):
         root = Path(__file__).resolve().parents[2]

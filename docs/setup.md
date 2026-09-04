@@ -141,6 +141,11 @@ The important relationship is:
 An owner with access to a private goal store may also clone it separately as
 `~/plans`. It is not a Creme, Jaune, or Blanc build dependency. Other users can
 store concrete goal documents in any private or local location they control.
+When a configured goal store is a Git worktree, add `/master/` to its
+`.gitignore` before starting the master workflow. `$GOAL_STORE/master/` is
+host-local runtime state and must remain untracked even when other goal
+documents and reports are versioned. `python3 -m creme doctor` fails this
+privacy check if the directory is tracked or unignored.
 
 ## 5. Initialize Creme
 

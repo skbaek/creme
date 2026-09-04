@@ -8,6 +8,7 @@ order can be tested without touching live processes.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -24,13 +25,14 @@ class Process:
 
     @property
     def kind(self) -> str:
-        if "lake serve" in self.command:
+        executable, arguments = lean_executable(self.command)
+        if executable == "lake" and "serve" in arguments:
             return "lake-serve"
-        if "--worker" in self.command:
+        if executable == "lean" and "--worker" in arguments:
             return "lean-worker"
-        if "lean --server" in self.command:
+        if executable == "lean" and "--server" in arguments:
             return "lean-server"
-        return os.path.basename(self.command.split(None, 1)[0]) or "process"
+        return os.path.basename(self.command.split(None, 1)[0]) if self.command.strip() else "process"
 
 
 @dataclass(frozen=True)
@@ -148,33 +150,51 @@ def ancestry(table: dict[int, Process], pid: int) -> tuple[int, ...]:
     return tuple(chain)
 
 
-def is_lean_worker(command: str) -> bool:
-    """Precise `lean --worker` test for a process that may be terminated."""
+# An elan toolchain binary, wherever the toolchain directory lives.  This is
+# the one form a `lean`/`lake` command line can take when its first token does
+# not tokenize cleanly (a home directory with a space in it), so it is matched
+# as a path, not as a substring of arbitrary text.
+_TOOLCHAIN_BINARY = re.compile(r"/\.elan/toolchains/[^/\s]+/bin/(lean|lake)(?=\s|$)")
+
+
+def lean_executable(command: str) -> tuple[Optional[str], list[str]]:
+    """Name the Lean toolchain executable a command line runs, if any.
+
+    Only the executable decides: the basename of the first token, or an elan
+    toolchain path anywhere a space could have split it.  The words `lean`,
+    `lake serve`, or `--worker` appearing inside a shell's arguments — a
+    `pgrep -f` pattern, a quoted script — name nothing.
+    """
     tokens = command.split()
     if not tokens:
-        return False
-    return os.path.basename(tokens[0]) == "lean" and "--worker" in tokens[1:]
+        return None, []
+    executable = os.path.basename(tokens[0])
+    if executable in {"lean", "lake"}:
+        return executable, tokens[1:]
+    match = _TOOLCHAIN_BINARY.search(command)
+    if match is not None:
+        rest = command[match.end():].split()
+        return match.group(1), rest
+    return None, tokens[1:]
+
+
+def is_lean_worker(command: str) -> bool:
+    """Precise `lean --worker` test for a process that may be terminated."""
+    executable, arguments = lean_executable(command)
+    return executable == "lean" and "--worker" in arguments
 
 
 def is_candidate(process: Process) -> bool:
     """Is this a Lean language server, worker, or Lake server process?
 
-    The executable has to be `lean` or `lake` for the flag forms.  Matching a
-    bare `--worker` anywhere beside the word "lean" also matched any shell
-    whose command line merely quoted those strings, and one such false
-    positive becomes the root of an ownership plan and suppresses every real
-    target under it.  The whole-command forms are kept so that a process this
-    predicate cannot tokenize is still recognized: wind-down must fail safe
-    towards seeing a Lean process, never away from it.
+    The executable has to be `lean` or `lake`, by basename or by elan
+    toolchain path, for the flag forms to count.  Matching the strings
+    `lean --server`, `lean --worker`, or `lake serve` anywhere in a command
+    line classified a shell that merely quoted them — a `pgrep -f` loop — as
+    a Lake server; that false positive became the root of an ownership plan
+    and protected every real target under it.
     """
-    command = process.command
-    if "lean --server" in command or "lean --worker" in command or "lake serve" in command:
-        return True
-    tokens = command.split()
-    if not tokens:
-        return False
-    executable = os.path.basename(tokens[0])
-    arguments = tokens[1:]
+    executable, arguments = lean_executable(process.command)
     if executable == "lean":
         return "--worker" in arguments or "--server" in arguments
     if executable == "lake":

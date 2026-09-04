@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -12,6 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import Mock, patch
 
 from creme import build_ownership as owned
@@ -22,6 +24,11 @@ from creme.doctor import STATUS_FAIL, STATUS_OK, check_client_surface
 
 ROOT = Path(__file__).resolve().parents[2]
 SETTINGS = dict(ADMISSION_DEFAULTS)
+# A probe that could not run: the wrapper keeps its target-keyed fallback.
+UNPROBED = {
+    "roots": ["T"], "package_roots": ["T"], "resolution": "T (module)",
+    "stale": None, "detail": "probe unavailable: fixture", "stale_set": None, "graph": None,
+}
 
 
 @contextmanager
@@ -306,18 +313,22 @@ class BuildOwnershipTest(unittest.TestCase):
         }, clear=True):
             self.assertEqual(owned.lean_proxy_main(["A.lean"]), owned.GUARD_REFUSAL_EXIT)
 
+    @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     @patch("creme.build_ownership.subprocess.Popen")
     @patch("creme.build_ownership.semaphore.adaptive_acquire")
     @patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g"))
     @patch("creme.build_ownership.resolve_toolchain", return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool")))
-    def test_refused_admission_spawns_no_lake(self, resolve: Mock, goal_label: Mock, acquire: Mock, popen: Mock) -> None:
+    def test_refused_admission_spawns_no_lake(self, resolve: Mock, goal_label: Mock, acquire: Mock, popen: Mock, probe: Mock) -> None:
         acquire.return_value = (False, "DEFER_FOR_HARD — foreign hard hold")
         output = io.StringIO()
-        self.assertEqual(
-            owned.run_lake_build("g", ["T"], contention="sensitive", memory_gib=8, stdout=output),
-            2,
-        )
-        popen.assert_not_called()
+        with _ledger_and_log():
+            self.assertEqual(
+                owned.run_lake_build("g", ["T"], contention="sensitive", memory_gib=8, stdout=output),
+                2,
+            )
+        # The profile may be read for the evidence comparison; Lake is never run.
+        for call in popen.call_args_list:
+            self.assertNotIn("/tool/lake", " ".join(map(str, call.args[0])))
         self.assertIn("REFUSED", output.getvalue())
 
     @patch("creme.build_ownership.append_ledger")
@@ -325,7 +336,7 @@ class BuildOwnershipTest(unittest.TestCase):
     @patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g"))
     @patch("creme.build_ownership.resolve_toolchain", return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool")))
     def test_probe_uses_no_build_without_admission(self, resolve: Mock, goal_label: Mock, run: Mock, append: Mock) -> None:
-        run.return_value = SimpleNamespace(returncode=3, stdout="stale\n")
+        run.return_value = SimpleNamespace(returncode=3, stdout="stale\n", stderr="")
         output = io.StringIO()
         self.assertEqual(
             owned.run_lake_build("g", ["T"], probe=True, contention="sensitive", stdout=output),
@@ -847,7 +858,9 @@ class BuildOwnershipTest(unittest.TestCase):
             released = root / "released"
             ledger = root / "ledger.jsonl"
             fake_lake.write_text(
-                f"#!/bin/sh\nsleep 30 &\necho $! > {str(child_pid)!r}\nwait\n",
+                "#!/bin/sh\n"
+                'case "$*" in *--no-build*) exit 3;; esac\n'
+                f"sleep 30 &\necho $! > {str(child_pid)!r}\nwait\n",
                 encoding="utf-8",
             )
             fake_lake.chmod(0o700)
@@ -896,7 +909,8 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
             with self.assertRaises(ProcessLookupError):
                 os.kill(child, 0)
 
-    def test_measurement_snapshot_precedes_release_mutation(self) -> None:
+    @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
+    def test_measurement_snapshot_precedes_release_mutation(self, _probe: Mock) -> None:
         events: list[str] = []
         trace = {"M": "first"}
         captured: list[dict] = []
@@ -909,12 +923,13 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
                 return 0
 
         class FakeSampler:
-            def __init__(self, _pid):
+            def __init__(self, _pid, worktree=None):
                 self.samples = 1
                 self.unavailable_samples = 0
                 self.peak_rss_mib = 10.0
                 self.peak_lean_rss_mib = 8.0
                 self.max_concurrent_lean = 1
+                self.module_peak_mib = {}
 
             def start(self):
                 pass
@@ -1046,7 +1061,8 @@ class TargetResolutionTest(unittest.TestCase):
         self.assertIn("(module)", detail)
 
     # -- B5 positive: a warm full target and a warm package target ---------
-    def _row(self, ledger: Path, worktree: Path, targets, peak_mib, rebuilt=("Lib.Top",)):
+    def _row(self, ledger: Path, worktree: Path, targets, peak_mib,
+             rebuilt=("Lib", "Lib.Core", "Lib.Top", "Main")):
         _write_ledger(ledger, [("2026-09-03T01:00:00Z", {
             "kind": "build", "goal": "g", "targets": list(targets),
             "command": ["lake", "build"], "exit": 0, "wall_seconds": 3.0,
@@ -1173,9 +1189,18 @@ class RowEvidenceTest(unittest.TestCase):
     """B8: reasons, stale detail, hints, and under-cover reach the row."""
 
     def run_build(self, ledger: Path, *, exit_code: int, rebuilt: list[str],
-                  peak_mib: float, memory_gib: int = 4, contention="sensitive"):
+                  peak_mib: float, memory_gib: int = 4, contention="sensitive",
+                  probe: Optional[dict] = None, classify=None):
         captured: list[dict] = []
         output = io.StringIO()
+        probe_patch = patch(
+            "creme.build_ownership.stale_evidence",
+            return_value=UNPROBED if probe is None else probe,
+        )
+        classify_patch = (
+            patch("creme.build_ownership.classify_contention", return_value=classify)
+            if classify is not None else contextlib.nullcontext()
+        )
 
         class FakeProc:
             pid = 4321
@@ -1185,10 +1210,11 @@ class RowEvidenceTest(unittest.TestCase):
                 return exit_code
 
         class FakeSampler:
-            def __init__(self, _pid):
+            def __init__(self, _pid, worktree=None):
                 self.peak_rss_mib = peak_mib
                 self.peak_lean_rss_mib = peak_mib
                 self.max_concurrent_lean = 1
+                self.module_peak_mib = {module: peak_mib for module in rebuilt}
                 self.samples = 4
                 self.unavailable_samples = 0
 
@@ -1210,7 +1236,8 @@ class RowEvidenceTest(unittest.TestCase):
             def stop(self):
                 pass
 
-        with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), \
+        with probe_patch, classify_patch, \
+             patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), \
              patch("creme.build_ownership.resolve_toolchain",
                    return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))), \
              patch("creme.build_ownership.semaphore.adaptive_acquire",
@@ -1285,21 +1312,22 @@ class RowEvidenceTest(unittest.TestCase):
     def test_the_row_records_the_evidence_reason_stale_set_and_roots(self) -> None:
         with _ledger_and_log() as (ledger, _):
             _write_ledger(ledger, [])
-            with patch("creme.build_ownership.stale_evidence", return_value={
-                "roots": ["Main"], "package_roots": ["Main"],
-                "resolution": "pkg -> ['Main']", "stale": 12, "detail": "fixture",
-            }), patch("creme.build_ownership.classify_contention",
-                       return_value=("sensitive", {
-                           "reason": "stale set is 12 (limit 8)",
-                           "stale_modules": 12,
-                           "stale_detail": "probe frontier ['Lib.Core']; 12 module(s)",
-                           "resolved_roots": ["Main"],
-                           "resolution": "pkg -> ['Main']",
-                       })):
-                _code, row, _text = self.run_build(
-                    ledger, exit_code=0, rebuilt=["A"], peak_mib=100.0,
-                    contention=None,
-                )
+            _code, row, _text = self.run_build(
+                ledger, exit_code=0, rebuilt=["A"], peak_mib=100.0,
+                contention=None,
+                probe={
+                    "roots": ["Main"], "package_roots": ["Main"],
+                    "resolution": "pkg -> ['Main']", "stale": 12, "detail": "fixture",
+                    "stale_set": None, "graph": None,
+                },
+                classify=("sensitive", {
+                    "reason": "stale set is 12 (limit 8)",
+                    "stale_modules": 12,
+                    "stale_detail": "probe frontier ['Lib.Core']; 12 module(s)",
+                    "resolved_roots": ["Main"],
+                    "resolution": "pkg -> ['Main']",
+                }),
+            )
         self.assertEqual(row["evidence_reason"], "stale set is 12 (limit 8)")
         self.assertEqual(row["stale_modules"], 12)
         self.assertEqual(row["resolved_roots"], ["Main"])
@@ -1485,7 +1513,7 @@ class QueueRollupTest(unittest.TestCase):
             ])
             report = owned.ledger_rollup("2026-09-03", "2026-09-03T02:00:00Z")
         self.assertEqual(report["by_goal"]["g"]["estimate_sources"], {
-            "measured": 1,
+            "measured (target rows)": 1,
             "profile default (full target)": 1,
             "profile default (no measurement)": 1,
         })

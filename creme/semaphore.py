@@ -817,7 +817,7 @@ def _reclaimable_note(report: Optional[dict[str, Any]]) -> str:
     return (
         f"; {(report or {}).get('idle_rss_gib')} GiB sits in {len(idle)} idle "
         f"lean --worker process(es) owned by {owners} — that owner can free it with "
-        "`python3 -m creme reclaim --idle-workers MIN`"
+        "`python3 -m creme reclaim --idle-workers MIN --goal GOAL`"
     )
 
 
@@ -851,9 +851,23 @@ def _expired(hold: dict[str, Any], now: Optional[float] = None) -> bool:
     return (now or _now()) > float(hold["renewed_at"]) + int(hold["lease_seconds"])
 
 
+# An elan toolchain binary by path: the one form a `lake`/`lean` command can
+# take when a space in the path splits its first token.
+_TOOLCHAIN_BINARY = re.compile(r"/\.elan/toolchains/[^/\s]+/bin/(lean|lake)(?=\s|$)")
+
+
 def _is_elaborating(command: str) -> bool:
-    first = command.split(None, 1)[0] if command else ""
-    return os.path.basename(first) in {"lake", "lean"} or "lean" in first
+    """Is this process a `lake` or `lean` executable?
+
+    The executable decides — its basename, or an elan toolchain path.  The
+    substring `lean` decides nothing: Apple's `CleanupPreparePathService`
+    contains it, and one such daemon left every hold on the host unattributed
+    for a whole observation window.
+    """
+    first = command.split(None, 1)[0] if command.strip() else ""
+    if os.path.basename(first) in {"lake", "lean"}:
+        return True
+    return _TOOLCHAIN_BINARY.search(command) is not None
 
 
 class HostView(NamedTuple):
@@ -1008,10 +1022,19 @@ def _refresh_signals(
         elif working is False:
             activity.setdefault(label, now)
         idle_since = activity.get(label)
+        _note, _gib, hold_class = _decode_admission_note(str(hold.get("note", "")), 0)
+        # A timing gate or a t8n/Python lane runs under `exclusive` with no
+        # `lake`/`lean` process at all, so "no Lean work" is not idleness for
+        # that class.  The observation is still made and still printed; it
+        # is not turned into an IDLE_HOLD verdict.  STRANDED is unaffected:
+        # a gone process and a lapsed lease is stranded whatever the lane.
+        exempt = "exclusive" if hold_class == "exclusive" else None
         hold_signals[label] = {
             "pid_alive": alive,
             "working": working,
             "manual": bool(hold.get("manual")),
+            "contention": hold_class,
+            "idle_exempt": exempt,
             "scope_roots": None if scope is None else [str(root) for root in scope],
             "unattributed_pids": list((view.unattributed if view else ()) or ()),
             "idle_seconds": (now - float(idle_since)) if idle_since is not None else None,
@@ -1020,6 +1043,7 @@ def _refresh_signals(
             # without discarding the streak it had already measured.
             "idle_hold": (
                 working is False
+                and exempt is None
                 and idle_since is not None
                 and now - float(idle_since) > IDLE_HOLD_SECONDS
             ),
@@ -1032,6 +1056,7 @@ def _refresh_signals(
     queue["activity"] = {
         label: value for label, value in activity.items() if label in labels
     }
+    _audit_attribution(root, hold_signals, view)
 
     sample = adapter.lean_workers()
     if sample.status == "OK" and isinstance(sample.data, dict):
@@ -1046,6 +1071,7 @@ def _refresh_signals(
         queue["workers"] = observations
         hold_pids = {int(hold["pid"]): hold["label"] for hold in holds}
         client_pattern = getattr(adapter, "client_pattern", _NEVER_MATCHES)
+        worker_cwds = _worker_working_directories(adapter, workers, view)
         worker_report = {
             "status": "OK",
             "workers": [
@@ -1054,7 +1080,10 @@ def _refresh_signals(
                     "rss_gib": round(int(worker["rss_kib"]) / (1024 ** 2), 2),
                     "idle_seconds": (derived.get(int(worker["pid"])) or {}).get("idle_seconds"),
                     "cpu_percent": (derived.get(int(worker["pid"])) or {}).get("cpu_percent"),
-                    "owner": idle_workers.owner_label(worker, hold_pids, client_pattern),
+                    "owner": idle_workers.owner_label(
+                        worker, hold_pids, client_pattern, worker_cwds.get(int(worker["pid"]))
+                    ),
+                    "cwd": worker_cwds.get(int(worker["pid"])),
                 }
                 for worker in workers
             ],
@@ -1076,6 +1105,116 @@ def _refresh_signals(
     except OSError:
         pass
     return {"holds": hold_signals, "lean_workers": worker_report}
+
+
+def _worker_working_directories(
+    adapter: Adapter, workers: list[dict[str, Any]], view: Optional[HostView]
+) -> dict[int, str]:
+    """Where each worker is working, from the pass's own sample when it has one."""
+    pids: list[int] = []
+    for worker in workers:
+        try:
+            pids.append(int(worker["pid"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not pids:
+        return {}
+    if view is not None and view.cwds is not None and all(pid in view.cwds for pid in pids):
+        return {pid: view.cwds[pid] for pid in pids}
+    sample = adapter.process_working_directories(pids)
+    if sample.status != "OK" or not isinstance(sample.data, dict):
+        return {}
+    raw = sample.data.get("working_directories")
+    cwds: dict[int, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            try:
+                cwds[int(key)] = str(value)
+            except (TypeError, ValueError):
+                continue
+    return cwds
+
+
+def _attribution_failure(signal: dict[str, Any], view: Optional[HostView]) -> Optional[str]:
+    """Why this hold could not be judged, naming the processes and the cause."""
+    if signal.get("working") is not None or signal.get("manual"):
+        return None
+    if signal.get("scope_roots") is None:
+        return "this goal's worktree scope is unreadable"
+    if view is None or view.table is None:
+        return "the process snapshot is unavailable"
+    if view.cwds is None:
+        listed = ", ".join(
+            f"pid {pid} ({os.path.basename(view.table[pid][1].split(None, 1)[0]) if pid in view.table and view.table[pid][1].strip() else '?'})"
+            for pid in view.elaborating
+        )
+        return f"the working-directory sample is unavailable for {listed}"
+    if view.unattributed:
+        listed = ", ".join(
+            f"pid {pid} ({os.path.basename(view.table[pid][1].split(None, 1)[0]) if pid in view.table and view.table[pid][1].strip() else '?'})"
+            for pid in view.unattributed
+        )
+        return (
+            f"{len(view.unattributed)} lake/lean process(es) could not be placed: {listed}; "
+            "the working-directory sample did not answer for them"
+        )
+    return "attribution could not be completed"
+
+
+def _last_log_rows(root: Path, action: str, tail_bytes: int = 65536) -> dict[str, dict[str, Any]]:
+    """The most recent row of one action per label, from the log's tail only."""
+    path = root / "log.jsonl"
+    latest: dict[str, dict[str, Any]] = {}
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(max(0, size - tail_bytes))
+            chunk = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return latest
+    lines = chunk.splitlines()
+    if size > tail_bytes and lines:
+        lines = lines[1:]
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and row.get("action") == action and isinstance(row.get("label"), str):
+            latest[row["label"]] = row
+    return latest
+
+
+def _audit_attribution(
+    root: Path, hold_signals: dict[str, dict[str, Any]], view: Optional[HostView]
+) -> None:
+    """Make ATTRIBUTION_UNAVAILABLE a logged, audited signal, not only a status line.
+
+    One `attribution` row per change: when a hold first cannot be judged, or
+    when the reason changes, a `REFUSED` row names the processes and the
+    cause; when it can be judged again an `OK` row closes the episode.  A
+    repeated `status` under the same condition writes nothing further.
+    """
+    previous = _last_log_rows(root, "attribution")
+    for label, signal in hold_signals.items():
+        failure = _attribution_failure(signal, view)
+        last = previous.get(label)
+        if failure is not None:
+            detail = f"ATTRIBUTION_UNAVAILABLE: {failure}; this hold is not reported idle"
+            if last is not None and last.get("verdict") == "REFUSED" and last.get("detail") == detail:
+                continue
+            try:
+                _log_to(root, "attribution", label, "REFUSED", detail)
+            except OSError:
+                pass
+        elif last is not None and last.get("verdict") == "REFUSED":
+            try:
+                _log_to(
+                    root, "attribution", label, "OK",
+                    "ATTRIBUTION_RESTORED: every lake/lean process on the host is placed again",
+                )
+            except OSError:
+                pass
 
 
 class _NeverMatches:
@@ -1101,7 +1240,7 @@ def _idle_worker_line(report: dict[str, Any]) -> Optional[str]:
     return (
         f"IDLE_WORKERS: {report['idle_rss_gib']} GiB across {len(idle)} idle "
         f"lean --worker process(es) (owner {owners}); "
-        "reclaim your own with `python3 -m creme reclaim --idle-workers MIN`"
+        "reclaim your own with `python3 -m creme reclaim --idle-workers MIN --goal GOAL`"
     )
 
 
@@ -1140,6 +1279,17 @@ def _signal_lines(label: str, signals: dict[str, dict[str, Any]], indent: str) -
         lines.append(
             f"{indent}IDLE_HOLD: {_attribution_text(signal)} for {seconds}s; "
             "release between gates and reacquire with --wait for the next elaborating command"
+        )
+    elif (
+        signal.get("idle_exempt")
+        and signal.get("working") is False
+        and (signal.get("idle_seconds") or 0) > IDLE_HOLD_SECONDS
+    ):
+        seconds = int(signal.get("idle_seconds") or 0)
+        lines.append(
+            f"{indent}IDLE_HOLD not judged: {_attribution_text(signal)} for {seconds}s, but the "
+            f"hold is {signal['idle_exempt']} — timing and non-Lean lanes run under exclusivity "
+            "with no lake or lean process; release it the moment the timed run ends"
         )
     elif signal.get("working") is None and not signal.get("manual"):
         unattributed = signal.get("unattributed_pids") or []
@@ -1405,6 +1555,7 @@ def _waiting_admit(
     poll_seconds: float = WAIT_POLL_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
     announce: Optional[Callable[[str], None]] = None,
+    estimate_source: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Enqueue one request and return only when it is decided.
 
@@ -1447,11 +1598,25 @@ def _waiting_admit(
                 "queued in arrival order but passed over by every request that fits"
             )
         default_gib = int(selected_policy["task_memory_gib"])
-        if memory_gib is not None and memory_gib > default_gib:
+        # Where the number came from decides what a starved waiter should do
+        # about it, so the line says derived or explicit in so many words.  A
+        # caller that passes no source is the command line, whose estimate is
+        # explicit exactly when it was given.
+        source = estimate_source
+        if source is None and memory_gib is not None:
+            source = "explicit --memory-gib"
+        explicit = source is not None and source.startswith("explicit")
+        if source is not None:
             announce(
-                f"fit: an explicit --memory-gib {memory_gib} exceeds this host's default "
+                f"fit: estimate {requested_memory} GiB is "
+                + ("explicit" if explicit else "derived, not explicit")
+                + f" ({source})"
+            )
+        if explicit and requested_memory > default_gib:
+            announce(
+                f"fit: an explicit --memory-gib {requested_memory} exceeds this host's default "
                 f"estimate of {default_gib} GiB and is charged "
-                f"{_charged_memory_gib(memory_gib)} GiB; state it only when you know the "
+                f"{_charged_memory_gib(requested_memory)} GiB; state it only when you know the "
                 "build is cold or broad"
             )
 
@@ -1677,6 +1842,7 @@ def adaptive_acquire(
     wait_seconds: Optional[int] = None,
     poll_seconds: float = WAIT_POLL_SECONDS,
     announce: Optional[Callable[[str], None]] = None,
+    estimate_source: Optional[str] = None,
 ) -> tuple[bool, str]:
     if wait_seconds is not None:
         return _waiting_admit(
@@ -1690,6 +1856,7 @@ def adaptive_acquire(
             wait_seconds=wait_seconds,
             poll_seconds=poll_seconds,
             announce=announce,
+            estimate_source=estimate_source,
         )
     return _admit(
         "adaptive",

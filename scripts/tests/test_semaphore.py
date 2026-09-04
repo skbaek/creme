@@ -797,7 +797,9 @@ class QueueTest(unittest.TestCase):
         )
         before = len(self.log_rows())
         self.wait_acquire("patient", seconds=1, poll=0.02)
-        rows = self.log_rows()[before:]
+        # The attribution audit writes its own row when the fixture host has
+        # no process snapshot; the wait itself still adds exactly two.
+        rows = [row for row in self.log_rows()[before:] if row["action"].startswith("wait")]
         self.assertEqual(len(rows), 2, rows)
         self.assertEqual([row["action"] for row in rows], ["wait-enqueue", "wait-acquire"])
 

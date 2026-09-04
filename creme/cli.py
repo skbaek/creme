@@ -19,8 +19,9 @@ from .host_wrappers import (
     render_host_wrappers,
 )
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
+from . import idle_workers
 from . import semaphore
-from .task_wind_down import wind_down
+from .task_wind_down import WorktreeScopeError, _goal_worktree_roots, wind_down
 from .build_ownership import (
     DEFAULT_MEMORY_GIB,
     DEFAULT_THREADS,
@@ -199,9 +200,31 @@ def cmd_cache_copy(arguments: argparse.Namespace) -> int:
 
 
 def cmd_idle_workers(arguments: argparse.Namespace) -> int:
-    """Reclaim the caller's own idle Lean workers; report everyone else's."""
+    """Reclaim the caller's own idle Lean workers; report everyone else's.
+
+    Ownership is the goal worktree a worker is working in.  Under the master
+    model every worker on the host is a subagent of one client process, so
+    the client ancestry that reclamation trusts names everyone at once; a
+    caller therefore names its goal with ``--goal`` and reclaims only inside
+    that goal's worktrees.  Without ``--goal`` a worker inside any goal
+    worktree is reported to its goal, never signalled.
+    """
     adapter = get_adapter()
     minimum_seconds = arguments.idle_workers * 60
+    goal = getattr(arguments, "goal", None)
+    scope_options: list[str] = []
+    if goal is not None:
+        try:
+            roots = _goal_worktree_roots(goal, adapter)
+        except (OSError, WorktreeScopeError) as exc:
+            _json({
+                "capability": "idle_workers",
+                "status": "REFUSED",
+                "detail": f"goal-scoped worker ownership could not be established: {exc}",
+            })
+            return 2
+        for root in roots:
+            scope_options.extend(("--scope-root", str(root)))
     signals = semaphore.refresh_signals(adapter)
     report = signals["lean_workers"]
     if report["status"] != "OK":
@@ -211,7 +234,7 @@ def cmd_idle_workers(arguments: argparse.Namespace) -> int:
             "detail": f"Lean worker sampling unavailable: {report['detail']}",
         })
         return 2
-    ownership = adapter.reclaim(["--dry-run"])
+    ownership = adapter.reclaim(["--dry-run", *scope_options])
     if ownership.status != "OK" or not isinstance(ownership.data, dict):
         _json({
             "capability": "idle_workers",
@@ -224,11 +247,31 @@ def cmd_idle_workers(arguments: argparse.Namespace) -> int:
         worker for worker in report["idle_workers"]
         if (worker["idle_seconds"] or 0) >= minimum_seconds
     ]
-    targets = sorted(worker["pid"] for worker in eligible if worker["pid"] in owned)
-    foreign = [worker for worker in eligible if worker["pid"] not in owned]
+
+    def foreign_reason(worker: dict) -> Optional[str]:
+        """Why this caller may not signal the worker, or None when it may."""
+        worker_goal = idle_workers.goal_of_directory(worker.get("cwd"))
+        if goal is None and worker_goal is not None:
+            return f"working in goal {worker_goal}'s worktree; name it with --goal"
+        if goal is not None and worker_goal is not None and worker_goal != goal:
+            return f"working in goal {worker_goal}'s worktree, not {goal}'s"
+        if worker["pid"] not in owned:
+            return (
+                "outside every worktree of the named goal"
+                if goal is not None and worker_goal is None
+                else "outside the caller's ownership boundary"
+            )
+        if goal is None and worker.get("cwd") is None:
+            return "working directory unreadable; a goal worktree cannot be excluded"
+        return None
+
+    reasons = {worker["pid"]: foreign_reason(worker) for worker in eligible}
+    targets = sorted(worker["pid"] for worker in eligible if reasons[worker["pid"]] is None)
+    foreign = [worker for worker in eligible if reasons[worker["pid"]] is not None]
     observed = {
         "capability": "idle_workers",
         "minimum_idle_minutes": arguments.idle_workers,
+        "goal": goal,
         "sampled_workers": len(report["workers"]),
         "idle_workers": eligible,
         "owned_targets": targets,
@@ -238,9 +281,14 @@ def cmd_idle_workers(arguments: argparse.Namespace) -> int:
                 "rss_gib": worker["rss_gib"],
                 "idle_seconds": round(worker["idle_seconds"] or 0.0, 1),
                 "owner": worker["owner"],
+                "reason": reasons[worker["pid"]],
                 "owner_should_run": (
                     "python3 -m creme reclaim --idle-workers "
                     f"{arguments.idle_workers}"
+                    + (
+                        f" --goal {worker['owner'][len('goal '):]}"
+                        if str(worker["owner"]).startswith("goal ") else ""
+                    )
                 ),
             }
             for worker in foreign
@@ -257,7 +305,7 @@ def cmd_idle_workers(arguments: argparse.Namespace) -> int:
         _json({**observed, "status": "OK", "detail": "dry-run frozen idle-worker plan"})
         return 0
     result = adapter.reclaim(
-        [option for pid in targets for option in ("--only-pid", str(pid))]
+        [*scope_options, *(option for pid in targets for option in ("--only-pid", str(pid)))]
     )
     _json({**observed, "status": result.status, "detail": result.detail, "reclaim": result.to_dict()})
     return 0 if result.status == "OK" else 2
@@ -273,6 +321,13 @@ def cmd_reclaim(arguments: argparse.Namespace) -> int:
             })
             return 2
         return cmd_idle_workers(arguments)
+    if getattr(arguments, "goal", None) is not None:
+        _json({
+            "capability": "idle_workers",
+            "status": "REFUSED",
+            "detail": "--goal is only meaningful with --idle-workers",
+        })
+        return 2
     wind_down_label = getattr(arguments, "wind_down", None)
     if wind_down_label is not None:
         if arguments.hard_pressure or arguments.dry_run:
@@ -605,6 +660,11 @@ def parser() -> argparse.ArgumentParser:
     reclaim.add_argument("--dry-run", action="store_true")
     reclaim.add_argument("--hard-pressure", action="store_true")
     reclaim.add_argument("--wind-down", metavar="GOAL")
+    reclaim.add_argument(
+        "--goal",
+        metavar="GOAL",
+        help="with --idle-workers: reclaim only workers working inside this goal's worktrees",
+    )
     reclaim.add_argument(
         "--idle-workers",
         type=_nonnegative,

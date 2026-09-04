@@ -30,6 +30,12 @@ ADMISSION_DEFAULTS = {
     "idle_hold_seconds": 120,
     "repeat_fail_seconds": 600,
     "wait_poll_seconds": 3,
+    # A small stale set whose members have no measurement of their own is
+    # sized at this narrow default rather than at the host's task default; a
+    # member that elaborated for at least `heavy_module_seconds` in some broad
+    # rebuild is a heavy module and keeps the task default instead.
+    "narrow_default_gib": 4,
+    "heavy_module_seconds": 30,
 }
 ADMISSION_RANGES = {
     "tolerant_module_count": (1, 4096),
@@ -40,6 +46,8 @@ ADMISSION_RANGES = {
     "idle_hold_seconds": (10, 86400),
     "repeat_fail_seconds": (10, 86400),
     "wait_poll_seconds": (2, 5),
+    "narrow_default_gib": (1, 32),
+    "heavy_module_seconds": (1, 86400),
 }
 
 

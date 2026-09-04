@@ -48,7 +48,15 @@ _SAFE_LEDGER_KEYS = {
     # counts it; the ledger itself is never rewritten.
     "evidence_reason", "resolved_roots", "stale_modules", "stale_detail",
     "estimate_gib", "estimate_under_cover_gib", "hint",
+    # Additive, from creme-admission-accuracy-v1: the peak RSS of each
+    # module's own `lean` process, so a later build of the same modules is
+    # sized from what they cost rather than from the spelling of a target list.
+    "module_peak_mib",
 }
+DEFAULT_LAKE_OVERHEAD_GIB = 1.0
+# A stale set this small has its concurrency computed exactly from the import
+# order; a larger one is bounded by the concurrency the ledger has seen.
+_WIDTH_BRUTE_FORCE_LIMIT = 12
 SANCTIONED_WORKTREE_SUFFIXES = ("control", "mutation", "rehearsal")
 
 
@@ -226,6 +234,12 @@ def _valid_ledger_row(row: Any) -> bool:
     if not isinstance(hashes, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in hashes.items()):
         return False
     if not isinstance(seconds, dict) or not all(isinstance(k, str) and _number_or_none(v) for k, v in seconds.items()):
+        return False
+    module_peaks = row.get("module_peak_mib")
+    if module_peaks is not None and not (
+        isinstance(module_peaks, dict)
+        and all(isinstance(k, str) and _number_or_none(v) for k, v in module_peaks.items())
+    ):
         return False
     optional_numbers = (
         "peak_rss_mib", "peak_lean_rss_mib", "max_concurrent_lean",
@@ -464,6 +478,7 @@ _REASON_BUCKETS = (
     ("worktree toolchain or manifest digest", "digest unavailable"),
     ("no successful measurement that elaborated", "no elaborating measurement"),
     ("no successful measurement", "no successful measurement"),
+    ("stale module(s) unmeasured", "unmeasured stale modules"),
     ("is not below", "measured peak too high"),
 )
 
@@ -500,11 +515,21 @@ def _estimate_source_histogram(rows: list[dict[str, Any]]) -> dict[str, int]:
         source = str(row.get("estimate_source") or "unrecorded")
         if source.startswith("profile default (full target"):
             bucket = "profile default (full target)"
+        elif source.startswith("profile default (heavy module"):
+            bucket = "profile default (heavy module)"
         elif source.startswith("profile default"):
             bucket = "profile default (no measurement)"
-        elif source.startswith("max of"):
-            bucket = "measured"
-        elif source == "explicit":
+        elif source.startswith("max of") or source.startswith("target rows:"):
+            bucket = "measured (target rows)"
+        elif source.startswith("measured stale set"):
+            bucket = "measured (stale set)"
+        elif source.startswith("narrow default"):
+            bucket = "narrow default"
+        elif source.startswith("broader rebuild"):
+            bucket = "broader rebuild"
+        elif source.startswith("nothing is stale"):
+            bucket = "fresh (no hold)"
+        elif source == "explicit" or source.startswith("explicit"):
             bucket = "explicit"
         else:
             bucket = source
@@ -1002,10 +1027,48 @@ def _swap_gib() -> Optional[float]:
         return None
 
 
+def _executable(command: str) -> str:
+    """The basename of a command line's executable, or `` when it has none."""
+    first = command.split(None, 1)[0] if command.strip() else ""
+    return os.path.basename(first)
+
+
+def _lean_module(command: str, worktree: Optional[Path]) -> Optional[str]:
+    """Name the module a `lean` process is elaborating, from its command line.
+
+    Lake invokes `lean <source>.lean -o <olean> ...`; the source path names the
+    module relative to the worktree, and the `.olean` path names it relative to
+    the build's `lib/lean` directory.  Either is enough; neither is guessed.
+    """
+    tokens = command.split()
+    if not tokens or os.path.basename(tokens[0]) != "lean":
+        return None
+    for token in tokens[1:]:
+        if token.endswith(".lean") and not token.startswith("-"):
+            path = Path(token)
+            if worktree is not None:
+                try:
+                    candidate = path if path.is_absolute() else worktree / path
+                    relative = Path(os.path.normpath(candidate)).relative_to(worktree)
+                    return ".".join(relative.with_suffix("").parts)
+                except ValueError:
+                    pass
+            break
+    for index, token in enumerate(tokens[1:-1], start=1):
+        if token == "-o" and tokens[index + 1].endswith(".olean"):
+            olean = tokens[index + 1].replace(os.sep, "/")
+            marker = "/lib/lean/"
+            if marker in olean:
+                return olean.split(marker, 1)[1][:-len(".olean")].replace("/", ".")
+    return None
+
+
 def _process_snapshot() -> Optional[dict[int, tuple[int, int, str]]]:
+    # `command=` rather than `comm=`: the arguments are what attribute a `lean`
+    # process to the module it is elaborating.
     try:
         completed = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,rss=,comm="], capture_output=True, text=True, check=False,
+            ["ps", "-axo", "pid=,ppid=,rss=,command="], capture_output=True, text=True, check=False,
         )
     except OSError:
         return None
@@ -1035,14 +1098,19 @@ def _descendants(root_pid: int, rows: dict[int, tuple[int, int, str]]) -> set[in
 
 
 class ProcessSampler(threading.Thread):
-    def __init__(self, pid: int, interval: float = 0.5):
+    def __init__(self, pid: int, interval: float = 0.5, worktree: Optional[Path] = None):
         super().__init__(daemon=True)
         self.pid = pid
         self.interval = interval
+        self.worktree = worktree
         self.stop_event = threading.Event()
         self.peak_rss_mib = 0.0
         self.max_concurrent_lean = 0
         self.peak_lean_rss_mib = 0.0
+        # Each module's own `lean` process at its peak, in MiB.  This is the
+        # additive quantity: a build's tree peak is the Lake overhead plus the
+        # `lean` processes that happen to run at the same time.
+        self.module_peak_mib: dict[str, float] = {}
         self.samples = 0
         self.unavailable_samples = 0
 
@@ -1056,14 +1124,17 @@ class ProcessSampler(threading.Thread):
             self.samples += 1
             pids = _descendants(self.pid, rows)
             rss_kib = sum(rows[pid][1] for pid in pids if pid in rows)
-            lean_count = sum(Path(rows[pid][2]).name == "lean" for pid in pids if pid in rows)
-            lean_rss_kib = max(
-                (rows[pid][1] for pid in pids if pid in rows and Path(rows[pid][2]).name == "lean"),
-                default=0,
-            )
+            lean_rows = [rows[pid] for pid in pids if pid in rows and _executable(rows[pid][2]) == "lean"]
+            lean_rss_kib = max((row[1] for row in lean_rows), default=0)
             self.peak_rss_mib = max(self.peak_rss_mib, rss_kib / 1024.0)
-            self.max_concurrent_lean = max(self.max_concurrent_lean, lean_count)
+            self.max_concurrent_lean = max(self.max_concurrent_lean, len(lean_rows))
             self.peak_lean_rss_mib = max(self.peak_lean_rss_mib, lean_rss_kib / 1024.0)
+            for _parent, rss, command in lean_rows:
+                module = _lean_module(command, self.worktree)
+                if module is not None:
+                    self.module_peak_mib[module] = max(
+                        self.module_peak_mib.get(module, 0.0), rss / 1024.0
+                    )
             self.stop_event.wait(self.interval)
 
     def stop(self) -> None:
@@ -1327,12 +1398,12 @@ def resolve_target_roots(
     return resolved, package_roots, "; ".join(named)
 
 
-def stale_closure(
+def stale_closure_modules(
     graph: dict[str, set[str]],
     targets: Iterable[str],
     frontier: set[str],
-) -> Optional[int]:
-    """Count the modules a build of ``targets`` would have to elaborate.
+) -> Optional[set[str]]:
+    """Name the modules a build of ``targets`` would have to elaborate.
 
     Lake's `--no-build` probe names only the frontier it stopped at, so the
     frontier alone under-reports what an actual build would elaborate.  The
@@ -1364,7 +1435,84 @@ def stale_closure(
             if graph.get(module, set()) & stale:
                 stale.add(module)
                 changed = True
-    return len(stale)
+    return stale
+
+
+def stale_closure(
+    graph: dict[str, set[str]],
+    targets: Iterable[str],
+    frontier: set[str],
+) -> Optional[int]:
+    """Count the modules a build of ``targets`` would have to elaborate."""
+    modules = stale_closure_modules(graph, targets, frontier)
+    return None if modules is None else len(modules)
+
+
+def stale_module_set(
+    worktree: Path,
+    targets: list[str],
+    real_lake: Path,
+    closure_roots: Optional[list[str]] = None,
+    package_roots: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Name the modules a probe proves out of date, or explain why it cannot.
+
+    Exit 0 means nothing is stale.  Exit 3 means Lake refused to build and
+    named the out-of-date frontier; anything else is not evidence.  The result
+    carries the closure itself (``modules``) and the package import graph the
+    closure was computed over, because the estimate is sized from exactly
+    those modules and their import order.
+    """
+    def failure(detail: str) -> dict[str, Any]:
+        return {"stale": None, "detail": detail, "modules": None, "graph": None}
+
+    try:
+        completed = subprocess.run(
+            [str(real_lake), "build", "--no-build", *targets],
+            cwd=worktree, text=True, capture_output=True, check=False, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return failure(f"probe unavailable: {exc}")
+    if completed.returncode == 0:
+        return {
+            "stale": 0, "detail": "probe reports the selected artifacts current",
+            "modules": [], "graph": None,
+        }
+    if completed.returncode != STALE_EXIT:
+        return failure(f"probe exited {completed.returncode}; not stale-set evidence")
+    output = (completed.stdout or "") + (completed.stderr or "")
+    lines = output.splitlines()
+    try:
+        start = next(
+            index for index, line in enumerate(lines)
+            if "logged failures" in line
+        )
+    except StopIteration:
+        return failure("probe reported stale artifacts without naming a frontier")
+    frontier = set()
+    for line in lines[start + 1:]:
+        match = _STALE_FAILURE_RE.match(line)
+        if not match:
+            break
+        frontier.add(match.group(1))
+    if not frontier:
+        return failure("probe named no out-of-date module")
+    roots = list(closure_roots if closure_roots is not None else targets)
+    graph = package_import_graph(worktree, list(package_roots or []) + roots)
+    if graph is None:
+        return failure("package import graph unavailable")
+    modules = stale_closure_modules(graph, roots, frontier)
+    if modules is None:
+        return failure("targets are outside the package import graph")
+    return {
+        "stale": len(modules),
+        "detail": (
+            f"probe frontier {sorted(frontier)}; {len(modules)} module(s) in the "
+            f"closure of {roots} would be elaborated"
+        ),
+        "modules": sorted(modules),
+        "graph": graph,
+    }
 
 
 def stale_module_count(
@@ -1374,50 +1522,9 @@ def stale_module_count(
     closure_roots: Optional[list[str]] = None,
     package_roots: Optional[list[str]] = None,
 ) -> tuple[Optional[int], str]:
-    """Count the modules a probe proves out of date, or explain why it cannot.
-
-    Exit 0 means nothing is stale.  Exit 3 means Lake refused to build and
-    named the out-of-date frontier; anything else is not evidence.
-    """
-    try:
-        completed = subprocess.run(
-            [str(real_lake), "build", "--no-build", *targets],
-            cwd=worktree, text=True, capture_output=True, check=False, timeout=120,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return None, f"probe unavailable: {exc}"
-    if completed.returncode == 0:
-        return 0, "probe reports the selected artifacts current"
-    if completed.returncode != STALE_EXIT:
-        return None, f"probe exited {completed.returncode}; not stale-set evidence"
-    output = (completed.stdout or "") + (completed.stderr or "")
-    lines = output.splitlines()
-    try:
-        start = next(
-            index for index, line in enumerate(lines)
-            if "logged failures" in line
-        )
-    except StopIteration:
-        return None, "probe reported stale artifacts without naming a frontier"
-    frontier = set()
-    for line in lines[start + 1:]:
-        match = _STALE_FAILURE_RE.match(line)
-        if not match:
-            break
-        frontier.add(match.group(1))
-    if not frontier:
-        return None, "probe named no out-of-date module"
-    roots = list(closure_roots if closure_roots is not None else targets)
-    graph = package_import_graph(worktree, list(package_roots or []) + roots)
-    if graph is None:
-        return None, "package import graph unavailable"
-    count = stale_closure(graph, roots, frontier)
-    if count is None:
-        return None, "targets are outside the package import graph"
-    return count, (
-        f"probe frontier {sorted(frontier)}; {count} module(s) in the closure of "
-        f"{roots} would be elaborated"
-    )
+    """Count the modules a probe proves out of date, or explain why it cannot."""
+    probe = stale_module_set(worktree, targets, real_lake, closure_roots, package_roots)
+    return probe["stale"], probe["detail"]
 
 
 def stale_evidence(
@@ -1434,30 +1541,26 @@ def stale_evidence(
     if closure_roots is None:
         return {
             "roots": None, "package_roots": package_roots, "resolution": resolution,
-            "stale": None, "detail": resolution,
+            "stale": None, "detail": resolution, "stale_set": None, "graph": None,
         }
-    stale, detail = stale_module_count(
-        worktree, targets, real_lake, closure_roots, package_roots
-    )
+    probe = stale_module_set(worktree, targets, real_lake, closure_roots, package_roots)
     return {
         "roots": closure_roots, "package_roots": package_roots,
-        "resolution": resolution, "stale": stale, "detail": detail,
+        "resolution": resolution, "stale": probe["stale"], "detail": probe["detail"],
+        "stale_set": probe["modules"], "graph": probe["graph"],
     }
 
 
-def _measured_rows(
+def _evidence_rows(
     worktree: Path,
-    targets: list[str],
     toolchain_digest: Optional[str],
     manifest_digest: Optional[str],
-    settings: dict[str, int],
-    require_elaboration: bool = False,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Ledger rows that measured *this* worktree, targets, and pinned inputs.
+    """Every successful, measured build row of this worktree on its pinned inputs.
 
-    ``require_elaboration`` keeps only rows that rebuilt at least one module.
-    A row that restored everything from the artifact cache measured a build
-    that elaborated nothing; it cannot size one that will.
+    The worktree, toolchain digest, and Lake manifest digest are what make an
+    older measurement comparable; the spelling of the target list is not, so
+    it is not a key here.
     """
     try:
         rows, _corrupt = read_ledger("30d")
@@ -1473,10 +1576,47 @@ def _measured_rows(
         and not row.get("probe")
         and row.get("exit") == 0
         and str(row.get("worktree")) == str(worktree)
-        and list(row.get("targets") or []) == list(targets)
         and row.get("toolchain_digest") == toolchain_digest
         and row.get("manifest_digest") == manifest_digest
         and isinstance(row.get("peak_rss_mib"), (int, float))
+        and not isinstance(row.get("peak_rss_mib"), bool)
+    ]
+    matching.sort(key=lambda row: str(row["time"]))
+    return matching, f"{len(matching)} measured row(s) on the pinned inputs"
+
+
+def _measured_rows(
+    worktree: Path,
+    targets: list[str],
+    toolchain_digest: Optional[str],
+    manifest_digest: Optional[str],
+    settings: dict[str, int],
+    require_elaboration: bool = False,
+    members: bool = False,
+) -> tuple[list[dict[str, Any]], str]:
+    """Ledger rows that measured *this* worktree, targets, and pinned inputs.
+
+    This is the target-keyed fallback, used only when the probe could not
+    name the stale set.  ``members`` widens the match from the exact list to
+    any row whose targets are a non-empty subset of it, so a list is sized
+    from the union of its members' rows rather than starting unmeasured.
+    ``require_elaboration`` keeps only rows that rebuilt at least one module.
+    A row that restored everything from the artifact cache measured a build
+    that elaborated nothing; it cannot size one that will.
+    """
+    rows, detail = _evidence_rows(worktree, toolchain_digest, manifest_digest)
+    if not rows and detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
+        return [], detail
+    wanted = set(targets)
+    matching = [
+        row for row in rows
+        if list(row.get("targets") or []) == list(targets)
+        or (
+            members
+            and wanted
+            and row.get("targets")
+            and set(row["targets"]) <= wanted
+        )
     ]
     if not matching:
         return [], "no successful measurement for these targets on the pinned inputs"
@@ -1494,6 +1634,318 @@ def _measured_rows(
     return keep, (detail + " that elaborated" if require_elaboration else detail)
 
 
+def module_cost_evidence(
+    rows: list[dict[str, Any]], settings: dict[str, int]
+) -> dict[str, Any]:
+    """Per-module cost from the ledger: what each module's `lean` process peaked at.
+
+    A row that recorded ``module_peak_mib`` measured each module directly.  An
+    older narrow row — at most ``tolerant_module_count`` modules rebuilt —
+    bounds every module in it by the largest `lean` process it saw.  A broad
+    row without per-module peaks measures no single module: its peak is the
+    breadth and the concurrency, not any one member.  ``module_seconds`` is
+    kept from every row, broad or narrow, because elaboration time is the one
+    signal a broad row does give about a single module.
+    """
+    narrow = int(settings["tolerant_module_count"])
+    sample = int(settings["estimate_sample_rows"])
+    peaks: dict[str, list[float]] = {}
+    seconds: dict[str, float] = {}
+    overheads: list[float] = []
+    concurrency = 1
+    for row in rows:
+        rebuilt = [str(module) for module in (row.get("modules_rebuilt") or [])]
+        if not rebuilt:
+            continue
+        for module, value in (row.get("module_seconds") or {}).items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                seconds[str(module)] = max(seconds.get(str(module), 0.0), float(value))
+        peak_gib = float(row["peak_rss_mib"]) / 1024.0
+        lean_peak = row.get("peak_lean_rss_mib")
+        lean_gib = (
+            float(lean_peak) / 1024.0
+            if isinstance(lean_peak, (int, float)) and not isinstance(lean_peak, bool)
+            else None
+        )
+        seen = row.get("max_concurrent_lean")
+        seen = int(seen) if isinstance(seen, int) and not isinstance(seen, bool) and seen > 0 else 1
+        concurrency = max(concurrency, seen)
+        if lean_gib is not None and seen == 1:
+            overheads.append(max(0.0, peak_gib - lean_gib))
+        recorded = row.get("module_peak_mib") or {}
+        for module in rebuilt:
+            value = recorded.get(module) if isinstance(recorded, dict) else None
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                cost = float(value) / 1024.0
+            elif len(rebuilt) <= narrow:
+                cost = lean_gib if lean_gib is not None else peak_gib
+            else:
+                continue
+            peaks.setdefault(module, []).append(cost)
+    return {
+        "lean_peak_gib": {
+            module: max(values[-sample:]) for module, values in peaks.items()
+        },
+        "seconds": seconds,
+        "overhead_gib": max(overheads[-sample:]) if overheads else DEFAULT_LAKE_OVERHEAD_GIB,
+        "overhead_measured": bool(overheads),
+        "concurrency": concurrency,
+        "rows": len(rows),
+    }
+
+
+def _reaches(graph: dict[str, set[str]], origin: str, limit: set[str]) -> set[str]:
+    """Modules of ``limit`` that ``origin`` transitively imports."""
+    found: set[str] = set()
+    stack = list(graph.get(origin, ()))
+    seen: set[str] = set()
+    while stack:
+        module = stack.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        if module in limit:
+            found.add(module)
+        stack.extend(graph.get(module, ()))
+    return found
+
+
+def stale_set_width(
+    modules: Iterable[str], graph: Optional[dict[str, set[str]]], cap: int
+) -> int:
+    """How many of these modules Lake could elaborate at the same time.
+
+    Two modules can overlap only when neither imports the other, so the answer
+    is the largest antichain of the import order restricted to the set.  It
+    is computed exactly for a small set and bounded by ``cap`` — the
+    concurrency the ledger has actually observed — for a large one.
+    """
+    names = sorted(set(modules))
+    if len(names) <= 1:
+        return len(names)
+    if graph is None or len(names) > _WIDTH_BRUTE_FORCE_LIMIT:
+        return max(1, min(cap, len(names)))
+    limit = set(names)
+    below = {name: _reaches(graph, name, limit) for name in names}
+    comparable = {
+        (a, b) for a in names for b in names
+        if a != b and (b in below[a] or a in below[b])
+    }
+    best = 1
+    count = len(names)
+    for mask in range(1, 1 << count):
+        chosen = [names[index] for index in range(count) if mask >> index & 1]
+        if len(chosen) <= best:
+            continue
+        if all((a, b) not in comparable for a in chosen for b in chosen if a < b):
+            best = len(chosen)
+    return max(1, min(cap, best))
+
+
+def _model_peak(
+    measured: dict[str, float],
+    graph: Optional[dict[str, set[str]]],
+    evidence: dict[str, Any],
+) -> tuple[float, int, list[float]]:
+    """Lake overhead plus the `lean` peaks that can run at once."""
+    cap = max(int(evidence["concurrency"]), 2 if len(measured) > 1 else 1)
+    width = stale_set_width(measured, graph, cap)
+    top = sorted(measured.values(), reverse=True)[:width]
+    return float(evidence["overhead_gib"]) + sum(top), width, top
+
+
+def _covering_rows(
+    rows: list[dict[str, Any]], stale: list[str], unmeasured: list[str]
+) -> list[dict[str, Any]]:
+    """Broader successful rebuilds that included nearly all the unmeasured modules."""
+    wanted = set(unmeasured)
+    covering = []
+    for row in rows:
+        rebuilt = set(row.get("modules_rebuilt") or [])
+        if len(rebuilt) < len(stale):
+            continue
+        if wanted and len(rebuilt & wanted) < 0.9 * len(wanted):
+            continue
+        covering.append(row)
+    return covering
+
+
+def size_stale_set(
+    stale: list[str],
+    graph: Optional[dict[str, set[str]]],
+    rows: list[dict[str, Any]],
+    settings: dict[str, int],
+    default_gib: int,
+) -> dict[str, Any]:
+    """Size a build from the modules it will elaborate, never from a target's name.
+
+    Every module in the stale set with a measured `lean` peak contributes it;
+    the build's peak is the Lake overhead plus the peaks that can run at the
+    same time.  When some module is unmeasured: a small set whose members
+    never elaborated for long takes the narrow default; a small set with a
+    member that elaborated for ``heavy_module_seconds`` or more in some broad
+    rebuild takes the profile default, because that member is a heavy one
+    whose cost is simply not yet recorded on its own; a large set is bounded
+    by the tightest broader rebuild that included its members, and by the
+    profile default when none did.
+    """
+    floor = int(settings["minimum_estimate_gib"])
+    margin = int(settings["estimate_margin_gib"])
+    limit = int(settings["tolerant_module_count"])
+    narrow_default = int(settings["narrow_default_gib"])
+    heavy_seconds = float(settings["heavy_module_seconds"])
+    evidence = module_cost_evidence(rows, settings)
+    names = sorted(set(stale))
+    measured = {name: evidence["lean_peak_gib"][name] for name in names if name in evidence["lean_peak_gib"]}
+    unmeasured = [name for name in names if name not in measured]
+    heavy = sorted(
+        ((name, evidence["seconds"][name]) for name in unmeasured
+         if evidence["seconds"].get(name, 0.0) >= heavy_seconds),
+        key=lambda item: -item[1],
+    )
+    result: dict[str, Any] = {
+        "stale_modules": len(names),
+        "measured": sorted(measured),
+        "unmeasured": unmeasured,
+        "heavy": [name for name, _seconds in heavy],
+        "overhead_gib": round(float(evidence["overhead_gib"]), 2),
+        "rows": evidence["rows"],
+    }
+    if not names:
+        result.update({
+            "kind": "fresh", "peak_gib": 0.0, "estimate_gib": floor,
+            "source": "nothing is stale; the build elaborates no module and takes no hold",
+        })
+        return result
+
+    def listed(items: list[str]) -> str:
+        shown = ", ".join(items[:3])
+        return shown + (f", … ({len(items)} in all)" if len(items) > 3 else "")
+
+    if not unmeasured:
+        peak, width, top = _model_peak(measured, graph, evidence)
+        result.update({
+            "kind": "measured",
+            "peak_gib": round(peak, 2),
+            "estimate_gib": max(floor, math.ceil(peak) + margin),
+            "width": width,
+            "source": (
+                f"measured stale set: {len(names)} module(s) all measured; Lake overhead "
+                f"{evidence['overhead_gib']:.2f} GiB + {width} concurrent lean peak(s) "
+                f"{[round(value, 2) for value in top]} GiB = {peak:.2f} GiB, plus {margin} GiB"
+            ),
+        })
+        return result
+
+    measured_peak = 0.0
+    if measured:
+        measured_peak, _width, _top = _model_peak(measured, graph, evidence)
+    if len(names) <= limit and not heavy:
+        estimate = max(floor, narrow_default, math.ceil(measured_peak) + margin if measured else 0)
+        result.update({
+            "kind": "narrow default",
+            "peak_gib": round(measured_peak, 2),
+            "estimate_gib": estimate,
+            "source": (
+                f"narrow default {narrow_default} GiB: {len(unmeasured)} of {len(names)} stale "
+                f"module(s) unmeasured ({listed(unmeasured)}) and none of them elaborated for "
+                f"{heavy_seconds:.0f}s or more in any measured rebuild"
+            ),
+        })
+        return result
+    if len(names) <= limit:
+        name, seconds = heavy[0]
+        estimate = max(floor, int(default_gib), math.ceil(measured_peak) + margin if measured else 0)
+        result.update({
+            "kind": "heavy module",
+            "peak_gib": round(measured_peak, 2),
+            "estimate_gib": estimate,
+            "source": (
+                f"profile default (heavy module): {name} elaborated for {seconds:.0f}s in a "
+                f"broad rebuild but has no measurement of its own; {len(unmeasured)} of "
+                f"{len(names)} stale module(s) unmeasured"
+            ),
+        })
+        return result
+    covering = _covering_rows(rows, names, unmeasured)
+    if covering:
+        tightest = min(covering, key=lambda row: float(row["peak_rss_mib"]))
+        peak = float(tightest["peak_rss_mib"]) / 1024.0
+        peak = max(peak, measured_peak)
+        result.update({
+            "kind": "broader rebuild",
+            "peak_gib": round(peak, 2),
+            "estimate_gib": max(floor, math.ceil(peak) + margin),
+            "covering_rows": len(covering),
+            "covering_time": str(tightest.get("time")),
+            "source": (
+                f"broader rebuild: {len(unmeasured)} of {len(names)} stale module(s) unmeasured; "
+                f"the tightest of {len(covering)} successful rebuild(s) of at least {len(names)} "
+                f"modules that included them ({len(tightest.get('modules_rebuilt') or [])} modules "
+                f"at {str(tightest.get('time'))}) peaked at {peak:.2f} GiB, plus {margin} GiB"
+            ),
+        })
+        return result
+    estimate = max(floor, int(default_gib), math.ceil(measured_peak) + margin if measured else 0)
+    result.update({
+        "kind": "profile default",
+        "peak_gib": round(measured_peak, 2),
+        "estimate_gib": estimate,
+        "source": (
+            f"profile default: {len(unmeasured)} of {len(names)} stale module(s) unmeasured "
+            f"({listed(unmeasured)}), the set is above the narrow limit of {limit}, and no "
+            "broader successful rebuild included them"
+        ),
+    })
+    return result
+
+
+def _target_keyed_estimate(
+    worktree: Path,
+    targets: list[str],
+    settings: dict[str, int],
+    digests: tuple[Optional[str], Optional[str]],
+    default_gib: int,
+    stale_modules: Optional[int],
+) -> tuple[int, dict[str, Any]]:
+    """The fallback when the probe could not name the stale set.
+
+    A build with nothing stale may be sized by any successful row of the same
+    targets; a build whose stale set could not be measured is sized only by
+    rows that themselves elaborated a module, because a cache-restored row
+    measures a build that did no work.  A list with no row of its own is
+    sized from the union of its members' rows.
+    """
+    floor = int(settings["minimum_estimate_gib"])
+    require_elaboration = stale_modules != 0
+    rows, detail = _measured_rows(
+        worktree, targets, *digests, settings, require_elaboration, members=True
+    )
+    if not rows:
+        return max(floor, default_gib), {
+            "kind": "profile default",
+            "source": f"profile default ({detail})",
+            "rows": 0,
+            "keyed_on_elaboration": require_elaboration,
+        }
+    peak_gib = max(float(row["peak_rss_mib"]) for row in rows) / 1024.0
+    estimate = max(floor, math.ceil(peak_gib) + int(settings["estimate_margin_gib"]))
+    exact = [row for row in rows if list(row.get("targets") or []) == list(targets)]
+    return estimate, {
+        "kind": "target rows",
+        "source": (
+            f"target rows: max of {len(rows)} measured peak(s) ({peak_gib:.2f} GiB) "
+            f"plus {settings['estimate_margin_gib']} GiB"
+            + (" from rows that elaborated" if require_elaboration else "")
+            + ("" if len(exact) == len(rows) else f"; {len(rows) - len(exact)} from member targets")
+        ),
+        "rows": len(rows),
+        "keyed_on_elaboration": require_elaboration,
+        "measured_peak_gib": round(peak_gib, 2),
+        "row_times": [str(row["time"]) for row in rows],
+    }
+
+
 def classify_contention(
     worktree: Path,
     targets: list[str],
@@ -1504,10 +1956,12 @@ def classify_contention(
 ) -> tuple[str, dict[str, Any]]:
     """Choose a contention class from measurement, defaulting to `sensitive`.
 
-    `tolerant` requires all three: a small stale set now, a measured peak below
-    the configured threshold, and a ledger row taken on the same toolchain and
-    Lake manifest.  Any missing, drifted, or unreadable evidence keeps the
-    conservative class; evidence can only ever relax scheduling, never a floor.
+    `tolerant` requires all three: a small stale set now, every module in it
+    measured on the same toolchain and Lake manifest, and a modelled peak
+    below the configured threshold.  The model is the one the estimate uses,
+    so the class and the estimate always describe the same stale set.  Any
+    missing, drifted, or unreadable evidence keeps the conservative class;
+    evidence can only ever relax scheduling, never a floor.
     """
     evidence: dict[str, Any] = {}
     probe = stale if stale is not None else stale_evidence(worktree, targets, real_lake)
@@ -1526,20 +1980,54 @@ def classify_contention(
             f"(limit {limit})"
         )
         return "sensitive", evidence
-    rows, rows_detail = _measured_rows(worktree, targets, *digests, settings)
+    threshold = float(settings["tolerant_peak_gib"])
+    stale_set = probe.get("stale_set")
+    if stale_set is None:
+        # The probe counted but did not name the modules: the target-keyed
+        # fallback is the only evidence there is.
+        rows, rows_detail = _measured_rows(worktree, targets, *digests, settings, members=True)
+        evidence["measurements"] = rows_detail
+        if not rows:
+            evidence["reason"] = rows_detail
+            return "sensitive", evidence
+        peak_gib = max(float(row["peak_rss_mib"]) for row in rows) / 1024.0
+        evidence["measured_peak_gib"] = round(peak_gib, 2)
+        if peak_gib >= threshold:
+            evidence["reason"] = f"measured peak {peak_gib:.2f} GiB is not below {threshold} GiB"
+            return "sensitive", evidence
+        evidence["reason"] = (
+            f"{stale_count} stale module(s) at or below {limit} and a measured peak of "
+            f"{peak_gib:.2f} GiB below {threshold} GiB on the pinned toolchain and manifest"
+        )
+        return "tolerant", evidence
+    if stale_count == 0:
+        evidence["reason"] = "nothing is stale; the build elaborates no module and takes no hold"
+        evidence["measured_peak_gib"] = 0.0
+        return "tolerant", evidence
+    rows, rows_detail = _evidence_rows(worktree, *digests)
     evidence["measurements"] = rows_detail
-    if not rows:
+    if not rows and rows_detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
         evidence["reason"] = rows_detail
         return "sensitive", evidence
-    peak_gib = max(float(row["peak_rss_mib"]) for row in rows) / 1024.0
-    evidence["measured_peak_gib"] = round(peak_gib, 2)
-    threshold = float(settings["tolerant_peak_gib"])
-    if peak_gib >= threshold:
-        evidence["reason"] = f"measured peak {peak_gib:.2f} GiB is not below {threshold} GiB"
+    sizing = size_stale_set(list(stale_set), probe.get("graph"), rows, settings, 0)
+    evidence["measured_peak_gib"] = sizing["peak_gib"]
+    evidence["sizing"] = sizing["kind"]
+    if sizing["unmeasured"]:
+        shown = ", ".join(sizing["unmeasured"][:3])
+        evidence["reason"] = (
+            f"{len(sizing['unmeasured'])} of {stale_count} stale module(s) unmeasured on the "
+            f"pinned inputs ({shown}{', …' if len(sizing['unmeasured']) > 3 else ''})"
+        )
+        return "sensitive", evidence
+    if sizing["peak_gib"] >= threshold:
+        evidence["reason"] = (
+            f"modelled peak {sizing['peak_gib']:.2f} GiB is not below {threshold} GiB"
+        )
         return "sensitive", evidence
     evidence["reason"] = (
-        f"{stale_count} stale module(s) at or below {limit} and a measured peak of "
-        f"{peak_gib:.2f} GiB below {threshold} GiB on the pinned toolchain and manifest"
+        f"{stale_count} stale module(s) at or below {limit}, all measured, and a modelled "
+        f"peak of {sizing['peak_gib']:.2f} GiB below {threshold} GiB on the pinned "
+        "toolchain and manifest"
     )
     return "tolerant", evidence
 
@@ -1551,38 +2039,41 @@ def derive_memory_gib(
     digests: tuple[Optional[str], Optional[str]],
     default_gib: int,
     stale_modules: Optional[int] = None,
+    stale: Optional[dict[str, Any]] = None,
 ) -> tuple[int, dict[str, Any]]:
     """Propose a whole-GiB estimate from measurement, never below the floor.
 
-    ``stale_modules`` is the probe's count for this build.  A build with
-    nothing stale may be sized by any successful row of the same targets; a
-    build that will elaborate — or one whose stale set could not be measured —
-    is sized only by rows that themselves elaborated a module, because a
-    cache-restored row measures a build that did no work.
+    ``stale`` is the probe's evidence for this build.  When it names the stale
+    set, the estimate is sized from those modules' own measured cost, whatever
+    the target list was called; the spelling of a target list is not evidence
+    about what it will elaborate.  Without a named set — the probe failed, or
+    a caller stated the class and no probe ran — the target-keyed fallback
+    applies, keyed on elaboration exactly as before.
     """
     floor = int(settings["minimum_estimate_gib"])
-    require_elaboration = stale_modules != 0
-    rows, detail = _measured_rows(
-        worktree, targets, *digests, settings, require_elaboration
-    )
-    if not rows:
+    stale_set = stale.get("stale_set") if stale is not None else None
+    if stale_set is None:
+        count = stale["stale"] if stale is not None else stale_modules
+        return _target_keyed_estimate(worktree, targets, settings, digests, default_gib, count)
+    rows, detail = _evidence_rows(worktree, *digests)
+    if not rows and detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
         return max(floor, default_gib), {
+            "kind": "profile default",
             "source": f"profile default ({detail})",
             "rows": 0,
-            "keyed_on_elaboration": require_elaboration,
+            "keyed_on_elaboration": True,
         }
-    peak_gib = max(float(row["peak_rss_mib"]) for row in rows) / 1024.0
-    estimate = max(floor, math.ceil(peak_gib) + int(settings["estimate_margin_gib"]))
-    return estimate, {
-        "source": (
-            f"max of {len(rows)} measured peak(s) ({peak_gib:.2f} GiB) "
-            f"plus {settings['estimate_margin_gib']} GiB"
-            + (" from rows that elaborated" if require_elaboration else "")
-        ),
-        "rows": len(rows),
-        "keyed_on_elaboration": require_elaboration,
-        "measured_peak_gib": round(peak_gib, 2),
-        "row_times": [str(row["time"]) for row in rows],
+    sizing = size_stale_set(list(stale_set), stale.get("graph"), rows, settings, default_gib)
+    return int(sizing["estimate_gib"]), {
+        "kind": sizing["kind"],
+        "source": sizing["source"],
+        "rows": sizing["rows"],
+        "keyed_on_elaboration": True,
+        "measured_peak_gib": sizing["peak_gib"],
+        "stale_modules": sizing["stale_modules"],
+        "measured_modules": len(sizing["measured"]),
+        "unmeasured_modules": sizing["unmeasured"][:12],
+        "heavy_modules": sizing["heavy"],
     }
 
 
@@ -1619,6 +2110,50 @@ def repeat_failure(
         f"{window // 60} minute(s). Read every error at once with "
         "`lean_diagnostic_messages` on the edited file, and use `lean_goal` or "
         "`lean_hover_info` for a type mismatch, before building again."
+    )
+
+
+def _stale_line(probe: Optional[dict[str, Any]]) -> str:
+    """One line naming the whole stale closure, not only Lake's frontier."""
+    if probe is None:
+        return "stale: not probed"
+    modules = probe.get("stale_set")
+    if probe.get("roots") is None or modules is None:
+        return f"stale: unmeasured — {probe.get('detail')}"
+    if not modules:
+        return "stale: 0 module(s); every selected artifact is current"
+    return (
+        f"stale: {len(modules)} module(s) in the closure of {probe.get('roots')} would be "
+        f"elaborated: {', '.join(modules)}"
+    )
+
+
+def _stale_fields(probe: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if probe is None:
+        return {}
+    fields: dict[str, Any] = {}
+    if isinstance(probe.get("stale"), int) and not isinstance(probe.get("stale"), bool):
+        fields["stale_modules"] = int(probe["stale"])
+    detail = probe.get("detail")
+    modules = probe.get("stale_set")
+    if isinstance(detail, str) and detail:
+        fields["stale_detail"] = detail + (f": {', '.join(modules)}" if modules else "")
+    if isinstance(probe.get("roots"), list):
+        fields["resolved_roots"] = [str(root) for root in probe["roots"]]
+    return fields
+
+
+def _estimate_note(estimate: dict[str, Any]) -> str:
+    """What the fit line says the estimate is, so a waiter blames the right cause."""
+    source = str(estimate.get("source") or "explicit")
+    if source != "explicit":
+        return f"derived: {source}"
+    derived = estimate.get("derived_gib")
+    if derived is None:
+        return "explicit --memory-gib"
+    return (
+        f"explicit --memory-gib {estimate.get('explicit_gib')}; the evidence supports "
+        f"{derived} GiB ({estimate.get('derived_source')})"
     )
 
 
@@ -1798,21 +2333,27 @@ def run_lake_build(
         contention, evidence = classify_contention(
             worktree, targets, real_lake, settings(), digests, stale()
         )
+    else:
+        # The class is stated, but the probe still runs: it is what tells the
+        # wrapper that nothing is stale and no hold is needed, and it is what
+        # the estimate is sized from.  One Lake `--no-build` costs a second.
+        stale()
     estimate_evidence: dict[str, Any] = {}
-    # The estimate reuses the class's probe when there was one.  It never asks
-    # for a probe of its own: a caller who states the class deserves the
-    # conservative keying, not a second Lake invocation.
+    # The estimate reuses the class's probe: the two answers describe one
+    # stale set.
     measured_stale = probe_evidence["stale"] if probe_evidence is not None else None
     if memory_gib is None:
         memory_gib, estimate_evidence = derive_memory_gib(
-            worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale
+            worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale,
+            probe_evidence,
         )
     elif probe_evidence is not None:
         # An explicit estimate is honoured, but the reader is told what the
         # evidence would have proposed: a larger one is charged 1.25x and can
         # be passed over by every smaller request on a busy host.
         derived, derived_evidence = derive_memory_gib(
-            worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale
+            worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale,
+            probe_evidence,
         )
         estimate_evidence = {
             "source": "explicit",
@@ -1829,6 +2370,9 @@ def run_lake_build(
                 "every smaller request while it waits",
                 file=output,
             )
+    else:
+        estimate_evidence = {"source": "explicit", "explicit_gib": memory_gib}
+    stale_line = _stale_line(probe_evidence)
 
     lake_args = [str(real_lake), "build"]
     if probe:
@@ -1841,33 +2385,61 @@ def run_lake_build(
         completed = subprocess.run(lake_args, cwd=worktree, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
         wall = time.monotonic() - started
         print(completed.stdout, end="", file=output)
+        # Lake names only the frontier it stopped at; the closure behind it is
+        # what a build would elaborate, so it is printed in full.
+        print(stale_line, file=output)
         append_ledger({
             "kind": "build", "worktree": str(worktree), "goal": goal, "targets": targets,
             "command": lake_args, "exit": completed.returncode, "wall_seconds": round(wall, 3),
             "threads": threads, "probe": True, "admission": "NOT_REQUIRED_NO_BUILD",
             "contention": contention, "modules_rebuilt": [], "modules_restored": [],
             "module_hashes": {}, "module_seconds": {},
+            **_stale_fields(probe_evidence),
             **_digest_fields(digests),
         })
         state = "fresh" if completed.returncode == 0 else "stale" if completed.returncode == STALE_EXIT else "error"
-        print(json.dumps({"status": state.upper(), "exit": completed.returncode}, sort_keys=True), file=output)
+        summary = {"status": state.upper(), "exit": completed.returncode}
+        if probe_evidence is not None:
+            summary["stale_modules"] = probe_evidence["stale"]
+            summary["stale_set"] = probe_evidence.get("stale_set")
+            summary["estimate"] = estimate_evidence
+            summary["memory_gib"] = memory_gib
+        print(json.dumps(summary, sort_keys=True), file=output)
         return completed.returncode
 
-    admitted, admission = semaphore.adaptive_acquire(
-        goal,
-        "classified lake build",
-        semaphore.ADAPTIVE_LEASE_SECONDS,
-        memory_gib=memory_gib,
-        contention=contention,
-        wait_seconds=wait_seconds,
-        **(
-            {
-                "poll_seconds": float(settings()["wait_poll_seconds"]),
-                "announce": lambda line: print(line, file=output, flush=True),
-            }
-            if wait_seconds is not None else {}
-        ),
+    fresh = (
+        probe_evidence is not None
+        and probe_evidence["stale"] == 0
+        and not census
     )
+    if fresh:
+        # Nothing is stale: the build restores or links, and elaborates no
+        # module.  It takes no hold, so a session behind a fresh checkpoint
+        # is never queued for a one-second no-op.
+        admitted, admission = True, "NOT_REQUIRED_FRESH"
+        print(
+            "admission: the probe reports every selected artifact current; this build "
+            "elaborates nothing and takes no hold",
+            file=output,
+        )
+    else:
+        admitted, admission = semaphore.adaptive_acquire(
+            goal,
+            "classified lake build",
+            semaphore.ADAPTIVE_LEASE_SECONDS,
+            memory_gib=memory_gib,
+            contention=contention,
+            wait_seconds=wait_seconds,
+            estimate_source=_estimate_note(estimate_evidence),
+            **(
+                {
+                    "poll_seconds": float(settings()["wait_poll_seconds"]),
+                    "announce": lambda line: print(line, file=output, flush=True),
+                }
+                if wait_seconds is not None else {}
+            ),
+        )
+
     if not admitted:
         print(json.dumps({
             "status": "REFUSED",
@@ -1889,7 +2461,7 @@ def run_lake_build(
         print(update.stderr, end="", file=output)
         dependency_rev, dependency_detail = _dependency_revision(worktree, str(dependency))
         if update.returncode != 0 or dependency_rev is None:
-            semaphore.adaptive_release(goal)
+            release_hold()
             print(json.dumps({
                 "status": "REFUSED",
                 "detail": f"dependency census aborted before building: {dependency_detail}",
@@ -1897,10 +2469,15 @@ def run_lake_build(
             }, sort_keys=True), file=output)
             return update.returncode or 2
         digests = worktree_digests(worktree)
+    def release_hold() -> tuple[bool, str]:
+        if fresh:
+            return True, "no hold was taken"
+        return semaphore.adaptive_release(goal)
+
     try:
         priority_launcher = guard_bin() / "nice"
     except (OSError, RuntimeError) as exc:
-        semaphore.adaptive_release(goal)
+        release_hold()
         print(json.dumps({"status": "REFUSED", "detail": f"priority launcher is unavailable: {exc}"}, sort_keys=True), file=output)
         return GUARD_REFUSAL_EXIT
     args = [str(priority_launcher), "-n", "10", *lake_args]
@@ -1932,16 +2509,17 @@ def run_lake_build(
             args, cwd=worktree, env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
         )
-        sampler = ProcessSampler(proc.pid)
+        sampler = ProcessSampler(proc.pid, worktree=worktree)
         sampler.start()
-        renewer = RenewalThread(goal, proc)
-        renewer.start()
+        if not fresh:
+            renewer = RenewalThread(goal, proc)
+            renewer.start()
         assert proc.stdout is not None
         for line in proc.stdout:
             lines.append(line)
             print(line, end="", file=output)
         exit_code = proc.wait()
-        if renewer.refused:
+        if renewer is not None and renewer.refused:
             exit_code = exit_code or 2
             cleanup_proved = renewer.cleanup_proved
     except KeyboardInterrupt:
@@ -1958,6 +2536,14 @@ def run_lake_build(
     after = _swap_gib()
     rebuilt, restored, module_seconds = _parse_build_output(lines)
     hashes = _module_hashes(worktree, rebuilt)
+    module_peaks = (
+        {
+            module: round(value, 1)
+            for module, value in sorted(sampler.module_peak_mib.items())
+            if module in rebuilt
+        }
+        if sampler and getattr(sampler, "module_peak_mib", None) else {}
+    )
     peak_mib = round(sampler.peak_rss_mib, 1) if sampler and sampler.samples else None
     hint = repeat_failure(worktree, targets, settings()) if exit_code == 1 else None
     restart_line = (
@@ -1989,6 +2575,7 @@ def run_lake_build(
         "probe": False, "admission": admission, "contention": contention,
         "modules_rebuilt": rebuilt, "modules_restored": restored,
         "module_hashes": hashes, "module_seconds": module_seconds,
+        **({"module_peak_mib": module_peaks} if module_peaks else {}),
         "toolchain": str(real_lake), "renewals": renewer.verdicts if renewer else [],
         "memory_gib": memory_gib,
         "evidence_contention": contention,
@@ -2011,7 +2598,7 @@ def run_lake_build(
         **_digest_fields(digests),
     }
     if cleanup_proved:
-        released, release_detail = semaphore.adaptive_release(goal)
+        released, release_detail = release_hold()
         if not released:
             print(json.dumps({"status": "RELEASE_FAILED", "detail": release_detail}, sort_keys=True), file=output)
             exit_code = exit_code or 2

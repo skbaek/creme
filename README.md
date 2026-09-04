@@ -105,7 +105,7 @@ python3 -m creme python-runtime 3.11.9
 ./.semaphore/semaphore adaptive-acquire GOAL --note "proof loop" --memory-gib 4
 ./.semaphore/semaphore adaptive-acquire GOAL --note "queued" --wait 600
 ./.semaphore/semaphore master-acquire --client claude --note "master session"
-./.semaphore/semaphore master-renew
+./.semaphore/semaphore master-renew --heartbeat 1500 --detach
 ./.semaphore/semaphore master-release
 python3 -m creme tempdir
 python3 -m creme cache-copy SOURCE DESTINATION

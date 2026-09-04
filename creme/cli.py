@@ -347,6 +347,8 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
         ))
     if action == "master-renew":
         if arguments.heartbeat is not None:
+            if arguments.detach:
+                return _sem_result(*semaphore.master_heartbeat_detached(arguments.heartbeat))
             return _sem_result(*semaphore.master_heartbeat(arguments.heartbeat))
         return _sem_result(*semaphore.master_renew(arguments.lease))
     if action == "master-release":
@@ -704,6 +706,11 @@ def parser() -> argparse.ArgumentParser:
             "run in the background: renew every SECS seconds until the lease is gone, "
             "a renewal is refused, or the holding client process exits"
         ),
+    )
+    master_renew.add_argument(
+        "--detach",
+        action="store_true",
+        help="with --heartbeat: start it in its own process session and return at once",
     )
     master_release = sem_commands.add_parser("master-release", help="end the master lease")
     master_release.add_argument(

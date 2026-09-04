@@ -1528,3 +1528,32 @@ class MasterLeaseTest(unittest.TestCase):
         ok, detail = semaphore.master_acquire("codex", "successor", take_over=True)
         self.assertTrue(ok, detail)
         self.assertIn("stranded", detail)
+
+    def test_an_orphaned_heartbeat_renews_for_the_holder_it_read(self):
+        semaphore.master_acquire("claude", "master")
+        self.as_client(None, None)          # orphaned: no client above the heartbeat
+        ok, detail = semaphore.master_heartbeat(5, sleep=lambda s: None, max_beats=1)
+        self.assertTrue(ok, detail)
+        self.assertEqual(self.log_actions().count("master-renew"), 1)
+        # A stranger without the holder assertion is still refused once lapsed.
+        self.expire()
+        ok, detail = semaphore.master_renew()
+        self.assertFalse(ok)
+
+    def test_the_detached_heartbeat_starts_its_own_session(self):
+        semaphore.master_acquire("claude", "master")
+        with mock.patch("creme.semaphore.subprocess.Popen") as popen:
+            popen.return_value.pid = 424242
+            ok, detail = semaphore.master_heartbeat_detached(1500)
+        self.assertTrue(ok, detail)
+        self.assertIn("pid 424242", detail)
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0][-3:], ["master-renew", "--heartbeat", "1500"])
+        self.assertTrue(args[0][1].endswith("/.semaphore/semaphore"))
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertEqual(kwargs["stdin"], semaphore.subprocess.DEVNULL)
+        self.assertIn("master-heartbeat", self.log_actions())
+        self.assertEqual(stat.S_IMODE((self.root / "heartbeat.log").stat().st_mode), 0o600)
+        semaphore.master_release()
+        ok, detail = semaphore.master_heartbeat_detached(1500)
+        self.assertFalse(ok)

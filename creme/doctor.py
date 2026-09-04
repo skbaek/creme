@@ -13,7 +13,13 @@ from .adapters import Adapter, get_adapter
 from .guidance import GuidanceValidation
 from .guidance import default_path as default_guidance_path
 from .guidance import load as load_guidance
-from .host_wrappers import default_output_dir, render_host_wrappers, wrapper_install_issues
+from .host_wrappers import (
+    RULES_FILENAME,
+    bundle_install_issues,
+    default_output_dir,
+    default_rules_dir,
+    render_host_wrappers,
+)
 from .profile import DEFAULT_RELATIVE_PROFILE, ProfileValidation, effective_policy, load
 from .semaphore import canonical_creme_root
 
@@ -370,34 +376,45 @@ def check_neutral_semaphore(root: Path) -> list[Check]:
     )]
 
 
-def check_host_wrappers(root: Path, output_dir: Optional[Path] = None) -> list[Check]:
-    directory = (output_dir or default_output_dir()).expanduser().resolve()
+def check_host_wrappers(
+    root: Path,
+    output_dir: Optional[Path] = None,
+    rules_dir: Optional[Path] = None,
+) -> list[Check]:
+    directory = (output_dir or default_output_dir()).expanduser().absolute()
+    rules_directory = (rules_dir or default_rules_dir()).expanduser().absolute()
     rendered = render_host_wrappers(root)
-    present = [
-        name for name in rendered
-        if os.path.lexists(directory / name)
-    ]
+    members = [*(directory / name for name in rendered), rules_directory / RULES_FILENAME]
+    present = [path for path in members if os.path.lexists(path)]
     if not present:
         return [Check(
-            "client: host wrappers",
+            "client: host capability bundle",
             STATUS_WARN,
-            f"not installed in {directory}; direct Creme capability commands remain canonical",
+            (
+                f"not installed in {directory} and {rules_directory}; direct Creme "
+                "capability commands remain canonical and host escalation may prompt"
+            ),
         )]
-    issues = wrapper_install_issues(root, directory)
+    issues = bundle_install_issues(root, directory, rules_directory)
     if issues:
         command = (
             "python3 -m creme host-wrappers --output-dir "
-            f"{shlex.quote(str(directory))} --write --replace"
+            f"{shlex.quote(str(directory))} --rules-dir "
+            f"{shlex.quote(str(rules_directory))} --write --replace"
         )
         return [Check(
-            "client: host wrappers",
+            "client: host capability bundle",
             STATUS_FAIL,
             f"invalid install: {issues}; review a fresh preview, then run `{command}`",
         )]
     return [Check(
-        "client: host wrappers",
+        "client: host capability bundle",
         STATUS_OK,
-        f"all {len(rendered)} delegates match {root / 'scripts' / 'creme'}",
+        (
+            f"all {len(members)} installed files match; fully restart Codex after "
+            "any change because rules load at process startup; stricter managed "
+            "requirements may still override these user allows"
+        ),
     )]
 
 

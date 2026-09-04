@@ -67,19 +67,28 @@ Fresh hosts keep its private runtime state in ignored `.semaphore/state/`.
 Upgraded hosts retain and use legacy state until the explicit, non-destructive
 `migrate-state` cutover documented in [the setup guide](docs/setup.md).
 
-Codex installations that authorize stable executable paths can install thin
-delegates for telemetry and Lean reclamation. Semaphore coordination always
-uses the tracked client-neutral launcher. Preview the exact files first:
+Codex installations that authorize stable executable paths can install a
+single reviewed bundle containing constrained telemetry/reclamation delegates
+and their least-privilege command rules. Permission profiles such as
+`creme-relay` govern sandbox filesystem/network access; they do not remember
+out-of-sandbox command approvals. Semaphore coordination always uses the
+tracked client-neutral launcher. Preview the exact files first:
 
 ```sh
-python3 -m creme host-wrappers --output-dir ~/.codex/bin
-python3 -m creme host-wrappers --output-dir ~/.codex/bin --write
+python3 -m creme host-wrappers \
+  --output-dir ~/.codex/bin --rules-dir ~/.codex/rules
+python3 -m creme host-wrappers \
+  --output-dir ~/.codex/bin --rules-dir ~/.codex/rules --write
 ```
 
-The generated files contain no capability implementation; each delegates to
-this checkout's `scripts/creme`. Regenerate them after moving the checkout.
-Use `--replace` only after reviewing a changed preview. If either generated
-path exists, `doctor` requires the complete installed set to match.
+The generated delegates reject every argument shape except telemetry with no
+arguments, reclamation `--dry-run`, and `--wind-down GOAL`. The generated rule
+file allows only those stable entry points; stronger reclamation remains
+prompt-gated. Regenerate after moving the checkout and use `--replace` only
+after reviewing a changed preview. Fully quit and restart Codex after a rule
+change: rules are loaded at process startup. If any bundle path exists,
+`doctor` requires the complete installed set, exact private modes, and current
+contents to match; stricter managed requirements may still override user rules.
 
 Before real work, read [AGENTS.md](AGENTS.md), the appropriate sibling's
 `scripts/GATES.md`, and [the execution guide](docs/guides/execution.md).
@@ -97,7 +106,7 @@ Client discovery and its negative control are documented in
 python3 -m creme --help
 python3 -m creme doctor --json
 python3 -m creme host-guidance
-python3 -m creme host-wrappers --output-dir ~/.codex/bin
+python3 -m creme host-wrappers --output-dir ~/.codex/bin --rules-dir ~/.codex/rules
 python3 -m creme memory-headroom
 python3 -m creme telemetry
 python3 -m creme python-runtime 3.11.9

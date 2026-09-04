@@ -166,8 +166,14 @@ host delegate that `python3 -m creme doctor` reports as current:
 ```
 
 These stable approval targets dispatch back into the canonical Creme checkout.
-Never use a copied standalone helper or a delegate that `doctor` marks stale;
-preview and regenerate the complete set with `python3 -m creme host-wrappers`.
+Their generated Codex rules allow only telemetry, reclamation `--dry-run`, and
+goal-scoped `--wind-down`; stronger reclamation remains approval-gated. Never
+persist a prefix for a shell script under `/tmp`, a goal worktree, or another
+sandbox-writable path. Repeated host execution needs a generated stable
+delegate with an argument-rejecting surface. Never use a copied standalone
+helper or a bundle that `doctor` marks stale; preview and regenerate the
+complete delegates-and-rules set with `python3 -m creme host-wrappers`, then
+fully restart Codex because rules load only at process startup.
 
 The capability contract and limited-mode results are in
 `docs/capabilities.md`. A missing capability is not permission to run another

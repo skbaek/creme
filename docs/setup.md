@@ -254,26 +254,38 @@ the cutover has wound down.
 
 ### Codex host-capability delegates
 
-Some Codex installations authorize a stable executable path for host
-operations that the project sandbox cannot perform directly. Creme can create
-two user-local delegates for that boundary: telemetry and Lean reclamation.
-They contain no copied host logic and always execute the current checkout's
-capability CLI. Semaphore coordination uses the tracked launcher above.
+Some Codex installations authorize stable executable paths for host operations
+that the project sandbox cannot perform directly. Creme creates the constrained
+delegates and their least-privilege Codex rules as one bundle. A custom
+permission profile such as `creme-relay` only sets the filesystem/network
+sandbox boundary; it cannot authorize an out-of-sandbox command. Semaphore
+coordination uses the tracked launcher above.
 
 Preview the complete contents and destinations before the first write:
 
 ```sh
 cd ~/creme
-python3 -m creme host-wrappers --output-dir ~/.codex/bin
-python3 -m creme host-wrappers --output-dir ~/.codex/bin --write
+python3 -m creme host-wrappers \
+  --output-dir ~/.codex/bin --rules-dir ~/.codex/rules
+python3 -m creme host-wrappers \
+  --output-dir ~/.codex/bin --rules-dir ~/.codex/rules --write
 ```
 
 If those paths already contain an older install, compare the preview and use
-`--replace` only after review. The installer refuses implicit destinations and
-existing files. It writes both files mode `0700` through same-directory
-temporary files. Relocating Creme changes their target, so regenerate them
-from the canonical checkout. `doctor` warns when none are installed and fails
-when it finds a partial, stale, linked, or non-executable set.
+`--replace` only after review. Writing requires both explicit destinations.
+Delegates are mode `0700`; the rule file is mode `0600` and is published last,
+so an interrupted first install fails by prompting. Telemetry accepts no
+arguments; reclamation accepts exactly `--dry-run` or `--wind-down GOAL`.
+Plain reclaim, `--hard-pressure`, and idle-worker reclamation remain outside
+the allow rules. Relocating Creme changes the delegates' target, so regenerate
+from the canonical checkout.
+
+Fully quit and restart Codex after installation or replacement. Codex scans
+rules only at process startup; a new turn or subagent is not a reload. `doctor`
+warns when the whole bundle is absent and fails on partial, stale, linked,
+wrong-mode, or non-regular installs. Its green result validates installed
+bytes, not the live process's startup snapshot, and stricter managed rules may
+still win.
 
 Claude Code users launch `claude` from `~/creme`, accept that exact workspace
 when prompted, and review the pinned `lean-lsp-mcp` project server before

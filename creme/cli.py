@@ -15,7 +15,9 @@ from .guidance import default_path as default_guidance_path
 from .guidance import load as load_guidance
 from .host_wrappers import (
     default_output_dir as default_host_wrapper_output_dir,
-    install_host_wrappers,
+    default_rules_dir as default_host_rules_dir,
+    install_host_bundle,
+    render_host_rules,
     render_host_wrappers,
 )
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
@@ -482,36 +484,56 @@ def cmd_client_profile(arguments: argparse.Namespace) -> int:
 
 def cmd_host_wrappers(arguments: argparse.Namespace) -> int:
     output = (
-        Path(arguments.output_dir).expanduser().resolve()
+        Path(arguments.output_dir).expanduser().absolute()
         if arguments.output_dir
-        else default_host_wrapper_output_dir().resolve()
+        else default_host_wrapper_output_dir().absolute()
+    )
+    rules = (
+        Path(arguments.rules_dir).expanduser().absolute()
+        if arguments.rules_dir
+        else default_host_rules_dir().absolute()
     )
     rendered = render_host_wrappers(ROOT)
     if not arguments.write:
         _json({
             "status": "PREVIEW",
-            "detail": "review these delegates, then rerun with --write",
+            "detail": (
+                "review this complete delegate-and-rules bundle, then rerun with --write; "
+                "Codex must be fully restarted after installation"
+            ),
             "creme_root": str(ROOT),
             "output_dir": str(output),
+            "rules_dir": str(rules),
             "wrappers": {
                 str(output / name): content for name, content in rendered.items()
             },
+            "rules": {
+                str(rules / "creme-host-capabilities.rules"): render_host_rules(output),
+            },
         })
         return 0
-    if not arguments.output_dir:
+    if not arguments.output_dir or not arguments.rules_dir:
         _json({
             "status": "REFUSED",
-            "detail": "--output-dir is required with --write; Creme never chooses or overwrites user executables implicitly",
+            "detail": (
+                "--output-dir and --rules-dir are both required with --write; "
+                "Creme never chooses or overwrites user authorization state implicitly"
+            ),
         })
         return 1
     try:
-        written = install_host_wrappers(ROOT, output, replace=arguments.replace)
-    except OSError as exc:
+        written = install_host_bundle(
+            ROOT, output, rules, replace=arguments.replace,
+        )
+    except (OSError, ValueError) as exc:
         _json({"status": "REFUSED", "detail": str(exc)})
         return 1
     _json({
         "status": "OK",
-        "detail": "reviewed host capability delegates written",
+        "detail": (
+            "reviewed host capability bundle written; fully quit and restart Codex "
+            "before expecting the new rules to apply"
+        ),
         "creme_root": str(ROOT),
         "paths": [str(path) for path in written],
     })
@@ -790,9 +812,10 @@ def parser() -> argparse.ArgumentParser:
 
     wrappers = commands.add_parser(
         "host-wrappers",
-        help="preview or install stable Codex delegates for telemetry and reclamation",
+        help="preview or install stable Codex delegates and their least-privilege rules",
     )
     wrappers.add_argument("--output-dir")
+    wrappers.add_argument("--rules-dir")
     wrappers.add_argument("--write", action="store_true")
     wrappers.add_argument("--replace", action="store_true")
     wrappers.set_defaults(func=cmd_host_wrappers)

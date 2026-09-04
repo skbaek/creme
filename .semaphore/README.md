@@ -35,7 +35,7 @@ under the same mutex. It charges no memory and never affects admission:
 
 ```sh
 ~/creme/.semaphore/semaphore master-acquire --client claude --note "why"
-~/creme/.semaphore/semaphore master-renew
+~/creme/.semaphore/semaphore master-renew --heartbeat 1500 --detach
 ~/creme/.semaphore/semaphore master-release
 ```
 

@@ -4,6 +4,8 @@ import fcntl
 import json
 import math
 import os
+import sys
+import subprocess
 import re
 import signal
 import tempfile
@@ -2245,11 +2247,18 @@ def master_renew(
     lease: Optional[int] = None,
     *,
     adapter: Optional[Adapter] = None,
+    as_client_pid: Optional[int] = None,
 ) -> tuple[bool, str]:
     if lease is not None and (lease < 1 or lease > MAX_LEASE_SECONDS):
         return False, f"lease must be 1..{MAX_LEASE_SECONDS} seconds"
     selected = adapter or get_adapter()
-    client_pid, _family, found = _client_process(selected)
+    if as_client_pid is not None:
+        # The detached heartbeat is orphaned to the init process and cannot
+        # find a client above itself; it acts for the holder it read from
+        # the lease, and it exits the moment that holder's process is gone.
+        client_pid, found = as_client_pid, f"heartbeat for client pid {as_client_pid}"
+    else:
+        client_pid, _family, found = _client_process(selected)
     with locked_state() as (path, _state):
         root = path.parent
         data = _load_master(root)
@@ -2352,10 +2361,45 @@ def master_heartbeat(
                 f"heartbeat stopped after {beats} renewal(s): the holding client "
                 f"pid {client_pid} is gone; the lease will lapse and read STRANDED"
             )
-        ok, detail = master_renew(adapter=selected)
+        ok, detail = master_renew(adapter=selected, as_client_pid=client_pid)
         if not ok:
             return False, f"heartbeat stopped after {beats} renewal(s): {detail}"
         beats += 1
         if max_beats is not None and beats >= max_beats:
             return True, f"heartbeat stopped after {beats} renewal(s): beat limit reached"
         sleep(interval)
+
+
+def master_heartbeat_detached(interval: int) -> tuple[bool, str]:
+    """Start the heartbeat in its own process session, detached from the caller.
+
+    A client's tool call is reaped when it ends or times out, and macOS has no
+    ``setsid`` binary, so the launcher detaches itself: the child starts a new
+    session, reads and writes nothing on the caller's descriptors, and logs to
+    ``heartbeat.log`` beside the lease state.  It still exits on its own when
+    the holding client process is gone or a renewal is refused.
+    """
+    if interval < 1 or interval > MAX_LEASE_SECONDS:
+        return False, f"interval must be 1..{MAX_LEASE_SECONDS} seconds"
+    with locked_state() as (path, _state):
+        root = path.parent
+        lease = _load_master(root)["lease"]
+    if lease is None:
+        return False, "no master lease exists; run master-acquire first"
+    launcher = canonical_creme_root() / NEUTRAL_STATE_RELATIVE.parent / "semaphore"
+    log = root / "heartbeat.log"
+    fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        process = subprocess.Popen(
+            [sys.executable, str(launcher), "master-renew", "--heartbeat", str(interval)],
+            stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
+            start_new_session=True, close_fds=True,
+        )
+    finally:
+        os.close(fd)
+    _log("master-heartbeat", lease["client"], "OK", f"detached pid {process.pid}; interval={interval}")
+    return True, (
+        f"heartbeat detached as pid {process.pid}, renewing every {interval}s for "
+        f"client {lease['client']}; log: {log}"
+    )

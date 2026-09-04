@@ -66,8 +66,9 @@ anything else and whether or not the user mentions the role:
    ~/creme/.semaphore/semaphore master-acquire --client claude --note "why this session"
    ```
 
-   - `OK`: this session is the **master**. Start the heartbeat in the
-     background (`master-renew --heartbeat 1500`), append a `master` event
+   - `OK`: this session is the **master**. Start the heartbeat detached
+     (`master-renew --heartbeat 1500 --detach`; a client's background tool
+     call is reaped, a detached process is not), append a `master` event
      naming the client, model, and effort, rewrite the board's lease line,
      and say in the first reply that this session is the master.
    - `REFUSED` because the lease is **live**: this session is a **reader**.
@@ -102,6 +103,7 @@ admission; it exists only so that two masters cannot coexist.
 
 ```sh
 ~/creme/.semaphore/semaphore master-acquire --client claude --note "..." [--lease SECS]
+~/creme/.semaphore/semaphore master-renew --heartbeat 1500 --detach
 ~/creme/.semaphore/semaphore master-renew
 ~/creme/.semaphore/semaphore master-release
 ~/creme/.semaphore/semaphore status        # prints the master: line

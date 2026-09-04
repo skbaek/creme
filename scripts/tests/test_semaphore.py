@@ -1480,15 +1480,21 @@ class MasterLeaseTest(unittest.TestCase):
             self.assertIn("live", detail)
 
     def test_codex_app_pipe_is_never_task_liveness(self):
-        raw_pipe = "/private/tmp/app-global-codex-tools.sock"
-        with mock.patch.dict(os.environ, {
-            "CREME_MASTER_SESSION_ID": "",
-            "CREME_MASTER_LIVENESS_SOCKET": "",
-            "CODEX_SESSION_ID": "session-a",
-            "CODEX_THREAD_ID": "",
-            "CODEX_APP_TOOLS_PIPE_PATH": raw_pipe,
-        }, clear=False):
-            session = semaphore._client_session("codex")
+        raw_pipe = str(self.root / "app-global-codex-tools.sock")
+        listener = semaphore.socket.socket(semaphore.socket.AF_UNIX, semaphore.socket.SOCK_STREAM)
+        listener.bind(raw_pipe)
+        listener.listen()
+        try:
+            with mock.patch.dict(os.environ, {
+                "CREME_MASTER_SESSION_ID": "",
+                "CREME_MASTER_LIVENESS_SOCKET": "",
+                "CODEX_SESSION_ID": "session-a",
+                "CODEX_THREAD_ID": "",
+                "CODEX_APP_TOOLS_PIPE_PATH": raw_pipe,
+            }, clear=False):
+                session = semaphore._client_session("codex")
+        finally:
+            listener.close()
         self.assertIsNotNone(session.digest)
         self.assertIsNone(session.liveness_digest)
         self.assertIsNone(session.liveness_socket)

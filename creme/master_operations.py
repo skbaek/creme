@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Union
 
-from . import master_reconcile, master_runtime, semaphore
+from . import master_migrate, master_reconcile, master_runtime, semaphore
 from .adapters import Adapter, get_adapter
 from .doctor import STATUS_FAIL, check_goal_store
 from .profile import DEFAULT_RELATIVE_PROFILE, load as load_profile
@@ -176,6 +176,25 @@ def plan_initialization(location: RuntimeLocation) -> InitPlan:
     ):
         detail = "existing master root must be an owner-only non-symlink directory"
         return InitPlan("REFUSED", str(root), detail, _standard_actions("refuse", detail))
+
+    if (root / master_migrate.MIGRATION_REPORT_NAME).exists():
+        migration = master_migrate.plan_migration(root)
+        if migration.status == "FINALIZE":
+            detail = "prepared legacy migration requires explicit `master init --migrate --apply`"
+            return InitPlan(
+                "MIGRATION_REQUIRED",
+                str(root),
+                detail,
+                _standard_actions("refuse", "prepared migration is not yet authoritative"),
+            )
+        if migration.status != "CURRENT":
+            detail = f"legacy migration is not verified: {migration.detail}"
+            return InitPlan(
+                "REFUSED",
+                str(root),
+                detail,
+                _standard_actions("refuse", "migration evidence requires explicit recovery"),
+            )
 
     core = [
         root / master_runtime.EVENTS_NAME,

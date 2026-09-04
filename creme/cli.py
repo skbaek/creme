@@ -21,6 +21,7 @@ from .host_wrappers import (
 )
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import idle_workers
+from . import master_migrate
 from . import master_operations
 from . import master_reconcile
 from . import master_runtime
@@ -204,6 +205,12 @@ def cmd_master_init(arguments: argparse.Namespace) -> int:
     if location is None:
         _json({"status": "unavailable", "detail": error})
         return 2
+    if arguments.migrate:
+        plan = master_migrate.migrate(location.record_root, apply=arguments.apply)
+        payload = plan.to_dict()
+        payload["record_root"] = str(location.record_root)
+        _json(payload)
+        return 0 if plan.status in {"PREVIEW", "FINALIZE", "CURRENT", "OK"} else 2
     plan = master_operations.initialize(location, apply=arguments.apply)
     _json(plan.to_dict())
     return 0 if plan.status in {"PREVIEW", "CURRENT", "OK"} else 2
@@ -810,6 +817,11 @@ def parser() -> argparse.ArgumentParser:
         help="preview the standard private layout; --apply is the only mutation",
     )
     master_init.add_argument("--apply", action="store_true")
+    master_init.add_argument(
+        "--migrate",
+        action="store_true",
+        help="explicitly preview or apply legacy migration with an in-record backup",
+    )
     master_init.set_defaults(func=cmd_master_init)
 
     master_start = master_commands.add_parser(

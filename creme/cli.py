@@ -14,8 +14,12 @@ from .doctor import run_doctor
 from .guidance import default_path as default_guidance_path
 from .guidance import load as load_guidance
 from .host_wrappers import (
+    BROKER_NAME,
+    RULES_FILENAME,
     default_output_dir as default_host_wrapper_output_dir,
-    install_host_wrappers,
+    default_rules_dir as default_host_rules_dir,
+    install_host_bundle,
+    render_host_rules,
     render_host_wrappers,
 )
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
@@ -58,6 +62,15 @@ def _task_memory(text: str) -> int:
 
 def _json(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
+
+
+def _path_has_text(path: Path, expected: str) -> bool:
+    try:
+        return not path.is_symlink() and path.is_file() and path.read_text(
+            encoding="utf-8",
+        ) == expected
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def _toml_string(value: object) -> str:
@@ -482,37 +495,78 @@ def cmd_client_profile(arguments: argparse.Namespace) -> int:
 
 def cmd_host_wrappers(arguments: argparse.Namespace) -> int:
     output = (
-        Path(arguments.output_dir).expanduser().resolve()
+        Path(arguments.output_dir).expanduser().absolute()
         if arguments.output_dir
-        else default_host_wrapper_output_dir().resolve()
+        else default_host_wrapper_output_dir().absolute()
     )
-    rendered = render_host_wrappers(ROOT)
+    rules = (
+        Path(arguments.rules_dir).expanduser().absolute()
+        if arguments.rules_dir
+        else default_host_rules_dir().absolute()
+    )
+    try:
+        rendered = render_host_wrappers(ROOT)
+    except (OSError, RuntimeError, ValueError) as exc:
+        _json({"status": "REFUSED", "detail": str(exc)})
+        return 1
     if not arguments.write:
+        expected_rules = render_host_rules(
+            output, include_build=BROKER_NAME in rendered,
+        )
+        rules_changed = not _path_has_text(rules / RULES_FILENAME, expected_rules)
         _json({
             "status": "PREVIEW",
-            "detail": "review these delegates, then rerun with --write",
+            "detail": (
+                "review this complete delegate-and-rules bundle, then rerun with --write; "
+                + (
+                    "the rule bytes would change, so Codex must then be fully restarted"
+                    if rules_changed else
+                    "the rule bytes are identical, so an already-loaded rule needs no restart"
+                )
+            ),
             "creme_root": str(ROOT),
             "output_dir": str(output),
+            "rules_dir": str(rules),
+            "rules_changed_by_install": rules_changed,
             "wrappers": {
                 str(output / name): content for name, content in rendered.items()
             },
+            "rules": {
+                str(rules / RULES_FILENAME): expected_rules,
+            },
         })
         return 0
-    if not arguments.output_dir:
+    if not arguments.output_dir or not arguments.rules_dir:
         _json({
             "status": "REFUSED",
-            "detail": "--output-dir is required with --write; Creme never chooses or overwrites user executables implicitly",
+            "detail": (
+                "--output-dir and --rules-dir are both required with --write; "
+                "Creme never chooses or overwrites user authorization state implicitly"
+            ),
         })
         return 1
     try:
-        written = install_host_wrappers(ROOT, output, replace=arguments.replace)
-    except OSError as exc:
+        expected_rules = render_host_rules(
+            output, include_build=BROKER_NAME in rendered,
+        )
+        rules_changed = not _path_has_text(rules / RULES_FILENAME, expected_rules)
+        written = install_host_bundle(
+            ROOT, output, rules, replace=arguments.replace,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
         _json({"status": "REFUSED", "detail": str(exc)})
         return 1
     _json({
         "status": "OK",
-        "detail": "reviewed host capability delegates written",
+        "detail": (
+            "reviewed host capability bundle written; fully quit and restart Codex "
+            "before expecting new rule bytes to apply"
+            if rules_changed else
+            "reviewed host capability bundle refreshed; rule bytes were already identical, "
+            "so an already-loaded rule needs no restart"
+        ),
         "creme_root": str(ROOT),
+        "rules_changed_by_install": rules_changed,
         "paths": [str(path) for path in written],
     })
     return 0
@@ -790,9 +844,10 @@ def parser() -> argparse.ArgumentParser:
 
     wrappers = commands.add_parser(
         "host-wrappers",
-        help="preview or install stable Codex delegates for telemetry and reclamation",
+        help="preview or install stable Codex delegates and their least-privilege rules",
     )
     wrappers.add_argument("--output-dir")
+    wrappers.add_argument("--rules-dir")
     wrappers.add_argument("--write", action="store_true")
     wrappers.add_argument("--replace", action="store_true")
     wrappers.set_defaults(func=cmd_host_wrappers)

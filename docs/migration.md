@@ -39,15 +39,18 @@ checkout, preview and then replace the telemetry and reclamation helpers with
 generated delegates:
 
 ```sh
-python3 -m creme host-wrappers --output-dir ~/.codex/bin
-python3 -m creme host-wrappers --output-dir ~/.codex/bin --write --replace
+python3 -m creme host-wrappers \
+  --output-dir ~/.codex/bin --rules-dir ~/.codex/rules
+python3 -m creme host-wrappers \
+  --output-dir ~/.codex/bin --rules-dir ~/.codex/rules --write --replace
 python3 -m creme doctor
 ```
 
-The delegates execute Creme's current capability CLI. `doctor` treats an
-absent set as optional, but rejects a partial, stale, linked, or non-executable
-install so a repository migration cannot silently leave active host behavior
-behind.
+The delegates and `creme-host-capabilities.rules` are one cutover unit. Fully
+quit and restart Codex after replacement. `doctor` treats a wholly absent
+bundle as optional, but rejects a partial, stale, linked, permissive, or
+non-executable install so a repository migration cannot silently leave active
+host behavior or missing authorization behind.
 
 ## Neutral semaphore cutover
 

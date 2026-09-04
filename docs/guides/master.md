@@ -72,8 +72,9 @@ anything else and whether or not the user mentions the role:
      naming the client, model, and effort, rewrite the board's lease line,
      and say in the first reply that this session is the master.
    - `REFUSED` because the lease is **live**: this session is a **reader**.
-     Say which session holds the lease. A reader may read anything, run light
-     analysis, and converse. It must not write under `master/`, merge, push,
+     Say so in the first reply, naming the client and process that hold the
+     lease, so the user never mistakes a reader for the master. A reader may
+     read anything, run light analysis, and converse. It must not write under `master/`, merge, push,
      spawn workers, or take goal holds for heavy work. If the user wants this
      session to be the master, they end the other one first.
    - `REFUSED` because the lease is **lapsed** or **stranded**: run the same

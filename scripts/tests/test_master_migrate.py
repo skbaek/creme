@@ -486,13 +486,30 @@ class MasterMigrationTest(unittest.TestCase):
 
     def test_source_change_during_backup_and_concurrent_migrations_do_not_corrupt(self):
         originals = self.make_legacy()
+        backup_ready = threading.Event()
+        source_changed = threading.Event()
 
-        def mutate(stage: str):
+        def pause_after_backup(stage: str):
             if stage == "backup:after-dir-fsync":
-                (self.root / "log.md").write_bytes(originals["log.md"] + self.event(3))
-                os.chmod(self.root / "log.md", 0o600)
+                backup_ready.set()
+                self.assertTrue(source_changed.wait(5))
 
-        changed = master_migrate.migrate(self.root, apply=True, renew=self.renew, fault=mutate)
+        def concurrent_writer():
+            self.assertTrue(backup_ready.wait(5))
+            (self.root / "log.md").write_bytes(originals["log.md"] + self.event(3))
+            os.chmod(self.root / "log.md", 0o600)
+            source_changed.set()
+
+        writer = threading.Thread(target=concurrent_writer)
+        writer.start()
+        changed = master_migrate.migrate(
+            self.root,
+            apply=True,
+            renew=self.renew,
+            fault=pause_after_backup,
+        )
+        writer.join(10)
+        self.assertFalse(writer.is_alive())
         self.assertEqual(changed.status, "REFUSED")
         self.assertIn("changed during backup", changed.detail)
         self.assertFalse((self.root / master_runtime.EVENTS_NAME).exists())

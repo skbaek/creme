@@ -1516,3 +1516,15 @@ class MasterLeaseTest(unittest.TestCase):
         adapter.processes[3]["command"] = "python3"
         adapter.processes[1]["command"] = "bash"
         self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (None, None))
+
+    def test_a_closed_session_strands_its_lease_at_once(self):
+        self.as_client(self.dead_pid(), "claude")
+        semaphore.master_acquire("claude", "tab closed without wind-down")
+        # Not expired: the window is intact, but the client process is gone.
+        text = semaphore.status_text(self.adapter)
+        self.assertIn("(stranded)", text)
+        self.assertIn("--take-over", text)
+        self.as_client(os.getpid(), "codex")
+        ok, detail = semaphore.master_acquire("codex", "successor", take_over=True)
+        self.assertTrue(ok, detail)
+        self.assertIn("stranded", detail)

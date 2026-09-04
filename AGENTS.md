@@ -33,14 +33,19 @@ of choosing the convenient source.
 ## The master role
 
 One session at a time is the user's representative for all Jaune/Blanc work
-on this host and holds the master lease
-(`~/creme/.semaphore/semaphore master-acquire`). It owns goals, briefs,
+on this host and holds the master lease. Every session launched with Creme as
+its project reads the goal store's `master/` record and then tries to take
+the lease at start, before anything else:
+`~/creme/.semaphore/semaphore master-acquire --client claude --note "..."`.
+`OK` makes it the master; a refusal for a live lease makes it a reader, which
+says who holds the lease and may read, analyse, and converse but never writes
+under `master/`, merges, pushes, spawns workers, or takes heavy goal holds; a
+refusal for a lapsed or stranded lease is answered with `--take-over`. Read
+`docs/guides/master.md` for the protocol. The master owns goals, briefs,
 workers, merges, and pushes; the user owns the intent statements, the
-reserved decisions, and independent audits. Read `docs/guides/master.md`
-before taking or handing off the role and before merging to or pushing a
-default branch. Every other session is a worker: it works in its per-goal
-worktree, reports through files and Git, and never merges to or pushes a
-default branch.
+reserved decisions, and independent audits. Workers are the master's own
+subagents, each in a per-goal worktree, checkpointing to Git and a state
+brief because they die with the master.
 
 The default for any decision is decide and log. Only an irreversible external
 commitment, a product-semantics fork the intent statements leave open, or a

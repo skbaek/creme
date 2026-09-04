@@ -51,27 +51,44 @@ fresh session of any client can continue from it alone, with nothing
 reconstructed from a predecessor's memory. That test is run as the handoff
 rehearsal below and as the `continuity` audit kind.
 
-## Becoming the master
+## Session start: master or reader
 
-Any supported client can take the role. From the Creme launch root:
+Every session launched with Creme as its project runs this at start, before
+anything else and whether or not the user mentions the role:
 
-1. `python3 -m creme doctor` and `python3 -m creme host-guidance`, as for any
-   session. Doctor prints the goal store and whether master state exists.
+1. `python3 -m creme doctor` and `python3 -m creme host-guidance`. Doctor
+   prints the goal store and whether master state exists there.
 2. Read `master/README.md`, `master/board.md`, the tail of `master/log.md`,
    every file in `master/intent/`, and the open findings in `master/audits/`.
-3. Take the lease:
+3. Try to take the lease:
 
    ```sh
    ~/creme/.semaphore/semaphore master-acquire --client claude --note "why this session"
    ```
 
-   `OK` makes this session the master. `REFUSED` names the current holder and
-   the exact command that ends it; do not work around it.
-4. Append a `master` event to the log naming the client, model, and effort,
-   and rewrite the board's lease line.
-5. Reconcile the board with reality before starting anything: semaphore
+   - `OK`: this session is the **master**. Start the heartbeat in the
+     background (`master-renew --heartbeat 1500`), append a `master` event
+     naming the client, model, and effort, rewrite the board's lease line,
+     and say in the first reply that this session is the master.
+   - `REFUSED` because the lease is **live**: this session is a **reader**.
+     Say which session holds the lease. A reader may read anything, run light
+     analysis, and converse. It must not write under `master/`, merge, push,
+     spawn workers, or take goal holds for heavy work. If the user wants this
+     session to be the master, they end the other one first.
+   - `REFUSED` because the lease is **lapsed** or **stranded**: run the same
+     command with `--take-over`. The previous master is gone or has stopped
+     renewing; the take-over is logged with its identity, and this session is
+     the master.
+4. Reconcile the board with reality before starting anything: semaphore
    status, live worktrees, branches ahead of main, uncommitted trees, and the
-   build ledger. Record every discrepancy as a `note` event.
+   build ledger. Record every discrepancy as a `note` event. A previous
+   master's workers did not survive it; the board says what each was doing,
+   and this session respawns them from their briefs and worktrees.
+
+The user's rule is therefore simple: at most one session does agentic work at
+a time. To replace the master, wind it down or close its tab, then open a new
+session from `~/creme` with whichever client. Auditor sessions are launched
+from outside `~/creme` and never run this protocol.
 
 The launch shape is client-specific — `claude` from `~/creme`, or the Codex
 project whose primary folder is Creme — and is documented in
@@ -90,14 +107,18 @@ admission; it exists only so that two masters cannot coexist.
 ~/creme/.semaphore/semaphore status        # prints the master: line
 ```
 
-- **Live** means the lease has been renewed within its window. Renew at
-  every event and at least every thirty minutes while the session is open.
-  A background renewal is fine; a client's idle tab is not a heartbeat.
-- **Lapsed** means the window passed but the client process that took the
-  lease is still alive. The session may be idle in a tab nobody wound down.
+- **Live** means the client process that took the lease is alive and the
+  window has not passed. Renew at every event and keep the background
+  heartbeat running; an idle tab whose heartbeat died will lapse.
+- **Lapsed** means the window passed but the client process is still alive:
+  a master that stopped renewing, or a tab nobody wound down.
   `master-acquire` refuses and says so.
-- **Stranded** means the window passed and the client process is gone, or
-  could not be found. `status` prints the take-over command.
+- **Stranded** means the client process is gone, or the window passed and the
+  process was never identified. A closed tab strands its lease at once;
+  `status` prints the take-over command.
+- Before every write to the record, merge, push, or worker spawn, the master
+  runs `master-renew`. A refusal means it has been superseded: stop, write
+  nothing, and tell the user.
 - `master-acquire --take-over` replaces a lapsed or stranded lease and logs
   whose lease it replaced. It never replaces a live one. Take-over is the
   sanctioned recovery; editing `master.json` is not.
@@ -112,24 +133,29 @@ client, pid, and note, so a disputed lease can be read back.
 Wind-down is what the user does before opening a new master, and what a
 master does before its session ends for any reason it can foresee:
 
-1. Finish or checkpoint the current turn's work; never leave a half-written
-   log entry.
-2. For every worker still running, make sure the board says where it is, what
-   it owns, and how its report will arrive. Workers **survive** the master:
-   they are out-of-process sessions with their own worktrees and holds, and
-   the next master adopts them from the board.
-3. If this session itself opened a Lean server or took a goal hold, run the
+1. Tell every running worker to checkpoint and stop: commit its worktree at
+   a green boundary, write its state brief, and return. Wait for them.
+   Workers are the master's subagents and die with it; whatever they did not
+   checkpoint is lost.
+2. Rewrite the board so it says, per goal, the worktree, the branch, the last
+   checkpoint, and the next unit, so a successor can respawn the worker from
+   that alone.
+3. If this session itself took a goal hold or opened a Lean server, run the
    goal-scoped `python3 -m creme reclaim --wind-down GOAL` for it. A
    coordinator that never touched Lean has nothing to reclaim.
 4. Append a `master` event saying the session is ending and what the next
    master should do first. Rewrite the board.
 5. `~/creme/.semaphore/semaphore master-release`.
 
+Closing the tab without these steps is survivable, not free: the lease
+strands at once, the successor takes over, and each worker resumes from its
+last checkpoint rather than from where it was.
+
 The control that shows this works is a **handoff rehearsal**: hand the role
 from one client to another and back on live work, and confirm from the
-second session's transcript that nothing was reconstructed from memory. Run
-it once when the role is introduced and again after any change to the state
-layout.
+successor's transcript that it respawned the workers from the record alone,
+with nothing reconstructed from memory. Run it once when the role is
+introduced and again after any change to the state layout.
 
 ## Workers
 
@@ -137,15 +163,21 @@ The master coordinates; it does not elaborate. It never opens a Lean file,
 runs a build, or takes a goal hold itself. Doing so fills the one context
 that has to hold the whole picture with details that belong to a worker.
 
-A worker is an out-of-process agent session started in its own per-goal
-worktree with a brief — a goal document written to the
-[goal guide](goal.md) when the work is large enough to deserve one, or a
-short `master/briefs/<goal>.md` when it is not. The brief states the
-objective, the owned paths, the resource class, the gates that must be green
-on the candidate, the decisions the worker may make alone, and where its
-report goes. The worker reports through files and Git: commits on its
-branch, a state brief, a report, and evidence. It never reports through a
-client's messaging surface, which the next master may not have.
+A worker is a subagent the master spawns inside its own session, through
+whichever delegation mechanism the client provides, with a brief, a per-goal
+worktree it owns, and a return contract. The brief is a goal document written
+to the [goal guide](goal.md) when the work is large enough to deserve one, or
+a short `master/briefs/<goal>.md` when it is not. It states the objective,
+the owned paths, the resource class, the gates that must be green on the
+candidate, the decisions the worker may make alone, and where its report
+goes. Choose each worker's model and effort for its hardest non-delegable
+judgment, as the goal guide describes.
+
+A worker dies with the master. It therefore checkpoints to Git and its state
+brief at every green boundary, so that a successor master can respawn it from
+those files and lose only the work since the last checkpoint. It never writes
+under `master/`. It reports twice: in files — commits on its branch, a state
+brief, a report, evidence — and in its return value to the master.
 
 The master accepts a worker's result only on evidence: the catalogue's
 verdict on the exact candidate commit, the diff, and the report's
@@ -154,15 +186,10 @@ evidence, and neither is a green signal whose failure mode was never shown
 to bite. This is the [execution guide's](execution.md) completion rule, and
 it is the only reviewer left once the user stops reading reports.
 
-An in-process subagent — one the client spawns inside the master's own
-process — dies with the master. Use one only for bounded light work whose
-loss costs nothing: an inventory, a search, a draft. Never for a proof, a
-build, a gate run, or anything whose evidence has to outlive this session.
-
-Launching a worker is client-specific. The master prepares the brief and the
-exact launch command, records both on the board, and launches through
-whatever the host supports; where nothing does, it asks the user to open the
-session with that one command.
+Run workers in parallel when their file ownership is disjoint. The semaphore
+governs their Lean memory exactly as it governs any session; a worker takes
+its own goal holds through the owned-build wrapper and winds them down when it
+returns.
 
 ## Merges
 
@@ -299,8 +326,10 @@ that the master cannot steer it toward the safe ones.
 
 ## What stays with the user
 
-- Winding down a master before opening a new one. The lease refuses a second
-  master; the user still has to end the first.
+- Ending a master before opening a new one, by wind-down or by closing its
+  tab. The lease refuses a second master while the first is alive; closing
+  the tab strands the lease at once, and in-flight worker work is lost back
+  to its last checkpoint.
 - Authoring and maintaining `master/intent/`, in their own words.
 - Starting audits and reading their reports.
 - The reserved decisions above, answered from a packet.
@@ -312,8 +341,9 @@ Everything else is the agents' job.
 ## Client neutrality
 
 - The protocol depends on files, Git, and the tracked semaphore launcher.
-  It never depends on one client's session listing, messaging, memory, or
-  subagent mechanism.
+  It never depends on one client's session listing, messaging, or memory.
+  Workers use whatever subagent mechanism the client has; the brief, the
+  worktree, and the checkpoint files are the same for every client.
 - `AGENTS.md` is the canonical instruction for every client; `CLAUDE.md`
   imports it; `.agents/` holds skills and MCP configuration; `.claude/` and
   `.codex/` are adapters that add nothing the protocol needs.

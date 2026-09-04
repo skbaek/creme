@@ -39,10 +39,12 @@ under the same mutex. It charges no memory and never affects admission:
 ~/creme/.semaphore/semaphore master-release
 ```
 
-A second `master-acquire` is refused while the lease is live. A lease whose
-window has passed is *lapsed* while its client process is still alive and
-*stranded* once that process is gone; `status` prints the take-over command,
-and `master-acquire --take-over` replaces only a lapsed or stranded lease.
+A second `master-acquire` is refused while the lease is live. A lease is
+*stranded* as soon as the client process that took it is gone, or when its
+window passes with that process never identified; it is *lapsed* when the
+window passes while the process is still alive. `status` prints the
+take-over command, and `master-acquire --take-over` replaces only a lapsed or
+stranded lease.
 
 Existing installations keep using the legacy state directory until an explicit migration:
 

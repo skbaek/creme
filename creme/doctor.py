@@ -383,7 +383,14 @@ def check_host_wrappers(
 ) -> list[Check]:
     directory = (output_dir or default_output_dir()).expanduser().absolute()
     rules_directory = (rules_dir or default_rules_dir()).expanduser().absolute()
-    rendered = render_host_wrappers(root)
+    try:
+        rendered = render_host_wrappers(root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return [Check(
+            "client: host capability bundle",
+            STATUS_FAIL,
+            f"cannot render the expected host capability bundle: {exc}",
+        )]
     members = [*(directory / name for name in rendered), rules_directory / RULES_FILENAME]
     present = [path for path in members if os.path.lexists(path)]
     if not present:

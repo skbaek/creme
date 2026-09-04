@@ -175,6 +175,13 @@ helper or a bundle that `doctor` marks stale; preview and regenerate the
 complete delegates-and-rules set with `python3 -m creme host-wrappers`, then
 fully restart Codex because rules load only at process startup.
 
+If that bundle includes `codex-creme-contained-build`, use it for a host-
+contained owned build instead of persistently approving `systemd-run`, a
+current-checkout safe runner, or a temporary shell script. Its profile and goal
+derive the worktree and its parser permits only probe/wait/exclusive build
+options and Lake targets. A drift refusal means preview and reinstall the
+bundle after review; never bypass the pin or downgrade its cgroup.
+
 The capability contract and limited-mode results are in
 `docs/capabilities.md`. A missing capability is not permission to run another
 OS's command. Full telemetry may be unavailable while the narrower aggregate

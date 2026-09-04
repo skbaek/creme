@@ -65,6 +65,15 @@ restarted after a rules change. Permission profiles control sandbox
 filesystem/network access and are not a substitute for this command-
 authorization layer.
 
+When the canonical host guidance supplies a reviewed Lean preflight, the
+bundle additionally renders a constrained contained-build broker. The broker
+accepts only a Jaune/Blanc profile, goal-derived worktree purpose, bounded
+wait/probe/exclusive options, and validated Lake targets. It pins the
+preflight digest and clean Creme runtime tree, owns a private cross-invocation
+lock, and preserves the host's fixed RAM/swap cgroup limits. Direct
+`systemd-run`, current-checkout safe runners, arbitrary commands, temporary
+scripts, resource downgrades, and dependency censuses are not rule-authorized.
+
 Optimized cache copies run into a randomly named, Creme-owned staging
 directory beside the requested destination. A failed clone or reflink attempt
 cannot occupy the destination and therefore falls back to the portable copy.

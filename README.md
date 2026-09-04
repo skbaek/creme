@@ -90,6 +90,13 @@ change: rules are loaded at process startup. If any bundle path exists,
 `doctor` requires the complete installed set, exact private modes, and current
 contents to match; stricter managed requirements may still override user rules.
 
+When the ignored host guidance supplies a reviewed Lean preflight, the bundle
+also includes a constrained `codex-creme-contained-build` broker. It derives a
+goal worktree, pins the preflight and clean Creme runtime tree, and accepts only
+bounded probe/wait/exclusive options plus validated Lake targets. Direct
+`systemd-run`, arbitrary commands, resource downgrades, and `/tmp` scripts
+remain outside the generated allow rules.
+
 Before real work, read [AGENTS.md](AGENTS.md), the appropriate sibling's
 `scripts/GATES.md`, and [the execution guide](docs/guides/execution.md).
 New goal documents use [the public goal-writing guide](docs/guides/goal.md),

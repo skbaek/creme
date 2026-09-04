@@ -287,6 +287,28 @@ wrong-mode, or non-regular installs. Its green result validates installed
 bytes, not the live process's startup snapshot, and stricter managed rules may
 still win.
 
+On a host whose reviewed local guidance provides
+`.creme/bin/lean-host-preflight`, the same preview also contains
+`codex-creme-contained-build` and its rule. Its public grammar is deliberately
+narrow:
+
+```sh
+~/.codex/bin/codex-creme-contained-build blanc GOAL \
+  [--purpose goal|control|mutation|rehearsal] [--probe] [--wait SECS] \
+  [--exclusive] -- [TARGET ...]
+```
+
+The broker derives the Jaune/Blanc worktree path from the profile, goal, and
+purpose; it does not accept a repository path, arbitrary command, resource
+downgrade, dependency census, or environment override. It pins the reviewed
+preflight digest and exact clean Creme runtime tree, serializes broker
+calls under private Codex state, runs the host preflight, and then enters the
+fixed 8 GiB systemd cgroup (zero swap for Blanc, 1 GiB for Jaune). Any drift
+fails closed until the bundle is previewed and replaced again. Mutable project
+source and Lake configuration remain the intentional build input under the
+same trust model as the existing host safe-build wrappers; the broker does not
+turn arbitrary project commands into approved host commands.
+
 Claude Code users launch `claude` from `~/creme`, accept that exact workspace
 when prompted, and review the pinned `lean-lsp-mcp` project server before
 approving it. The relative sibling access in `.claude/settings.json` does not

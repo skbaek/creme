@@ -74,6 +74,10 @@ class DoctorTest(unittest.TestCase):
             (workspace / "plans" / "master" / "board.md").write_text("# Board\n", encoding="utf-8")
             present = check_goal_store(workspace, profile)[0]
             self.assertIn("master state present", present.detail)
+            (workspace / "plans" / "master" / "board.md").unlink()
+            (workspace / "plans" / "master" / "board.json").write_text("{}\n", encoding="utf-8")
+            structured = check_goal_store(workspace, profile)[0]
+            self.assertIn("master state present", structured.detail)
 
     def test_git_goal_store_requires_master_state_to_be_ignored_and_untracked(self):
         with tempfile.TemporaryDirectory() as tmp:

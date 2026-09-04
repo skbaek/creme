@@ -200,8 +200,9 @@ def check_goal_store(workspace: Path, profile: Optional[dict[str, Any]]) -> list
         return [Check("goal store", STATUS_FAIL, f"configured but missing: {store}")]
 
     master = store / "master"
-    board = master / "board.md"
-    state = f"master state {'present' if board.is_file() else 'absent'}: {board}"
+    boards = (master / "board.json", master / "board.md")
+    present = any(board.is_file() for board in boards)
+    state = f"master state {'present' if present else 'absent'}: {master}"
     git_probe = _git(store, "rev-parse", "--is-inside-work-tree")
     if git_probe.returncode or git_probe.stdout.strip() != "true":
         return [Check("goal store", STATUS_OK, f"{store} ({state}; not a Git worktree)")]

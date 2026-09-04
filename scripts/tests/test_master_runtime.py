@@ -504,6 +504,40 @@ class MasterRuntimeTest(unittest.TestCase):
         self.assertTrue(final.board_current)
         self.assertEqual(len(final.events), 2)
 
+    def test_once_per_acquisition_retry_repairs_without_a_duplicate_event(self):
+        payload = {
+            "action": "start",
+            "model": "synthetic-model",
+            "effort": "high",
+            "note": "start",
+            "next_unit": "unit",
+            "reconciliation": [],
+        }
+        writer = self.writer()
+
+        def inject(stage):
+            if stage == "transaction:after-log-commit":
+                raise SyntheticFault(stage)
+
+        with self.assertRaises(SyntheticFault):
+            writer.append(
+                "master", payload, fault=inject, once_per_acquisition=True
+            )
+        split = master_runtime.read_record(self.root)
+        self.assertEqual(len(split.events), 1)
+        self.assertFalse(split.board_current)
+        retried = writer.append(
+            "master",
+            {**payload, "action": "resume", "note": "retry"},
+            once_per_acquisition=True,
+        )
+        self.assertTrue(retried.already_present)
+        self.assertTrue(retried.repaired_stale_board)
+        final = master_runtime.read_record(self.root)
+        self.assertTrue(final.board_current)
+        self.assertEqual(len(final.events), 1)
+        self.assertEqual(final.events[0]["payload"]["action"], "start")
+
 
 def re_escape(value: str) -> str:
     """Keep subtest regexes literal without importing another global module."""

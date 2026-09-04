@@ -107,6 +107,7 @@ class AppendResult:
     event: dict[str, Any]
     board: dict[str, Any]
     repaired_stale_board: bool
+    already_present: bool = False
 
 
 _thread_locks_guard = threading.Lock()
@@ -414,6 +415,24 @@ def validate_event(value: Any) -> dict[str, Any]:
     if len(_canonical_json(event)) > MAX_EVENT_BYTES:
         raise MasterRecordError(f"event exceeds {MAX_EVENT_BYTES} bytes")
     return event
+
+
+def validate_payload(kind: str, payload: Any) -> dict[str, Any]:
+    """Validate and detach one caller-supplied kind payload."""
+    kind = _text(kind, "event kind")
+    frozen = _strict_json(_canonical_json(payload), "event payload")
+    _validate_payload(kind, frozen)
+    return frozen
+
+
+def parse_event_input(data: bytes) -> tuple[str, dict[str, Any]]:
+    """Parse one bounded caller object; IDs, time, and actor remain injected."""
+    if len(data) > MAX_EVENT_BYTES:
+        raise MasterRecordError(f"event input exceeds {MAX_EVENT_BYTES} bytes")
+    value = _strict_json(data, "event input")
+    request = _object(value, {"kind", "payload"}, "event input")
+    kind = _text(request["kind"], "event input.kind")
+    return kind, validate_payload(kind, request["payload"])
 
 
 def _canonical_log(events: Sequence[Mapping[str, Any]]) -> bytes:
@@ -819,6 +838,7 @@ class RecordWriter:
         payload: Mapping[str, Any],
         *,
         fault: Optional[FaultInjector] = None,
+        once_per_acquisition: bool = False,
     ) -> AppendResult:
         # The first renewal is deliberately outside the record lock: a
         # nonholder must not serialize or inspect private state as a writer.
@@ -851,6 +871,30 @@ class RecordWriter:
                 "payload": payload_snapshot,
             }
             validate_event(event)
+            if once_per_acquisition:
+                for existing in reversed(view.events):
+                    if (
+                        existing["kind"] == kind
+                        and existing["actor"]["acquisition_digest"]
+                        == actor["acquisition_digest"]
+                        and (
+                            kind != "master"
+                            or existing["payload"]["action"] in {"start", "resume"}
+                        )
+                    ):
+                        if not view.board_current:
+                            _atomic_replace(
+                                self.root / BOARD_NAME,
+                                _canonical_json(view.expected_board),
+                                label="board",
+                                fault=fault,
+                            )
+                        return AppendResult(
+                            event=existing,
+                            board=view.expected_board,
+                            repaired_stale_board=not view.board_current,
+                            already_present=True,
+                        )
             if event_id in {row["event_id"] for row in view.events}:
                 raise MasterRecordError(f"duplicate event ID: {event_id}")
             events = (*view.events, event)
@@ -875,4 +919,5 @@ class RecordWriter:
                 event=event,
                 board=board,
                 repaired_stale_board=not view.board_current,
+                already_present=False,
             )

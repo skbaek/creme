@@ -146,7 +146,11 @@ admission; it exists only so that two masters cannot coexist.
   sanctioned recovery; editing `master.json` is not.
 - `master-release` from the holding session is the normal end. From any other
   session it succeeds only against a lapsed or stranded lease.
-- A detached heartbeat is bound to one lease id. With process discovery denied,
+- Heartbeat startup is authenticated before recorded holder data can be
+  adopted. A foreground starter must match the holder directly. A detached
+  parent first does the same, then sends a random one-time capability to the
+  child through an inherited stdin pipe; only a short-lived digest and expiry
+  are persisted under the mutex, and consumption is atomic. With process discovery denied,
   an explicitly supplied task-owned neutral listener lets it stop when the task
   closes and recover within one heartbeat slice after wake. The Codex Desktop
   app-tools pipe is app-global and does not qualify. Without a task-scoped
@@ -155,9 +159,11 @@ admission; it exists only so that two masters cannot coexist.
   passively for another direct renewal. A helper cannot advance that absolute
   anchor; a matching holder can recover directly after any sleep and reset it.
   At the standard 1,500/1,800-second settings an orphan therefore becomes
-  take-overable within 4,800 seconds of the last direct activity. The detached
-  child receives the parent's random lease id and checks it before adopting a
-  lease; that argv value is not raw session identity or a liveness path.
+  take-overable within 4,800 seconds of the last direct activity. After
+  consuming its capability the child is bound to the exact random lease id
+  and stops on a successor. Child argv contains neither value and never raw
+  session identity or a liveness path. The persisted lease id is an
+  acquisition binding, not authority to start a heartbeat.
 
 Every transition writes one row to the semaphore log with the holder's
 client, pid, and note, so a disputed lease can be read back.

@@ -213,7 +213,10 @@ rather than signalled.
 client family and client process, opaque digests of any adapter-supplied
 session identity and liveness socket, a per-acquisition lease id, the pid and
 uid that took it, a note, the last verified direct-holder activity, and the
-acquire/renew times with the lease window.
+acquire/renew times with the lease window. While a detached child is starting,
+it may also contain a short-lived one-time launch-capability digest and its
+expiry. The raw capability exists only in the parent-to-child pipe and is
+atomically consumed before the child adopts holder data.
 Raw session identifiers and socket paths are never persisted, printed, or
 logged. It is written under the same
 mutex as the holds and never read by admission, so it cannot change any
@@ -229,8 +232,10 @@ disappears with it. Codex's internal session/thread aliases are accepted as
 best-effort identity hints, but they are not a documented public interface.
 Codex Desktop's app-tools pipe is app-global and thread-multiplexed, so Creme
 never treats it—or the shared app pid—as task identity or liveness. Missing or
-malformed task identity fails closed for direct holder writes and selects the
-lease-id-bound fallback for the detached helper.
+malformed task identity fails closed for direct holder writes and heartbeat
+startup. A verified session that lacks process/listener liveness may use the
+bounded fallback; an invocation with no holder identity cannot start it merely
+by reading the persisted random lease id.
 
 `master-acquire` refuses while a lease is live, naming the holder and the
 command that ends it. When process discovery is unavailable, a stable
@@ -248,15 +253,20 @@ normal end; from another client it succeeds only against a lapsed or stranded
 lease, or with an explicit, logged `--force`. `master-renew` from a client
 other than the holder is refused while the lease is live, even if it supplies
 the same client label or shares a discovered app pid. Corrupt lease state is
-reported and never reset. Schema-1 leases are validated and upgraded in
-memory, then persisted as schema 2 on the next legitimate write without
+reported and never reset. Schema-1 and pre-launch-capability schema-2 leases
+are validated and upgraded in memory, then persisted as schema 3 on the next legitimate write without
 changing their holder or times. A process-unknown schema-1 lease remains live
 but unverifiable: no unknown invocation may renew or release it, and it becomes
 take-overable when its original window lapses. A process-verified, task-scoped
 legacy holder may upgrade normally.
 
-The detached heartbeat is bound to the lease id it started for. With no usable
-task-scoped process it may actively probe an explicitly supplied task-owned
+Heartbeat startup itself is authenticated. A foreground starter must directly
+match the holder; a detached parent must do the same before minting a random,
+one-time capability. The raw value crosses only an inherited stdin pipe, while
+the lease stores only a digest and expiry under the mutex. The child consumes
+it once before adopting the recorded holder process and exact lease id, so a
+non-holder, delayed predecessor, duplicate, or replay cannot start a helper.
+With no usable task-scoped process it may actively probe an explicitly supplied task-owned
 Unix listener; three consecutive failed probes stop renewal, so an abruptly
 closed task is take-overable no later than the lease window after its last
 successful beat. If no such listener or task-scoped process exists, the safe
@@ -267,9 +277,9 @@ self-renew more than 3,000 seconds after it, even if the helper starts late or
 wakes after a long system sleep. With the prescribed 1,500-second heartbeat
 and 1,800-second lease, automatic expiry is therefore no later than 4,800
 seconds after the last direct activity. A successor's new lease id ends the
-old passive heartbeat: the detached parent passes only that random id to its
-child, never raw session identity or a liveness path, and the child checks it
-before adopting any lease snapshot. Missing capabilities therefore degrade
+old passive heartbeat. Neither the random lease id nor the one-time capability,
+raw session identity, or liveness path appears in child argv, status, or logs.
+The lease id is an acquisition binding, not starter authority. Missing capabilities therefore degrade
 toward bounded take-over, never indefinite orphan renewal or two masters. A
 matching session digest can still renew directly after sleep if no successor
 has taken over; that direct action resets the anchor. An automatic post-wake

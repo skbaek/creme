@@ -37,8 +37,9 @@ on this host and holds the master lease. Every session launched with Creme as
 its project reads the goal store's `master/` record and then tries to take
 the lease at start, before anything else:
 `~/creme/.semaphore/semaphore master-acquire --client claude --note "..."`.
-`OK` makes it the master; a refusal for a live lease makes it a reader, which
-says who holds the lease and may read, analyse, and converse but never writes
+`OK` makes it the master, and it says so in its first reply; a refusal for a
+live lease makes it a reader, which says so in its first reply, naming the
+holder, and may read, analyse, and converse but never writes
 under `master/`, merges, pushes, spawns workers, or takes heavy goal holds; a
 refusal for a lapsed or stranded lease is answered with `--take-over`. Read
 `docs/guides/master.md` for the protocol. The master owns goals, briefs,

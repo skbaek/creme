@@ -204,9 +204,11 @@ is: hold-state validation rejects unknown keys, and a pre-update reader must
 still validate the hold state.
 
 `master-acquire` refuses while a lease is live, naming the holder and the
-command that ends it. A lease whose window has passed is *lapsed* while the
-client process that took it is still alive and *stranded* once that process
-is gone or cannot be found; `status` prints the take-over command, and
+command that ends it. A lease is *stranded* as soon as the client process
+that took it is gone — a closed session cannot renew — or once its window
+passes with that process never identified, and *lapsed* when the window
+passes while the process is still alive; `status` prints the take-over
+command, and
 `master-acquire --take-over` replaces only a lapsed or stranded lease, logging
 whose lease it replaced. `master-release` from the holding client is the
 normal end; from another client it succeeds only against a lapsed or stranded

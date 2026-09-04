@@ -2105,7 +2105,11 @@ def _master_view(lease: Optional[dict[str, Any]], now: float) -> dict[str, Any]:
     expired = _expired(lease, now)
     client_pid = lease["client_pid"]
     client_alive = _pid_alive(int(client_pid)) if client_pid is not None else None
-    if not expired:
+    if client_alive is False:
+        # The session that took the lease is gone: nothing legitimate can
+        # renew it, so a successor may take over at once.
+        state = "stranded"
+    elif not expired:
         state = "live"
     elif client_alive:
         # The window passed but the session that took the lease is still a

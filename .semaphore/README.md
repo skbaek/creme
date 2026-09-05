@@ -42,7 +42,12 @@ under the same mutex. It charges no memory and never affects admission:
 A second `master-acquire` is refused while the lease is live. An
 adapter-supplied session identity is stored only as a digest and prevents a
 second task of the same client from renewing or releasing the lease when
-process discovery is unavailable or shared. A detached heartbeat starts only
+process discovery is unavailable or shared. Holder authentication matches
+both Codex compatibility aliases (or the explicit neutral
+identity) and any recorded process-lifetime guard. A full Codex exit releases
+its existing arg0 lock, which strands the lease immediately across PID
+namespaces; a held application lock never removes task heartbeat limits.
+A detached heartbeat starts only
 after its parent authenticates as the holder. A random one-time capability
 crosses to the child through an inherited pipe; only its short-lived digest is
 persisted, and the child consumes it atomically before adopting the exact lease

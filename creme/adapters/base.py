@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .session import codex_process_witness, lock_alive
+
 
 @dataclass(frozen=True)
 class CapabilityResult:
@@ -91,6 +93,19 @@ class Adapter:
             "process_snapshot", "UNAVAILABLE",
             f"process snapshots are not implemented for {self.system}",
         )
+
+    def master_process_witness(self, client: Optional[str]) -> CapabilityResult:
+        """Identify an existing process guard without asserting task liveness."""
+        if client == "codex" and self.system in {"Linux", "Darwin"}:
+            witness = codex_process_witness()
+            if witness is not None:
+                return self.result("master_process_witness", "OK", "Codex lifetime lock identified", witness)
+        return self.result("master_process_witness", "UNAVAILABLE", "no process-lifetime witness available")
+
+    def master_process_alive(self, witness: dict[str, Any]) -> CapabilityResult:
+        alive = lock_alive(witness) if self.system in {"Linux", "Darwin"} else None
+        return self.result("master_process_alive", "OK" if alive is not None else "UNAVAILABLE",
+                           "original process lifetime lock sampled", {"alive": alive})
 
     def process_working_directories(self, pids: list[int]) -> CapabilityResult:
         """Sample the working directory of each named pid.

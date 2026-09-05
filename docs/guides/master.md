@@ -81,8 +81,8 @@ anything else and whether or not the user mentions the role:
    ```
 
    - `OK`: this session is the **master**. Start the heartbeat detached
-     (`master-renew --heartbeat 1500 --detach`; a client's background tool
-     call is reaped, a detached process is not), append a `master` event
+     (`master-renew --heartbeat 1500 --detach`; verify its renewal in the log,
+     since some managed tool sandboxes also reap detached children), append a `master` event
      naming the client, model, and effort, rewrite the board's lease line,
      and say in the first reply that this session is the master.
    - `REFUSED` because the lease is **live**: this session is a **reader**.
@@ -129,6 +129,7 @@ admission; it exists only so that two masters cannot coexist.
   adapter-supplied session digest when available, otherwise by its discovered
   task-scoped client process. A Codex Desktop app pid is shared and is never
   task identity. Raw session identifiers are never written to disk or logs.
+  Codex compatibility identity combines both session and thread aliases.
   Renew at every event and keep the background heartbeat running.
 - **Lapsed** means the window passed but the client process is still alive:
   a master that stopped renewing, or a tab nobody wound down.
@@ -138,6 +139,14 @@ admission; it exists only so that two masters cannot coexist.
   holder recover after system sleep; a different session cannot renew or
   release merely by naming the same client. `status` prints the take-over
   command.
+- On Linux and Darwin, acquisition can record Codex's existing process-lifetime
+  arg0 lock. Full application exit releases that kernel lock, so a new session
+  can take over immediately even when both sandboxes call their client PID 1.
+  A held lock does not prove an individual task lives: closing one tab while
+  the application survives keeps the bounded fallback below. Missing or denied
+  witness discovery retains that fallback. No new daemon or host permission
+  is required; the adapter probes the original lock read-only on the shared
+  local filesystem.
 - Before every write to the record, merge, push, or worker spawn, the master
   runs `master-renew`. A refusal means it has been superseded: stop, write
   nothing, and tell the user.
@@ -165,6 +174,13 @@ admission; it exists only so that two masters cannot coexist.
   session identity or a liveness path. The persisted lease id is an
   acquisition binding, not authority to start a heartbeat.
 
+Schema-1 through schema-3 records remain readable without changing ownership
+or timestamps. They cannot acquire a process witness retroactively. During
+the schema-4 upgrade, release/reacquire once to establish the witness and the
+combined Codex alias digest. An old alias digest is not accepted as proof of
+the new identity: if the old holder already ended, use expiry plus take-over
+or the existing reasoned force-release recovery; never edit lease state.
+
 Every transition writes one row to the semaphore log with the holder's
 client, pid, and note, so a disputed lease can be read back.
 
@@ -187,9 +203,10 @@ master does before its session ends for any reason it can foresee:
    master should do first. Rewrite the board.
 5. `~/creme/.semaphore/semaphore master-release`.
 
-Closing the tab without these steps is survivable, not free: the lease
-strands at once, the successor takes over, and each worker resumes from its
-last checkpoint rather than from where it was.
+Closing without these steps loses in-flight work. Full application exit with
+a recorded process witness strands the lease immediately; closing a task
+inside a surviving app can require the bounded lease timeout. The successor
+resumes each worker from its last checkpoint.
 
 The control that shows this works is a **handoff rehearsal**: hand the role
 from one client to another and back on live work, and confirm from the
@@ -368,8 +385,9 @@ that the master cannot steer it toward the safe ones.
 ## What stays with the user
 
 - Ending a master before opening a new one, by wind-down or by closing its
-  tab. The lease refuses a second master while the first is alive; closing
-  the tab strands the lease at once, and in-flight worker work is lost back
+  tab. The lease refuses a second master while the first lease is live;
+  full app exit can be detected immediately, while a closed task in a live
+  application may need bounded expiry. In-flight worker work is lost back
   to its last checkpoint.
 - Authoring and maintaining `master/intent/`, in their own words.
 - Starting audits and reading their reports.

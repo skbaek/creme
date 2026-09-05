@@ -20,7 +20,7 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 | temporary root | `TMPDIR` or runtime temp directory | `TMPDIR` or runtime temp directory | `UNAVAILABLE` if no writable root exists |
 | guarded Lean server | toolchain-selected Lake with Creme `setup-file` guard | same | fail closed if Elan, the real toolchain, or the facade cannot be proved |
 | owned Lake build | adaptive admission, `nice`, thread cap, process sampling, ledger | same | refusal; bare or tool-initiated builds remain disabled |
-| master lease | locked `master.json` beside the hold state; client ancestry from the process snapshot | same | a second master is refused; a lapsed or stranded lease is replaced only by an explicit take-over |
+| master lease | locked `master.json`; optional Codex process-lifetime lock witness | same | a second master is refused; a lapsed or stranded lease requires explicit take-over |
 
 Shared code does not invoke another OS's command as a fallback. An unavailable
 telemetry sample never proves a host is quiet or under pressure. Aggregate
@@ -229,6 +229,9 @@ acquire/renew times with the lease window. While a detached child is starting,
 it may also contain a short-lived one-time launch-capability digest and its
 expiry. The raw capability exists only in the parent-to-child pipe and is
 atomically consumed before the child adopts holder data.
+Schema 4 also records an optional Codex process-lifetime witness: its unique
+arg0 lock path, device, inode, and owner UID. This is private runtime data,
+independent of raw task identity and socket paths.
 Raw session identifiers and socket paths are never persisted, printed, or
 logged. It is written under the same
 mutex as the holds and never read by admission, so it cannot change any
@@ -242,12 +245,37 @@ asking the user to copy a token between commands. The latter is trusted only
 under the explicit contract that its Unix listener belongs to this task and
 disappears with it. Codex's internal session/thread aliases are accepted as
 best-effort identity hints, but they are not a documented public interface.
+Both aliases are encoded together with domain separation, so two threads
+sharing a session alias still have distinct identities. An explicit neutral
+session ID takes precedence over both aliases.
 Codex Desktop's app-tools pipe is app-global and thread-multiplexed, so Creme
 never treats it—or the shared app pid—as task identity or liveness. Missing or
 malformed task identity fails closed for direct holder writes and heartbeat
 startup. A verified session that lacks process/listener liveness may use the
 bounded fallback; an invocation with no holder identity cannot start it merely
 by reading the persisted random lease id.
+
+The Linux and Darwin adapters provide `master_process_witness` and
+`master_process_alive`. Codex's
+[Arg0PathEntryGuard](https://github.com/openai/codex/blob/main/codex-rs/arg0/src/lib.rs)
+holds an exclusive kernel lock in its first per-process arg0 PATH directory
+for the process lifetime. Creme opens that existing file read-only, validates
+its UID/device/inode, briefly tries a nonblocking shared lock, and closes it.
+It never creates, deletes, or retains a client lock. Missing or released
+original locks, or a replacement inode, prove departure and immediately
+strand the lease even across PID namespaces. Access failures are unknown,
+and a broken first PATH candidate never falls through to an inherited guard.
+This capability assumes a stable shared local filesystem on one host, with
+Codex owning its guard's lifetime; arbitrary remounts, path substitution, and
+cross-host state sharing are outside its contract.
+
+A held application lock is only a process-death veto, not positive task
+liveness: closing one task while its application stays alive still uses the
+bounded heartbeat fallback below. The original witness must also match for
+direct holder writes and heartbeat startup, so a restarted process cannot
+impersonate its predecessor by reusing a task ID. Process departure is checked
+again under the renewal mutex and in every heartbeat slice. Unsupported
+clients/platforms keep their existing process/listener/fallback behavior.
 
 `master-acquire` refuses while a lease is live, naming the holder and the
 command that ends it. When process discovery is unavailable, a stable
@@ -265,9 +293,15 @@ normal end; from another client it succeeds only against a lapsed or stranded
 lease, or with an explicit, logged `--force`. `master-renew` from a client
 other than the holder is refused while the lease is live, even if it supplies
 the same client label or shares a discovered app pid. Corrupt lease state is
-reported and never reset. Schema-1 and pre-launch-capability schema-2 leases
-are validated and upgraded in memory, then persisted as schema 3 on the next legitimate write without
-changing their holder or times. A process-unknown schema-1 lease remains live
+reported and never reset. Schema-1, schema-2, and schema-3 leases are validated
+and upgraded in memory, then persisted as schema 4 on the next legitimate
+write without changing their holder or times. Old leases have no process
+witness; discovery never retroactively invents one. The new combined Codex
+alias digest deliberately does not match the former session-or-thread digest.
+Release before upgrading when possible; an already-upgraded legacy alias
+lease needs expiry and explicit take-over, or the existing reasoned force
+release after the old session is confirmed ended. Reacquisition establishes
+the new digest and process witness. A process-unknown schema-1 lease remains live
 but unverifiable: no unknown invocation may renew or release it, and it becomes
 take-overable when its original window lapses. A process-verified, task-scoped
 legacy holder may upgrade normally.

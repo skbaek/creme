@@ -139,6 +139,13 @@ mutation campaigns in disposable worktrees.
 
 ## Host capabilities and coordination
 
+Separate task authorization, client access, host admission, and repository
+evidence restrictions using [the escalation procedure](docs/guides/escalation.md).
+Inventory the planned workflow's capability coverage once before execution;
+do not rediscover missing coverage through repeated approval requests. Existing
+user authorization persists. An applicable platform approval still uses the
+client's approval mechanism; it does not need a second conversational approval.
+
 Shared workflow calls Creme capabilities; it does not invoke platform binaries
 directly. Use:
 

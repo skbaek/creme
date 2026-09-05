@@ -418,9 +418,15 @@ def check_host_wrappers(
         "client: host capability bundle",
         STATUS_OK,
         (
-            f"all {len(members)} installed files match; fully restart Codex after "
-            "any change because rules load at process startup; stricter managed "
-            "requirements may still override these user allows"
+            f"all {len(members)} installed files match on disk; coverage: telemetry, "
+            "reclaim --dry-run and --wind-down"
+            + (", contained Lake builds" if "codex-creme-contained-build" in rendered else "")
+            + "; arbitrary gate/fixture commands are not covered. "
+            "Running-client rule loading and effective managed/MCP approval policy "
+            "are not verified by this check. Fully restart Codex after bundle "
+            "changes because rules load at process startup; stricter managed "
+            "requirements may still override these user allows. "
+            "See docs/guides/escalation.md"
         ),
     )]
 

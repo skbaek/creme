@@ -80,6 +80,13 @@ lock, and preserves the host's fixed RAM/swap cgroup limits. Direct
 `systemd-run`, current-checkout safe runners, arbitrary commands, temporary
 scripts, resource downgrades, and dependency censuses are not rule-authorized.
 
+Bundle integrity is an on-disk check. Doctor cannot prove which rules the
+running client loaded, which managed requirements take precedence, or whether
+an MCP invocation has a separate approval policy. A current build broker also
+does not cover arbitrary gate or fixture runners. Diagnose these separately
+with the [escalation procedure](guides/escalation.md). Memory cgroups constrain
+resource consumption; they do not isolate filesystem access or network actions.
+
 Optimized cache copies run into a randomly named, Creme-owned staging
 directory beside the requested destination. A failed clone or reflink attempt
 cannot occupy the destination and therefore falls back to the portable copy.

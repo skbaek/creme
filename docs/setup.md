@@ -207,24 +207,29 @@ This does not require changing home config or reinstalling host delegates.
 
 ### Codex CLI
 
-Codex CLI users who need sibling writes should preview and then explicitly
-install the generated least-privilege profile:
+Codex CLI users who need sibling writes should preview the generated
+least-privilege profile. Add `--auto-review` to explicitly request native
+risk-based review of eligible approval requests:
 
 ```sh
 cd ~/creme
-python3 -m creme client-profile --workspace-root ..
+python3 -m creme client-profile --workspace-root .. --auto-review
 python3 -m creme client-profile --workspace-root .. \
-  --output ~/.codex/creme.config.toml --write
-codex --profile creme
+  --auto-review --output ~/.codex/creme.config.toml --write
 ```
 
 Review the preview before `--write`. Permission-profile syntax is beta; compare
 the generated file with the installed client's current documentation. Creme
-does not edit the user's main Codex configuration.
+does not edit the user's main Codex configuration. The output is a configuration
+fragment: merge its reviewed keys into `~/.codex/config.toml`, preserving the
+other settings. A file named `creme.config.toml` is not automatically loaded,
+and it does not define a `[profiles.creme]` configuration profile.
 
 The CLI alternative to the desktop project is to start Codex with
-`cd ~/creme && codex --profile creme`; the directory where the CLI starts is its
-project.
+`cd ~/creme && codex` after installation; the directory where the CLI starts is
+its project. Existing conversations can retain their prior reviewer even after
+configuration changes. Run `python3 -m creme doctor` in the new session and
+follow [native approval review verification](guides/codex-approvals.md).
 
 ### Shared host semaphore
 

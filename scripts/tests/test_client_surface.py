@@ -483,6 +483,15 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertIn('\\\\', rendered)
         self.assertNotIn("\nnext", rendered)
 
+    def test_native_auto_review_is_opt_in_and_preserves_permission_boundary(self) -> None:
+        workspace = Path("/tmp/workspace")
+        ordinary = render_codex_profile(workspace)
+        automatic = render_codex_profile(workspace, auto_review=True)
+        addition = 'approval_policy = "on-request"\napprovals_reviewer = "auto_review"\n'
+        self.assertNotIn("approvals_reviewer", ordinary)
+        self.assertEqual(automatic.replace(addition, ""), ordinary)
+        self.assertIn('extends = ":workspace"', automatic)
+
     def test_client_profile_write_is_private_atomic_and_leaves_no_temp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -492,6 +501,7 @@ class ClientSurfaceTest(unittest.TestCase):
                 write=True,
                 output=str(output),
                 replace=False,
+                auto_review=False,
             )
             self.assertEqual(cmd_client_profile(arguments), 0)
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)

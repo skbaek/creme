@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from .adapters import Adapter, get_adapter
+from .codex_approvals import approval_checks
 from .guidance import GuidanceValidation
 from .guidance import default_path as default_guidance_path
 from .guidance import load as load_guidance
@@ -505,6 +506,7 @@ def run_doctor(
     checks.extend(check_sibling("blanc", workspace / blanc_name, "github.com/skbaek/blanc"))
     checks.extend(check_goal_store(workspace, profile))
     checks.extend(check_client_surface(root))
+    checks.extend(Check(*row) for row in approval_checks(root))
     checks.extend(check_neutral_semaphore(root))
     checks.extend(check_host_wrappers(shared_root))
     checks.extend(check_public_runtime_boundary(root))

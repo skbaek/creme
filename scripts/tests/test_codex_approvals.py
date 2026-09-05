@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from creme.codex_approvals import _read_config, _turn_metadata, approval_checks
+
+
+SESSION = "12345678-abcd-1234-abcd-123456789abc"
+OTHER = "87654321-abcd-1234-abcd-123456789abc"
+
+
+class CodexApprovalsTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.home = self.root / "codex-home"
+        self.home.mkdir()
+
+    def config(self, text):
+        (self.home / "config.toml").write_text(text)
+
+    def rollout(self, reviewer="user", session=SESSION, **extra):
+        path = self.home / "sessions" / "2026" / f"rollout-date-{session}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "approvals_reviewer": reviewer,
+            "approval_policy": "on-request",
+            "active_permission_profile": {"id": "creme-relay", "extends": ":workspace"},
+            "sandbox_policy": {"type": "workspace-write", "writable_roots": ["PRIVATE_PATH"]},
+            "permission_profile": {"type": "managed", "file_system": {"type": "restricted"}},
+            "user_instructions": "PRIVATE_INSTRUCTIONS",
+            "turn_id": "PRIVATE_TURN_ID",
+            **extra,
+        }
+        with path.open("a") as handle:
+            handle.write(json.dumps({"timestamp": "2026-09-06T00:00:00Z", "type": "turn_context", "payload": payload}) + "\n")
+        return path
+
+    def checks(self, session=SESSION):
+        return approval_checks(self.root, home=self.home, session=session)
+
+    def test_named_profile_and_saved_auto_mode_cannot_hide_actual_user(self):
+        self.config('default_permissions = "creme-relay"\n')
+        (self.home / ".codex-global-state.json").write_text(json.dumps({
+            "electron-persisted-atom-state": {
+                "permission-selection-by-host-id:local": {
+                    "kind": "agent-mode", "agentMode": "guardian-approvals",
+                },
+            },
+        }))
+        self.rollout()
+        rows = self.checks()
+        self.assertIn("unset (Codex default=user", rows[0][2])
+        self.assertEqual(rows[-1][1], "fail")
+        self.assertIn("AUTO_REVIEW_INACTIVE", rows[-1][2])
+        self.assertIn("permission profile=creme-relay", rows[-1][2])
+
+    def test_control_runtime_change_clears_disagreement(self):
+        self.config('approvals_reviewer = "auto_review"\n')
+        self.rollout("user")
+        self.assertEqual(self.checks()[-1][1], "fail")
+        self.rollout("auto_review")
+        row = self.checks()[-1]
+        self.assertEqual(row[1], "ok")
+        self.assertIn("not a live settings query", row[2])
+
+    def test_config_alone_and_other_sessions_never_prove_activation(self):
+        self.config('approvals_reviewer = "auto_review"\n')
+        self.rollout("auto_review", session=OTHER)
+        for session in (SESSION, "", "../sessions/*", "old-unknown-session"):
+            with self.subTest(session=session):
+                row = self.checks(session)[-1]
+                self.assertEqual(row[1], "warn")
+                self.assertIn("UNVERIFIED", row[2])
+
+    def test_latest_older_metadata_does_not_fall_back_to_previous_reviewer(self):
+        self.rollout("auto_review")
+        self.rollout(None)
+        row = self.checks()[-1]
+        self.assertEqual(row[1], "warn")
+        self.assertIn("reviewer=unverified", row[2])
+
+    def test_partial_context_invalidates_earlier_success(self):
+        path = self.rollout("auto_review")
+        with path.open("a") as handle:
+            handle.write('{"type":"turn_context","payload":')
+        self.assertIsNone(_turn_metadata(path))
+
+    def test_current_client_ordinal_metadata_is_supported(self):
+        path = self.rollout("auto_review")
+        record = json.loads(path.read_text())
+        path.write_text(json.dumps({"timestamp": record["timestamp"], "ordinal": 123,
+                                    "type": "turn_context", "payload": record["payload"]}) + "\n")
+        self.assertEqual(self.checks()[-1][1], "ok")
+
+    def test_unknown_context_envelope_invalidates_earlier_success(self):
+        path = self.rollout("auto_review")
+        with path.open("a") as handle:
+            handle.write(json.dumps({"new_envelope": True, "type": "turn_context",
+                                     "payload": {"approvals_reviewer": "user"}}) + "\n")
+        self.assertIn("UNVERIFIED", self.checks()[-1][2])
+
+    def test_exact_current_session_index_is_read_only(self):
+        path = self.rollout("auto_review")
+        # Index lookup supports rollout names that do not encode the session.
+        renamed = path.with_name("current.jsonl")
+        path.rename(renamed)
+        index = self.home / "state_5.sqlite"
+        with sqlite3.connect(index) as db:
+            db.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT)")
+            db.execute("INSERT INTO threads VALUES (?, ?)", (SESSION, str(renamed)))
+        before = index.read_bytes()
+        self.assertEqual(self.checks()[-1][1], "ok")
+        self.assertEqual(index.read_bytes(), before)
+        self.assertIn("UNVERIFIED", self.checks(OTHER)[-1][2])
+
+    def test_rollout_symlink_outside_sessions_is_not_read(self):
+        path = self.rollout("auto_review")
+        outside = self.root / "outside.jsonl"
+        path.rename(outside)
+        path.symlink_to(outside)
+        self.assertIn("UNVERIFIED", self.checks()[-1][2])
+
+    def test_transcripts_not_decoded_and_all_outputs_redacted(self):
+        self.config('approvals_reviewer = "auto_review"\napi_key = "PRIVATE_CREDENTIAL"\n')
+        path = self.rollout("auto_review")
+        response = {"type": "response_item", "payload": {
+            "content": "PRIVATE_TRANSCRIPT", "approvals_reviewer": "user",
+        }}
+        with path.open("a") as handle:
+            handle.write(json.dumps(response) + "\n")
+        original = json.loads
+
+        def context_only(value, *args, **kwargs):
+            self.assertNotIn(b"PRIVATE_TRANSCRIPT", value if isinstance(value, bytes) else value.encode())
+            return original(value, *args, **kwargs)
+
+        with mock.patch("creme.codex_approvals.json.loads", side_effect=context_only):
+            rendered = json.dumps(self.checks())
+        for secret in (SESSION, "PRIVATE_CREDENTIAL", "PRIVATE_TRANSCRIPT", "PRIVATE_PATH",
+                       "PRIVATE_INSTRUCTIONS", "PRIVATE_TURN_ID", str(path)):
+            self.assertNotIn(secret, rendered)
+
+    def test_auto_review_does_not_make_disabled_boundary_healthy(self):
+        variants = (
+            {"approval_policy": "never"},
+            {"sandbox_policy": {"type": "danger-full-access"}},
+            {"permission_profile": {"file_system": {"type": "unrestricted"}}},
+        )
+        for extra in variants:
+            with self.subTest(extra=extra):
+                self.rollout("auto_review", **extra)
+                self.assertEqual(self.checks()[-1][1], "fail")
+                self.assertIn("AUTO_REVIEW_BOUNDARY_MISSING", self.checks()[-1][2])
+
+    def test_config_profile_override_and_invalid_metadata_are_explicit(self):
+        self.config('profile = "creme"\n[profiles.creme]\napprovals_reviewer = "auto_review"\n')
+        self.assertEqual(_read_config(self.home / "config.toml")["reviewer"], "auto_review")
+        self.config('approvals_reviewer = "PRIVATE_BAD_VALUE" trailing\n')
+        row = self.checks()[0]
+        self.assertEqual(row[1], "warn")
+        self.assertNotIn("PRIVATE_BAD_VALUE", row[2])
+
+    def test_explicit_project_human_review_is_not_silent_auto_review_drift(self):
+        self.config('approvals_reviewer = "auto_review"\n')
+        project = self.root / ".codex" / "config.toml"
+        project.parent.mkdir()
+        project.write_text('approvals_reviewer = "user"\n')
+        self.rollout("user")
+        self.assertEqual(self.checks()[-1][1], "warn")
+
+    def test_missing_toml_reader_is_unverified_not_guessed(self):
+        original = __import__
+
+        def without_toml(name, *args, **kwargs):
+            if name in {"tomllib", "tomli"}:
+                raise ImportError(name)
+            return original(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", side_effect=without_toml):
+            state = _read_config(self.home / "config.toml")
+        self.assertEqual(state["status"], "unverified")
+
+
+if __name__ == "__main__":
+    unittest.main()

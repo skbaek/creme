@@ -441,13 +441,17 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
     return _sem_result(False, f"unknown action: {action}")
 
 
-def render_codex_profile(workspace: Path) -> str:
+def render_codex_profile(workspace: Path, auto_review: bool = False) -> str:
     creme = workspace / "creme"
     jaune = workspace / "jaune"
     blanc = workspace / "blanc"
     roots = [creme, jaune, blanc]
     lines = [
         'default_permissions = "creme-relay"',
+        *([
+            'approval_policy = "on-request"',
+            'approvals_reviewer = "auto_review"',
+        ] if auto_review else []),
         "",
         "[features]",
         "network_proxy = true",
@@ -477,7 +481,7 @@ def render_codex_profile(workspace: Path) -> str:
 
 def cmd_client_profile(arguments: argparse.Namespace) -> int:
     workspace = Path(arguments.workspace_root).expanduser().resolve() if arguments.workspace_root else ROOT.parent
-    rendered = render_codex_profile(workspace)
+    rendered = render_codex_profile(workspace, auto_review=arguments.auto_review)
     if not arguments.write:
         print("# PREVIEW — review before writing; permission profiles are client-version-sensitive.")
         print(rendered, end="")
@@ -854,6 +858,10 @@ def parser() -> argparse.ArgumentParser:
 
     client = commands.add_parser("client-profile", help="preview a machine-local Codex sibling-access profile")
     client.add_argument("--workspace-root")
+    client.add_argument(
+        "--auto-review", action="store_true",
+        help="opt in to native risk-based approval review; preserve the workspace sandbox",
+    )
     client.add_argument("--output")
     client.add_argument("--write", action="store_true")
     client.add_argument("--replace", action="store_true")

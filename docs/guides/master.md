@@ -223,12 +223,15 @@ that has to hold the whole picture with details that belong to a worker.
 A worker is a subagent the master spawns inside its own session, through
 whichever delegation mechanism the client provides, with a brief, a per-goal
 worktree it owns, and a return contract. The brief is a goal document written
-to the [goal guide](goal.md) when the work is large enough to deserve one, or
-a short `master/briefs/<goal>.md` when it is not. It states the objective,
-the owned paths, the resource class, the gates that must be green on the
-candidate, the decisions the worker may make alone, and where its report
+to the [goal guide](goal.md) when the work has product semantics worth
+reviewing, or a short `master/briefs/<goal>.md` when it does not. It states the
+objective, the owned paths, the resource class, the gates that must be green on
+the candidate, the decisions the worker may make alone, and where its report
 goes. Choose each worker's model and effort for its hardest non-delegable
-judgment, as the goal guide describes.
+judgment, and prefer the standard model over the frontier one unless the
+judgment requires it, as [the briefs guide](briefs.md) describes; that guide
+holds the brief contract and the model-and-effort ladder the goal document no
+longer carries.
 
 A worker dies with the master. It therefore checkpoints to Git and its state
 brief at every green boundary, so that a successor master can respawn it from

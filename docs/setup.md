@@ -440,6 +440,9 @@ Public goal-writing and execution methods are part of Creme:
   authoring a goal document.
 - [`docs/guides/execution.md`](guides/execution.md) is the authoritative method
   for executing it.
+- [`docs/guides/briefs.md`](guides/briefs.md) is the method for the worker
+  briefs the master writes, including how a worker's model and effort are
+  chosen.
 - [`docs/guides/master.md`](guides/master.md) is the method for the single
   master session that owns goals, workers, merges, and pushes on a host, and
   for the independent audits that replace user review of reports.

@@ -100,7 +100,8 @@ remain outside the generated allow rules.
 Before real work, read [AGENTS.md](AGENTS.md), the appropriate sibling's
 `scripts/GATES.md`, and [the execution guide](docs/guides/execution.md).
 New goal documents use [the public goal-writing guide](docs/guides/goal.md),
-even when a concrete goal is stored in a private repository. One session at a
+even when a concrete goal is stored in a private repository; worker briefs and
+the model-and-effort ladder are in [the briefs guide](docs/guides/briefs.md). One session at a
 time holds the master role described in
 [the master guide](docs/guides/master.md); it owns goals, workers, merges, and
 pushes, and it is the only session that takes the `master-*` lease.
@@ -153,6 +154,7 @@ another.
 - [Capability contract](docs/capabilities.md)
 - [Host profile](docs/host-profile.md)
 - [Goal contracts](docs/guides/goal.md)
+- [Worker briefs, model, and effort](docs/guides/briefs.md)
 - [Lean edit loops](docs/guides/lean-edit-loops.md)
 - [Migration from Elanc/Plans](docs/migration.md)
 - [Provenance](docs/provenance.md)

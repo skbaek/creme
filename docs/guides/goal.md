@@ -1,25 +1,39 @@
 # Executable goal contracts
 
-A goal is a durable contract for autonomous execution. It is specific enough
-to prove complete, explicit about boundaries, and independent of disposable
-client memory.
+A goal is a durable contract for autonomous execution. It carries what nothing
+else in the workflow can supply: the user-reviewed product semantics, the
+decisions already fixed and the ones reserved, and the definition of done with
+the evidence that settles it. It is specific enough to prove complete, explicit
+about boundaries, and independent of disposable client memory.
+
+A goal document is one of the two forms of instruction a worker can be handed.
+The other is the short worker brief described in
+[the briefs guide](briefs.md). Write a goal document when the work has product
+semantics worth reviewing, a completion claim someone will audit, or decisions
+that must outlive every session that touches them; write a brief when it does
+not. The goal is also the contract an independent audit judges the delivered
+work against, which is why it states what must become true rather than the
+coordination method [the master](master.md) already owns.
 
 ## Required shape
 
-1. Stable ID, title, date, owner, status, and exact objective.
-2. Recommended lead configuration: client, model, effort selector, rationale,
-   delegation posture, and reconsideration conditions.
-3. Mandatory outcome table: each condition has inspectable acceptance evidence.
+1. Stable ID, title, date, owner, and status.
+2. Exact objective and the honest claim: what the finished work asserts and,
+   explicitly, what it does not.
+3. Mandatory outcome table: each condition has inspectable acceptance evidence,
+   named with the negative control that would fail if the outcome were absent.
 4. Scope and non-goals.
 5. Fixed decisions, invariants, and authority order.
-6. Verified starting state with dated commits and uncertainty.
-7. Workstreams with dependencies, ownership, resource class, and convergence
-   gates—not an artificially rigid sequence.
+6. Verified starting state with dated commits and the remaining uncertainty.
+7. Workstreams with dependencies, ownership, and resource class — a dependency
+   graph and its convergence gates, not a schedule.
 8. Verification sources and goal-specific controls.
-9. Autonomous decisions versus decisions reserved for the user.
-10. State/recovery locations and completion-report requirements.
+9. Decisions the executing worker may make alone, and decisions reserved for
+   the user.
+10. Completion-report requirements: where the report goes and what its
+    condition-to-evidence table must contain.
 
-Use `ready` only when a competent lead can begin without inventing product
+Use `ready` only when a competent worker can begin without inventing product
 semantics. Use `active` while a live execution owns the goal, `blocked` only at
 a genuine impasse, and `complete` only when every mandatory outcome has
 evidence on the exact delivered candidate.
@@ -31,86 +45,51 @@ verdict-relevant identity. Require all-fresh execution only when freshness is
 itself an acceptance subject; routine draft pushes should run the affected set
 and required cheap invariants without inheriting a blanket freshness claim.
 
-## Recommended lead configuration
+## What the goal no longer carries
 
-Every substantial goal gives a best-guess starting configuration for its
-execution lead. The recommendation is required but advisory: it records the
-author's sizing judgment, not a permanent dependency on one vendor release.
+Earlier goal documents also configured the execution lead and the mechanics of
+running the work. Under the master-led workflow those belong elsewhere, and a
+goal that restates them creates a second authority that drifts:
 
-Include:
+- **Lead, model, and effort selection** moves to the master's brief, under
+  [the briefs guide](briefs.md). The master sizes each worker at dispatch,
+  against current client offerings, and records what it ran with. A goal owner
+  who genuinely needs a fixed configuration may still fix it in the goal as a
+  **reserved decision** in item 9; then it binds the master.
+- **Delegation posture and packet boundaries** move to the brief. The goal
+  gives the dependency graph and file ownership (item 7); how that is cut into
+  packets, and by whom, is a dispatch decision.
+- **Branch target and merge cadence** move to the master's merge policy in
+  [the master guide](master.md#merges). A worker hands over a green candidate;
+  it never chooses the merge.
+- **State and recovery locations** move to the master record — the board says,
+  per goal, the worktree, branch, last checkpoint, and next unit — and to the
+  worker's own state brief. The goal still names where its completion report
+  goes, because that is an acceptance artifact.
 
-- the intended client, exact currently available model, and exact visible
-  effort selector;
-- an optional equivalent for another supported client;
-- a short rationale based on the hardest likely **non-delegable** judgment,
-  rather than the total volume of mechanical work;
-- the expected worker allocation, including any per-worker model or effort
-  overrides the client actually supports; and
-- concrete conditions for de-escalating, escalating, or handing off to a
-  successor lead.
+## Why this shape
 
-State the primary and the equivalent as `client / model / effort` triples at
-the same rung: the model tier and the effort selector are independent axes,
-and this workflow pairs Fable with Sol and Opus with Terra. After the hard
-boundary, de-escalate the effort, not the model; weaker models belong only on
-delegated worker packets.
+Each retired section answered a real failure, and each failure now has a
+different answer. The lead configuration existed so that an under-powered
+session would not silently invent product semantics; that is now prevented by
+the goal's own fixed decisions and reserved-decision split, and by the master
+choosing the worker at dispatch with the task in front of it. The branch and
+merge instructions existed so that a finished candidate would not sit unowned
+or be merged by whoever happened to hold it; merges are now serialized through
+one master under a written policy, with a `merge` event per merge. The
+state-and-recovery section existed so that a handoff would not lose in-flight
+work; continuity is now the master record's job, tested by the handoff
+rehearsal and the `continuity` audit. What is left in the goal is what none of
+those mechanisms can supply: the semantics, the fixed and reserved decisions,
+and the evidence that completion is real. Creme requires a retired procedure to
+name the failure it prevented and what prevents it now; this paragraph is that
+statement for readers on any host, and the master logs the matching `procedure`
+event.
 
-Date-stamp or reconcile the recommendation with the goal. At launch, recheck
-the installed client's available models and selectors. A renamed or retired
-model may be replaced by its closest current capability equivalent, but the
-substitution and effective effort must be recorded in the state brief. Do not
-silently fall back to a client default.
-
-### Model choice
-
-Use the client-visible model name, not a redundant API-family prefix or suffix
-that the user does not select. As reconciled on 2026-08-31, this workflow's
-Codex choices are **Sol**, **Terra**, and **Luna**; its Claude Code choices are
-**Fable** and **Opus**. Recheck those names at launch rather than treating this
-snapshot as a permanent product catalogue.
-
-For Codex, use Sol for the hardest quality-first lead judgment, Terra for a
-balanced everyday lead or reviewer, and Luna for efficient bounded work where
-the route and falsifier are already clear. Fable is the established Claude
-hard-lead equivalent in this workflow. Opus is an alternate capable Claude
-choice, including when independent model diversity is useful; do not claim a
-fixed Fable-versus-Opus ranking without a current representative comparison.
-
-### The six-selector model
-
-Codex and Claude Code currently expose six user-visible selector positions.
-The first five form the lead-intelligence ladder. The sixth is an orchestration
-mode, not a higher intelligence effort:
-
-| Position | Codex label | Claude Code label | Use |
-|---|---|---|---|
-| 1 | Light | `low` | Fast bounded work: inventories, direct edits, routine checks, and other tasks with a short falsifiable route. |
-| 2 | Medium | `medium` | Ordinary multi-step implementation with clear semantics and modest ambiguity. |
-| 3 | High | `high` | Complex implementation or proof repair along a known architecture; latency is secondary to reliability. |
-| 4 | Extra High | `xhigh` / extra | Hard architecture, proof strategy, integration, or ambiguous diagnosis that benefits from sustained reasoning. |
-| 5 | Max | `max` | The intelligence ceiling: the hardest quality-first, non-delegable reasoning chains. Compare against position 4; more effort can add latency or overthinking without a measured gain. |
-| orchestration | Ultra: Max reasoning with automatic task delegation | `ultracode` / Ultra: automatic multi-agent orchestration; recheck its effective lead effort at launch | Choose an orchestration mode when automatic decomposition across genuinely independent workstreams is itself desired. Do not infer one client's exact lead-reasoning semantics from the other's label. |
-
-Current OpenAI model guidance describes Codex Max as maximum reasoning for one
-task and Codex Ultra as maximum reasoning with automatic task delegation. The
-latter can reduce wall-clock time on work that divides cleanly. Recheck the
-[current Codex model guidance](https://learn.chatgpt.com/docs/models) and
-[API model guidance](https://developers.openai.com/api/docs/guides/latest-model)
-when authoring or reconciling a goal because model support and defaults drift.
-
-Ultra is therefore not a sixth intelligence rung and must not be recommended
-as shorthand for “strongest.” Creme already specifies explicit delegation,
-ownership, and host-headroom rules. In that workflow, prefer Extra High when
-that is enough lead reasoning, Max when the lead's own judgment needs the
-ceiling, and Ultra only when its automatic orchestration is a deliberate
-benefit rather than duplicate policy.
-
-Do not choose Max reflexively. Use it when the hard part is one coupled chain
-that cannot be safely packetized—for example, freezing a novel invariant or
-integration boundary. De-escalate after that boundary becomes mechanical.
-Bounded discovery, fixture generation, routine proof repair, gate execution,
-and independent review normally belong to appropriately sized workers rather
-than inflating the lead setting.
+Existing goal documents written in the fuller shape remain valid: a master
+reads their lead-configuration, delegation, branch, and recovery sections as
+advisory, and their identity, semantics, decisions, and acceptance sections as
+binding.
 
 ## Quality rules
 
@@ -127,8 +106,8 @@ than inflating the lead setting.
 - Never mark completion based on a plan, a silent command, or a green signal
   whose failure mode was not shown to bite.
 
-The lead may adapt internal implementation, packet boundaries, and cheap test
-selection. Changes to objective, public claim, security boundary, supported
-platforms, license, or remote require the authority named in the goal; a
-protected/default merge follows the master's merge policy in
+The executing worker may adapt internal implementation, packet boundaries, and
+cheap test selection. Changes to objective, public claim, security boundary,
+supported platforms, license, or remote require the authority named in the
+goal; a protected/default merge follows the master's merge policy in
 [the master guide](master.md).

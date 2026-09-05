@@ -25,7 +25,8 @@ becomes a hidden dependency of the public workflow.
 ## Delegate by ownership
 
 Delegate only bounded packets with disjoint file ownership, stated authority,
-resource class, required checks, and a clear return contract. The lead retains
+resource class, required checks, and a clear return contract; under the master
+model each packet is a written brief, per [the briefs guide](briefs.md). The lead retains
 integration, conflict reconciliation, final verification, and user-only
 decisions. Parallel work is useful only when it leaves evidence that can be
 merged without overlapping authority.

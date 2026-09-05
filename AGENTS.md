@@ -50,7 +50,9 @@ live lease makes it a reader, which says so in its first reply, naming the
 holder, and may read, analyse, and converse but never writes
 under `master/`, merges, pushes, spawns workers, or takes heavy goal holds; a
 refusal for a lapsed or stranded lease is answered with `--take-over`. Read
-`docs/guides/master.md` for the protocol. The master owns goals, briefs,
+`docs/guides/master.md` for the protocol, `docs/guides/goal.md` for what a
+goal document must carry, and `docs/guides/briefs.md` for what a worker brief
+states and how its model and effort are chosen. The master owns goals, briefs,
 workers, merges, and pushes; the user owns the intent statements, the
 reserved decisions, and independent audits. Workers are the master's own
 subagents, each in a per-goal worktree, checkpointing to Git and a state

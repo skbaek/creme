@@ -231,6 +231,107 @@ class MasterMigrationTest(unittest.TestCase):
             "CURRENT",
         )
 
+    def test_verified_migration_artifacts_remain_operable_after_new_events(self):
+        self.make_legacy()
+        migrated = master_migrate.migrate(self.root, apply=True, renew=self.renew)
+        self.assertEqual(migrated.status, "OK")
+        initial = master_runtime.read_record(self.root)
+        lease = {
+            "schema_version": 3,
+            "lease": {"client": "codex", "lease_id": "a" * 32},
+        }
+        writer = master_runtime.RecordWriter(
+            self.root,
+            renew=lambda: (True, "synthetic holder verified"),
+            lease_snapshot=lambda: lease,
+        )
+        for ordinal in range(2):
+            writer.append(
+                "note",
+                {
+                    "title": f"post-migration event {ordinal}",
+                    "note": "verified migration remains an operable current record",
+                    "evidence": f"synthetic-post-migration-{ordinal}.json",
+                    "next_unit": f"continue from migrated record {ordinal}",
+                },
+            )
+            self.assertEqual(master_migrate.plan_migration(self.root).status, "CURRENT")
+            self.assertEqual(
+                master_operations.plan_initialization(
+                    SimpleNamespace(record_root=self.root)
+                ).status,
+                "CURRENT",
+            )
+            digest = master_operations.digest_record(
+                self.root,
+                lease_snapshot=lambda: lease,
+                lease_status=lambda: "master: codex (live)\n",
+            )
+            self.assertEqual(digest["status"], "OK")
+            self.assertEqual(
+                digest["next_unit"], f"continue from migrated record {ordinal}"
+            )
+        current = master_runtime.read_record(self.root)
+        self.assertTrue(current.log_bytes.startswith(initial.log_bytes))
+        self.assertEqual(len(current.events), len(initial.events) + 2)
+        self.assertEqual(master_migrate.plan_migration(self.root).status, "CURRENT")
+
+        snapshot = self.tree_snapshot(self.root)
+        renewals = self.renewals
+        rerun = master_migrate.migrate(self.root, apply=True, renew=self.renew)
+        self.assertEqual(rerun.status, "CURRENT")
+        self.assertEqual(self.renewals, renewals)
+        self.assertEqual(self.tree_snapshot(self.root), snapshot)
+        self.assertEqual(
+            master_operations.plan_initialization(SimpleNamespace(record_root=self.root)).status,
+            "CURRENT",
+        )
+
+    def test_completed_migration_rejects_changed_prefix_and_malformed_suffix(self):
+        cases = ("altered", "reordered", "truncated", "malformed-suffix")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                self.make_legacy(root)
+                migrated = master_migrate.migrate(root, apply=True, renew=self.renew)
+                self.assertEqual(migrated.status, "OK")
+                original = master_runtime.read_record(root)
+                rows = original.log_bytes.splitlines(keepends=True)
+                if case == "altered":
+                    event = json.loads(rows[0])
+                    event["event_id"] = "f" * 32
+                    changed = [master_runtime._canonical_json(event), *rows[1:]]
+                elif case == "reordered":
+                    changed = [rows[1], rows[0], *rows[2:]]
+                elif case == "truncated":
+                    changed = rows[:-1]
+                else:
+                    changed = [*rows, b'{"malformed":']
+                log_bytes = b"".join(changed)
+                (root / master_runtime.EVENTS_NAME).write_bytes(log_bytes)
+                os.chmod(root / master_runtime.EVENTS_NAME, 0o600)
+                if case != "malformed-suffix":
+                    events = [
+                        master_runtime.validate_event(json.loads(row))
+                        for row in changed
+                    ]
+                    (root / master_runtime.BOARD_NAME).write_bytes(
+                        master_runtime.render_board(events)
+                    )
+                    os.chmod(root / master_runtime.BOARD_NAME, 0o600)
+
+                before = self.tree_snapshot(root)
+                with self.assertRaises(master_runtime.MasterRecordError):
+                    master_runtime.read_record(root)
+                self.assertEqual(master_migrate.plan_migration(root).status, "REFUSED")
+                with self.assertRaises(master_runtime.MasterRecordError):
+                    master_operations.digest_record(
+                        root,
+                        lease_snapshot=lambda: {"schema_version": 3, "lease": None},
+                        lease_status=lambda: "master: none\n",
+                    )
+                self.assertEqual(self.tree_snapshot(root), before)
+
     def test_ambiguous_log_and_board_remain_evidence_not_facts(self):
         originals = self.make_legacy(recognizable=False)
         result = master_migrate.migrate(self.root, apply=True, renew=self.renew)

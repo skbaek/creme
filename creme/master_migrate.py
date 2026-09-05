@@ -16,8 +16,8 @@ from . import master_runtime, semaphore
 
 
 MIGRATION_SCHEMA_VERSION = 1
-MIGRATION_REPORT_NAME = "migration.json"
-BACKUP_ROOT_NAME = "migration-backups"
+MIGRATION_REPORT_NAME = master_runtime.MIGRATION_REPORT_NAME
+BACKUP_ROOT_NAME = master_runtime.MIGRATION_BACKUP_ROOT_NAME
 BACKUP_MANIFEST_NAME = "manifest.json"
 BACKUP_ORIGINALS_NAME = "originals"
 
@@ -705,20 +705,54 @@ def _verify_completed_legacy_core(root: Path, snapshot: LegacySnapshot) -> None:
             raise MigrationError(f"retained legacy source {name} changed after migration")
 
 
-def _current_view(root: Path) -> Optional[master_runtime.RecordView]:
+def _migration_root_nodes(
+    root: Path,
+    orphan_temps: Sequence[Path] = (),
+) -> tuple[str, ...]:
+    candidates = {
+        MIGRATION_REPORT_NAME,
+        BACKUP_ROOT_NAME,
+        *master_runtime.MIGRATION_RETAINED_ROOT_FILES,
+    }
+    names = {
+        name
+        for name in candidates
+        if (root / name).exists() or (root / name).is_symlink()
+    }
+    names.update(path.name for path in orphan_temps if path.parent == root)
+    return tuple(sorted(names))
+
+
+def _read_migration_record(
+    root: Path,
+    orphan_temps: Sequence[Path] = (),
+) -> master_runtime.RecordView:
+    return master_runtime.read_record(
+        root,
+        _migration_root_nodes=_migration_root_nodes(root, orphan_temps),
+    )
+
+
+def _current_view(
+    root: Path,
+    orphan_temps: Sequence[Path] = (),
+) -> Optional[master_runtime.RecordView]:
     if not (root / master_runtime.EVENTS_NAME).exists() and not (
         root / master_runtime.BOARD_NAME
     ).exists():
         return None
     try:
-        return master_runtime.read_record(root)
+        return _read_migration_record(root, orphan_temps)
     except master_runtime.MasterRecordError:
         return None
 
 
-def _idempotent_plan(root: Path) -> Optional[MigrationPlan]:
+def _idempotent_plan(
+    root: Path,
+    orphan_temps: Sequence[Path] = (),
+) -> Optional[MigrationPlan]:
     report_path = root / MIGRATION_REPORT_NAME
-    current = _current_view(root)
+    current = _current_view(root, orphan_temps)
     if not report_path.exists():
         if current is None:
             return None
@@ -764,10 +798,15 @@ def _idempotent_plan(root: Path) -> Optional[MigrationPlan]:
             tuple(report["retained_artifacts"]),
             tuple(report["ambiguities"]),
         )
-    if current.log_bytes != snapshot.translated_log:
+    translated_log_matches = (
+        current.log_bytes == snapshot.translated_log
+        if report["status"] == "prepared"
+        else current.log_bytes.startswith(snapshot.translated_log)
+    )
+    if not translated_log_matches:
         return MigrationPlan(
             "REFUSED",
-            "structured log does not match the migration report",
+            "structured log does not preserve the migration report prefix",
             report["source_snapshot_sha256"],
             backup_id,
             (),
@@ -922,7 +961,7 @@ def plan_migration(root: Path) -> MigrationPlan:
         root = master_runtime._normalized_root(root)
         _private_directory(root)
         orphan_temps = _orphan_temp_paths(root)
-        idempotent = _idempotent_plan(root)
+        idempotent = _idempotent_plan(root, orphan_temps)
         if idempotent is not None:
             if not orphan_temps:
                 return idempotent
@@ -1176,7 +1215,7 @@ def _publish_prepared_runtime(
         fault=fault,
     )
     _verify_snapshot_boundary(root, snapshot, current_readme=True)
-    current = master_runtime.read_record(root)
+    current = _read_migration_record(root)
     if not current.board_current or current.log_bytes != snapshot.translated_log:
         raise MigrationError("published structured record does not match prepared migration")
     return current
@@ -1203,7 +1242,7 @@ def _finalize_prepared(
     if verified["status"] != "complete":
         raise MigrationError("migration report did not become complete")
     _verify_snapshot_boundary(root, snapshot, current_readme=True)
-    current = master_runtime.read_record(root)
+    current = _read_migration_record(root)
     if not current.board_current or current.log_bytes != snapshot.translated_log:
         raise MigrationError("completed structured record no longer matches its handoff")
     return MigrationPlan(

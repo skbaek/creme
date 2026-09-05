@@ -27,6 +27,9 @@ BOARD_NAME = "board.json"
 LOCK_NAME = ".record.lock"
 README_NAME = "README.md"
 PRIVATE_DIRECTORIES = ("intent", "briefs", "audits")
+MIGRATION_REPORT_NAME = "migration.json"
+MIGRATION_BACKUP_ROOT_NAME = "migration-backups"
+MIGRATION_RETAINED_ROOT_FILES = ("log.md", "board.md")
 
 MAX_EVENT_BYTES = 64 * 1024
 MAX_LOG_BYTES = 64 * 1024 * 1024
@@ -612,15 +615,83 @@ def _validate_private_tree(root: Path) -> None:
                 )
 
 
-def _validate_layout(root: Path) -> Path:
+def _validate_layout(
+    root: Path,
+    *,
+    migration_root_nodes: Optional[Sequence[str]] = None,
+) -> tuple[Path, bool]:
     root = _normalized_root(root)
     _validate_owner_mode(root, 0o700, directory=True)
-    for name in (EVENTS_NAME, BOARD_NAME, LOCK_NAME, README_NAME):
+    required_files = (EVENTS_NAME, BOARD_NAME, LOCK_NAME, README_NAME)
+    required_directories = PRIVATE_DIRECTORIES
+    standard = set(required_files) | set(required_directories)
+    try:
+        with os.scandir(root) as entries:
+            observed = {entry.name for entry in entries}
+    except OSError as exc:
+        raise MasterRecordError(f"cannot inventory private master root: {exc}") from exc
+
+    extras = observed - standard
+    if migration_root_nodes is None:
+        allowed_migration = {
+            MIGRATION_REPORT_NAME,
+            MIGRATION_BACKUP_ROOT_NAME,
+            *MIGRATION_RETAINED_ROOT_FILES,
+        }
+        unknown = extras - allowed_migration
+        if unknown:
+            raise MasterRecordError(
+                f"unexpected private master root node: {sorted(unknown)[0]}"
+            )
+        if extras and MIGRATION_REPORT_NAME not in extras:
+            raise MasterRecordError(
+                "migration root nodes require a verified migration report"
+            )
+    else:
+        permitted = set(migration_root_nodes)
+        if extras != permitted:
+            unexpected = sorted(extras - permitted)
+            missing = sorted(permitted - extras)
+            detail = unexpected[0] if unexpected else missing[0]
+            raise MasterRecordError(
+                f"migration root inventory changed at node: {detail}"
+            )
+
+    for name in required_files:
         _validate_owner_mode(root / name, 0o600, directory=False)
-    for name in PRIVATE_DIRECTORIES:
+    for name in required_directories:
         private = root / name
         _validate_owner_mode(private, 0o700, directory=True)
         _validate_private_tree(private)
+    for name in sorted(extras):
+        path = root / name
+        if name == MIGRATION_BACKUP_ROOT_NAME:
+            _validate_owner_mode(path, 0o700, directory=True)
+            _validate_private_tree(path)
+        else:
+            _validate_owner_mode(path, 0o600, directory=False)
+    return root, bool(extras)
+
+
+def _validated_layout(
+    root: Path,
+    *,
+    migration_root_nodes: Optional[Sequence[str]] = None,
+) -> Path:
+    root, has_migration_nodes = _validate_layout(
+        root,
+        migration_root_nodes=migration_root_nodes,
+    )
+    if has_migration_nodes and migration_root_nodes is None:
+        # Import lazily: migration owns the report/backup interpretation while
+        # this module owns the record layout used during that interpretation.
+        from . import master_migrate
+
+        migration = master_migrate.plan_migration(root)
+        if migration.status != "CURRENT":
+            raise MasterRecordError(
+                f"migration root nodes are not verified current: {migration.detail}"
+            )
     return root
 
 
@@ -743,8 +814,12 @@ def _validate_board(value: Any) -> dict[str, Any]:
     return board
 
 
-def read_record(root: Path) -> RecordView:
-    root = _validate_layout(root)
+def read_record(
+    root: Path,
+    *,
+    _migration_root_nodes: Optional[Sequence[str]] = None,
+) -> RecordView:
+    root = _validated_layout(root, migration_root_nodes=_migration_root_nodes)
     events, log_bytes = _load_events(root / EVENTS_NAME)
     expected = reduce_events(events)
     board_path = root / BOARD_NAME
@@ -768,7 +843,7 @@ def read_record(root: Path) -> RecordView:
 
 @contextlib.contextmanager
 def _locked_record(root: Path) -> Iterator[None]:
-    root = _validate_layout(root)
+    root = _validated_layout(root)
     lock_path = root / LOCK_NAME
     local = _thread_lock(root)
     with local:

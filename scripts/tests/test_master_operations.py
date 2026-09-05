@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -125,6 +126,38 @@ class MasterOperationsTest(unittest.TestCase):
             for path in sorted(root.rglob("*"))
         ]
 
+    @staticmethod
+    def nonfollowing_tree_snapshot(root):
+        rows = []
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                children = sorted(entries, key=lambda entry: entry.name)
+            for entry in children:
+                info = entry.stat(follow_symlinks=False)
+                path = Path(entry.path)
+                relative = path.relative_to(root).as_posix()
+                data = None
+                link_target = None
+                if stat.S_ISREG(info.st_mode):
+                    data = path.read_bytes()
+                elif stat.S_ISLNK(info.st_mode):
+                    link_target = os.readlink(path)
+                elif stat.S_ISDIR(info.st_mode):
+                    pending.append(path)
+                rows.append(
+                    (
+                        relative,
+                        info.st_mode,
+                        info.st_uid,
+                        info.st_nlink,
+                        data,
+                        link_target,
+                    )
+                )
+        return sorted(rows)
+
     def test_resolution_requires_the_valid_configured_ignored_untracked_store(self):
         location = master_operations.resolve_runtime_location(
             self.creme, adapter=self.adapter
@@ -214,6 +247,95 @@ class MasterOperationsTest(unittest.TestCase):
         os.chmod(root / master_runtime.EVENTS_NAME, 0o600)
         partial = master_operations.initialize(self.location, apply=True)
         self.assertEqual(partial.status, "REFUSED")
+
+    def test_unrecognized_root_nodes_refuse_every_operation_without_mutation(self):
+        cases = (
+            "symlink",
+            "public-file",
+            "retired-log",
+            "retired-board",
+            "private-file",
+            "private-directory",
+            "hardlink",
+            "fifo",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                master_runtime.initialize_empty_record(root)
+                outside = root.parent / f"outside-{case}"
+                outside.write_bytes(b"outside bytes\n")
+                os.chmod(outside, 0o600)
+                if case == "symlink":
+                    (root / "rogue").symlink_to(outside)
+                elif case == "public-file":
+                    (root / "public.txt").write_bytes(b"public bytes\n")
+                    os.chmod(root / "public.txt", 0o644)
+                elif case == "retired-log":
+                    (root / "log.md").write_bytes(b"retired writer bytes\n")
+                    os.chmod(root / "log.md", 0o600)
+                elif case == "retired-board":
+                    (root / "board.md").write_bytes(b"retired board bytes\n")
+                    os.chmod(root / "board.md", 0o600)
+                elif case == "private-file":
+                    (root / "rogue").write_bytes(b"private rogue bytes\n")
+                    os.chmod(root / "rogue", 0o600)
+                elif case == "private-directory":
+                    (root / "rogue").mkdir(mode=0o700)
+                elif case == "hardlink":
+                    os.link(outside, root / "rogue")
+                else:
+                    os.mkfifo(root / "rogue", 0o600)
+
+                location = SimpleNamespace(record_root=root)
+                before = self.nonfollowing_tree_snapshot(root)
+                outside_before = outside.read_bytes()
+
+                plan = master_operations.plan_initialization(location)
+                self.assertEqual(plan.status, "REFUSED")
+                self.assertEqual(self.nonfollowing_tree_snapshot(root), before)
+
+                with self.assertRaises(master_runtime.MasterRecordError):
+                    master_runtime.read_record(root)
+                self.assertEqual(self.nonfollowing_tree_snapshot(root), before)
+
+                with self.assertRaises(master_runtime.MasterRecordError):
+                    master_operations.digest_record(
+                        root,
+                        lease_snapshot=lambda: {"schema_version": 3, "lease": None},
+                        lease_status=lambda: "master: none\n",
+                    )
+                self.assertEqual(self.nonfollowing_tree_snapshot(root), before)
+
+                lease = LeaseHarness()
+                with self.assertRaises(master_runtime.MasterRecordError):
+                    master_operations.start_master(
+                        root,
+                        client="codex",
+                        model="synthetic-model",
+                        effort="high",
+                        note="root inventory control",
+                        acquire=lease.acquire,
+                        renew=lease.renew,
+                        release=lease.release,
+                        heartbeat=lease.heartbeat,
+                        lease_snapshot=lease.snapshot,
+                        lease_status=lambda: "master: none\n",
+                    )
+                self.assertEqual(lease.acquire_count, 0)
+                self.assertEqual(self.nonfollowing_tree_snapshot(root), before)
+
+                ok, detail = lease.acquire("codex", "event control")
+                self.assertTrue(ok, detail)
+                writer = master_runtime.RecordWriter(
+                    root,
+                    renew=lease.renew,
+                    lease_snapshot=lease.snapshot,
+                )
+                with self.assertRaises(master_runtime.MasterRecordError):
+                    writer.append("note", self.note_payload())
+                self.assertEqual(self.nonfollowing_tree_snapshot(root), before)
+                self.assertEqual(outside.read_bytes(), outside_before)
 
     def test_digest_is_bounded_deterministic_private_and_read_only(self):
         root = self.initialize()

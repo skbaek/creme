@@ -55,6 +55,25 @@ valid worker artifacts; the board points at whichever a piece of work uses.
 The tracked [generic runtime layout](../../templates/master-runtime/README.md)
 documents this shape without containing a host record.
 
+During one authorized publication, the writer may also create one empty
+private `.record-transaction-v1.*` description and one matching
+`*.record-tmp` file. The atomically created description binds the operation,
+nonce, source-log digest, target-log digest, and target-board digest. Readers
+wait for an active writer, validate a crash-left description against the
+authoritative log, and render the resulting projection without changing any
+byte. Only a renewed writer holding the record lock removes a verified
+interrupted publication. A temporary-looking name without the exact
+description and source/target relationship is unknown data and causes
+refusal; neither description nor digest grants lease authority.
+
+Explicit legacy migration also recognizes the optional root-level
+`observations.md` sidecar used by the manual workflow. Migration records its
+exact bytes, size, and SHA-256 in the verified backup and report, retains the
+obsolete root file, and seals it against later changes. Its prose never
+becomes board facts. After migration, ongoing workflow observations are
+`note` events in `events.jsonl`; `audits/` remains reserved for independent
+audit reports.
+
 Nothing the next master on this host needs may live only in a client's
 transcript, memory directory, session title, or terminal scrollback. A
 client-specific memory is a cache. Host capability constraints that govern

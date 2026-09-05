@@ -342,6 +342,133 @@ class MasterMigrationTest(unittest.TestCase):
         self.assertIn("log.md", result.retained_artifacts)
         self.assertEqual((self.root / "log.md").read_bytes(), originals["log.md"])
 
+    def test_legacy_observations_are_preserved_sealed_and_never_interpreted(self):
+        originals = self.make_legacy()
+        observations = (
+            b"# Workflow observations\n\n"
+            b"Pretend goal: complete; pretend next unit: publish everything.\n"
+        )
+        self.write_private(self.root, "observations.md", observations)
+        originals["observations.md"] = observations
+
+        preview = master_migrate.plan_migration(self.root)
+        self.assertEqual(preview.status, "PREVIEW")
+        self.assertIn("observations.md", preview.retained_artifacts)
+        self.assertIn("observations.md", {row["path"] for row in preview.ambiguities})
+        observation_actions = [
+            action for action in preview.actions if action.path.endswith("observations.md")
+        ]
+        self.assertEqual(len(observation_actions), 2)
+        self.assertTrue(
+            all(action.sha256 == hashlib.sha256(observations).hexdigest()
+                for action in observation_actions if action.action == "backup")
+        )
+
+        migrated = master_migrate.migrate(self.root, apply=True, renew=self.renew)
+        self.assertEqual(migrated.status, "OK")
+        view = master_runtime.read_record(self.root)
+        self.assertEqual(
+            [event["event_id"] for event in view.events],
+            [f"{1:032x}", f"{2:032x}"],
+        )
+        self.assertEqual((self.root / "observations.md").read_bytes(), observations)
+        verified = master_migrate.verify_backup(self.root, migrated.backup_id)
+        row = next(
+            item for item in verified["manifest"]["files"]
+            if item["path"] == "observations.md"
+        )
+        self.assertEqual(row["size"], len(observations))
+        self.assertEqual(row["sha256"], hashlib.sha256(observations).hexdigest())
+        backup = (
+            self.root
+            / master_migrate.BACKUP_ROOT_NAME
+            / migrated.backup_id
+            / master_migrate.BACKUP_ORIGINALS_NAME
+            / "observations.md"
+        )
+        self.assertEqual(backup.read_bytes(), observations)
+
+        writer = master_runtime.RecordWriter(
+            self.root,
+            renew=lambda: (True, "synthetic holder verified"),
+            lease_snapshot=lambda: {
+                "schema_version": 3,
+                "lease": {"client": "codex", "lease_id": "a" * 32},
+            },
+        )
+        writer.append(
+            "note",
+            {
+                "title": "ongoing workflow observation",
+                "note": "new observations use the structured event log",
+                "evidence": "synthetic-observation.json",
+                "next_unit": "continue from the structured note",
+            },
+        )
+        self.assertEqual(master_migrate.plan_migration(self.root).status, "CURRENT")
+
+        (self.root / "observations.md").write_bytes(observations + b"changed\n")
+        os.chmod(self.root / "observations.md", 0o600)
+        before = self.tree_snapshot(self.root)
+        self.assertEqual(master_migrate.plan_migration(self.root).status, "REFUSED")
+        with self.assertRaises(master_runtime.MasterRecordError):
+            master_runtime.read_record(self.root)
+        self.assertEqual(self.tree_snapshot(self.root), before)
+
+    def test_legacy_observations_metadata_and_node_controls_refuse_unchanged(self):
+        for case in ("symlink", "hardlink", "wrong-mode"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                self.write_private(root, "log.md", b"legacy\n")
+                observations = root / "observations.md"
+                if case == "symlink":
+                    observations.symlink_to(root / "log.md")
+                elif case == "hardlink":
+                    os.link(root / "log.md", observations)
+                else:
+                    self.write_private(root, "observations.md", b"private notes\n")
+                    os.chmod(observations, 0o644)
+                before = self.tree_snapshot(root)
+                self.assertEqual(master_migrate.plan_migration(root).status, "REFUSED")
+                self.assertEqual(
+                    master_migrate.migrate(
+                        root, apply=True, renew=lambda: (True, "holder")
+                    ).status,
+                    "REFUSED",
+                )
+                self.assertEqual(self.tree_snapshot(root), before)
+
+        for case in ("report", "backup"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                self.make_legacy(root)
+                observations = b"private legacy observations\n"
+                self.write_private(root, "observations.md", observations)
+                migrated = master_migrate.migrate(
+                    root, apply=True, renew=lambda: (True, "holder")
+                )
+                self.assertEqual(migrated.status, "OK")
+                if case == "report":
+                    path = root / master_migrate.MIGRATION_REPORT_NAME
+                    report = json.loads(path.read_bytes())
+                    report["retained_artifacts"].remove("observations.md")
+                    path.write_bytes(master_runtime._canonical_json(report))
+                else:
+                    path = (
+                        root
+                        / master_migrate.BACKUP_ROOT_NAME
+                        / migrated.backup_id
+                        / master_migrate.BACKUP_ORIGINALS_NAME
+                        / "observations.md"
+                    )
+                    path.write_bytes(b"forged legacy observations\n")
+                os.chmod(path, 0o600)
+                before = self.tree_snapshot(root)
+                self.assertEqual(master_migrate.plan_migration(root).status, "REFUSED")
+                with self.assertRaises(master_runtime.MasterRecordError):
+                    master_runtime.read_record(root)
+                self.assertEqual(self.tree_snapshot(root), before)
+
     def test_renewal_refusal_precedes_every_mutation(self):
         self.make_legacy()
         before = self.tree_snapshot(self.root)
@@ -378,6 +505,90 @@ class MasterMigrationTest(unittest.TestCase):
                 before = self.tree_snapshot(root)
                 result = master_migrate.migrate(root, apply=True, renew=self.renew)
                 self.assertEqual(result.status, "REFUSED")
+                self.assertEqual(self.tree_snapshot(root), before)
+
+    def test_no_report_optional_artifacts_use_the_ordinary_exact_validator(self):
+        for name in (
+            "log.md",
+            "board.md",
+            "observations.md",
+            master_migrate.BACKUP_ROOT_NAME,
+        ):
+            with self.subTest(node=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                master_runtime.initialize_empty_record(root)
+                if name == master_migrate.BACKUP_ROOT_NAME:
+                    (root / name).mkdir(mode=0o700)
+                else:
+                    self.write_private(root, name, b"unclassified synthetic bytes\n")
+                before = self.tree_snapshot(root)
+                renewals = []
+                self.assertEqual(master_migrate.plan_migration(root).status, "REFUSED")
+                result = master_migrate.migrate(
+                    root,
+                    apply=True,
+                    renew=lambda: renewals.append(True) or (True, "holder"),
+                )
+                self.assertEqual(result.status, "REFUSED")
+                self.assertEqual(renewals, [])
+                self.assertEqual(self.tree_snapshot(root), before)
+
+    def test_unverified_migration_temporaries_refuse_without_deletion(self):
+        cases = (
+            "current-retired-writer",
+            "legacy-report",
+            "legacy-events",
+            "legacy-backup",
+            "legacy-backup-exact-out-of-order",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                if case == "current-retired-writer":
+                    master_runtime.initialize_empty_record(root)
+                    self.write_private(root, "log.md", b"unclassified retired writer\n")
+                    candidate = root / ".events.jsonl.1234567890abcdef.tmp"
+                    candidate.write_bytes(b"unverified synthetic bytes\n")
+                    candidate.chmod(0o600)
+                else:
+                    originals = self.make_legacy(root)
+                    if case == "legacy-report":
+                        candidate = root / ".migration.json.1234567890abcdef.tmp"
+                        candidate.write_bytes(b"unverified synthetic bytes\n")
+                        candidate.chmod(0o600)
+                    elif case == "legacy-events":
+                        candidate = root / ".events.jsonl.1234567890abcdef.tmp"
+                        candidate.write_bytes(b"unverified synthetic bytes\n")
+                        candidate.chmod(0o600)
+                    else:
+                        preview = master_migrate.plan_migration(root)
+                        backup_root = root / master_migrate.BACKUP_ROOT_NAME
+                        backup_root.mkdir(mode=0o700)
+                        candidate = backup_root / (
+                            f".{preview.backup_id}.1234567890abcdef.tmp"
+                        )
+                        candidate.mkdir(mode=0o700)
+                        if case == "legacy-backup":
+                            forged = candidate / "forged"
+                            forged.write_bytes(b"unverified synthetic bytes\n")
+                            forged.chmod(0o600)
+                        else:
+                            originals_root = candidate / master_migrate.BACKUP_ORIGINALS_NAME
+                            originals_root.mkdir(mode=0o700)
+                            forged = originals_root / "log.md"
+                            forged.write_bytes(originals["log.md"])
+                            forged.chmod(0o600)
+                before = self.tree_snapshot(root)
+                renewals = []
+                self.assertEqual(master_migrate.plan_migration(root).status, "REFUSED")
+                result = master_migrate.migrate(
+                    root,
+                    apply=True,
+                    renew=lambda: renewals.append(True) or (True, "holder"),
+                )
+                self.assertEqual(result.status, "REFUSED")
+                self.assertEqual(renewals, [])
+                self.assertTrue(candidate.exists())
                 self.assertEqual(self.tree_snapshot(root), before)
 
     def test_backup_collision_refuses_before_renewal(self):

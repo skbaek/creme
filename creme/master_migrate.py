@@ -21,15 +21,16 @@ BACKUP_ROOT_NAME = master_runtime.MIGRATION_BACKUP_ROOT_NAME
 BACKUP_MANIFEST_NAME = "manifest.json"
 BACKUP_ORIGINALS_NAME = "originals"
 
-LEGACY_CORE_FILES = ("README.md", "board.md", "log.md")
+LEGACY_CORE_FILES = ("README.md", "board.md", "log.md", "observations.md")
+LEGACY_RETAINED_ROOT_FILES = ("log.md", "board.md", "observations.md")
 LEGACY_DIRECTORIES = master_runtime.PRIVATE_DIRECTORIES
 MAX_LEGACY_FILES = 4096
 MAX_LEGACY_BYTES = master_runtime.MAX_LOG_BYTES
 
 _ROOT_TEMP = re.compile(
-    r"^\.(?:migration\.json|README\.md|events\.jsonl|board\.json)\.[0-9a-f]{16}\.tmp$"
+    r"^\.(migration\.json|README\.md|events\.jsonl|board\.json)\.[0-9a-f]{16}\.tmp$"
 )
-_BACKUP_TEMP = re.compile(r"^\.[0-9a-f]{64}\.[0-9a-f]{16}\.tmp$")
+_BACKUP_TEMP = re.compile(r"^\.([0-9a-f]{64})\.[0-9a-f]{16}\.tmp$")
 
 
 class MigrationError(RuntimeError):
@@ -208,6 +209,16 @@ def _interpreted_snapshot(
                 ),
             }
         )
+    if any(item.path == "observations.md" for item in ordered_files):
+        ambiguities.append(
+            {
+                "path": "observations.md",
+                "detail": (
+                    "legacy workflow observations are retained without translation; "
+                    "ongoing observations use structured note events"
+                ),
+            }
+        )
     retained = tuple(item.path for item in ordered_files if item.path != "README.md")
     descriptor = _snapshot_descriptor(ordered_directories, ordered_files)
     source_digest = hashlib.sha256(_canonical_json(descriptor)).hexdigest()
@@ -222,7 +233,7 @@ def _interpreted_snapshot(
     )
 
 
-def _orphan_temp_paths(root: Path) -> tuple[Path, ...]:
+def _candidate_temp_paths(root: Path) -> tuple[Path, ...]:
     paths: list[Path] = []
     try:
         root_entries = list(root.iterdir())
@@ -252,7 +263,7 @@ def _cleanup_orphan_temps(
     *,
     fault: Optional[FaultInjector],
 ) -> None:
-    for index, path in enumerate(_orphan_temp_paths(root)):
+    for index, path in enumerate(_verified_orphan_temp_paths(root)):
         _fault(fault, f"recovery-temp-{index}:before-remove")
         if path.is_dir():
             shutil.rmtree(path)
@@ -262,7 +273,10 @@ def _cleanup_orphan_temps(
         _fault(fault, f"recovery-temp-{index}:after-remove")
 
 
-def _scan_legacy(root: Path) -> LegacySnapshot:
+def _scan_legacy(
+    root: Path,
+    orphan_temps: Sequence[Path] = (),
+) -> LegacySnapshot:
     root = master_runtime._normalized_root(root)
     _private_directory(root)
     allowed_files = set(LEGACY_CORE_FILES) | {master_runtime.LOCK_NAME}
@@ -275,7 +289,7 @@ def _scan_legacy(root: Path) -> LegacySnapshot:
         top_level = sorted(root.iterdir(), key=lambda path: path.name)
     except OSError as exc:
         raise MigrationError(f"could not inventory legacy record: {exc}") from exc
-    orphan_names = {path.name for path in _orphan_temp_paths(root) if path.parent == root}
+    orphan_names = {path.name for path in orphan_temps if path.parent == root}
     for entry in top_level:
         if entry.name in orphan_names:
             continue
@@ -569,6 +583,158 @@ def _verified_report(root: Path) -> tuple[dict[str, Any], bytes, LegacySnapshot]
     return report, report_bytes, snapshot
 
 
+def _verify_temporary_bytes(path: Path, expected: bytes, context: str) -> None:
+    data = _read_private_bytes(path, context)
+    if data not in {b"", expected}:
+        raise MigrationError(f"{context} is not empty or the exact prepared target")
+
+
+def _verify_partial_backup(path: Path, snapshot: LegacySnapshot) -> None:
+    match = _BACKUP_TEMP.fullmatch(path.name)
+    if match is None or match.group(1) != snapshot.source_snapshot_sha256:
+        raise MigrationError("backup temporary is not bound to the legacy snapshot")
+    directory_order = [
+        BACKUP_ORIGINALS_NAME,
+        *(
+            f"{BACKUP_ORIGINALS_NAME}/{relative}"
+            for relative in sorted(
+                snapshot.directories,
+                key=lambda value: (len(PurePosixPath(value).parts), value),
+            )
+        ),
+    ]
+    file_order = [
+        *(f"{BACKUP_ORIGINALS_NAME}/{item.path}" for item in snapshot.files),
+        BACKUP_MANIFEST_NAME,
+    ]
+    expected_files = {
+        f"{BACKUP_ORIGINALS_NAME}/{item.path}": item.data
+        for item in snapshot.files
+    }
+    expected_files[BACKUP_MANIFEST_NAME] = _canonical_json(
+        _manifest(snapshot, snapshot.source_snapshot_sha256)
+    )
+    observed_directories: set[str] = set()
+    observed_files: dict[str, bytes] = {}
+    for candidate in sorted(path.rglob("*")):
+        relative = candidate.relative_to(path).as_posix()
+        if candidate.is_symlink():
+            raise MigrationError(f"backup temporary path {relative} must not be a symlink")
+        if candidate.is_dir():
+            _private_directory(candidate)
+            if relative not in directory_order:
+                raise MigrationError(f"unexpected backup temporary directory {relative}")
+            observed_directories.add(relative)
+            continue
+        _private_file(candidate)
+        expected = expected_files.get(relative)
+        if expected is None:
+            raise MigrationError(f"unexpected backup temporary file {relative}")
+        data = candidate.read_bytes()
+        if data != expected:
+            raise MigrationError(f"backup temporary file {relative} changed")
+        observed_files[relative] = data
+
+    directory_prefixes = {
+        frozenset(directory_order[:count])
+        for count in range(len(directory_order) + 1)
+    }
+    if not observed_files:
+        if frozenset(observed_directories) not in directory_prefixes:
+            raise MigrationError("backup temporary directories are not a publication prefix")
+        return
+    if observed_directories != set(directory_order):
+        raise MigrationError("backup temporary files precede its complete directory inventory")
+    observed_names = frozenset(observed_files)
+    file_prefixes = {
+        frozenset(file_order[:count])
+        for count in range(1, len(file_order) + 1)
+    }
+    if observed_names not in file_prefixes:
+        raise MigrationError("backup temporary files are not a publication prefix")
+
+
+def _verified_orphan_temp_paths(root: Path) -> tuple[Path, ...]:
+    """Authenticate every migration temporary from durable transaction state."""
+    candidates = _candidate_temp_paths(root)
+    if not candidates:
+        return ()
+    root_temps = tuple(path for path in candidates if path.parent == root)
+    backup_temps = tuple(path for path in candidates if path.parent != root)
+    if len(root_temps) > 1 or len(backup_temps) > 1 or (
+        root_temps and backup_temps
+    ):
+        raise MigrationError("migration temporary inventory is not a reachable transaction state")
+
+    report_path = root / MIGRATION_REPORT_NAME
+    if report_path.exists() or report_path.is_symlink():
+        report, _, snapshot = _verified_report(root)
+        if backup_temps:
+            raise MigrationError("backup temporary is impossible after a prepared report")
+        if report["status"] != "prepared":
+            raise MigrationError("migration temporary is impossible after completion")
+        path = root_temps[0]
+        matched = _ROOT_TEMP.fullmatch(path.name)
+        if matched is None:
+            raise MigrationError("migration temporary name is invalid")
+        destination = matched.group(1)
+        if destination == "README.md":
+            expected = master_runtime._README.encode("utf-8")
+        elif destination == "events.jsonl":
+            expected = snapshot.translated_log
+        elif destination == "board.json":
+            events = [
+                master_runtime.validate_event(master_runtime._strict_json(row, "translated event"))
+                for row in snapshot.translated_log.splitlines(keepends=True)
+            ]
+            expected = master_runtime.render_board(events)
+        elif destination == "migration.json":
+            expected = _canonical_json({**report, "status": "complete"})
+        else:  # pragma: no cover - kept explicit if the root pattern grows
+            raise MigrationError("migration temporary target is unsupported")
+        _verify_temporary_bytes(path, expected, "migration temporary")
+        return candidates
+
+    if backup_temps:
+        snapshot = _scan_legacy(root, candidates)
+        backup_root = root / BACKUP_ROOT_NAME
+        entries = sorted(backup_root.iterdir(), key=lambda path: path.name)
+        if entries != [backup_temps[0]]:
+            raise MigrationError("backup temporary namespace is incomplete")
+        _verify_partial_backup(backup_temps[0], snapshot)
+        return candidates
+
+    path = root_temps[0]
+    matched = _ROOT_TEMP.fullmatch(path.name)
+    if matched is None or matched.group(1) != "migration.json":
+        raise MigrationError(
+            "runtime temporary has no verified prepared migration report"
+        )
+    snapshot = _scan_legacy(root, candidates)
+    backup_root = root / BACKUP_ROOT_NAME
+    if not backup_root.exists() or backup_root.is_symlink():
+        raise MigrationError("prepared-report temporary has no verified backup namespace")
+    _private_directory(backup_root)
+    entries = sorted(backup_root.iterdir(), key=lambda candidate: candidate.name)
+    if len(entries) != 1 or entries[0].name != snapshot.source_snapshot_sha256:
+        raise MigrationError("prepared-report temporary has no exact verified backup")
+    manifest, manifest_bytes, backup_snapshot = _verified_backup(
+        root, snapshot.source_snapshot_sha256
+    )
+    if backup_snapshot.source_snapshot_sha256 != snapshot.source_snapshot_sha256:
+        raise MigrationError("prepared-report temporary backup does not match the source")
+    expected = _report(
+        snapshot,
+        snapshot.source_snapshot_sha256,
+        hashlib.sha256(manifest_bytes).hexdigest(),
+        status="prepared",
+    )
+    if manifest != _manifest(snapshot, snapshot.source_snapshot_sha256):
+        raise MigrationError("prepared-report temporary manifest is not exact")
+    _verify_temporary_bytes(path, _canonical_json(expected), "prepared-report temporary")
+    return candidates
+
+
 def _read_private_bytes(path: Path, context: str) -> bytes:
     _private_file(path)
     try:
@@ -582,6 +748,7 @@ def _verify_snapshot_boundary(
     snapshot: LegacySnapshot,
     *,
     current_readme: bool,
+    orphan_temps: Sequence[Path] = (),
 ) -> None:
     """Verify the legacy source on the prepared side of the authority marker.
 
@@ -602,7 +769,7 @@ def _verify_snapshot_boundary(
         BACKUP_ROOT_NAME,
     }
     known_root_names.update(
-        path.name for path in _orphan_temp_paths(root) if path.parent == root
+        path.name for path in orphan_temps if path.parent == root
     )
     try:
         observed_root_names = {entry.name for entry in root.iterdir()}
@@ -624,7 +791,7 @@ def _verify_snapshot_boundary(
     elif current_readme or legacy_readme is not None:
         raise MigrationError("migration README disappeared during authority handoff")
 
-    for name in ("log.md", "board.md"):
+    for name in LEGACY_RETAINED_ROOT_FILES:
         expected = expected_files.get(name)
         path = root / name
         if expected is None:
@@ -695,7 +862,7 @@ def _verify_completed_legacy_core(root: Path, snapshot: LegacySnapshot) -> None:
     readme = _read_private_bytes(root / master_runtime.README_NAME, "migration README")
     if readme != master_runtime._README.encode("utf-8"):
         raise MigrationError("current migration README does not match the runtime guide")
-    for name in ("log.md", "board.md"):
+    for name in LEGACY_RETAINED_ROOT_FILES:
         item = expected.get(name)
         path = root / name
         if item is None:
@@ -727,7 +894,10 @@ def _read_migration_record(
     root: Path,
     orphan_temps: Sequence[Path] = (),
 ) -> master_runtime.RecordView:
-    return master_runtime.read_record(
+    # Migration already owns serialization when it mutates.  Planning keeps
+    # this internal reader non-locking so ordinary read_record can call the
+    # migration verifier while holding its shared record lock.
+    return master_runtime._read_record_unlocked(
         root,
         _migration_root_nodes=_migration_root_nodes(root, orphan_temps),
     )
@@ -752,9 +922,14 @@ def _idempotent_plan(
     orphan_temps: Sequence[Path] = (),
 ) -> Optional[MigrationPlan]:
     report_path = root / MIGRATION_REPORT_NAME
-    current = _current_view(root, orphan_temps)
     if not report_path.exists():
-        if current is None:
+        try:
+            # With no migration report there is no authenticated exception to
+            # the ordinary current-root contract.  In particular, retired
+            # writers, backup namespaces, and temporary-looking files cannot
+            # be hidden by the migration-only inventory override.
+            master_runtime._read_record_unlocked(root)
+        except master_runtime.MasterRecordError:
             return None
         return MigrationPlan(
             "CURRENT",
@@ -766,6 +941,7 @@ def _idempotent_plan(
             (),
             (),
         )
+    current = _current_view(root, orphan_temps)
     try:
         report, _, snapshot = _verified_report(root)
     except MigrationError as exc:
@@ -816,7 +992,12 @@ def _idempotent_plan(
         )
     if report["status"] == "prepared":
         try:
-            _verify_snapshot_boundary(root, snapshot, current_readme=True)
+            _verify_snapshot_boundary(
+                root,
+                snapshot,
+                current_readme=True,
+                orphan_temps=orphan_temps,
+            )
         except MigrationError as exc:
             return MigrationPlan(
                 "REFUSED",
@@ -960,7 +1141,7 @@ def plan_migration(root: Path) -> MigrationPlan:
     try:
         root = master_runtime._normalized_root(root)
         _private_directory(root)
-        orphan_temps = _orphan_temp_paths(root)
+        orphan_temps = _verified_orphan_temp_paths(root)
         idempotent = _idempotent_plan(root, orphan_temps)
         if idempotent is not None:
             if not orphan_temps:
@@ -1000,7 +1181,7 @@ def plan_migration(root: Path) -> MigrationPlan:
                 idempotent.retained_artifacts,
                 idempotent.ambiguities,
             )
-        snapshot = _scan_legacy(root)
+        snapshot = _scan_legacy(root, orphan_temps)
         backup_id = snapshot.source_snapshot_sha256
         create_backup = _backup_namespace_is_available(root, backup_id)
         return MigrationPlan(

@@ -29,8 +29,13 @@ README_NAME = "README.md"
 PRIVATE_DIRECTORIES = ("intent", "briefs", "audits")
 MIGRATION_REPORT_NAME = "migration.json"
 MIGRATION_BACKUP_ROOT_NAME = "migration-backups"
-MIGRATION_RETAINED_ROOT_FILES = ("log.md", "board.md")
+MIGRATION_RETAINED_ROOT_FILES = ("log.md", "board.md", "observations.md")
 
+_PUBLICATION_MARKER_PREFIX = ".record-transaction-v1."
+_PUBLICATION_MARKER = re.compile(
+    r"^\.record-transaction-v1\.(append|board)\.([0-9a-f]{16})\."
+    r"([0-9a-f]{64})\.([0-9a-f]{64})\.([0-9a-f]{64})$"
+)
 MAX_EVENT_BYTES = 64 * 1024
 MAX_LOG_BYTES = 64 * 1024 * 1024
 MAX_EVENTS = 100_000
@@ -97,12 +102,24 @@ LeaseSnapshot = Callable[[], dict[str, Any]]
 
 
 @dataclass(frozen=True)
+class _PublicationTransaction:
+    operation: str
+    nonce: str
+    source_log_digest: str
+    target_log_digest: str
+    target_board_digest: str
+    marker_name: str
+    temporary_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RecordView:
     events: tuple[dict[str, Any], ...]
     board: dict[str, Any]
     expected_board: dict[str, Any]
     board_current: bool
     log_bytes: bytes
+    publication_transaction: Optional[_PublicationTransaction] = None
 
 
 @dataclass(frozen=True)
@@ -615,11 +632,81 @@ def _validate_private_tree(root: Path) -> None:
                 )
 
 
+def _publication_temp_name(destination: str, nonce: str) -> str:
+    return f".{destination}.{nonce}.record-tmp"
+
+
+def _publication_marker_name(
+    operation: str,
+    nonce: str,
+    source_log_digest: str,
+    target_log_digest: str,
+    target_board_digest: str,
+) -> str:
+    return (
+        f"{_PUBLICATION_MARKER_PREFIX}{operation}.{nonce}."
+        f"{source_log_digest}.{target_log_digest}.{target_board_digest}"
+    )
+
+
+def _publication_transaction_from_inventory(
+    root: Path,
+    extras: set[str],
+) -> tuple[Optional[_PublicationTransaction], set[str]]:
+    """Recognize one atomically described W1 publication, without following it.
+
+    The marker is an empty private directory whose complete description is in
+    its atomically created name.  A temporary-looking file without that exact
+    description remains an unknown root node.
+    """
+    marker_names = sorted(
+        name for name in extras if name.startswith(_PUBLICATION_MARKER_PREFIX)
+    )
+    if not marker_names:
+        return None, set()
+    if len(marker_names) != 1:
+        raise MasterRecordError("multiple record publication descriptions refuse recovery")
+    marker_name = marker_names[0]
+    match = _PUBLICATION_MARKER.fullmatch(marker_name)
+    if match is None:
+        raise MasterRecordError("record publication description is malformed")
+    operation, nonce, source_digest, target_digest, board_digest = match.groups()
+    marker = root / marker_name
+    _validate_owner_mode(marker, 0o700, directory=True)
+    try:
+        with os.scandir(marker) as entries:
+            if next(iter(entries), None) is not None:
+                raise MasterRecordError("record publication description must be empty")
+    except OSError as exc:
+        raise MasterRecordError(
+            f"cannot inspect record publication description: {exc}"
+        ) from exc
+
+    possible = {_publication_temp_name(BOARD_NAME, nonce)}
+    if operation == "append":
+        possible.add(_publication_temp_name(EVENTS_NAME, nonce))
+    temporary_names = tuple(sorted(name for name in extras if name in possible))
+    if len(temporary_names) > 1:
+        raise MasterRecordError("record publication has an impossible temporary inventory")
+    for name in temporary_names:
+        _validate_owner_mode(root / name, 0o600, directory=False)
+    transaction = _PublicationTransaction(
+        operation=operation,
+        nonce=nonce,
+        source_log_digest=source_digest,
+        target_log_digest=target_digest,
+        target_board_digest=board_digest,
+        marker_name=marker_name,
+        temporary_names=temporary_names,
+    )
+    return transaction, {marker_name, *temporary_names}
+
+
 def _validate_layout(
     root: Path,
     *,
     migration_root_nodes: Optional[Sequence[str]] = None,
-) -> tuple[Path, bool]:
+) -> tuple[Path, bool, Optional[_PublicationTransaction]]:
     root = _normalized_root(root)
     _validate_owner_mode(root, 0o700, directory=True)
     required_files = (EVENTS_NAME, BOARD_NAME, LOCK_NAME, README_NAME)
@@ -632,6 +719,10 @@ def _validate_layout(
         raise MasterRecordError(f"cannot inventory private master root: {exc}") from exc
 
     extras = observed - standard
+    transaction, transaction_nodes = _publication_transaction_from_inventory(
+        root, extras
+    )
+    extras -= transaction_nodes
     if migration_root_nodes is None:
         allowed_migration = {
             MIGRATION_REPORT_NAME,
@@ -670,15 +761,15 @@ def _validate_layout(
             _validate_private_tree(path)
         else:
             _validate_owner_mode(path, 0o600, directory=False)
-    return root, bool(extras)
+    return root, bool(extras), transaction
 
 
 def _validated_layout(
     root: Path,
     *,
     migration_root_nodes: Optional[Sequence[str]] = None,
-) -> Path:
-    root, has_migration_nodes = _validate_layout(
+) -> tuple[Path, Optional[_PublicationTransaction]]:
+    root, has_migration_nodes, transaction = _validate_layout(
         root,
         migration_root_nodes=migration_root_nodes,
     )
@@ -692,7 +783,7 @@ def _validated_layout(
             raise MasterRecordError(
                 f"migration root nodes are not verified current: {migration.detail}"
             )
-    return root
+    return root, transaction
 
 
 def _write_new_file(path: Path, data: bytes) -> None:
@@ -814,12 +905,99 @@ def _validate_board(value: Any) -> dict[str, Any]:
     return board
 
 
-def read_record(
+def _read_publication_temp(root: Path, name: str) -> bytes:
+    path = root / name
+    _validate_owner_mode(path, 0o600, directory=False)
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise MasterRecordError(
+            f"could not read record publication temporary {name}: {exc}"
+        ) from exc
+
+
+def _verify_publication_transaction(
+    root: Path,
+    transaction: _PublicationTransaction,
+    events: tuple[dict[str, Any], ...],
+    log_bytes: bytes,
+    expected_board: dict[str, Any],
+) -> None:
+    """Bind a crash-left publication description to the authoritative log.
+
+    Empty temporaries are reachable immediately after creation.  Non-empty
+    temporaries must already equal the complete deterministic target; partial
+    or forged bytes are preserved and refused.
+    """
+    current_digest = hashlib.sha256(log_bytes).hexdigest()
+    expected_board_bytes = _canonical_json(expected_board)
+    expected_board_digest = hashlib.sha256(expected_board_bytes).hexdigest()
+    temporary = transaction.temporary_names[0] if transaction.temporary_names else None
+    log_temporary = _publication_temp_name(EVENTS_NAME, transaction.nonce)
+    board_temporary = _publication_temp_name(BOARD_NAME, transaction.nonce)
+
+    if transaction.operation == "board":
+        if transaction.source_log_digest != transaction.target_log_digest:
+            raise MasterRecordError("board publication description changes the log")
+        if current_digest != transaction.source_log_digest:
+            raise MasterRecordError("board publication description has the wrong source log")
+        if transaction.target_board_digest != expected_board_digest:
+            raise MasterRecordError("board publication description has the wrong board target")
+        if temporary not in {None, board_temporary}:
+            raise MasterRecordError("board publication has an impossible temporary")
+        if temporary is not None:
+            data = _read_publication_temp(root, temporary)
+            if data not in {b"", expected_board_bytes}:
+                raise MasterRecordError("board publication temporary is not empty or complete")
+        return
+
+    if transaction.source_log_digest == transaction.target_log_digest:
+        raise MasterRecordError("append publication description does not advance the log")
+    if current_digest == transaction.source_log_digest:
+        if temporary not in {None, log_temporary}:
+            raise MasterRecordError("pre-commit append has an impossible temporary")
+        if temporary is None:
+            return
+        data = _read_publication_temp(root, temporary)
+        if data == b"":
+            return
+        if hashlib.sha256(data).hexdigest() != transaction.target_log_digest:
+            raise MasterRecordError("append publication temporary has the wrong target digest")
+        temporary_events, canonical = _load_events(root / temporary)
+        if canonical != data or len(temporary_events) != len(events) + 1:
+            raise MasterRecordError("append publication temporary is not one complete event")
+        if tuple(temporary_events[:-1]) != events:
+            raise MasterRecordError("append publication temporary does not extend the source log")
+        target_board = render_board(temporary_events)
+        if hashlib.sha256(target_board).hexdigest() != transaction.target_board_digest:
+            raise MasterRecordError("append publication description has the wrong board target")
+        return
+
+    if current_digest != transaction.target_log_digest:
+        raise MasterRecordError("append publication description matches neither log state")
+    if temporary not in {None, board_temporary}:
+        raise MasterRecordError("post-commit append has an impossible temporary")
+    if not events:
+        raise MasterRecordError("append publication target has no appended event")
+    source_bytes = _canonical_log(events[:-1])
+    if hashlib.sha256(source_bytes).hexdigest() != transaction.source_log_digest:
+        raise MasterRecordError("append publication target is not a one-event extension")
+    if transaction.target_board_digest != expected_board_digest:
+        raise MasterRecordError("append publication description has the wrong board target")
+    if temporary is not None:
+        data = _read_publication_temp(root, temporary)
+        if data not in {b"", expected_board_bytes}:
+            raise MasterRecordError("board publication temporary is not empty or complete")
+
+
+def _read_record_unlocked(
     root: Path,
     *,
     _migration_root_nodes: Optional[Sequence[str]] = None,
 ) -> RecordView:
-    root = _validated_layout(root, migration_root_nodes=_migration_root_nodes)
+    root, transaction = _validated_layout(
+        root, migration_root_nodes=_migration_root_nodes
+    )
     events, log_bytes = _load_events(root / EVENTS_NAME)
     expected = reduce_events(events)
     board_path = root / BOARD_NAME
@@ -832,18 +1010,28 @@ def read_record(
     if canonical != board_bytes:
         raise MasterRecordError("derived board is not canonical JSON")
     expected_bytes = _canonical_json(expected)
+    if transaction is not None:
+        _verify_publication_transaction(
+            root,
+            transaction,
+            events,
+            log_bytes,
+            expected,
+        )
     return RecordView(
         events=events,
         board=board,
         expected_board=expected,
         board_current=board_bytes == expected_bytes,
         log_bytes=log_bytes,
+        publication_transaction=transaction,
     )
 
 
 @contextlib.contextmanager
-def _locked_record(root: Path) -> Iterator[None]:
-    root = _validated_layout(root)
+def _record_lock(root: Path, *, exclusive: bool) -> Iterator[Path]:
+    root = _normalized_root(root)
+    _validate_owner_mode(root, 0o700, directory=True)
     lock_path = root / LOCK_NAME
     local = _thread_lock(root)
     with local:
@@ -861,13 +1049,31 @@ def _locked_record(root: Path) -> Iterator[None]:
                 raise MasterRecordError("private record lock changed during open")
             if not stat.S_ISREG(opened.st_mode) or stat.S_IMODE(opened.st_mode) != 0o600:
                 raise MasterRecordError("private record lock is unsafe")
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            yield
+            fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield root
         finally:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(descriptor)
+
+
+def read_record(
+    root: Path,
+    *,
+    _migration_root_nodes: Optional[Sequence[str]] = None,
+) -> RecordView:
+    with _record_lock(root, exclusive=False) as locked_root:
+        return _read_record_unlocked(
+            locked_root,
+            _migration_root_nodes=_migration_root_nodes,
+        )
+
+
+@contextlib.contextmanager
+def _locked_record(root: Path) -> Iterator[None]:
+    with _record_lock(root, exclusive=True):
+        yield
 
 
 def _atomic_replace(
@@ -876,9 +1082,13 @@ def _atomic_replace(
     *,
     label: str,
     fault: Optional[FaultInjector],
+    temporary: Optional[Path] = None,
 ) -> None:
     root = path.parent
-    temporary = root / f".{path.name}.{secrets.token_hex(8)}.tmp"
+    if temporary is None:
+        temporary = root / f".{path.name}.{secrets.token_hex(8)}.tmp"
+    elif temporary.parent != root:
+        raise MasterRecordError("publication temporary must share the destination directory")
     descriptor: Optional[int] = None
     replaced = False
     _fault(fault, f"{label}:before-temp-create")
@@ -913,6 +1123,121 @@ def _atomic_replace(
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _begin_publication_transaction(
+    root: Path,
+    *,
+    operation: str,
+    source_log: bytes,
+    target_log: bytes,
+    target_board: bytes,
+    fault: Optional[FaultInjector],
+) -> _PublicationTransaction:
+    nonce = secrets.token_hex(8)
+    source_digest = hashlib.sha256(source_log).hexdigest()
+    target_digest = hashlib.sha256(target_log).hexdigest()
+    board_digest = hashlib.sha256(target_board).hexdigest()
+    marker_name = _publication_marker_name(
+        operation,
+        nonce,
+        source_digest,
+        target_digest,
+        board_digest,
+    )
+    marker = root / marker_name
+    _fault(fault, "transaction-description:before-create")
+    try:
+        marker.mkdir(mode=0o700)
+    except OSError as exc:
+        raise MasterRecordError(
+            f"could not create record publication description: {exc}"
+        ) from exc
+    _fault(fault, "transaction-description:after-create")
+    _fault(fault, "transaction-description:before-dir-fsync")
+    _fsync_directory(root)
+    _fault(fault, "transaction-description:after-dir-fsync")
+    return _PublicationTransaction(
+        operation=operation,
+        nonce=nonce,
+        source_log_digest=source_digest,
+        target_log_digest=target_digest,
+        target_board_digest=board_digest,
+        marker_name=marker_name,
+        temporary_names=(),
+    )
+
+
+def _discard_publication_transaction(
+    root: Path,
+    transaction: _PublicationTransaction,
+    *,
+    fault: Optional[FaultInjector] = None,
+) -> None:
+    _fault(fault, "transaction-description:before-remove-temporaries")
+    for destination in (EVENTS_NAME, BOARD_NAME):
+        temporary = root / _publication_temp_name(destination, transaction.nonce)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise MasterRecordError(
+                f"could not remove verified publication temporary: {exc}"
+            ) from exc
+    _fault(fault, "transaction-description:after-remove-temporaries")
+    try:
+        (root / transaction.marker_name).rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise MasterRecordError(
+            f"could not remove record publication description: {exc}"
+        ) from exc
+    _fault(fault, "transaction-description:after-remove")
+    _fsync_directory(root)
+    _fault(fault, "transaction-description:after-remove-dir-fsync")
+
+
+def _publish_record_transaction(
+    root: Path,
+    *,
+    source_log: bytes,
+    target_log: bytes,
+    target_board: bytes,
+    operation: str,
+    fault: Optional[FaultInjector],
+) -> None:
+    transaction: Optional[_PublicationTransaction] = None
+    try:
+        transaction = _begin_publication_transaction(
+            root,
+            operation=operation,
+            source_log=source_log,
+            target_log=target_log,
+            target_board=target_board,
+            fault=fault,
+        )
+        if operation == "append":
+            _atomic_replace(
+                root / EVENTS_NAME,
+                target_log,
+                label="log",
+                fault=fault,
+                temporary=root
+                / _publication_temp_name(EVENTS_NAME, transaction.nonce),
+            )
+            _fault(fault, "transaction:after-log-commit")
+        _atomic_replace(
+            root / BOARD_NAME,
+            target_board,
+            label="board",
+            fault=fault,
+            temporary=root / _publication_temp_name(BOARD_NAME, transaction.nonce),
+        )
+    finally:
+        if transaction is not None and (root / transaction.marker_name).exists():
+            _discard_publication_transaction(root, transaction, fault=fault)
 
 
 def _actor_from_snapshot(snapshot: Any) -> dict[str, str]:
@@ -979,7 +1304,13 @@ class RecordWriter:
                 raise
             except Exception as exc:
                 raise RenewalRefused(f"master lease snapshot failed: {exc}") from exc
-            view = read_record(self.root)
+            view = _read_record_unlocked(self.root)
+            if view.publication_transaction is not None:
+                _discard_publication_transaction(
+                    self.root,
+                    view.publication_transaction,
+                )
+                view = _read_record_unlocked(self.root)
             event_id = self.event_id()
             now = self.clock()
             if now.tzinfo is None or now.utcoffset() is None:
@@ -1009,10 +1340,12 @@ class RecordWriter:
                         )
                     ):
                         if not view.board_current:
-                            _atomic_replace(
-                                self.root / BOARD_NAME,
-                                _canonical_json(view.expected_board),
-                                label="board",
+                            _publish_record_transaction(
+                                self.root,
+                                source_log=view.log_bytes,
+                                target_log=view.log_bytes,
+                                target_board=_canonical_json(view.expected_board),
+                                operation="board",
                                 fault=fault,
                             )
                         return AppendResult(
@@ -1028,17 +1361,12 @@ class RecordWriter:
             if len(log_bytes) > MAX_LOG_BYTES or len(events) > MAX_EVENTS:
                 raise MasterRecordError("authoritative event log reached its supported bound")
             board = reduce_events(events)
-            _atomic_replace(
-                self.root / EVENTS_NAME,
-                log_bytes,
-                label="log",
-                fault=fault,
-            )
-            _fault(fault, "transaction:after-log-commit")
-            _atomic_replace(
-                self.root / BOARD_NAME,
-                _canonical_json(board),
-                label="board",
+            _publish_record_transaction(
+                self.root,
+                source_log=view.log_bytes,
+                target_log=log_bytes,
+                target_board=_canonical_json(board),
+                operation="append",
                 fault=fault,
             )
             return AppendResult(

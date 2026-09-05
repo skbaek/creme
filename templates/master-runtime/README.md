@@ -27,6 +27,14 @@ master/
 - `audits/` contains independently owned reports and findings.
 - `migration.json` and `migration-backups/` appear only after explicit legacy
   migration. They bind the verified conversion and byte-identical originals.
+- An optional legacy `observations.md` is retained and sealed by that report;
+  its prose is never interpreted. New observations use structured `note`
+  events, while `audits/` remains independently owned.
+- One empty `.record-transaction-v1.*` description and one matching
+  `*.record-tmp` file may exist transiently during an authorized publication.
+  The description binds source and target digests so readers can project a
+  crash-left state without mutation and the next renewed writer can recover
+  it. A name alone is never accepted as a transaction or lease authority.
 
 Every runtime directory is mode `0700`; every runtime file is mode `0600`.
 The whole `master/` subtree must be ignored and untracked. See the

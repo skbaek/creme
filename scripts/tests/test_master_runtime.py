@@ -16,6 +16,33 @@ class SyntheticFault(RuntimeError):
     pass
 
 
+def tree_snapshot(root: Path):
+    rows = []
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in sorted(entries, key=lambda item: item.name):
+                path = Path(entry.path)
+                info = entry.stat(follow_symlinks=False)
+                data = None
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(path)
+                elif stat.S_ISREG(info.st_mode):
+                    data = path.read_bytes()
+                elif stat.S_ISLNK(info.st_mode):
+                    data = os.readlink(path).encode("utf-8")
+                rows.append(
+                    (
+                        path.relative_to(root).as_posix(),
+                        info.st_mode,
+                        info.st_nlink,
+                        data,
+                    )
+                )
+    return sorted(rows)
+
+
 def process_append(root: str, index: int, start, results) -> None:
     try:
         if not start.wait(5):
@@ -39,6 +66,28 @@ def process_append(root: str, index: int, start, results) -> None:
         results.put(None)
     except Exception as exc:
         results.put(repr(exc))
+
+
+def kill_append_at(root: str, stage: str) -> None:
+    writer = master_runtime.RecordWriter(
+        Path(root),
+        renew=lambda: (True, "synthetic holder verified"),
+        lease_snapshot=lambda: {
+            "schema_version": 3,
+            "lease": {"client": "codex", "lease_id": "a" * 32},
+        },
+    )
+    writer.append(
+        "note",
+        {
+            "title": "process-death",
+            "note": "synthetic publication boundary",
+            "evidence": "synthetic-process-death.json",
+            "next_unit": "recover",
+        },
+        fault=lambda current: os._exit(71) if current == stage else None,
+    )
+    os._exit(72)
 
 
 class MasterRuntimeTest(unittest.TestCase):
@@ -478,6 +527,160 @@ class MasterRuntimeTest(unittest.TestCase):
         self.assertEqual(len(view.events), count)
         self.assertEqual(len({event["event_id"] for event in view.events}), count)
         self.assertEqual(len(view.board["goals"]), count)
+
+    def test_synchronized_writer_waits_for_live_publication(self):
+        paused = threading.Event()
+        release = threading.Event()
+        contender_done = threading.Event()
+        results = {}
+
+        def pause(stage):
+            if stage == "board:after-temp-create":
+                paused.set()
+                if not release.wait(5):
+                    raise AssertionError("owner publication was not released")
+
+        def owner():
+            results["owner"] = self.writer().append(
+                "note", self.note_payload("owner"), fault=pause
+            )
+
+        def contender():
+            results["contender"] = self.writer().append(
+                "note", self.note_payload("contender")
+            )
+            contender_done.set()
+
+        first = threading.Thread(target=owner)
+        first.start()
+        self.assertTrue(paused.wait(5))
+        second = threading.Thread(target=contender)
+        second.start()
+        self.assertFalse(contender_done.wait(0.2))
+        release.set()
+        first.join(5)
+        second.join(5)
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(set(results), {"owner", "contender"})
+        view = master_runtime.read_record(self.root)
+        self.assertEqual(len(view.events), 2)
+        self.assertTrue(view.board_current)
+
+    def test_process_death_at_every_publication_boundary_is_projected_and_recovered(self):
+        before_log = {
+            "transaction-description:before-create",
+            "transaction-description:after-create",
+            "transaction-description:before-dir-fsync",
+            "transaction-description:after-dir-fsync",
+            "log:before-temp-create",
+            "log:after-temp-create",
+            "log:after-write",
+            "log:after-flush",
+            "log:after-fsync",
+            "log:before-replace",
+        }
+        after_log = {
+            "log:after-replace",
+            "log:before-dir-fsync",
+            "log:after-dir-fsync",
+            "transaction:after-log-commit",
+            "board:before-temp-create",
+            "board:after-temp-create",
+            "board:after-write",
+            "board:after-flush",
+            "board:after-fsync",
+            "board:before-replace",
+        }
+        after_board = {
+            "board:after-replace",
+            "board:before-dir-fsync",
+            "board:after-dir-fsync",
+            "transaction-description:before-remove-temporaries",
+            "transaction-description:after-remove-temporaries",
+            "transaction-description:after-remove",
+            "transaction-description:after-remove-dir-fsync",
+        }
+        context = multiprocessing.get_context("fork")
+        for stage in sorted(before_log | after_log | after_board):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                master_runtime.initialize_empty_record(root)
+                process = context.Process(target=kill_append_at, args=(str(root), stage))
+                process.start()
+                process.join(10)
+                self.assertFalse(process.is_alive())
+                self.assertEqual(process.exitcode, 71)
+
+                before_read = tree_snapshot(root)
+                view = master_runtime.read_record(root)
+                self.assertEqual(tree_snapshot(root), before_read)
+                accepted = 0 if stage in before_log else 1
+                self.assertEqual(len(view.events), accepted)
+                if stage in after_log:
+                    self.assertFalse(view.board_current)
+                else:
+                    self.assertTrue(view.board_current)
+
+                writer = master_runtime.RecordWriter(
+                    root,
+                    renew=self.renew,
+                    lease_snapshot=self.snapshot,
+                )
+                writer.append("note", self.note_payload("successor"))
+                final = master_runtime.read_record(root)
+                self.assertEqual(len(final.events), accepted + 1)
+                self.assertTrue(final.board_current)
+                self.assertFalse(
+                    any(
+                        path.name.startswith(".record-transaction-v1.")
+                        or path.name.endswith(".record-tmp")
+                        for path in root.iterdir()
+                    )
+                )
+
+    def test_forged_publication_nodes_refuse_unchanged(self):
+        cases = ("un described", "wrong source", "forged target", "marker child")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                master_runtime.initialize_empty_record(root)
+                source = hashlib.sha256(b"").hexdigest()
+                nonce = "1" * 16
+                target = "2" * 64
+                board = "3" * 64
+                temporary_name = master_runtime._publication_temp_name(
+                    master_runtime.EVENTS_NAME, nonce
+                )
+                if case == "un described":
+                    path = root / temporary_name
+                    path.write_bytes(b"forged bytes\n")
+                    path.chmod(0o600)
+                else:
+                    if case == "wrong source":
+                        source = "4" * 64
+                    marker_name = master_runtime._publication_marker_name(
+                        "append", nonce, source, target, board
+                    )
+                    marker = root / marker_name
+                    marker.mkdir(mode=0o700)
+                    if case == "marker child":
+                        child = marker / "forged"
+                        child.write_bytes(b"forged bytes\n")
+                        child.chmod(0o600)
+                    else:
+                        path = root / temporary_name
+                        path.write_bytes(b"forged bytes\n")
+                        path.chmod(0o600)
+                before = tree_snapshot(root)
+                with self.assertRaises(master_runtime.MasterRecordError):
+                    master_runtime.read_record(root)
+                with self.assertRaises(master_runtime.MasterRecordError):
+                    master_runtime.RecordWriter(
+                        root,
+                        renew=self.renew,
+                        lease_snapshot=self.snapshot,
+                    ).append("note", self.note_payload())
+                self.assertEqual(tree_snapshot(root), before)
 
     def test_faults_leave_only_old_or_log_authoritative_or_fully_new_state(self):
         before_log_stages = {

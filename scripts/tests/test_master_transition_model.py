@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import itertools
 import json
+import os
 import random
 import tempfile
 import threading
@@ -85,6 +86,7 @@ class ReferenceModel:
         self.events: list[tuple[str, int]] = []
         self.started: set[int] = set()
         self.board_current = True
+        self.publication_pending = False
         self.lease_encoding = "current"
         self.record_encoding = "current"
 
@@ -148,6 +150,7 @@ class ReferenceModel:
         assert self.lease is not None
         self.events.append((kind, self.lease.generation))
         self.board_current = True
+        self.publication_pending = False
 
     def transition(self, action: Action) -> str:
         name = action.principal
@@ -186,6 +189,7 @@ class ReferenceModel:
                 return "refused"
             self._record_event("note")
             self.board_current = False
+            self.publication_pending = True
             return "crash"
         if action.operation == "migrate-record":
             if self.record_encoding != "legacy" or not self._direct_renew(name):
@@ -456,6 +460,29 @@ class ConcreteWorld:
             event_id=self._next_event_id,
         )
 
+    def append_then_die(self, payload: dict[str, str], stage: str) -> int:
+        """Publish in a real child process and terminate at the selected boundary."""
+        event_id = self._next_event_id()
+        pid = os.fork()
+        if pid == 0:
+            writer = master_runtime.RecordWriter(
+                self.record_root,
+                renew=self._renew,
+                lease_snapshot=semaphore.master_snapshot,
+                event_id=lambda: event_id,
+            )
+
+            def die(candidate: str) -> None:
+                if candidate == stage:
+                    os._exit(71)
+
+            writer.append("note", payload, fault=die)
+            os._exit(99)
+        waited, status = os.waitpid(pid, 0)
+        if waited != pid or not os.WIFEXITED(status):
+            raise AssertionError("synthetic publication child did not exit normally")
+        return os.WEXITSTATUS(status)
+
     @staticmethod
     def note_payload(index: int) -> dict[str, str]:
         return {
@@ -567,23 +594,18 @@ class ConcreteWorld:
             if self.record_encoding != "current":
                 return "refused"
 
-            def stop_after_log(stage: str) -> None:
-                if stage == "transaction:after-log-commit":
-                    raise RuntimeError("synthetic post-log crash")
-
             try:
-                self.writer().append(
-                    "note",
+                exit_code = self.append_then_die(
                     self.note_payload(self.event_counter + 1),
-                    fault=stop_after_log,
+                    "board:after-fsync",
                 )
-            except RuntimeError as exc:
-                if str(exc) != "synthetic post-log crash":
-                    raise
-                return "crash"
             except master_runtime.MasterRecordError:
                 return "refused"
-            raise AssertionError("post-log crash boundary was not reached")
+            if exit_code != 71:
+                raise AssertionError(
+                    f"post-log crash boundary was not reached: exit {exit_code}"
+                )
+            return "crash"
         if action.operation == "migrate-record":
             if self.record_encoding != "legacy":
                 return "refused"
@@ -745,6 +767,7 @@ class ConcreteWorld:
             actual_record_encoding = "current"
             events = view.events
             board_current = view.board_current
+            publication_pending = view.publication_transaction is not None
         except master_runtime.MasterRecordError:
             if not (self.record_root / master_runtime.EVENTS_NAME).exists() and (
                 self.record_root / "log.md"
@@ -762,6 +785,7 @@ class ConcreteWorld:
                 actual_record_encoding = "malformed"
                 events = ()
             board_current = False
+            publication_pending = False
         event_rows = [
             (
                 event["kind"],
@@ -778,6 +802,7 @@ class ConcreteWorld:
             "events": event_rows,
             "event_ids": [event["event_id"] for event in events],
             "board_current": board_current,
+            "publication_pending": publication_pending,
         }
 
 
@@ -1000,6 +1025,11 @@ class MasterTransitionModelTest(unittest.TestCase):
             event_ids = actual["event_ids"]
             self.assertEqual(len(event_ids), len(set(event_ids)), f"duplicate event after {action}")
         self.assertEqual(actual["board_current"], model.board_current, f"board after {action}")
+        self.assertEqual(
+            actual["publication_pending"],
+            model.publication_pending,
+            f"publication after {action}",
+        )
 
     def run_trace(
         self,
@@ -1366,17 +1396,14 @@ class MasterTransitionModelTest(unittest.TestCase):
 
         with ConcreteWorld(0xB0A4D) as world:
             self.assertEqual(world.execute(Action("acquire", "session-a")), "ok")
-            writer = world.writer()
-
-            def stop_after_log(stage: str) -> None:
-                if stage == "transaction:after-log-commit":
-                    raise RuntimeError("synthetic crash after log commit")
-
-            with self.assertRaisesRegex(RuntimeError, "after log commit"):
-                writer.append("note", world.note_payload(1), fault=stop_after_log)
+            self.assertEqual(
+                world.append_then_die(world.note_payload(1), "board:after-fsync"),
+                71,
+            )
             split = master_runtime.read_record(world.record_root)
             self.assertEqual(len(split.events), 1)
             self.assertFalse(split.board_current)
+            self.assertIsNotNone(split.publication_transaction)
             digest_before = world.record_bytes()
             digest = master_operations.digest_record(
                 world.record_root,
@@ -1385,7 +1412,7 @@ class MasterTransitionModelTest(unittest.TestCase):
             )
             self.assertTrue(digest["record"]["board_repair"]["required"])
             self.assertEqual(world.record_bytes(), digest_before)
-            writer.append("note", world.note_payload(2))
+            world.writer().append("note", world.note_payload(2))
             repaired = master_runtime.read_record(world.record_root)
             self.assertEqual(len(repaired.events), 2)
             self.assertEqual(len({event["event_id"] for event in repaired.events}), 2)

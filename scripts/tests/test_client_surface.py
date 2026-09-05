@@ -12,7 +12,6 @@ from pathlib import Path
 import re
 import stat
 import tempfile
-import tomllib
 from types import SimpleNamespace
 import unittest
 
@@ -83,12 +82,59 @@ def audit_mcp_annotations(source: str) -> None:
                 field: values.get(field)
                 for field in ("readOnlyHint", "openWorldHint", "idempotentHint", "destructiveHint")
             }
+            if any(value is not None and type(value) is not bool for value in actual[name].values()):
+                raise AssertionError("MCP tool annotation types changed")
     if actual != REVIEWED_ANNOTATIONS:
         raise AssertionError("Pinned MCP tool inventory/annotations drifted; re-review approval policy")
 
 
 def _json(relative: str) -> dict:
     return json.loads((ROOT / relative).read_text(encoding="utf-8"))
+
+
+def _project_codex_config(text: str) -> dict:
+    """Read the committed TOML subset on Python 3.9; reject unfamiliar syntax.
+
+    This is a static surface check, not a general client configuration parser.
+    Quoted tables, inline tables, multiline values and non-string arrays need
+    explicit review if ever introduced into this small project config.
+    """
+    result = {}
+    table = result
+    declared_tables = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        section = re.fullmatch(r"\[([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\]", line)
+        if section:
+            path = section.group(1)
+            if path in declared_tables:
+                raise AssertionError("duplicate config table")
+            declared_tables.add(path)
+            table = result
+            for part in path.split("."):
+                table = table.setdefault(part, {})
+                if not isinstance(table, dict):
+                    raise AssertionError("config table/value collision")
+            continue
+        assignment = re.fullmatch(r"([A-Za-z0-9_-]+)\s*=\s*(.+)", line)
+        if not assignment:
+            raise AssertionError("unreviewed project TOML syntax")
+        key, value = assignment.groups()
+        if key in table:
+            raise AssertionError("duplicate config key")
+        if value.startswith("'''") and value.endswith("'''") and "'''" not in value[3:-3]:
+            parsed = value[3:-3]
+        else:
+            parsed = json.loads(value)
+        if not (
+            isinstance(parsed, (str, bool))
+            or isinstance(parsed, list) and all(isinstance(item, str) for item in parsed)
+        ):
+            raise AssertionError("unreviewed project TOML value")
+        table[key] = parsed
+    return result
 
 
 class ClientSurfaceTest(unittest.TestCase):
@@ -124,7 +170,7 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^\[projects(?:\.|])")
 
     def assert_codex_approval_policy(self, text: str) -> None:
-        config = tomllib.loads(text)
+        config = _project_codex_config(text)
         self.assertEqual(set(config), {"mcp_servers"})
         self.assertEqual(set(config["mcp_servers"]), {"lean-lsp-mcp"})
         server = config["mcp_servers"]["lean-lsp-mcp"]
@@ -165,7 +211,7 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assert_codex_approval_policy(text)
 
     def test_reviewed_inventory_covers_all_enabled_tool_policies(self) -> None:
-        server = tomllib.loads((ROOT / ".codex/config.toml").read_text())["mcp_servers"]["lean-lsp-mcp"]
+        server = _project_codex_config((ROOT / ".codex/config.toml").read_text())["mcp_servers"]["lean-lsp-mcp"]
         self.assertIn(PINNED_MCP, server["args"])
         disabled = set(server["env"]["LEAN_MCP_DISABLED_TOOLS"].split(","))
         self.assertEqual(disabled, {"lean_build", "lean_profile_proof"})
@@ -179,6 +225,26 @@ class ClientSurfaceTest(unittest.TestCase):
         guide = (ROOT / "docs/client-discovery.md").read_text()
         for name in REVIEWED_ANNOTATIONS:
             self.assertIn(f"`{name}`", guide)
+
+    def test_project_config_reader_rejects_unreviewed_syntax(self) -> None:
+        text = (ROOT / ".codex/config.toml").read_text()
+        parsed = _project_codex_config(text)
+        for addition in (
+            '\n[permissions]\nallow = {all = true}\n',
+            '\n["quoted-table"]\nvalue = "x"\n',
+            '\n[mcp_servers.lean-lsp-mcp]\n',
+            '\nLEAN_LOG_LEVEL = "duplicate"\n',
+        ):
+            with self.assertRaises((AssertionError, ValueError)):
+                _project_codex_config(text + addition)
+        # Independent standard-library parity where available. Python 3.9/3.10
+        # still run every policy/control test using the constrained reader.
+        try:
+            import tomllib
+        except ImportError:
+            pass
+        else:
+            self.assertEqual(parsed, tomllib.loads(text))
 
     def test_source_annotation_audit_rejects_tool_and_metadata_drift(self) -> None:
         # Synthetic decorators exercise the auditor without depending on a

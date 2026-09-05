@@ -199,6 +199,12 @@ project whose primary folder is Jaune or Blanc, does not exercise Creme's
 client contract. Opening a file from another task also does not change that
 task's project root.
 
+Creme's project config keeps write approvals enabled, with one reviewed
+`lean_verify` exception for the pinned MCP's temporary verification buffer
+edit. After a config update, follow the reload/restart and live-verification
+steps in [Lean verification approval](client-discovery.md#lean-verification-approval).
+This does not require changing home config or reinstalling host delegates.
+
 ### Codex CLI
 
 Codex CLI users who need sibling writes should preview and then explicitly

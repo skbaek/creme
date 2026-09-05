@@ -19,7 +19,7 @@ class MasterReconciliationTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.workspace = Path(self.temporary.name).resolve()
         self.lease = {
-            "schema_version": 3,
+            "schema_version": 4,
             "lease": {"client": "codex", "lease_id": "1" * 32},
         }
 
@@ -379,7 +379,7 @@ class MasterReconciliationTest(unittest.TestCase):
         lease = None
 
         def snapshot():
-            return {"schema_version": 3, "lease": lease}
+            return {"schema_version": 4, "lease": lease}
 
         def acquire(client, note, *, take_over=False):
             nonlocal lease

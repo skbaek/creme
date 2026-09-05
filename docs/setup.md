@@ -199,6 +199,12 @@ project whose primary folder is Jaune or Blanc, does not exercise Creme's
 client contract. Opening a file from another task also does not change that
 task's project root.
 
+Creme's project config keeps write approvals enabled, with one reviewed
+`lean_verify` exception for the pinned MCP's temporary verification buffer
+edit. After a config update, follow the reload/restart and live-verification
+steps in [Lean verification approval](client-discovery.md#lean-verification-approval).
+This does not require changing home config or reinstalling host delegates.
+
 ### Codex CLI
 
 Codex CLI users who need sibling writes should preview and then explicitly
@@ -254,26 +260,60 @@ the cutover has wound down.
 
 ### Codex host-capability delegates
 
-Some Codex installations authorize a stable executable path for host
-operations that the project sandbox cannot perform directly. Creme can create
-two user-local delegates for that boundary: telemetry and Lean reclamation.
-They contain no copied host logic and always execute the current checkout's
-capability CLI. Semaphore coordination uses the tracked launcher above.
+Some Codex installations authorize stable executable paths for host operations
+that the project sandbox cannot perform directly. Creme creates the constrained
+delegates and their least-privilege Codex rules as one bundle. A custom
+permission profile such as `creme-relay` only sets the filesystem/network
+sandbox boundary; it cannot authorize an out-of-sandbox command. Semaphore
+coordination uses the tracked launcher above.
 
 Preview the complete contents and destinations before the first write:
 
 ```sh
 cd ~/creme
-python3 -m creme host-wrappers --output-dir ~/.codex/bin
-python3 -m creme host-wrappers --output-dir ~/.codex/bin --write
+python3 -m creme host-wrappers \
+  --output-dir ~/.codex/bin --rules-dir ~/.codex/rules
+python3 -m creme host-wrappers \
+  --output-dir ~/.codex/bin --rules-dir ~/.codex/rules --write
 ```
 
 If those paths already contain an older install, compare the preview and use
-`--replace` only after review. The installer refuses implicit destinations and
-existing files. It writes both files mode `0700` through same-directory
-temporary files. Relocating Creme changes their target, so regenerate them
-from the canonical checkout. `doctor` warns when none are installed and fails
-when it finds a partial, stale, linked, or non-executable set.
+`--replace` only after review. Writing requires both explicit destinations.
+Delegates are mode `0700`; the rule file is mode `0600` and is published last,
+so an interrupted first install fails by prompting. Telemetry accepts no
+arguments; reclamation accepts exactly `--dry-run` or `--wind-down GOAL`.
+Plain reclaim, `--hard-pressure`, and idle-worker reclamation remain outside
+the allow rules. Relocating Creme changes the delegates' target, so regenerate
+from the canonical checkout.
+
+Fully quit and restart Codex after installation or replacement. Codex scans
+rules only at process startup; a new turn or subagent is not a reload. `doctor`
+warns when the whole bundle is absent and fails on partial, stale, linked,
+wrong-mode, or non-regular installs. Its green result validates installed
+bytes, not the live process's startup snapshot, and stricter managed rules may
+still win.
+
+On a host whose reviewed local guidance provides
+`.creme/bin/lean-host-preflight`, the same preview also contains
+`codex-creme-contained-build` and its rule. Its public grammar is deliberately
+narrow:
+
+```sh
+~/.codex/bin/codex-creme-contained-build blanc GOAL \
+  [--purpose goal|control|mutation|rehearsal] [--probe] [--wait SECS] \
+  [--exclusive] -- [TARGET ...]
+```
+
+The broker derives the Jaune/Blanc worktree path from the profile, goal, and
+purpose; it does not accept a repository path, arbitrary command, resource
+downgrade, dependency census, or environment override. It pins the reviewed
+preflight digest and exact clean Creme runtime tree, serializes broker
+calls under private Codex state, runs the host preflight, and then enters the
+fixed 8 GiB systemd cgroup (zero swap for Blanc, 1 GiB for Jaune). Any drift
+fails closed until the bundle is previewed and replaced again. Mutable project
+source and Lake configuration remain the intentional build input under the
+same trust model as the existing host safe-build wrappers; the broker does not
+turn arbitrary project commands into approved host commands.
 
 Claude Code users launch `claude` from `~/creme`, accept that exact workspace
 when prompted, and review the pinned `lean-lsp-mcp` project server before

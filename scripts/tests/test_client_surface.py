@@ -6,6 +6,7 @@ MCP, inspect a user's home directory, or mutate trust/approval state.
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 import re
@@ -20,10 +21,120 @@ from creme.cli import cmd_client_profile, render_codex_profile
 ROOT = Path(__file__).resolve().parents[2]
 PINNED_MCP = "lean-lsp-mcp==0.26.1"
 SKILLS = ("lean-inspector", "lean-prover")
+# Reviewed against all 22 decorators in the pinned package, without importing
+# its server. Keep the source audit explicit when changing PINNED_MCP.
+LOCAL_READ_ONLY_TOOLS = (
+    "lean_file_outline", "lean_diagnostic_messages", "lean_goal", "lean_term_goal",
+    "lean_hover_info", "lean_completions", "lean_declaration_file", "lean_references",
+    "lean_multi_attempt", "lean_run_code", "lean_local_search", "lean_code_actions",
+    "lean_get_widgets", "lean_get_widget_source", "lean_profile_proof",
+)
+REMOTE_READ_ONLY_TOOLS = (
+    "lean_leansearch", "lean_loogle", "lean_leanfinder", "lean_state_search",
+    "lean_hammer_premise",
+)
+REVIEWED_ANNOTATIONS = {
+    name: {
+        "readOnlyHint": name not in {"lean_build", "lean_verify"},
+        "openWorldHint": name in REMOTE_READ_ONLY_TOOLS,
+        "idempotentHint": True,
+        # Missing is distinct from false; do not invent an upstream annotation.
+        "destructiveHint": True if name == "lean_build" else None,
+    }
+    for name in (*LOCAL_READ_ONLY_TOOLS, *REMOTE_READ_ONLY_TOOLS, "lean_build", "lean_verify")
+}
+
+
+def audit_mcp_annotations(source: str) -> None:
+    """Compare a supplied server.py to the review; never execute its contents."""
+    actual = {}
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and isinstance(decorator.func.value, ast.Name)
+                and decorator.func.value.id == "mcp"
+                and decorator.func.attr == "tool"
+            ):
+                continue
+            if len(decorator.args) != 1:
+                raise AssertionError("MCP tool declaration shape changed")
+            name = ast.literal_eval(decorator.args[0])
+            if not isinstance(name, str) or name in actual:
+                raise AssertionError("MCP tool name is invalid or duplicated")
+            annotation = next(
+                (kw.value for kw in decorator.keywords if kw.arg == "annotations"), None
+            )
+            if not (
+                isinstance(annotation, ast.Call)
+                and isinstance(annotation.func, ast.Name)
+                and annotation.func.id == "ToolAnnotations"
+                and not annotation.args
+            ):
+                raise AssertionError("MCP tool annotation shape changed")
+            values = {kw.arg: ast.literal_eval(kw.value) for kw in annotation.keywords}
+            if not set(values) <= {"title", "readOnlyHint", "openWorldHint", "idempotentHint", "destructiveHint"}:
+                raise AssertionError("MCP tool annotation fields changed")
+            actual[name] = {
+                field: values.get(field)
+                for field in ("readOnlyHint", "openWorldHint", "idempotentHint", "destructiveHint")
+            }
+            if any(value is not None and type(value) is not bool for value in actual[name].values()):
+                raise AssertionError("MCP tool annotation types changed")
+    if actual != REVIEWED_ANNOTATIONS:
+        raise AssertionError("Pinned MCP tool inventory/annotations drifted; re-review approval policy")
 
 
 def _json(relative: str) -> dict:
     return json.loads((ROOT / relative).read_text(encoding="utf-8"))
+
+
+def _project_codex_config(text: str) -> dict:
+    """Read the committed TOML subset on Python 3.9; reject unfamiliar syntax.
+
+    This is a static surface check, not a general client configuration parser.
+    Quoted tables, inline tables, multiline values and non-string arrays need
+    explicit review if ever introduced into this small project config.
+    """
+    result = {}
+    table = result
+    declared_tables = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        section = re.fullmatch(r"\[([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\]", line)
+        if section:
+            path = section.group(1)
+            if path in declared_tables:
+                raise AssertionError("duplicate config table")
+            declared_tables.add(path)
+            table = result
+            for part in path.split("."):
+                table = table.setdefault(part, {})
+                if not isinstance(table, dict):
+                    raise AssertionError("config table/value collision")
+            continue
+        assignment = re.fullmatch(r"([A-Za-z0-9_-]+)\s*=\s*(.+)", line)
+        if not assignment:
+            raise AssertionError("unreviewed project TOML syntax")
+        key, value = assignment.groups()
+        if key in table:
+            raise AssertionError("duplicate config key")
+        if value.startswith("'''") and value.endswith("'''") and "'''" not in value[3:-3]:
+            parsed = value[3:-3]
+        else:
+            parsed = json.loads(value)
+        if not (
+            isinstance(parsed, (str, bool))
+            or isinstance(parsed, list) and all(isinstance(item, str) for item in parsed)
+        ):
+            raise AssertionError("unreviewed project TOML value")
+        table[key] = parsed
+    return result
 
 
 class ClientSurfaceTest(unittest.TestCase):
@@ -57,6 +168,103 @@ class ClientSurfaceTest(unittest.TestCase):
         )
         self.assertNotRegex(text, r"(?m)^\[permissions(?:\.|])")
         self.assertNotRegex(text, r"(?m)^\[projects(?:\.|])")
+
+    def assert_codex_approval_policy(self, text: str) -> None:
+        config = _project_codex_config(text)
+        self.assertEqual(set(config), {"mcp_servers"})
+        self.assertEqual(set(config["mcp_servers"]), {"lean-lsp-mcp"})
+        server = config["mcp_servers"]["lean-lsp-mcp"]
+        self.assertEqual(
+            set(server),
+            {"command", "args", "required", "default_tools_approval_mode", "tools", "env"},
+        )
+        self.assertEqual(server["default_tools_approval_mode"], "writes")
+        self.assertEqual(server["tools"], {"lean_verify": {"approval_mode": "approve"}})
+        self.assertEqual(server["command"], "/usr/bin/python3")
+        self.assertEqual(server["args"], ["-m", "creme", "lean-mcp", "--", "uvx", PINNED_MCP])
+        self.assertIs(server["required"], True)
+        self.assertEqual(server["env"], _json(".mcp.json")["mcpServers"]["lean-lsp-mcp"]["env"])
+
+    def test_codex_approval_exception_is_only_reviewed_lean_verify(self) -> None:
+        self.assert_codex_approval_policy(
+            (ROOT / ".codex/config.toml").read_text(encoding="utf-8")
+        )
+
+    def test_codex_approval_policy_rejects_missing_or_widened_exception(self) -> None:
+        text = (ROOT / ".codex/config.toml").read_text(encoding="utf-8")
+        exception = '[mcp_servers.lean-lsp-mcp.tools.lean_verify]\napproval_mode = "approve"\n'
+        mutations = {
+            "missing": text.replace(exception, ""),
+            "server-wide": text.replace('default_tools_approval_mode = "writes"', 'default_tools_approval_mode = "approve"'),
+            "wrong tool": text.replace("tools.lean_verify]", "tools.lean_build]"),
+            "still prompts": text.replace('approval_mode = "approve"', 'approval_mode = "prompt"'),
+            "extra tool": text + '\n[mcp_servers.lean-lsp-mcp.tools.lean_run_code]\napproval_mode = "approve"\n',
+            "top-level": 'approval_policy = "never"\n' + text,
+            "build enabled": text.replace("lean_build,lean_profile_proof", "lean_profile_proof"),
+        }
+        self.assert_codex_approval_policy(text)
+        for label, mutated in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(mutated, text)
+                with self.assertRaises(AssertionError):
+                    self.assert_codex_approval_policy(mutated)
+        self.assert_codex_approval_policy(text)
+
+    def test_reviewed_inventory_covers_all_enabled_tool_policies(self) -> None:
+        server = _project_codex_config((ROOT / ".codex/config.toml").read_text())["mcp_servers"]["lean-lsp-mcp"]
+        self.assertIn(PINNED_MCP, server["args"])
+        disabled = set(server["env"]["LEAN_MCP_DISABLED_TOOLS"].split(","))
+        self.assertEqual(disabled, {"lean_build", "lean_profile_proof"})
+        self.assertEqual(len(REVIEWED_ANNOTATIONS), 22)
+        enabled = set(REVIEWED_ANNOTATIONS) - disabled
+        self.assertEqual(len(enabled), 20)
+        self.assertEqual(
+            {name for name in enabled if not REVIEWED_ANNOTATIONS[name]["readOnlyHint"]},
+            set(server["tools"]),
+        )
+        guide = (ROOT / "docs/client-discovery.md").read_text()
+        for name in REVIEWED_ANNOTATIONS:
+            self.assertIn(f"`{name}`", guide)
+
+    def test_project_config_reader_rejects_unreviewed_syntax(self) -> None:
+        text = (ROOT / ".codex/config.toml").read_text()
+        parsed = _project_codex_config(text)
+        for addition in (
+            '\n[permissions]\nallow = {all = true}\n',
+            '\n["quoted-table"]\nvalue = "x"\n',
+            '\n[mcp_servers.lean-lsp-mcp]\n',
+            '\nLEAN_LOG_LEVEL = "duplicate"\n',
+        ):
+            with self.assertRaises((AssertionError, ValueError)):
+                _project_codex_config(text + addition)
+        # Independent standard-library parity where available. Python 3.9/3.10
+        # still run every policy/control test using the constrained reader.
+        try:
+            import tomllib
+        except ImportError:
+            pass
+        else:
+            self.assertEqual(parsed, tomllib.loads(text))
+
+    def test_source_annotation_audit_rejects_tool_and_metadata_drift(self) -> None:
+        # Synthetic decorators exercise the auditor without depending on a
+        # user's package cache. Release evidence separately audits real source.
+        source = "\n".join(
+            f'@mcp.tool({name!r}, annotations=ToolAnnotations('
+            + ", ".join(f"{field}={value!r}" for field, value in fields.items() if value is not None)
+            + f"))\ndef tool_{index}(): pass\n"
+            for index, (name, fields) in enumerate(REVIEWED_ANNOTATIONS.items())
+        )
+        audit_mcp_annotations(source)
+        for mutated in (
+            source.replace("'lean_goal'", "'lean_new_tool'"),
+            source.replace("readOnlyHint=True", "readOnlyHint=False", 1),
+            source.replace("openWorldHint=False", "openWorldHint=True", 1),
+            source + "\n@mcp.tool('extra', annotations=ToolAnnotations())\ndef extra(): pass\n",
+        ):
+            with self.assertRaisesRegex(AssertionError, "inventory/annotations drifted"):
+                audit_mcp_annotations(mutated)
+        audit_mcp_annotations(source)
 
     def test_claude_settings_grant_only_relative_sibling_access(self) -> None:
         settings = _json(".claude/settings.json")

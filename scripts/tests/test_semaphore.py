@@ -1919,14 +1919,14 @@ class MasterLeaseTest(unittest.TestCase):
             "lease": legacy_lease,
         }), encoding="utf-8")
         snapshot = semaphore.master_snapshot()
-        self.assertEqual(snapshot["schema_version"], 3)
+        self.assertEqual(snapshot["schema_version"], 4)
         self.assertEqual(snapshot["lease"]["acquired_at"], legacy_lease["acquired_at"])
         self.assertEqual(snapshot["lease"]["direct_activity_at"], legacy_lease["renewed_at"])
         self.assertTrue(snapshot["lease"]["legacy_unbound"])
         ok, detail = semaphore.master_renew()
         self.assertTrue(ok, detail)
         persisted = json.loads((self.root / "master.json").read_text(encoding="utf-8"))
-        self.assertEqual(persisted["schema_version"], 3)
+        self.assertEqual(persisted["schema_version"], 4)
         self.assertFalse(persisted["lease"]["legacy_unbound"])
         self.assertEqual(persisted["lease"]["client"], "claude")
 
@@ -2010,7 +2010,7 @@ class MasterLeaseTest(unittest.TestCase):
         ok, detail = semaphore.master_renew()
         self.assertTrue(ok, detail)
         persisted = json.loads((self.root / "master.json").read_text(encoding="utf-8"))
-        self.assertEqual(persisted["schema_version"], 3)
+        self.assertEqual(persisted["schema_version"], 4)
         self.assertFalse(persisted["lease"]["legacy_unbound"])
         self.assertEqual(persisted["lease"]["client_pid"], os.getpid())
 
@@ -2021,13 +2021,14 @@ class MasterLeaseTest(unittest.TestCase):
         data["schema_version"] = 2
         del data["lease"]["heartbeat_launch_digest"]
         del data["lease"]["heartbeat_launch_expires_at"]
+        del data["lease"]["process_witness"]
         path.write_text(json.dumps(data), encoding="utf-8")
         snapshot = semaphore.master_snapshot()
-        self.assertEqual(snapshot["schema_version"], 3)
+        self.assertEqual(snapshot["schema_version"], 4)
         self.assertIsNone(snapshot["lease"]["heartbeat_launch_digest"])
         ok, detail = semaphore.master_renew()
         self.assertTrue(ok, detail)
-        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 3)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 4)
 
     def test_boolean_and_float_schema_versions_are_preserved_and_refused(self):
         path = self.root / "master.json"

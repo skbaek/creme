@@ -4,6 +4,11 @@ args = ["-m", "creme", "lean-mcp", "--", "uvx", "lean-lsp-mcp==0.26.1"]
 required = true
 default_tools_approval_mode = "writes"
 
+# Reviewed 0.26.1 verification edits an LSP buffer (restoration in finally),
+# so its readOnlyHint is false. Keep this exception scoped to one tool.
+[mcp_servers.lean-lsp-mcp.tools.lean_verify]
+approval_mode = "approve"
+
 [mcp_servers.lean-lsp-mcp.env]
 LEAN_LOG_LEVEL = "INFO"
 LEAN_MCP_DISABLED_TOOLS = "lean_build,lean_profile_proof"

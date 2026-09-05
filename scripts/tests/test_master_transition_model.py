@@ -1349,10 +1349,10 @@ class MasterTransitionModelTest(unittest.TestCase):
             legacy_bytes = json.dumps(legacy, separators=(",", ":")).encode()
             lease_path.write_bytes(legacy_bytes)
             world.select("process-a")
-            self.assertEqual(semaphore.master_snapshot()["schema_version"], 3)
+            self.assertEqual(semaphore.master_snapshot()["schema_version"], 4)
             self.assertEqual(lease_path.read_bytes(), legacy_bytes)
             self.assertTrue(world._renew()[0])
-            self.assertEqual(json.loads(lease_path.read_bytes())["schema_version"], 3)
+            self.assertEqual(json.loads(lease_path.read_bytes())["schema_version"], 4)
 
         with ConcreteWorld(0xBAD5) as world:
             lease_path = world.state_root / semaphore.MASTER_NAME

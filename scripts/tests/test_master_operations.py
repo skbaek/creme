@@ -41,7 +41,7 @@ class LeaseHarness:
         self.next_id = 1
 
     def snapshot(self):
-        return {"schema_version": 3, "lease": self.lease}
+        return {"schema_version": 4, "lease": self.lease}
 
     def acquire(self, client, note, *, take_over=False):
         self.acquire_count += 1
@@ -302,7 +302,7 @@ class MasterOperationsTest(unittest.TestCase):
                 with self.assertRaises(master_runtime.MasterRecordError):
                     master_operations.digest_record(
                         root,
-                        lease_snapshot=lambda: {"schema_version": 3, "lease": None},
+                        lease_snapshot=lambda: {"schema_version": 4, "lease": None},
                         lease_status=lambda: "master: none\n",
                     )
                 self.assertEqual(self.nonfollowing_tree_snapshot(root), before)

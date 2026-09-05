@@ -237,7 +237,7 @@ class MasterMigrationTest(unittest.TestCase):
         self.assertEqual(migrated.status, "OK")
         initial = master_runtime.read_record(self.root)
         lease = {
-            "schema_version": 3,
+            "schema_version": 4,
             "lease": {"client": "codex", "lease_id": "a" * 32},
         }
         writer = master_runtime.RecordWriter(
@@ -327,7 +327,7 @@ class MasterMigrationTest(unittest.TestCase):
                 with self.assertRaises(master_runtime.MasterRecordError):
                     master_operations.digest_record(
                         root,
-                        lease_snapshot=lambda: {"schema_version": 3, "lease": None},
+                        lease_snapshot=lambda: {"schema_version": 4, "lease": None},
                         lease_status=lambda: "master: none\n",
                     )
                 self.assertEqual(self.tree_snapshot(root), before)
@@ -392,7 +392,7 @@ class MasterMigrationTest(unittest.TestCase):
             self.root,
             renew=lambda: (True, "synthetic holder verified"),
             lease_snapshot=lambda: {
-                "schema_version": 3,
+                "schema_version": 4,
                 "lease": {"client": "codex", "lease_id": "a" * 32},
             },
         )

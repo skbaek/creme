@@ -73,6 +73,62 @@ Permission profiles are currently beta. If their network-domain rules are
 used, `features.network_proxy = true` is required for those rules to be
 enforced; `network.enabled = true` alone allows direct network access.
 
+### Lean verification approval
+
+The project keeps `default_tools_approval_mode = "writes"` and grants only
+`mcp_servers.lean-lsp-mcp.tools.lean_verify` an `approval_mode = "approve"`
+exception. The reviewed `lean-lsp-mcp==0.26.1` tool advertises
+`readOnlyHint=false`: it temporarily appends `#print axioms` to an LSP buffer,
+attempts buffer restoration in `finally`, and optionally searches source with
+`rg`. It is not a read-only LSP-buffer operation. The exception accepts this
+specific verification operation; it does not change the annotation or approve other
+MCP writes. Re-review this exception when upgrading the package pin.
+
+Codex documents `writes` as prompting for tools not marked read-only and
+supports the per-tool exception above. See the official
+[MCP configuration options and examples](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+The guarded launcher, disabled build/profiler tools, sandbox, project trust,
+host containment, and semaphore admission remain unchanged.
+
+The 2026-09-05 source audit covered every tool decorator in the pinned 0.26.1
+`server.py`, not only verification. There are 22 tools, of which 20 are enabled:
+
+| Tools | Upstream hints (`readOnlyHint`, `openWorldHint`) | Project approval policy |
+| --- | --- | --- |
+| `lean_file_outline`, `lean_diagnostic_messages`, `lean_goal`, `lean_term_goal`, `lean_hover_info`, `lean_completions`, `lean_declaration_file`, `lean_references` | true, false | Existing `writes` default; no exception |
+| `lean_multi_attempt`, `lean_run_code`, `lean_local_search`, `lean_code_actions`, `lean_get_widgets`, `lean_get_widget_source` | true, false | Existing `writes` default; no exception |
+| `lean_leansearch`, `lean_loogle`, `lean_leanfinder`, `lean_state_search`, `lean_hammer_premise` | true, true | Existing `writes` default; network policy still applies |
+| `lean_verify` | false, false | Single reviewed `approve` exception |
+| `lean_build` | false, false | Disabled; no approval exception |
+| `lean_profile_proof` | true, false | Disabled; no approval exception |
+
+All 22 advertise `idempotentHint=true`; only `lean_build` explicitly advertises
+`destructiveHint=true` (the others omit that hint). These are upstream policy
+annotations, not proof that execution has no effects: `lean_run_code` creates
+a temporary file and `lean_multi_attempt` edits a temporary LSP buffer. The
+usual proof-loop, resource, source-edit, and network restrictions still apply.
+The 19 enabled read-only-marked tools need no additional exception to avoid
+prompts caused by the `writes` setting. Other client or managed policies can
+still require approval; this audit does not promise every action is prompt-free.
+
+The portable regression in `scripts/tests/test_client_surface.py` records this
+inventory and checks pin/config scope, policy coverage, and metadata-drift
+controls. Its `audit_mcp_annotations(source)` helper compares supplied package
+source using Python's AST without importing or starting MCP. Run that source
+audit again against the installed package when changing the pin or tools;
+ordinary static CI intentionally does not depend on a host package cache.
+
+After updating the trusted project's config, use a supported MCP/config reload
+if the installed client exposes one; otherwise restart the client. The official
+[app-server API](https://learn.chatgpt.com/docs/app-server) provides
+`config/mcpServer/reload` to reload disk config and queue refreshes for loaded
+threads; `/mcp` is documented as a status view, not a reload command. Existing
+tasks may retain their loaded configuration. Verify the effective project
+config and an authorized `lean_verify` call before declaring activation
+complete. Static tests prove the committed scope, not prompt-free live
+behavior. Do not relax server-wide or global approvals to compensate for a
+stale or unsupported client configuration.
+
 Official evidence:
 
 - [Custom instructions with AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md)

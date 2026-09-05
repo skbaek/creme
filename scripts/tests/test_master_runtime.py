@@ -51,7 +51,7 @@ def process_append(root: str, index: int, start, results) -> None:
             Path(root),
             renew=lambda: (True, "synthetic holder verified"),
             lease_snapshot=lambda: {
-                "schema_version": 3,
+                "schema_version": 4,
                 "lease": {"client": "codex", "lease_id": "a" * 32},
             },
         )
@@ -73,7 +73,7 @@ def kill_append_at(root: str, stage: str) -> None:
         Path(root),
         renew=lambda: (True, "synthetic holder verified"),
         lease_snapshot=lambda: {
-            "schema_version": 3,
+            "schema_version": 4,
             "lease": {"client": "codex", "lease_id": "a" * 32},
         },
     )
@@ -105,7 +105,7 @@ class MasterRuntimeTest(unittest.TestCase):
 
     def snapshot(self):
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "lease": {"client": "codex", "lease_id": self.lease_id},
         }
 

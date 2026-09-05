@@ -71,6 +71,38 @@ def _write_log(path: Path, rows: list[tuple[str, str, str, str, str]]) -> None:
     )
 
 
+class LakeCacheEnvironmentTest(unittest.TestCase):
+    def test_cache_overrides_host_defaults_without_mutating_caller(self) -> None:
+        base = {"LAKE_CACHE_DIR": "/outside/cache", "KEEP": "value"}
+        with patch.object(owned.semaphore, "canonical_creme_root", return_value=Path("/workspace/creme")):
+            env = owned.lake_env(base)
+        self.assertEqual(env, {"LAKE_CACHE_DIR": "/workspace/creme/.creme/lake-cache", "KEEP": "value"})
+        self.assertEqual(base["LAKE_CACHE_DIR"], "/outside/cache")
+
+    def test_linked_creme_worktree_uses_shared_checkout_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "creme"
+            gitdir = root / ".git" / "worktrees" / "goal"
+            gitdir.mkdir(parents=True)
+            (gitdir / "commondir").write_text("../..\n")
+            linked = root / ".worktrees" / "goal"
+            linked.mkdir(parents=True)
+            (linked / ".git").write_text(f"gitdir: {gitdir}\n")
+            resolver = owned.semaphore.canonical_creme_root
+            with patch.object(owned.semaphore, "canonical_creme_root", side_effect=lambda: resolver(linked)):
+                self.assertEqual(owned.lake_env({})["LAKE_CACHE_DIR"], str(root / ".creme/lake-cache"))
+            self.assertFalse((root / ".creme").exists())
+
+    def test_mcp_environment_uses_same_cache_even_with_empty_base(self) -> None:
+        with patch.object(owned, "guard_bin", return_value=Path("/guard")), patch.dict(
+            os.environ, {"LAKE_CACHE_DIR": "/outside/cache", "UNRELATED": "host"}
+        ):
+            env = owned.guarded_mcp_env({})
+        self.assertEqual(env["LAKE_CACHE_DIR"], str(owned.semaphore.canonical_creme_root() / ".creme/lake-cache"))
+        self.assertEqual(env["PATH"], "/guard:")
+        self.assertNotIn("UNRELATED", env)
+
+
 class BuildOwnershipTest(unittest.TestCase):
     def test_canonical_creme_launcher_binds_system_python(self) -> None:
         self.assertEqual((ROOT / "scripts" / "creme").read_text().splitlines()[0], "#!/usr/bin/python3")
@@ -258,6 +290,7 @@ class BuildOwnershipTest(unittest.TestCase):
         run.return_value = SimpleNamespace(returncode=3)
         with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")):
             self.assertEqual(owned.lake_guard_main(["setup-file", "A.lean", "-"]), 3)
+        self.assertEqual(run.call_args.kwargs["env"]["LAKE_CACHE_DIR"], owned.lake_env({})["LAKE_CACHE_DIR"])
         invoked = run.call_args.args[0]
         self.assertIn("--no-build", invoked)
         self.assertIn("--no-cache", invoked)
@@ -300,6 +333,7 @@ class BuildOwnershipTest(unittest.TestCase):
         executable, argv, env = execve.call_args.args
         self.assertEqual(executable, Path("/tool/lake"))
         self.assertEqual(argv[1], "serve")
+        self.assertEqual(env["LAKE_CACHE_DIR"], owned.lake_env({})["LAKE_CACHE_DIR"])
         self.assertEqual(env["LEAN_SYSROOT"], "/facade")
         self.assertEqual(env["CREME_LAKE_GUARD"], "/guard/bin/lake")
 
@@ -342,6 +376,9 @@ class BuildOwnershipTest(unittest.TestCase):
             owned.run_lake_build("g", ["T"], probe=True, contention="sensitive", stdout=output),
             3,
         )
+        for call in run.call_args_list:
+            if "--no-build" in call.args[0]:
+                self.assertEqual(call.kwargs["env"]["LAKE_CACHE_DIR"], owned.lake_env({})["LAKE_CACHE_DIR"])
         self.assertIn("--no-build", run.call_args.args[0])
         self.assertEqual(append.call_args.args[0]["admission"], "NOT_REQUIRED_NO_BUILD")
         self.assertIn('"status": "STALE"', output.getvalue())
@@ -968,7 +1005,7 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
             "creme.build_ownership.semaphore.adaptive_release", side_effect=release
         ), patch("creme.build_ownership.guard_bin", return_value=Path("/guard")), patch(
             "creme.build_ownership.subprocess.Popen", return_value=FakeProc()
-        ), patch("creme.build_ownership.ProcessSampler", FakeSampler), patch(
+        ) as popen, patch("creme.build_ownership.ProcessSampler", FakeSampler), patch(
             "creme.build_ownership.RenewalThread", FakeRenewer
         ), patch("creme.build_ownership._process_group_alive", return_value=False), patch(
             "creme.build_ownership._module_hashes", side_effect=hashes
@@ -981,6 +1018,7 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
                 ),
                 0,
             )
+        self.assertEqual(popen.call_args.kwargs["env"]["LAKE_CACHE_DIR"], owned.lake_env({})["LAKE_CACHE_DIR"])
         self.assertEqual(events, ["hash", "release", "ledger"])
         self.assertEqual(captured[0]["module_hashes"], {"M": "first"})
 

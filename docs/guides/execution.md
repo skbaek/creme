@@ -356,6 +356,22 @@ catalogue's full target at checkpoints. Bare `lake build`, MCP `lean_build`,
 dependency builds, and startup cache downloads are not compilation owners and
 are refused or disabled.
 
+Creme supplies `LAKE_CACHE_DIR` as the canonical checkout's
+`.creme/lake-cache/` for owned builds, probes, and guarded MCP processes,
+overriding inherited shell or toolchain defaults. Linked Creme worktrees use
+that same ignored directory. Jaune and Blanc share it: Lake addresses artifacts
+by content hash and output mappings by scope and input hash. Repository names
+alone do not select a cached artifact. No shell startup file or host-wide
+user-manager setting is required. Host containment wrappers that launch gates
+must explicitly pass this same absolute setting into the contained process;
+they cannot rely on the calling shell's environment surviving containment.
+
+Existing caches are not migrated automatically. Copy or move them only at a
+quiet checkpoint using the host's reviewed migration procedure, preserving
+hard links where relevant, then verify the selected cache before retiring the
+old location. Changes to Creme's runtime invalidate a pinned contained-build
+broker; review and regenerate its capability bundle before using that broker.
+
 **Let the wrapper classify.** Omit `--contention` and `--memory-gib` and it
 derives both from evidence about the *modules that are stale right now*, not
 from the name of the target list. The probe resolves the targets to their

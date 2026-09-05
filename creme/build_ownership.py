@@ -800,8 +800,19 @@ def guard_bin() -> Path:
     return binary
 
 
+def lake_env(base: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """Keep every workflow Lake process on the canonical Creme cache.
+
+    Override inherited host/toolchain defaults, including from linked worktrees.
+    Lake creates the cache on demand; resolving the environment is read-only.
+    """
+    env = dict(os.environ if base is None else base)
+    env["LAKE_CACHE_DIR"] = str(semaphore.canonical_creme_root() / ".creme" / "lake-cache")
+    return env
+
+
 def guarded_mcp_env(base: Optional[dict[str, str]] = None) -> dict[str, str]:
-    env = dict(base or os.environ)
+    env = lake_env(base)
     binary = guard_bin()
     env["PATH"] = str(binary) + os.pathsep + env.get("PATH", "")
     return env
@@ -936,7 +947,7 @@ def lake_guard_main(argv: list[str]) -> int:
             _guard_event(cwd=cwd, args=args, exit_code=GUARD_REFUSAL_EXIT, rewritten=False, reason=str(exc))
             print(f"creme lake guard: cannot construct guarded serve environment: {exc}", file=os.sys.stderr)
             return GUARD_REFUSAL_EXIT
-        env = os.environ.copy()
+        env = lake_env()
         env.update({
             "LEAN_SYSROOT": str(facade),
             "LEAN": str(facade / "bin" / "lean"),
@@ -954,7 +965,7 @@ def lake_guard_main(argv: list[str]) -> int:
             guarded.append("--no-build")
         if "--no-cache" not in guarded:
             guarded.append("--no-cache")
-        completed = subprocess.run([str(real_lake), *guarded], cwd=cwd, check=False)
+        completed = subprocess.run([str(real_lake), *guarded], cwd=cwd, env=lake_env(), check=False)
         _guard_event(
             cwd=cwd, args=guarded, exit_code=completed.returncode, rewritten=rewritten,
             reason="setup-file forced to no-build/no-cache" if rewritten else "already guarded setup-file",
@@ -962,7 +973,7 @@ def lake_guard_main(argv: list[str]) -> int:
         return completed.returncode
 
     if command in {"--version", "-h", "--help", "help"}:
-        return subprocess.run([str(real_lake), *args], cwd=cwd, check=False).returncode
+        return subprocess.run([str(real_lake), *args], cwd=cwd, env=lake_env(), check=False).returncode
 
     reason = f"unowned or unknown lake invocation: {' '.join(args)}"
     _guard_event(cwd=cwd, args=args, exit_code=GUARD_REFUSAL_EXIT, rewritten=False, reason=reason)
@@ -993,7 +1004,7 @@ def lean_proxy_main(argv: list[str]) -> int:
     ):
         print("creme lean proxy: guarded executables are unavailable; refusing", file=os.sys.stderr)
         return GUARD_REFUSAL_EXIT
-    env = os.environ.copy()
+    env = lake_env()
     env.update({"LEAN": str(real_path), "LEAN_SYSROOT": str(sysroot_path), "LAKE": str(guard_path)})
     env.pop("LAKE_OVERRIDE_LEAN", None)
     os.execve(real_path, [str(real_path), *argv], env)
@@ -1469,7 +1480,7 @@ def stale_module_set(
     try:
         completed = subprocess.run(
             [str(real_lake), "build", "--no-build", *targets],
-            cwd=worktree, text=True, capture_output=True, check=False, timeout=120,
+            cwd=worktree, env=lake_env(), text=True, capture_output=True, check=False, timeout=120,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return failure(f"probe unavailable: {exc}")
@@ -2382,7 +2393,7 @@ def run_lake_build(
     lake_args.extend(targets)
     if probe:
         started = time.monotonic()
-        completed = subprocess.run(lake_args, cwd=worktree, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+        completed = subprocess.run(lake_args, cwd=worktree, env=lake_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
         wall = time.monotonic() - started
         print(completed.stdout, end="", file=output)
         # Lake names only the frontier it stopped at; the closure behind it is
@@ -2483,7 +2494,7 @@ def run_lake_build(
     args = [str(priority_launcher), "-n", "10", *lake_args]
     before = _swap_gib()
     started = time.monotonic()
-    env = os.environ.copy()
+    env = lake_env()
     env["LEAN_NUM_THREADS"] = str(threads)
     proc: Optional[subprocess.Popen[str]] = None
     sampler: Optional[ProcessSampler] = None

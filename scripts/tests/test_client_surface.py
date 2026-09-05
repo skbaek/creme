@@ -405,8 +405,8 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertNotIn("/" + "Users" + "/", setup)
         self.assertNotRegex(setup, r"/home/[^/]+/")
 
-    def test_goal_guide_keeps_model_effort_contract(self) -> None:
-        guide = (ROOT / "docs/guides/goal.md").read_text(encoding="utf-8")
+    def test_briefs_guide_keeps_model_effort_contract(self) -> None:
+        guide = (ROOT / "docs/guides/briefs.md").read_text(encoding="utf-8")
         for required_concept in (
             "Recommended lead configuration",
             "required but advisory",

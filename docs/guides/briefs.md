@@ -38,8 +38,21 @@ effective effort in the board and the state brief. Never fall back silently to
 a client default. A goal may fix a configuration as a reserved decision; then
 it binds, and the master records that it is honouring it.
 
-After the hard boundary in a piece of work becomes mechanical, de-escalate the
-effort rather than the model, and re-dispatch the remainder to smaller workers.
+Older goal documents carry a **Recommended lead configuration** section from
+the shape that preceded this guide. That section is required but advisory
+where it appears: it records the author's sizing judgment at authoring time,
+not a permanent dependency on one vendor release. Reconcile it against the
+offerings available at dispatch and record what was actually run. Only a
+configuration the goal fixes as a reserved decision binds.
+
+**Escalate effort before model.** When a standard-model worker looks
+insufficient — thrashing, repeating an approach, not converging — the first
+escalation is effort within the same model, one rung at a time:
+`medium` → `high` → `xhigh`. Only after that ladder is exhausted does the
+frontier model become the answer, and that dispatch is justified in one line
+in the master log. The same ordering runs backwards: after the hard boundary
+in a piece of work becomes mechanical, de-escalate the effort rather than the
+model, and re-dispatch the remainder to smaller workers.
 
 ## Model choice
 
@@ -58,11 +71,12 @@ Two tiers matter for dispatch, whatever a client calls them:
 
 **The default is the standard model.** A Claude session strongly prefers Opus
 workers and escalates to Fable only when the added power is clearly necessary
-for a non-delegable judgment; a Fable dispatch is justified in one line in the
-master log. This is a cost-of-power rule, not a capability ranking: do not
-claim a fixed Fable-versus-Opus ordering without a current representative
-comparison, and do not read the default as a reason to under-size a genuinely
-frontier judgment.
+for a non-delegable judgment, and only after the effort ladder above has been
+walked within Opus; a Fable dispatch is justified in one line in the master
+log. This is a cost-of-power rule, not a capability ranking: do not claim a
+fixed Fable-versus-Opus ordering without a current representative comparison,
+and do not read the default as a reason to under-size a genuinely frontier
+judgment.
 
 Model diversity is a separate reason to choose a model. An independent review
 of work produced by one model is more useful from another, and the audit and

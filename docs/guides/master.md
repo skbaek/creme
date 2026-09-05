@@ -228,8 +228,8 @@ reviewing, or a short `master/briefs/<goal>.md` when it does not. It states the
 objective, the owned paths, the resource class, the gates that must be green on
 the candidate, the decisions the worker may make alone, and where its report
 goes. Choose each worker's model and effort for its hardest non-delegable
-judgment, and prefer the standard model over the frontier one unless the
-judgment requires it, as [the briefs guide](briefs.md) describes; that guide
+judgment, preferring the standard model and escalating effort within it before
+reaching for the frontier one, as [the briefs guide](briefs.md) describes; that guide
 holds the brief contract and the model-and-effort ladder the goal document no
 longer carries.
 

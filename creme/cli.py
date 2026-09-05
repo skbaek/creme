@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
@@ -24,6 +25,10 @@ from .host_wrappers import (
 )
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import idle_workers
+from . import master_migrate
+from . import master_operations
+from . import master_reconcile
+from . import master_runtime
 from . import semaphore
 from .task_wind_down import WorktreeScopeError, _goal_worktree_roots, wind_down
 from .build_ownership import (
@@ -186,6 +191,158 @@ def cmd_memory_headroom(arguments: argparse.Namespace) -> int:
     result = get_adapter().memory_headroom()
     _json(result.to_dict())
     return 0 if result.status == "OK" else 2
+
+
+def _master_location() -> tuple[Optional[master_operations.RuntimeLocation], Optional[str]]:
+    try:
+        return master_operations.resolve_runtime_location(ROOT), None
+    except master_operations.MasterOperationError as exc:
+        return None, str(exc)
+
+
+def _master_record_status(
+    location: master_operations.RuntimeLocation,
+) -> tuple[Optional[str], master_operations.InitPlan]:
+    plan = master_operations.plan_initialization(location)
+    if plan.status == "CURRENT":
+        return None, plan
+    if plan.status == "MIGRATION_REQUIRED":
+        return "migration-required", plan
+    if plan.status == "PREVIEW":
+        return "init-required", plan
+    return "unavailable", plan
+
+
+def cmd_master_init(arguments: argparse.Namespace) -> int:
+    location, error = _master_location()
+    if location is None:
+        _json({"status": "unavailable", "detail": error})
+        return 2
+    if arguments.migrate:
+        plan = master_migrate.migrate(location.record_root, apply=arguments.apply)
+        payload = plan.to_dict()
+        payload["record_root"] = str(location.record_root)
+        _json(payload)
+        return 0 if plan.status in {"PREVIEW", "FINALIZE", "CURRENT", "OK"} else 2
+    plan = master_operations.initialize(location, apply=arguments.apply)
+    _json(plan.to_dict())
+    return 0 if plan.status in {"PREVIEW", "CURRENT", "OK"} else 2
+
+
+def cmd_master_start(arguments: argparse.Namespace) -> int:
+    location, error = _master_location()
+    if location is None:
+        _json({"status": "unavailable", "detail": error})
+        return 2
+    status, plan = _master_record_status(location)
+    if status is not None:
+        _json({"status": status, "detail": plan.detail})
+        return 2
+    try:
+        reconciliation = master_operations.reconcile_location(location)
+        result = master_operations.start_master(
+            location.record_root,
+            client=arguments.client,
+            model=arguments.model,
+            effort=arguments.effort,
+            note=arguments.note,
+            take_over=arguments.take_over,
+            reconciliation=reconciliation,
+        )
+    except (
+        master_operations.MasterOperationError,
+        master_reconcile.ReconciliationError,
+        master_runtime.MasterRecordError,
+    ) as exc:
+        _json({"status": "unavailable", "detail": str(exc)})
+        return 2
+    _json(result)
+    return 0 if result["status"] in {"master", "reader", "takeover-required"} else 2
+
+
+def _read_event_source(source: str) -> bytes:
+    if source == "-":
+        data = sys.stdin.buffer.read(master_runtime.MAX_EVENT_BYTES + 1)
+    else:
+        path = Path(source).expanduser()
+        try:
+            if path.stat().st_size > master_runtime.MAX_EVENT_BYTES:
+                raise master_runtime.MasterRecordError(
+                    f"event input exceeds {master_runtime.MAX_EVENT_BYTES} bytes"
+                )
+            data = path.read_bytes()
+        except OSError as exc:
+            raise master_runtime.MasterRecordError(f"event input could not be read: {exc}") from exc
+    if len(data) > master_runtime.MAX_EVENT_BYTES:
+        raise master_runtime.MasterRecordError(
+            f"event input exceeds {master_runtime.MAX_EVENT_BYTES} bytes"
+        )
+    return data
+
+
+def cmd_master_event(arguments: argparse.Namespace) -> int:
+    location, error = _master_location()
+    if location is None:
+        _json({"status": "unavailable", "detail": error})
+        return 2
+    status, plan = _master_record_status(location)
+    if status is not None:
+        _json({"status": status, "detail": plan.detail})
+        return 2
+    try:
+        kind, payload = master_runtime.parse_event_input(_read_event_source(arguments.source))
+        result = master_runtime.RecordWriter(location.record_root).append(kind, payload)
+    except master_runtime.MasterRecordError as exc:
+        _json({"status": "refused", "detail": str(exc)})
+        return 2
+    _json({
+        "status": "OK",
+        "event": {
+            "event_id": result.event["event_id"],
+            "kind": result.event["kind"],
+            "timestamp": result.event["timestamp"],
+        },
+        "source": result.board["source"],
+        "board_repaired": result.repaired_stale_board,
+    })
+    return 0
+
+
+def cmd_master_digest(arguments: argparse.Namespace) -> int:
+    location, error = _master_location()
+    if location is None:
+        _json({"status": "unavailable", "detail": error})
+        return 2
+    status, plan = _master_record_status(location)
+    if status is not None:
+        _json({"schema_version": 1, "status": status, "detail": plan.detail})
+        return 2
+    try:
+        reconciliation = (
+            master_operations.reconcile_location(location)
+            if arguments.reconcile
+            else None
+        )
+        digest = master_operations.digest_record(
+            location.record_root,
+            goals_limit=arguments.goals_limit,
+            decisions_limit=arguments.decisions_limit,
+            findings_limit=arguments.findings_limit,
+            discrepancies_limit=arguments.discrepancies_limit,
+            live_reconciliation=reconciliation,
+        )
+    except (
+        master_operations.MasterOperationError,
+        master_reconcile.ReconciliationError,
+        master_runtime.MasterRecordError,
+    ) as exc:
+        _json({"schema_version": 1, "status": "unavailable", "detail": str(exc)})
+        return 2
+    if arguments.human:
+        print(master_operations.render_digest_human(digest), end="")
+    else:
+        _json(digest)
+    return 0
 
 
 def cmd_tempdir(arguments: argparse.Namespace) -> int:
@@ -703,6 +860,57 @@ def parser() -> argparse.ArgumentParser:
     doctor.add_argument("--heavy-workers", type=_positive)
     doctor.add_argument("--light-workers", type=_positive)
     doctor.set_defaults(func=cmd_doctor)
+
+    master = commands.add_parser(
+        "master",
+        help="operate the configured ignored master-session record",
+    )
+    master_commands = master.add_subparsers(dest="master_action", required=True)
+    master_init = master_commands.add_parser(
+        "init",
+        help="preview the standard private layout; --apply is the only mutation",
+    )
+    master_init.add_argument("--apply", action="store_true")
+    master_init.add_argument(
+        "--migrate",
+        action="store_true",
+        help="explicitly preview or apply legacy migration with an in-record backup",
+    )
+    master_init.set_defaults(func=cmd_master_init)
+
+    master_start = master_commands.add_parser(
+        "start",
+        help="enter as the master or report the current reader state",
+    )
+    master_start.add_argument("--client", required=True)
+    master_start.add_argument("--model", required=True)
+    master_start.add_argument("--effort", required=True)
+    master_start.add_argument("--note", required=True)
+    master_start.add_argument("--take-over", action="store_true")
+    master_start.set_defaults(func=cmd_master_start)
+
+    master_event = master_commands.add_parser(
+        "event",
+        help="append one validated JSON event from a file or standard input",
+    )
+    master_event.add_argument("--from", dest="source", required=True, metavar="FILE")
+    master_event.set_defaults(func=cmd_master_event)
+
+    master_digest = master_commands.add_parser(
+        "digest",
+        help="read a bounded source-validated continuity digest without acquiring",
+    )
+    master_digest.add_argument("--goals-limit", type=_nonnegative, default=20)
+    master_digest.add_argument("--decisions-limit", type=_nonnegative, default=20)
+    master_digest.add_argument("--findings-limit", type=_nonnegative, default=20)
+    master_digest.add_argument("--discrepancies-limit", type=_nonnegative, default=20)
+    master_digest.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="compare the current board with configured Git/worktree facts without mutation",
+    )
+    master_digest.add_argument("--human", action="store_true")
+    master_digest.set_defaults(func=cmd_master_digest)
 
     telemetry = commands.add_parser("telemetry", help="sample dynamic host state through the selected adapter")
     telemetry.set_defaults(func=cmd_telemetry)

@@ -62,6 +62,10 @@ class SemaphoreError(Exception):
     pass
 
 
+class MasterAuthorityRefused(SemaphoreError):
+    """A direct holder could not enter a master-authorized transaction."""
+
+
 def _now() -> float:
     return time.time()
 
@@ -2746,14 +2750,31 @@ def _heartbeat_binding(
     ), None
 
 
-def _renew_master(
+class _MasterRenewalRejected(Exception):
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class _RenewedMaster(NamedTuple):
+    snapshot: dict[str, Any]
+    detail: str
+    client: str
+    lease_seconds: int
+    verified: str
+
+
+@contextmanager
+def _master_renewal_transaction(
     lease: Optional[int],
     *,
     adapter: Optional[Adapter],
     heartbeat_binding: Optional[_HeartbeatBinding],
-) -> tuple[bool, str]:
+) -> Iterator[_RenewedMaster]:
     if lease is not None and (lease < 1 or lease > MAX_LEASE_SECONDS):
-        return False, f"lease must be 1..{MAX_LEASE_SECONDS} seconds"
+        raise _MasterRenewalRejected(
+            f"lease must be 1..{MAX_LEASE_SECONDS} seconds"
+        )
     selected = adapter or get_adapter()
     if heartbeat_binding is None:
         client_pid, client_family, found = _client_process(selected)
@@ -2770,79 +2791,123 @@ def _renew_master(
             heartbeat_binding.liveness_socket,
             found,
         )
-    with locked_state() as (path, _state):
-        root = path.parent
-        data = _load_master(root)
-        current = data["lease"]
-        if current is None:
-            return False, "no master lease exists; run master-acquire"
-        if heartbeat_binding is not None and not hmac.compare_digest(
-            current["lease_id"], heartbeat_binding.lease_id
-        ):
-            return False, "the master lease changed; this heartbeat belongs to its predecessor"
-        now = _now()
-        view = _master_view(current, now, selected)
-        holder = _master_holder_text(current)
-        same = _same_client(current, client_pid, session_digest, client_family, selected)
-        heartbeat = heartbeat_binding is not None
-        authorized = heartbeat or same is True
-        if view["process_alive"] is False:
-            return False, "the original client process lifetime witness is gone"
-        if heartbeat and client_pid is not None and not _pid_alive(int(client_pid)):
-            return False, "the holding client process is gone"
-        if view["state"] == "live" and not authorized:
-            detail = f"the master lease belongs to {holder}; this invocation: {found}"
-            _log("master-renew", current["client"], "REFUSED", detail)
-            return False, detail
-        if view["state"] != "live" and not authorized:
+    renewal: Optional[_RenewedMaster] = None
+    try:
+        with locked_state() as (path, _state):
+            root = path.parent
+            data = _load_master(root)
+            current = data["lease"]
+            if current is None:
+                raise _MasterRenewalRejected(
+                    "no master lease exists; run master-acquire"
+                )
+            if heartbeat_binding is not None and not hmac.compare_digest(
+                current["lease_id"], heartbeat_binding.lease_id
+            ):
+                raise _MasterRenewalRejected(
+                    "the master lease changed; this heartbeat belongs to its predecessor"
+                )
+            now = _now()
+            view = _master_view(current, now, selected)
+            holder = _master_holder_text(current)
+            same = _same_client(current, client_pid, session_digest, client_family, selected)
+            heartbeat = heartbeat_binding is not None
+            authorized = heartbeat or same is True
+            if view["process_alive"] is False:
+                raise _MasterRenewalRejected(
+                    "the original client process lifetime witness is gone"
+                )
+            if heartbeat and client_pid is not None and not _pid_alive(int(client_pid)):
+                raise _MasterRenewalRejected("the holding client process is gone")
+            if view["state"] == "live" and not authorized:
+                detail = f"the master lease belongs to {holder}; this invocation: {found}"
+                _log("master-renew", current["client"], "REFUSED", detail)
+                raise _MasterRenewalRejected(detail)
+            if view["state"] != "live" and not authorized:
+                detail = (
+                    f"the master lease is {view['state'].upper()} and this invocation "
+                    f"({found}) is not its holder; use `master-acquire --take-over`"
+                )
+                _log("master-renew", current["client"], "REFUSED", detail)
+                raise _MasterRenewalRejected(detail)
+            if heartbeat and _bounded_master_heartbeat(current):
+                if now > (
+                    current["direct_activity_at"]
+                    + MASTER_UNVERIFIED_HEARTBEAT_GRACE_SECONDS
+                ):
+                    raise _MasterRenewalRejected(
+                        "unverified heartbeat direct-activity deadline passed"
+                    )
+                if current["heartbeat_renewals"] >= MASTER_UNVERIFIED_HEARTBEAT_RENEWALS:
+                    raise _MasterRenewalRejected(
+                        "unverified heartbeat self-renewal budget exhausted"
+                    )
+            if current["legacy_unbound"] and authorized:
+                current["legacy_unbound"] = False
+                current["session_digest"] = session_digest
+                if session_digest is not None and _session_socket_live(
+                    session.liveness_socket
+                ):
+                    current["liveness_digest"] = session.liveness_digest
+            current["renewed_at"] = now
+            if lease is not None:
+                current["lease_seconds"] = lease
+            if heartbeat:
+                current["heartbeat_renewals"] += 1
+            else:
+                current["heartbeat_renewals"] = 0
+                # Reaching this branch required same=True.  Only this direct,
+                # verified holder action advances the absolute fallback anchor;
+                # helper renewals never do.
+                current["direct_activity_at"] = now
+                if (
+                    authorized
+                    and session_digest is not None
+                    and current["session_digest"] is not None
+                    and hmac.compare_digest(session_digest, current["session_digest"])
+                    and _session_socket_live(session.liveness_socket)
+                ):
+                    current["liveness_digest"] = session.liveness_digest
+            _save_master(root, data)
+            verified = "holder verified" if authorized else "holder unverified"
             detail = (
-                f"the master lease is {view['state'].upper()} and this invocation "
-                f"({found}) is not its holder; use `master-acquire --take-over`"
+                f"master lease renewed for client {current['client']} ({verified}); "
+                f"{current['lease_seconds']}s window"
             )
-            _log("master-renew", current["client"], "REFUSED", detail)
-            return False, detail
-        if (
-            heartbeat
-            and _bounded_master_heartbeat(current)
-        ):
-            if now > (
-                current["direct_activity_at"]
-                + MASTER_UNVERIFIED_HEARTBEAT_GRACE_SECONDS
-            ):
-                return False, "unverified heartbeat direct-activity deadline passed"
-            if current["heartbeat_renewals"] >= MASTER_UNVERIFIED_HEARTBEAT_RENEWALS:
-                return False, "unverified heartbeat self-renewal budget exhausted"
-        if current["legacy_unbound"] and authorized:
-            current["legacy_unbound"] = False
-            current["session_digest"] = session_digest
-            if session_digest is not None and _session_socket_live(session.liveness_socket):
-                current["liveness_digest"] = session.liveness_digest
-        current["renewed_at"] = now
-        if lease is not None:
-            current["lease_seconds"] = lease
-        if heartbeat:
-            current["heartbeat_renewals"] += 1
-        else:
-            current["heartbeat_renewals"] = 0
-            # Reaching this branch required same=True.  Only this direct,
-            # verified holder action advances the absolute fallback anchor;
-            # helper renewals never do.
-            current["direct_activity_at"] = now
-            if (
-                authorized
-                and session_digest is not None
-                and current["session_digest"] is not None
-                and hmac.compare_digest(session_digest, current["session_digest"])
-                and _session_socket_live(session.liveness_socket)
-            ):
-                current["liveness_digest"] = session.liveness_digest
-        _save_master(root, data)
-    verified = "holder verified" if authorized else "holder unverified"
-    _log("master-renew", current["client"], "OK", f"lease={current['lease_seconds']}; {verified}")
-    return True, (
-        f"master lease renewed for client {current['client']} ({verified}); "
-        f"{current['lease_seconds']}s window"
-    )
+            renewal = _RenewedMaster(
+                json.loads(json.dumps(data)),
+                detail,
+                current["client"],
+                current["lease_seconds"],
+                verified,
+            )
+            yield renewal
+    finally:
+        if renewal is not None:
+            _log(
+                "master-renew",
+                renewal.client,
+                "OK",
+                f"lease={renewal.lease_seconds}; {renewal.verified}",
+            )
+
+
+def _renew_master(
+    lease: Optional[int],
+    *,
+    adapter: Optional[Adapter],
+    heartbeat_binding: Optional[_HeartbeatBinding],
+) -> tuple[bool, str]:
+    try:
+        with _master_renewal_transaction(
+            lease,
+            adapter=adapter,
+            heartbeat_binding=heartbeat_binding,
+        ) as renewal:
+            detail = renewal.detail
+    except _MasterRenewalRejected as exc:
+        return False, exc.detail
+    return True, detail
 
 
 def master_renew(
@@ -2852,6 +2917,29 @@ def master_renew(
 ) -> tuple[bool, str]:
     """Renew only after authenticating this direct invocation as the holder."""
     return _renew_master(lease, adapter=adapter, heartbeat_binding=None)
+
+
+@contextmanager
+def master_authority_transaction(
+    *,
+    adapter: Optional[Adapter] = None,
+) -> Iterator[dict[str, Any]]:
+    """Renew a direct holder and retain the lease mutex through its mutation.
+
+    The yielded current-schema snapshot is loaded, authenticated, renewed, and saved
+    under the same mutex that excludes release and succession.  Callers must
+    acquire their private record lock before entering this context so the
+    cross-subsystem lock order remains record then semaphore.
+    """
+    try:
+        with _master_renewal_transaction(
+            None,
+            adapter=adapter,
+            heartbeat_binding=None,
+        ) as renewal:
+            yield renewal.snapshot
+    except _MasterRenewalRejected as exc:
+        raise MasterAuthorityRefused(exc.detail) from exc
 
 
 def _renew_master_heartbeat(

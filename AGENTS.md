@@ -59,9 +59,10 @@ subagents, each in a per-goal worktree, checkpointing to Git and a state
 brief because they die with the master.
 
 The default for any decision is decide and log. Only an irreversible external
-commitment, a product-semantics fork the intent statements leave open, or a
-decision an intent statement explicitly reserves goes to the user, and then as
-a decision packet with a recommendation. Retiring a procedure requires a logged
+commitment, a product-semantics fork the intent statements leave open, a
+decision an intent statement explicitly reserves, or an integrity/provenance
+change the master guide classifies as reserved goes to the user, and then as a
+decision packet with a recommendation. Retiring a procedure requires a logged
 `procedure` event naming the failure it prevented and what prevents that
 failure now.
 
@@ -133,7 +134,11 @@ make a gate green.
 Jaune's authoritative catalogue is `../jaune/scripts/GATES.md`; Blanc's is
 `../blanc/scripts/GATES.md`. Use their current selection, concurrency, runtime,
 and pass rules rather than copied summaries. Generated artifacts come only
-from the registered generators.
+from the registered generators. Follow the master guide's registered-provenance
+rule: generation never makes a pin/reference movement, weakened baseline or
+budget, allowlist growth, golden, timeout, publication, public claim/count,
+license, external message, spend, or dependent public contract autonomous.
+Separate an ambiguous mixed diff or escalate it as a decision packet.
 
 A control must be shown to bite: the surrounding tree still builds, failure
 lands at the control, and removing only the control restores green. Run

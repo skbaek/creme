@@ -769,6 +769,115 @@ class MasterMigrationTest(unittest.TestCase):
         self.assertEqual(recovered.status, "OK")
         self.assertEqual(master_migrate.plan_migration(self.root).status, "CURRENT")
 
+    def test_backup_exception_cleanup_death_recovers_at_every_reverse_boundary(self):
+        self.make_legacy()
+        observed_stages: list[str] = []
+
+        def record_exception_cleanup(stage: str) -> None:
+            observed_stages.append(stage)
+            if stage == "backup:before-publish":
+                raise SyntheticFault(stage)
+
+        failed = master_migrate.migrate(
+            self.root,
+            apply=True,
+            renew=self.renew,
+            fault=record_exception_cleanup,
+        )
+        self.assertEqual(failed.status, "REFUSED")
+        cleanup_death_stages = tuple(
+            stage
+            for stage in observed_stages
+            if stage.startswith("backup-exception-cleanup:")
+            and stage.endswith(":after-remove")
+        )
+        self.assertGreater(len(cleanup_death_stages), 1)
+        self.assertEqual(master_migrate.plan_migration(self.root).status, "PREVIEW")
+
+        context = multiprocessing.get_context("fork")
+        for death_stage in cleanup_death_stages:
+            with self.subTest(stage=death_stage), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve() / "master"
+                originals = self.make_legacy(root)
+
+                def die_during_exception_cleanup() -> None:
+                    def inject(stage: str) -> None:
+                        if stage == "backup:before-publish":
+                            raise SyntheticFault(stage)
+                        if stage == death_stage:
+                            os._exit(74)
+
+                    master_migrate.migrate(
+                        root,
+                        apply=True,
+                        renew=lambda: (True, "synthetic holder"),
+                        fault=inject,
+                    )
+
+                process = context.Process(target=die_during_exception_cleanup)
+                process.start()
+                process.join(10)
+                self.assertFalse(process.is_alive())
+                self.assertEqual(process.exitcode, 74)
+                for relative, data in originals.items():
+                    self.assertEqual((root / relative).read_bytes(), data)
+
+                preview_snapshot = self.tree_snapshot(root)
+                self.assertEqual(master_migrate.plan_migration(root).status, "PREVIEW")
+                self.assertEqual(self.tree_snapshot(root), preview_snapshot)
+
+                recovered = master_migrate.migrate(
+                    root,
+                    apply=True,
+                    renew=lambda: (True, "synthetic holder"),
+                )
+                self.assertEqual(recovered.status, "OK")
+                self.assertEqual(master_migrate.plan_migration(root).status, "CURRENT")
+                for relative, data in originals.items():
+                    backup = (
+                        root
+                        / master_migrate.BACKUP_ROOT_NAME
+                        / recovered.backup_id
+                        / master_migrate.BACKUP_ORIGINALS_NAME
+                        / relative
+                    )
+                    self.assertEqual(backup.read_bytes(), data)
+
+    def test_backup_exception_cleanup_preserves_corrupt_partial_unchanged(self):
+        originals = self.make_legacy()
+
+        def corrupt_then_raise(stage: str) -> None:
+            if stage != "backup:before-publish":
+                return
+            candidates = master_migrate._candidate_temp_paths(self.root)
+            self.assertEqual(len(candidates), 1)
+            target = (
+                candidates[0]
+                / master_migrate.BACKUP_ORIGINALS_NAME
+                / "README.md"
+            )
+            target.write_bytes(b"corrupt staged bytes\n")
+            target.chmod(0o600)
+            raise SyntheticFault(stage)
+
+        failed = master_migrate.migrate(
+            self.root,
+            apply=True,
+            renew=self.renew,
+            fault=corrupt_then_raise,
+        )
+        self.assertEqual(failed.status, "REFUSED")
+        self.assertIn("changed", failed.detail)
+        for relative, data in originals.items():
+            self.assertEqual((self.root / relative).read_bytes(), data)
+        refused_snapshot = self.tree_snapshot(self.root)
+        self.assertEqual(master_migrate.plan_migration(self.root).status, "REFUSED")
+        self.assertEqual(
+            master_migrate.migrate(self.root, apply=True, renew=self.renew).status,
+            "REFUSED",
+        )
+        self.assertEqual(self.tree_snapshot(self.root), refused_snapshot)
+
     def test_verified_backup_requires_exact_top_level_inventory(self):
         self.make_legacy()
         migrated = master_migrate.migrate(

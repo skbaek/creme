@@ -6,7 +6,6 @@ import hashlib
 import os
 import re
 import secrets
-import shutil
 import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -273,7 +272,7 @@ def _cleanup_orphan_temps(
                 path,
                 snapshot,
                 fault=fault,
-                temporary_index=index,
+                stage_prefix=f"recovery-temp-{index}",
             )
         else:
             path.unlink()
@@ -671,7 +670,7 @@ def _remove_verified_partial_backup(
     snapshot: LegacySnapshot,
     *,
     fault: Optional[FaultInjector],
-    temporary_index: int,
+    stage_prefix: str,
 ) -> None:
     """Remove a verified staging prefix in reverse publication order.
 
@@ -682,7 +681,7 @@ def _remove_verified_partial_backup(
     prefix = _backup_publication_order(snapshot)[:count]
     for removal_index, (relative, directory, _data) in enumerate(reversed(prefix)):
         candidate = path / Path(relative)
-        stage = f"recovery-temp-{temporary_index}:node-{removal_index}"
+        stage = f"{stage_prefix}:node-{removal_index}"
         _fault(fault, f"{stage}:before-remove")
         if directory:
             os.rmdir(candidate)
@@ -690,10 +689,10 @@ def _remove_verified_partial_backup(
             os.unlink(candidate)
         master_runtime._fsync_directory(candidate.parent)
         _fault(fault, f"{stage}:after-remove")
-    _fault(fault, f"recovery-temp-{temporary_index}:root:before-remove")
+    _fault(fault, f"{stage_prefix}:root:before-remove")
     os.rmdir(path)
     master_runtime._fsync_directory(path.parent)
-    _fault(fault, f"recovery-temp-{temporary_index}:root:after-remove")
+    _fault(fault, f"{stage_prefix}:root:after-remove")
 
 
 def _verified_orphan_temp_paths(root: Path) -> tuple[Path, ...]:
@@ -1376,7 +1375,12 @@ def _publish_backup(
         raise MigrationError(f"could not publish migration backup: {exc}") from exc
     finally:
         if not published and temporary.exists():
-            shutil.rmtree(temporary)
+            _remove_verified_partial_backup(
+                temporary,
+                snapshot,
+                fault=fault,
+                stage_prefix="backup-exception-cleanup",
+            )
     verified = verify_backup(root, backup_id)
     return verified["manifest"], manifest_bytes
 

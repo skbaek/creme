@@ -67,6 +67,12 @@ authorization layer.
 
 When the canonical host guidance supplies a reviewed Lean preflight, the
 bundle additionally renders a constrained contained-build broker. The broker
+provisions a missing Codex `state/` directory at first use only beneath an
+existing private root owned by the invoking user, using a directory descriptor
+and no symlink following. It creates just that child with mode 0700, then
+applies the existing state-directory and exclusive-lock checks. Unsafe or
+foreign-owned parents are refused without changing their permissions.
+The broker
 accepts only a Jaune/Blanc profile, goal-derived worktree purpose, bounded
 wait/probe/exclusive options, and validated Lake targets. It pins the
 preflight digest and clean Creme runtime tree, owns a private cross-invocation

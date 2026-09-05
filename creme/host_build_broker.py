@@ -253,8 +253,36 @@ def build_command(goal: str, probe: bool, wait: int | None, exclusive: bool, tar
     return command
 
 
+def provision_state_parent(state_parent: Path) -> None:
+    try:
+        state_parent.lstat()
+        return
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        refuse(f"cannot inspect Codex state parent: {{exc}}")
+    descriptor = None
+    try:
+        # Only create the exact missing child of an existing private root.
+        # A directory descriptor anchors mkdir without following a root link.
+        descriptor = os.open(state_parent.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_stat = os.fstat(descriptor)
+        if root_stat.st_uid != os.getuid() or root_stat.st_mode & 0o077:
+            refuse("Codex root must be private and owned by this user before creating state")
+        try:
+            os.mkdir(state_parent.name, mode=0o700, dir_fd=descriptor)
+        except FileExistsError:
+            pass  # Another startup won; broker_lock validates its result.
+    except OSError as exc:
+        refuse(f"cannot provision Codex state parent: {{exc}}")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def broker_lock() -> int:
     state_parent = BROKER_STATE.parent
+    provision_state_parent(state_parent)
     if state_parent.is_symlink() or not state_parent.is_dir():
         refuse("Codex state parent is not a regular directory")
     parent_stat = state_parent.stat()
@@ -270,11 +298,14 @@ def broker_lock() -> int:
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    descriptor = None
     try:
         descriptor = os.open(BROKER_STATE / "active.lock", flags, 0o600)
         os.fchmod(descriptor, 0o600)
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (OSError, BlockingIOError) as exc:
+        if descriptor is not None:
+            os.close(descriptor)
         refuse(f"another contained-build broker is active or the lock is unsafe: {{exc}}")
     return descriptor
 

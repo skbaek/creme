@@ -427,6 +427,9 @@ class ConcreteWorld:
     def _renew(self):
         return semaphore.master_renew(adapter=self.adapter)
 
+    def _authority_transaction(self):
+        return semaphore.master_authority_transaction(adapter=self.adapter)
+
     def _release(self):
         return semaphore.master_release(adapter=self.adapter)
 
@@ -457,6 +460,7 @@ class ConcreteWorld:
             self.record_root,
             renew=self._renew,
             lease_snapshot=semaphore.master_snapshot,
+            authority_transaction=self._authority_transaction,
             event_id=self._next_event_id,
         )
 
@@ -469,6 +473,7 @@ class ConcreteWorld:
                 self.record_root,
                 renew=self._renew,
                 lease_snapshot=semaphore.master_snapshot,
+                authority_transaction=self._authority_transaction,
                 event_id=lambda: event_id,
             )
 
@@ -613,6 +618,7 @@ class ConcreteWorld:
                 self.record_root,
                 apply=True,
                 renew=self._renew,
+                authority_transaction=self._authority_transaction,
             )
             if result.status == "OK":
                 self.record_encoding = "current"
@@ -736,6 +742,7 @@ class ConcreteWorld:
                     heartbeat=lambda _interval: (True, "synthetic heartbeat"),
                     lease_snapshot=semaphore.master_snapshot,
                     lease_status=self._status,
+                    authority_transaction=self._authority_transaction,
                 )
             except (master_runtime.MasterRecordError, master_operations.MasterOperationError):
                 return "error"
@@ -1496,10 +1503,31 @@ class MasterTransitionModelTest(unittest.TestCase):
         ):
             yield
 
-    @staticmethod
     @contextlib.contextmanager
-    def _record_renew_mutation(_world: ConcreteWorld) -> Iterator[None]:
-        with mock.patch("creme.master_runtime._renew_or_refuse", return_value=None):
+    def _record_renew_mutation(self, world: ConcreteWorld) -> Iterator[None]:
+        @contextlib.contextmanager
+        def split_renew_and_snapshot(*, adapter=None):
+            ok, detail = semaphore.master_renew(adapter=adapter)
+            if not ok:
+                raise semaphore.MasterAuthorityRefused(detail)
+            predecessor = world.active().name
+            world.now += LEASE_SECONDS + 1
+            world.select("process-b")
+            acquired, takeover_detail = world._acquire(
+                world.active().client,
+                "mutated split authority transaction",
+                take_over=True,
+            )
+            if not acquired:
+                raise AssertionError(takeover_detail)
+            world._register_lease()
+            world.select(predecessor)
+            yield semaphore.master_snapshot()
+
+        with mock.patch(
+            "creme.semaphore.master_authority_transaction",
+            side_effect=split_renew_and_snapshot,
+        ):
             yield
 
     @staticmethod
@@ -1609,10 +1637,10 @@ class MasterTransitionModelTest(unittest.TestCase):
                     Action("consume", "process-a", "correct"),
                 ],
             ),
-            "renew-before-record-write": (
+            "record-authority-transaction": (
                 0xAE0E,
                 self._record_renew_mutation,
-                [Action("acquire", "process-a"), Action("event", "process-b")],
+                [Action("acquire", "process-a"), Action("event", "process-a")],
             ),
             "record-acquisition": (
                 0xAC701,

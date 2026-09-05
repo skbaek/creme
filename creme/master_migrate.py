@@ -10,7 +10,7 @@ import shutil
 import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterator, Optional, Sequence
+from typing import Any, Callable, ContextManager, Iterator, Optional, Sequence
 
 from . import master_runtime, semaphore
 
@@ -39,6 +39,7 @@ class MigrationError(RuntimeError):
 
 FaultInjector = Callable[[str], None]
 Renewal = Callable[[], tuple[bool, str]]
+AuthorityTransaction = Callable[[], ContextManager[Any]]
 
 
 @dataclass(frozen=True)
@@ -263,13 +264,20 @@ def _cleanup_orphan_temps(
     *,
     fault: Optional[FaultInjector],
 ) -> None:
-    for index, path in enumerate(_verified_orphan_temp_paths(root)):
+    candidates = _verified_orphan_temp_paths(root)
+    for index, path in enumerate(candidates):
         _fault(fault, f"recovery-temp-{index}:before-remove")
-        if path.is_dir():
-            shutil.rmtree(path)
+        if path.parent == root / BACKUP_ROOT_NAME:
+            snapshot = _scan_legacy(root, candidates)
+            _remove_verified_partial_backup(
+                path,
+                snapshot,
+                fault=fault,
+                temporary_index=index,
+            )
         else:
             path.unlink()
-        master_runtime._fsync_directory(path.parent)
+            master_runtime._fsync_directory(path.parent)
         _fault(fault, f"recovery-temp-{index}:after-remove")
 
 
@@ -456,6 +464,13 @@ def _verified_backup(
     backup = root / BACKUP_ROOT_NAME / backup_id
     _private_directory(root / BACKUP_ROOT_NAME)
     _private_directory(backup)
+    try:
+        with os.scandir(backup) as entries:
+            child_names = sorted(entry.name for entry in entries)
+    except OSError as exc:
+        raise MigrationError(f"could not inventory backup {backup_id}: {exc}") from exc
+    if child_names != sorted((BACKUP_MANIFEST_NAME, BACKUP_ORIGINALS_NAME)):
+        raise MigrationError("backup directory has an unexpected child inventory")
     _private_directory(backup / BACKUP_ORIGINALS_NAME)
     manifest, manifest_bytes = _read_canonical_json(
         backup / BACKUP_MANIFEST_NAME, "backup manifest"
@@ -589,11 +604,10 @@ def _verify_temporary_bytes(path: Path, expected: bytes, context: str) -> None:
         raise MigrationError(f"{context} is not empty or the exact prepared target")
 
 
-def _verify_partial_backup(path: Path, snapshot: LegacySnapshot) -> None:
-    match = _BACKUP_TEMP.fullmatch(path.name)
-    if match is None or match.group(1) != snapshot.source_snapshot_sha256:
-        raise MigrationError("backup temporary is not bound to the legacy snapshot")
-    directory_order = [
+def _backup_publication_order(
+    snapshot: LegacySnapshot,
+) -> tuple[tuple[str, bool, Optional[bytes]], ...]:
+    directories = (
         BACKUP_ORIGINALS_NAME,
         *(
             f"{BACKUP_ORIGINALS_NAME}/{relative}"
@@ -602,56 +616,84 @@ def _verify_partial_backup(path: Path, snapshot: LegacySnapshot) -> None:
                 key=lambda value: (len(PurePosixPath(value).parts), value),
             )
         ),
-    ]
-    file_order = [
-        *(f"{BACKUP_ORIGINALS_NAME}/{item.path}" for item in snapshot.files),
-        BACKUP_MANIFEST_NAME,
-    ]
-    expected_files = {
-        f"{BACKUP_ORIGINALS_NAME}/{item.path}": item.data
-        for item in snapshot.files
-    }
-    expected_files[BACKUP_MANIFEST_NAME] = _canonical_json(
-        _manifest(snapshot, snapshot.source_snapshot_sha256)
     )
-    observed_directories: set[str] = set()
-    observed_files: dict[str, bytes] = {}
+    files: list[tuple[str, bool, Optional[bytes]]] = [
+        (f"{BACKUP_ORIGINALS_NAME}/{item.path}", False, item.data)
+        for item in snapshot.files
+    ]
+    files.append(
+        (
+            BACKUP_MANIFEST_NAME,
+            False,
+            _canonical_json(_manifest(snapshot, snapshot.source_snapshot_sha256)),
+        )
+    )
+    return tuple((relative, True, None) for relative in directories) + tuple(files)
+
+
+def _verify_partial_backup(path: Path, snapshot: LegacySnapshot) -> int:
+    match = _BACKUP_TEMP.fullmatch(path.name)
+    if match is None or match.group(1) != snapshot.source_snapshot_sha256:
+        raise MigrationError("backup temporary is not bound to the legacy snapshot")
+    order = _backup_publication_order(snapshot)
+    expected = {
+        relative: (directory, data)
+        for relative, directory, data in order
+    }
+    observed: dict[str, tuple[bool, Optional[bytes]]] = {}
     for candidate in sorted(path.rglob("*")):
         relative = candidate.relative_to(path).as_posix()
         if candidate.is_symlink():
             raise MigrationError(f"backup temporary path {relative} must not be a symlink")
         if candidate.is_dir():
             _private_directory(candidate)
-            if relative not in directory_order:
-                raise MigrationError(f"unexpected backup temporary directory {relative}")
-            observed_directories.add(relative)
+            observed[relative] = (True, None)
             continue
         _private_file(candidate)
-        expected = expected_files.get(relative)
-        if expected is None:
-            raise MigrationError(f"unexpected backup temporary file {relative}")
         data = candidate.read_bytes()
-        if data != expected:
-            raise MigrationError(f"backup temporary file {relative} changed")
-        observed_files[relative] = data
+        observed[relative] = (False, data)
 
-    directory_prefixes = {
-        frozenset(directory_order[:count])
-        for count in range(len(directory_order) + 1)
-    }
-    if not observed_files:
-        if frozenset(observed_directories) not in directory_prefixes:
-            raise MigrationError("backup temporary directories are not a publication prefix")
-        return
-    if observed_directories != set(directory_order):
-        raise MigrationError("backup temporary files precede its complete directory inventory")
-    observed_names = frozenset(observed_files)
-    file_prefixes = {
-        frozenset(file_order[:count])
-        for count in range(1, len(file_order) + 1)
-    }
-    if observed_names not in file_prefixes:
-        raise MigrationError("backup temporary files are not a publication prefix")
+    count = len(observed)
+    prefix = order[:count]
+    if set(observed) != {relative for relative, _, _ in prefix}:
+        raise MigrationError("backup temporary nodes are not a publication prefix")
+    for relative, value in observed.items():
+        wanted = expected.get(relative)
+        if wanted is None or value[0] != wanted[0]:
+            raise MigrationError(f"unexpected backup temporary node {relative}")
+        if not value[0] and value[1] != wanted[1]:
+            raise MigrationError(f"backup temporary file {relative} changed")
+    return count
+
+
+def _remove_verified_partial_backup(
+    path: Path,
+    snapshot: LegacySnapshot,
+    *,
+    fault: Optional[FaultInjector],
+    temporary_index: int,
+) -> None:
+    """Remove a verified staging prefix in reverse publication order.
+
+    Every successful removal leaves another exact publication prefix, so a
+    process death at any unlink or rmdir can be authenticated and resumed.
+    """
+    count = _verify_partial_backup(path, snapshot)
+    prefix = _backup_publication_order(snapshot)[:count]
+    for removal_index, (relative, directory, _data) in enumerate(reversed(prefix)):
+        candidate = path / Path(relative)
+        stage = f"recovery-temp-{temporary_index}:node-{removal_index}"
+        _fault(fault, f"{stage}:before-remove")
+        if directory:
+            os.rmdir(candidate)
+        else:
+            os.unlink(candidate)
+        master_runtime._fsync_directory(candidate.parent)
+        _fault(fault, f"{stage}:after-remove")
+    _fault(fault, f"recovery-temp-{temporary_index}:root:before-remove")
+    os.rmdir(path)
+    master_runtime._fsync_directory(path.parent)
+    _fault(fault, f"recovery-temp-{temporary_index}:root:after-remove")
 
 
 def _verified_orphan_temp_paths(root: Path) -> tuple[Path, ...]:
@@ -1215,9 +1257,27 @@ def _renew_or_refuse(renew: Renewal) -> None:
 
 
 @contextlib.contextmanager
+def _composed_authority_transaction(renew: Renewal) -> Iterator[None]:
+    """Compatibility transaction for isolated callers with injected renewal."""
+    _renew_or_refuse(renew)
+    yield
+
+
+def _select_authority_transaction(
+    renew: Renewal,
+    authority_transaction: Optional[AuthorityTransaction],
+) -> AuthorityTransaction:
+    if authority_transaction is not None:
+        return authority_transaction
+    if renew is semaphore.master_renew:
+        return semaphore.master_authority_transaction
+    return lambda: _composed_authority_transaction(renew)
+
+
+@contextlib.contextmanager
 def _migration_lock(
     root: Path,
-    renew: Renewal,
+    authority_transaction: AuthorityTransaction,
     fault: Optional[FaultInjector],
 ) -> Iterator[None]:
     root = master_runtime._normalized_root(root)
@@ -1227,13 +1287,17 @@ def _migration_lock(
         root_descriptor = os.open(root, os.O_RDONLY)
         try:
             fcntl.flock(root_descriptor, fcntl.LOCK_EX)
-            _renew_or_refuse(renew)
             lock_path = root / master_runtime.LOCK_NAME
             if not lock_path.exists():
-                _fault(fault, "lock:before-create")
-                master_runtime._write_new_file(lock_path, b"")
-                master_runtime._fsync_directory(root)
-                _fault(fault, "lock:after-create")
+                # The lock file is itself durable runtime state.  Bootstrap it
+                # while public authority is retained, then release that mutex
+                # before waiting on the newly created record lock.
+                with authority_transaction():
+                    if not lock_path.exists():
+                        _fault(fault, "lock:before-create")
+                        master_runtime._write_new_file(lock_path, b"")
+                        master_runtime._fsync_directory(root)
+                        _fault(fault, "lock:after-create")
             _private_file(lock_path)
             flags = os.O_RDWR
             if hasattr(os, "O_NOFOLLOW"):
@@ -1245,7 +1309,6 @@ def _migration_lock(
                 if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
                     raise MigrationError("record lock changed during migration open")
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
-                _renew_or_refuse(renew)
                 yield
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -1438,11 +1501,89 @@ def _finalize_prepared(
     )
 
 
+def _migrate_authorized(
+    root: Path,
+    preview: MigrationPlan,
+    *,
+    fault: Optional[FaultInjector],
+) -> MigrationPlan:
+    """Apply one migration while record serialization and authority are held."""
+    _cleanup_orphan_temps(root, fault=fault)
+    locked = plan_migration(root)
+    if locked.status == "CURRENT" and preview.status == "FINALIZE":
+        return MigrationPlan(
+            "OK",
+            "orphaned migration temporaries removed; current record verified",
+            locked.source_snapshot_sha256,
+            locked.backup_id,
+            preview.actions,
+            locked.translations,
+            locked.retained_artifacts,
+            locked.ambiguities,
+        )
+    if locked.status == "FINALIZE":
+        return _finalize_prepared(root, fault=fault)
+    if locked.status != "PREVIEW":
+        raise MigrationError(
+            f"migration changed after preview: {locked.status}: {locked.detail}"
+        )
+    if locked.source_snapshot_sha256 != preview.source_snapshot_sha256:
+        raise MigrationError("legacy source changed after preview")
+    snapshot = _scan_legacy(root)
+    backup_id = snapshot.source_snapshot_sha256
+    manifest, manifest_bytes = _publish_backup(
+        root, snapshot, backup_id, fault=fault
+    )
+    if manifest["source_snapshot_sha256"] != snapshot.source_snapshot_sha256:
+        raise MigrationError("published backup does not match the legacy snapshot")
+    after_backup = _scan_legacy(root)
+    if after_backup.source_snapshot_sha256 != snapshot.source_snapshot_sha256:
+        raise MigrationError("legacy source changed during backup")
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    prepared = _report(
+        snapshot,
+        backup_id,
+        manifest_sha256,
+        status="prepared",
+    )
+    _atomic_report(
+        root,
+        prepared,
+        label="migration-report-prepared",
+        fault=fault,
+    )
+    completed = _finalize_prepared(root, fault=fault)
+    return MigrationPlan(
+        "OK",
+        "legacy record migrated with a verified byte-identical backup",
+        completed.source_snapshot_sha256,
+        completed.backup_id,
+        tuple(
+            MigrationAction(
+                action.path,
+                (
+                    "completed"
+                    if action.action not in {"retain", "keep", "create-or-keep"}
+                    else action.action
+                ),
+                action.detail,
+                action.size,
+                action.sha256,
+            )
+            for action in locked.actions
+        ),
+        completed.translations,
+        completed.retained_artifacts,
+        completed.ambiguities,
+    )
+
+
 def migrate(
     root: Path,
     *,
     apply: bool,
     renew: Renewal = semaphore.master_renew,
+    authority_transaction: Optional[AuthorityTransaction] = None,
     fault: Optional[FaultInjector] = None,
 ) -> MigrationPlan:
     preview = plan_migration(root)
@@ -1461,75 +1602,10 @@ def migrate(
         )
     try:
         _renew_or_refuse(renew)
-        with _migration_lock(root, renew, fault):
-            _cleanup_orphan_temps(root, fault=fault)
-            locked = plan_migration(root)
-            if locked.status == "CURRENT" and preview.status == "FINALIZE":
-                return MigrationPlan(
-                    "OK",
-                    "orphaned migration temporaries removed; current record verified",
-                    locked.source_snapshot_sha256,
-                    locked.backup_id,
-                    preview.actions,
-                    locked.translations,
-                    locked.retained_artifacts,
-                    locked.ambiguities,
-                )
-            if locked.status == "FINALIZE":
-                return _finalize_prepared(root, fault=fault)
-            if locked.status != "PREVIEW":
-                raise MigrationError(
-                    f"migration changed after preview: {locked.status}: {locked.detail}"
-                )
-            if locked.source_snapshot_sha256 != preview.source_snapshot_sha256:
-                raise MigrationError("legacy source changed after preview")
-            snapshot = _scan_legacy(root)
-            backup_id = snapshot.source_snapshot_sha256
-            manifest, manifest_bytes = _publish_backup(
-                root, snapshot, backup_id, fault=fault
-            )
-            if manifest["source_snapshot_sha256"] != snapshot.source_snapshot_sha256:
-                raise MigrationError("published backup does not match the legacy snapshot")
-            after_backup = _scan_legacy(root)
-            if after_backup.source_snapshot_sha256 != snapshot.source_snapshot_sha256:
-                raise MigrationError("legacy source changed during backup")
-            manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-            prepared = _report(
-                snapshot,
-                backup_id,
-                manifest_sha256,
-                status="prepared",
-            )
-            _atomic_report(
-                root,
-                prepared,
-                label="migration-report-prepared",
-                fault=fault,
-            )
-            completed = _finalize_prepared(root, fault=fault)
-            return MigrationPlan(
-                "OK",
-                "legacy record migrated with a verified byte-identical backup",
-                completed.source_snapshot_sha256,
-                completed.backup_id,
-                tuple(
-                    MigrationAction(
-                        action.path,
-                        (
-                            "completed"
-                            if action.action not in {"retain", "keep", "create-or-keep"}
-                            else action.action
-                        ),
-                        action.detail,
-                        action.size,
-                        action.sha256,
-                    )
-                    for action in locked.actions
-                ),
-                completed.translations,
-                completed.retained_artifacts,
-                completed.ambiguities,
-            )
+        transaction = _select_authority_transaction(renew, authority_transaction)
+        with _migration_lock(root, transaction, fault):
+            with transaction():
+                return _migrate_authorized(root, preview, fault=fault)
     except Exception as exc:
         return MigrationPlan(
             "REFUSED",

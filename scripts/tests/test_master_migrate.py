@@ -713,6 +713,80 @@ class MasterMigrationTest(unittest.TestCase):
                 self.assertTrue(master_runtime.read_record(root).board_current)
                 master_migrate.verify_backup(root, current.backup_id)
 
+    def test_verified_backup_cleanup_recovers_through_repeated_process_deaths(self):
+        originals = self.make_legacy()
+        context = multiprocessing.get_context("fork")
+
+        process = context.Process(
+            target=kill_migration_at,
+            args=(str(self.root), "backup:before-publish"),
+        )
+        process.start()
+        process.join(10)
+        self.assertFalse(process.is_alive())
+        self.assertEqual(process.exitcode, 73)
+
+        candidates = master_migrate._candidate_temp_paths(self.root)
+        self.assertEqual(len(candidates), 1)
+        temporary = candidates[0]
+        snapshot = master_migrate._scan_legacy(self.root, candidates)
+        node_count = master_migrate._verify_partial_backup(temporary, snapshot)
+
+        def die_after_one_cleanup_step() -> None:
+            def inject(stage: str) -> None:
+                if stage in {
+                    "recovery-temp-0:node-0:after-remove",
+                    "recovery-temp-0:root:after-remove",
+                }:
+                    os._exit(74)
+
+            master_migrate.migrate(
+                self.root,
+                apply=True,
+                renew=lambda: (True, "synthetic holder"),
+                fault=inject,
+            )
+
+        deaths = 0
+        while temporary.exists():
+            process = context.Process(target=die_after_one_cleanup_step)
+            process.start()
+            process.join(10)
+            self.assertFalse(process.is_alive())
+            self.assertEqual(process.exitcode, 74)
+            deaths += 1
+            self.assertLessEqual(deaths, node_count + 1)
+            self.assertEqual(master_migrate.plan_migration(self.root).status, "PREVIEW")
+            for relative, data in originals.items():
+                self.assertEqual((self.root / relative).read_bytes(), data)
+
+        self.assertEqual(deaths, node_count + 1)
+        recovered = master_migrate.migrate(
+            self.root,
+            apply=True,
+            renew=lambda: (True, "synthetic holder"),
+        )
+        self.assertEqual(recovered.status, "OK")
+        self.assertEqual(master_migrate.plan_migration(self.root).status, "CURRENT")
+
+    def test_verified_backup_requires_exact_top_level_inventory(self):
+        self.make_legacy()
+        migrated = master_migrate.migrate(
+            self.root,
+            apply=True,
+            renew=self.renew,
+        )
+        self.assertEqual(migrated.status, "OK")
+        backup = self.root / master_migrate.BACKUP_ROOT_NAME / migrated.backup_id
+        extra = backup / "unmanifested.bin"
+        extra.write_bytes(b"unknown private backup bytes\n")
+        extra.chmod(0o600)
+        before = self.tree_snapshot(self.root)
+        self.assertEqual(master_migrate.plan_migration(self.root).status, "REFUSED")
+        with self.assertRaises(master_runtime.MasterRecordError):
+            master_runtime.read_record(self.root)
+        self.assertEqual(self.tree_snapshot(self.root), before)
+
     def test_ignored_fixture_git_state_is_unchanged_by_preview_and_apply(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = Path(temporary).resolve() / "goals"

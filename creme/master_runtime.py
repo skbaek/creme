@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, ContextManager, Iterator, Mapping, Optional, Sequence
 
 from . import semaphore
 
@@ -99,6 +99,7 @@ class RenewalRefused(MasterRecordError):
 FaultInjector = Callable[[str], None]
 Renewal = Callable[[], tuple[bool, str]]
 LeaseSnapshot = Callable[[], dict[str, Any]]
+AuthorityTransaction = Callable[[], ContextManager[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -1265,6 +1266,22 @@ def _renew_or_refuse(renew: Renewal) -> None:
         raise RenewalRefused(f"master renewal refused: {detail}")
 
 
+@contextlib.contextmanager
+def _composed_authority_transaction(
+    renew: Renewal,
+    lease_snapshot: LeaseSnapshot,
+) -> Iterator[dict[str, Any]]:
+    """Compatibility transaction for isolated callers with injected lease I/O."""
+    _renew_or_refuse(renew)
+    try:
+        snapshot = lease_snapshot()
+    except MasterRecordError:
+        raise
+    except Exception as exc:
+        raise RenewalRefused(f"master lease snapshot failed: {exc}") from exc
+    yield snapshot
+
+
 class RecordWriter:
     """Renew-first private append transaction over one configured record root."""
 
@@ -1274,12 +1291,22 @@ class RecordWriter:
         *,
         renew: Renewal = semaphore.master_renew,
         lease_snapshot: LeaseSnapshot = semaphore.master_snapshot,
+        authority_transaction: Optional[AuthorityTransaction] = None,
         event_id: Callable[[], str] = lambda: uuid.uuid4().hex,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self.root = _normalized_root(root)
         self.renew = renew
         self.lease_snapshot = lease_snapshot
+        if authority_transaction is not None:
+            self.authority_transaction = authority_transaction
+        elif lease_snapshot is semaphore.master_snapshot:
+            self.authority_transaction = semaphore.master_authority_transaction
+        else:
+            self.authority_transaction = lambda: _composed_authority_transaction(
+                self.renew,
+                self.lease_snapshot,
+            )
         self.event_id = event_id
         self.clock = clock
 
@@ -1295,83 +1322,97 @@ class RecordWriter:
         # nonholder must not serialize or inspect private state as a writer.
         _renew_or_refuse(self.renew)
         with _locked_record(self.root):
-            # Close the wait-for-lock race and bind the actor to the exact
-            # acquisition that remains current at the transaction boundary.
-            _renew_or_refuse(self.renew)
             try:
-                actor = _actor_from_snapshot(self.lease_snapshot())
-            except MasterRecordError:
-                raise
-            except Exception as exc:
-                raise RenewalRefused(f"master lease snapshot failed: {exc}") from exc
-            view = _read_record_unlocked(self.root)
-            if view.publication_transaction is not None:
-                _discard_publication_transaction(
-                    self.root,
-                    view.publication_transaction,
-                )
-                view = _read_record_unlocked(self.root)
-            event_id = self.event_id()
-            now = self.clock()
-            if now.tzinfo is None or now.utcoffset() is None:
-                raise MasterRecordError("event clock must return a timezone-aware UTC datetime")
-            timestamp = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            payload_snapshot = _strict_json(
-                _canonical_json(dict(payload)), "event payload"
-            )
-            event = {
-                "schema_version": EVENT_SCHEMA_VERSION,
-                "event_id": event_id,
-                "timestamp": timestamp,
-                "kind": kind,
-                "actor": actor,
-                "payload": payload_snapshot,
-            }
-            validate_event(event)
-            if once_per_acquisition:
-                for existing in reversed(view.events):
-                    if (
-                        existing["kind"] == kind
-                        and existing["actor"]["acquisition_digest"]
-                        == actor["acquisition_digest"]
-                        and (
-                            kind != "master"
-                            or existing["payload"]["action"] in {"start", "resume"}
-                        )
-                    ):
-                        if not view.board_current:
-                            _publish_record_transaction(
-                                self.root,
-                                source_log=view.log_bytes,
-                                target_log=view.log_bytes,
-                                target_board=_canonical_json(view.expected_board),
-                                operation="board",
-                                fault=fault,
-                            )
-                        return AppendResult(
-                            event=existing,
-                            board=view.expected_board,
-                            repaired_stale_board=not view.board_current,
-                            already_present=True,
-                        )
-            if event_id in {row["event_id"] for row in view.events}:
-                raise MasterRecordError(f"duplicate event ID: {event_id}")
-            events = (*view.events, event)
-            log_bytes = _canonical_log(events)
-            if len(log_bytes) > MAX_LOG_BYTES or len(events) > MAX_EVENTS:
-                raise MasterRecordError("authoritative event log reached its supported bound")
-            board = reduce_events(events)
-            _publish_record_transaction(
+                with self.authority_transaction() as snapshot:
+                    return self._append_authorized(
+                        snapshot,
+                        kind,
+                        payload,
+                        fault=fault,
+                        once_per_acquisition=once_per_acquisition,
+                    )
+            except semaphore.MasterAuthorityRefused as exc:
+                raise RenewalRefused(f"master renewal refused: {exc}") from exc
+
+    def _append_authorized(
+        self,
+        snapshot: dict[str, Any],
+        kind: str,
+        payload: Mapping[str, Any],
+        *,
+        fault: Optional[FaultInjector],
+        once_per_acquisition: bool,
+    ) -> AppendResult:
+        """Append while the caller retains both record and lease mutexes."""
+        actor = _actor_from_snapshot(snapshot)
+        view = _read_record_unlocked(self.root)
+        if view.publication_transaction is not None:
+            _discard_publication_transaction(
                 self.root,
-                source_log=view.log_bytes,
-                target_log=log_bytes,
-                target_board=_canonical_json(board),
-                operation="append",
-                fault=fault,
+                view.publication_transaction,
             )
-            return AppendResult(
-                event=event,
-                board=board,
-                repaired_stale_board=not view.board_current,
-                already_present=False,
-            )
+            view = _read_record_unlocked(self.root)
+        event_id = self.event_id()
+        now = self.clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise MasterRecordError("event clock must return a timezone-aware UTC datetime")
+        timestamp = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        payload_snapshot = _strict_json(
+            _canonical_json(dict(payload)), "event payload"
+        )
+        event = {
+            "schema_version": EVENT_SCHEMA_VERSION,
+            "event_id": event_id,
+            "timestamp": timestamp,
+            "kind": kind,
+            "actor": actor,
+            "payload": payload_snapshot,
+        }
+        validate_event(event)
+        if once_per_acquisition:
+            for existing in reversed(view.events):
+                if (
+                    existing["kind"] == kind
+                    and existing["actor"]["acquisition_digest"]
+                    == actor["acquisition_digest"]
+                    and (
+                        kind != "master"
+                        or existing["payload"]["action"] in {"start", "resume"}
+                    )
+                ):
+                    if not view.board_current:
+                        _publish_record_transaction(
+                            self.root,
+                            source_log=view.log_bytes,
+                            target_log=view.log_bytes,
+                            target_board=_canonical_json(view.expected_board),
+                            operation="board",
+                            fault=fault,
+                        )
+                    return AppendResult(
+                        event=existing,
+                        board=view.expected_board,
+                        repaired_stale_board=not view.board_current,
+                        already_present=True,
+                    )
+        if event_id in {row["event_id"] for row in view.events}:
+            raise MasterRecordError(f"duplicate event ID: {event_id}")
+        events = (*view.events, event)
+        log_bytes = _canonical_log(events)
+        if len(log_bytes) > MAX_LOG_BYTES or len(events) > MAX_EVENTS:
+            raise MasterRecordError("authoritative event log reached its supported bound")
+        board = reduce_events(events)
+        _publish_record_transaction(
+            self.root,
+            source_log=view.log_bytes,
+            target_log=log_bytes,
+            target_board=_canonical_json(board),
+            operation="append",
+            fault=fault,
+        )
+        return AppendResult(
+            event=event,
+            board=board,
+            repaired_stale_board=not view.board_current,
+            already_present=False,
+        )

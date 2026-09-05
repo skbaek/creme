@@ -460,6 +460,7 @@ def start_master(
     heartbeat: Heartbeat = semaphore.master_heartbeat_detached,
     lease_snapshot: Snapshot = semaphore.master_snapshot,
     lease_status: LeaseStatus = semaphore.status_text,
+    authority_transaction: Optional[master_runtime.AuthorityTransaction] = None,
 ) -> dict[str, Any]:
     if not isinstance(client, str) or semaphore.CLIENT_LABEL.fullmatch(client) is None:
         raise MasterOperationError("client must be a short client label")
@@ -537,6 +538,7 @@ def start_master(
         root,
         renew=renew,
         lease_snapshot=lease_snapshot,
+        authority_transaction=authority_transaction,
     )
     try:
         acquisition_digest = master_runtime._actor_from_snapshot(

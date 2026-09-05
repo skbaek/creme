@@ -190,6 +190,14 @@ derive the worktree and its parser permits only probe/wait/exclusive build
 options and Lake targets. A drift refusal means preview and reinstall the
 bundle after review; never bypass the pin or downgrade its cgroup.
 
+If it includes `codex-creme-contained-workflow`, use its reviewed operation and
+mode for registered gates and fixture validation/generation, and `status` for
+host/service inspection. Follow [the recipe contract](docs/guides/contained-workflow.md).
+The generic `lean-safe-run -- COMMAND` path is human manual-only for operations
+covered by the installed capability; routine agents do not request repeated
+approvals for it. Repair missing workflow coverage as a reviewed recipe set,
+not a new persistent prefix for each script.
+
 The capability contract and limited-mode results are in
 `docs/capabilities.md`. A missing capability is not permission to run another
 OS's command. Full telemetry may be unavailable while the narrower aggregate

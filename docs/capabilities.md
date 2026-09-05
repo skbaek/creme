@@ -87,6 +87,14 @@ does not cover arbitrary gate or fixture runners. Diagnose these separately
 with the [escalation procedure](guides/escalation.md). Memory cgroups constrain
 resource consumption; they do not isolate filesystem access or network actions.
 
+Hosts with reviewed `.creme/workflow-recipes.json` also receive the
+[contained workflow capability](guides/contained-workflow.md) and its single
+argument-rejecting delegate rule. Recipes pin the operation/mode command set;
+routine invocation supplies no executable, command, environment, or path. Its
+service owns the shared build/workflow lock through execution and keeps status
+and completion records when the launching client disconnects. This extends
+trusted-project execution coverage; it does not provide filesystem isolation.
+
 Optimized cache copies run into a randomly named, Creme-owned staging
 directory beside the requested destination. A failed clone or reflink attempt
 cannot occupy the destination and therefore falls back to the portable copy.

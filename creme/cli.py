@@ -15,6 +15,7 @@ from .guidance import default_path as default_guidance_path
 from .guidance import load as load_guidance
 from .host_wrappers import (
     BROKER_NAME,
+    WORKFLOW_BROKER_NAME,
     RULES_FILENAME,
     default_output_dir as default_host_wrapper_output_dir,
     default_rules_dir as default_host_rules_dir,
@@ -526,6 +527,7 @@ def cmd_host_wrappers(arguments: argparse.Namespace) -> int:
     if not arguments.write:
         expected_rules = render_host_rules(
             output, include_build=BROKER_NAME in rendered,
+            include_workflow=WORKFLOW_BROKER_NAME in rendered,
         )
         rules_changed = not _path_has_text(rules / RULES_FILENAME, expected_rules)
         _json({
@@ -562,6 +564,7 @@ def cmd_host_wrappers(arguments: argparse.Namespace) -> int:
     try:
         expected_rules = render_host_rules(
             output, include_build=BROKER_NAME in rendered,
+            include_workflow=WORKFLOW_BROKER_NAME in rendered,
         )
         rules_changed = not _path_has_text(rules / RULES_FILENAME, expected_rules)
         written = install_host_bundle(

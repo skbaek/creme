@@ -421,6 +421,7 @@ def check_host_wrappers(
             f"all {len(members)} installed files match on disk; coverage: telemetry, "
             "reclaim --dry-run and --wind-down"
             + (", contained Lake builds" if "codex-creme-contained-build" in rendered else "")
+            + (", reviewed workflow recipes and status" if "codex-creme-contained-workflow" in rendered else "")
             + "; arbitrary gate/fixture commands are not covered. "
             "Running-client rule loading and effective managed/MCP approval policy "
             "are not verified by this check. Fully restart Codex after bundle "

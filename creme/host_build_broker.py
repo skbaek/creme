@@ -136,8 +136,8 @@ def safe_component_path(path: Path, base: Path) -> None:
             refuse(f"worktree path contains a symbolic link: {{current}}")
 
 
-def require_worktree(profile: str, goal: str, purpose: str) -> Path:
-    repository = WORKSPACE / profile
+def require_worktree(profile: str, goal: str, purpose: str, repository: Path | None = None) -> Path:
+    repository = repository if repository is not None else WORKSPACE / profile
     repo = repository / ".worktrees" / f"{{goal}}{{PURPOSE_SUFFIX[purpose]}}"
     safe_component_path(repo, repository)
     if not repo.is_dir():
@@ -320,18 +320,19 @@ def main(arguments: list[str]) -> int:
     command = build_command(goal, probe, wait, exclusive, targets)
     if contained:
         require_containment(profile)
-        os.chdir(repo)
-        os.execv(command[0], command)
-        refuse("exec returned unexpectedly")
-
-    lock = broker_lock()
-    try:
+        lock = broker_lock()
         try:
+            # The service owns admission exclusion, even if the outer client
+            # disappears. Children retain it until their execution ends.
+            os.set_inheritable(lock, True)
             completed = subprocess.run([str(PREFLIGHT)], check=False)
-        except OSError as exc:
-            refuse(f"cannot run host preflight: {{exc}}")
-        if completed.returncode != 0:
-            return completed.returncode
+            if completed.returncode != 0:
+                return completed.returncode
+            return subprocess.run(command, cwd=repo, check=False, pass_fds=(lock,)).returncode
+        finally:
+            os.close(lock)
+
+    try:
         swap = "0" if profile == "blanc" else "1G"
         outer = [
             str(SYSTEMD_RUN), "--user", "--wait", "--collect", "--pipe", "--quiet",
@@ -348,8 +349,8 @@ def main(arguments: list[str]) -> int:
             return subprocess.run(outer, check=False).returncode
         except OSError as exc:
             refuse(f"cannot enter the contained Lean cgroup: {{exc}}")
-    finally:
-        os.close(lock)
+    except OSError as exc:
+        refuse(f"cannot launch contained build: {{exc}}")
 
 
 if __name__ == "__main__":

@@ -282,7 +282,7 @@ def _safe_lease(
     status_text: str,
 ) -> dict[str, Any]:
     if not isinstance(snapshot, dict) or snapshot.get("schema_version") != semaphore.MASTER_SCHEMA_VERSION:
-        raise MasterOperationError("schema-3 lease summary is unavailable")
+        raise MasterOperationError("master lease summary is unavailable")
     lease = snapshot.get("lease")
     if lease is None:
         return {
@@ -292,7 +292,7 @@ def _safe_lease(
             "matches_recorded_acquisition": False,
         }
     if not isinstance(lease, dict):
-        raise MasterOperationError("schema-3 lease summary is malformed")
+        raise MasterOperationError("master lease summary is malformed")
     actor = master_runtime._actor_from_snapshot(snapshot)
     recorded = next(
         (

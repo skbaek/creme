@@ -2926,7 +2926,7 @@ def master_authority_transaction(
 ) -> Iterator[dict[str, Any]]:
     """Renew a direct holder and retain the lease mutex through its mutation.
 
-    The yielded schema-3 snapshot is loaded, authenticated, renewed, and saved
+    The yielded current-schema snapshot is loaded, authenticated, renewed, and saved
     under the same mutex that excludes release and succession.  Callers must
     acquire their private record lock before entering this context so the
     cross-subsystem lock order remains record then semaphore.

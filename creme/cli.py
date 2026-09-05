@@ -880,7 +880,7 @@ def parser() -> argparse.ArgumentParser:
 
     master_start = master_commands.add_parser(
         "start",
-        help="enter as the schema-3 master or report the current reader state",
+        help="enter as the master or report the current reader state",
     )
     master_start.add_argument("--client", required=True)
     master_start.add_argument("--model", required=True)

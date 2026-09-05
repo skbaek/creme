@@ -93,7 +93,7 @@ class MasterRecordError(RuntimeError):
 
 
 class RenewalRefused(MasterRecordError):
-    """The current invocation could not prove schema-3 lease authority."""
+    """The current invocation could not prove master lease authority."""
 
 
 FaultInjector = Callable[[str], None]
@@ -1243,7 +1243,7 @@ def _publish_record_transaction(
 
 def _actor_from_snapshot(snapshot: Any) -> dict[str, str]:
     if not isinstance(snapshot, dict) or snapshot.get("schema_version") != semaphore.MASTER_SCHEMA_VERSION:
-        raise RenewalRefused("schema-3 master lease snapshot is unavailable")
+        raise RenewalRefused("current master lease snapshot is unavailable")
     lease = snapshot.get("lease")
     if not isinstance(lease, dict):
         raise RenewalRefused("no master lease exists after renewal")

@@ -1227,7 +1227,7 @@ def plan_migration(root: Path) -> MigrationPlan:
         create_backup = _backup_namespace_is_available(root, backup_id)
         return MigrationPlan(
             "PREVIEW",
-            "legacy migration preview; rerun with --apply while holding the schema-3 lease",
+            "legacy migration preview; rerun with --apply while holding the master lease",
             snapshot.source_snapshot_sha256,
             backup_id,
             tuple(

@@ -1309,6 +1309,15 @@ class MasterLeaseTest(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.as_client(os.getpid(), "claude")
+        # Test processes stand in for clients; incarnation capability behavior
+        # itself is covered in test_session_identity, including real locks.
+        self.adapter.session_identity = lambda pid, family: self.adapter.result(
+            "session_identity", "OK" if pid else "UNAVAILABLE", "fixture incarnation",
+            {"kind": "linux-process", "pid": pid, "scope": "00000000-0000-0000-0000-000000000000:pid:[1]", "start": "1", "uid": os.getuid()} if pid else None,
+        )
+        self.adapter.session_alive = lambda identity: self.adapter.result(
+            "session_alive", "OK", "fixture liveness", {"alive": semaphore._pid_alive(identity["pid"])},
+        )
 
     def as_client(self, pid, family):
         if getattr(self, "_client_patch", None):
@@ -1499,8 +1508,12 @@ class MasterLeaseTest(unittest.TestCase):
         path = self.root / "master.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         data["lease"]["client_pid"] = self.dead_pid()
+        data["lease"]["identity"]["pid"] = data["lease"]["client_pid"]
         path.write_text(json.dumps(data), encoding="utf-8")
-        ok, detail = semaphore.master_heartbeat(5, sleep=naps.append, max_beats=5)
+        ok, detail = semaphore.master_heartbeat(
+            5, sleep=naps.append, max_beats=5,
+            expected_generation=data["lease"]["generation"], expected_identity=data["lease"]["identity"],
+        )
         self.assertTrue(ok, detail)
         self.assertIn("is gone", detail)
         self.assertEqual(self.log_actions().count("master-renew"), 2)
@@ -1541,8 +1554,12 @@ class MasterLeaseTest(unittest.TestCase):
 
     def test_an_orphaned_heartbeat_renews_for_the_holder_it_read(self):
         semaphore.master_acquire("claude", "master")
+        original = semaphore.master_snapshot()["lease"]
         self.as_client(None, None)          # orphaned: no client above the heartbeat
-        ok, detail = semaphore.master_heartbeat(5, sleep=lambda s: None, max_beats=1)
+        ok, detail = semaphore.master_heartbeat(
+            5, sleep=lambda s: None, max_beats=1,
+            expected_generation=original["generation"], expected_identity=original["identity"],
+        )
         self.assertTrue(ok, detail)
         self.assertEqual(self.log_actions().count("master-renew"), 1)
         # A stranger without the holder assertion is still refused once lapsed.
@@ -1558,7 +1575,9 @@ class MasterLeaseTest(unittest.TestCase):
         self.assertTrue(ok, detail)
         self.assertIn("pid 424242", detail)
         args, kwargs = popen.call_args
-        self.assertEqual(args[0][-3:], ["master-renew", "--heartbeat", "1500"])
+        self.assertEqual(args[0][2:5], ["master-renew", "--heartbeat", "1500"])
+        self.assertEqual(args[0][5:8], ["--generation", semaphore.master_snapshot()["lease"]["generation"], "--identity"])
+        self.assertEqual(json.loads(args[0][8]), semaphore.master_snapshot()["lease"]["identity"])
         self.assertTrue(args[0][1].endswith("/.semaphore/semaphore"))
         self.assertTrue(kwargs["start_new_session"])
         self.assertEqual(kwargs["stdin"], semaphore.subprocess.DEVNULL)

@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .session import codex_identity, lock_alive, valid_identity
+
 
 @dataclass(frozen=True)
 class CapabilityResult:
@@ -91,6 +93,27 @@ class Adapter:
             "process_snapshot", "UNAVAILABLE",
             f"process snapshots are not implemented for {self.system}",
         )
+
+    def session_identity(self, pid: Optional[int], family: Optional[str]) -> CapabilityResult:
+        if family == "codex" and self.system in {"Linux", "Darwin"}:
+            identity = codex_identity()
+            if identity is not None:
+                return self.result("session_identity", "OK", "Codex process-lifetime lock identified", identity)
+        if pid is not None:
+            return self.process_identity(pid)
+        return self.result("session_identity", "UNAVAILABLE", "client incarnation is not observable")
+
+    def process_identity(self, pid: int) -> CapabilityResult:
+        return self.result("session_identity", "UNAVAILABLE", "process incarnation is not available")
+
+    def session_alive(self, identity: dict[str, Any]) -> CapabilityResult:
+        if not valid_identity(identity):
+            return self.result("session_alive", "UNAVAILABLE", "invalid session identity")
+        if identity["kind"] == "codex-arg0-lock":
+            alive = lock_alive(identity)
+            return self.result("session_alive", "OK" if alive is not None else "UNAVAILABLE",
+                               "sampled original Codex lifetime lock", {"alive": alive})
+        return self.result("session_alive", "UNAVAILABLE", "process incarnation is not observable here")
 
     def process_working_directories(self, pids: list[int]) -> CapabilityResult:
         """Sample the working directory of each named pid.

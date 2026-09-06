@@ -414,10 +414,16 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
             arguments.client, arguments.note, arguments.lease, take_over=arguments.take_over,
         ))
     if action == "master-renew":
+        if arguments.generation is not None or arguments.identity is not None:
+            if arguments.heartbeat is None or arguments.detach or arguments.generation is None or arguments.identity is None:
+                return _sem_result(False, "--generation and --identity require a non-detached --heartbeat")
         if arguments.heartbeat is not None:
             if arguments.detach:
                 return _sem_result(*semaphore.master_heartbeat_detached(arguments.heartbeat))
-            return _sem_result(*semaphore.master_heartbeat(arguments.heartbeat))
+            return _sem_result(*semaphore.master_heartbeat(
+                arguments.heartbeat, expected_generation=arguments.generation,
+                expected_identity=arguments.identity,
+            ))
         return _sem_result(*semaphore.master_renew(arguments.lease))
     if action == "master-release":
         return _sem_result(*semaphore.master_release(
@@ -812,6 +818,8 @@ def parser() -> argparse.ArgumentParser:
     )
     master_renew = sem_commands.add_parser("master-renew", help="heartbeat the master lease")
     master_renew.add_argument("--lease", type=int, default=None)
+    master_renew.add_argument("--generation", help=argparse.SUPPRESS)
+    master_renew.add_argument("--identity", type=json.loads, help=argparse.SUPPRESS)
     master_renew.add_argument(
         "--heartbeat",
         type=_positive,

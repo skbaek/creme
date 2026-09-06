@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .base import Adapter, CapabilityResult
+from .session import valid_identity
 from ..reclaim import (
     Process,
     is_lean_worker as _is_lean_worker,
@@ -32,6 +33,46 @@ class LinuxAdapter(Adapter):
     @staticmethod
     def _run(argv: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+    @staticmethod
+    def _process_scope() -> str:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        return boot + ":" + os.readlink("/proc/self/ns/pid")
+
+    def process_identity(self, pid: int) -> CapabilityResult:
+        try:
+            path = Path(f"/proc/{pid}")
+            fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
+            if fields[0] in {"Z", "X"}:
+                return self.result("session_identity", "UNAVAILABLE", "client has exited")
+            identity = {"kind": "linux-process", "pid": pid, "scope": self._process_scope(),
+                        "start": fields[19], "uid": path.stat().st_uid}
+        except (OSError, ValueError, IndexError) as exc:
+            return self.result("session_identity", "UNAVAILABLE", f"cannot inspect client incarnation: {exc}")
+        return self.result("session_identity", "OK", "Linux boot/namespace/start-time identity", identity)
+
+    def session_alive(self, identity: dict) -> CapabilityResult:
+        if not valid_identity(identity) or identity["kind"] != "linux-process":
+            return super().session_alive(identity)
+        try:
+            scope = self._process_scope()
+        except OSError as exc:
+            return self.result("session_alive", "UNAVAILABLE", f"cannot inspect PID namespace: {exc}")
+        try:
+            if scope.split(":", 1)[0] != identity["scope"].split(":", 1)[0]:
+                alive = False
+            elif scope != identity["scope"]:
+                return self.result("session_alive", "UNAVAILABLE", "owner is in another PID namespace")
+            else:
+                path = Path(f"/proc/{identity['pid']}")
+                fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
+                alive = (fields[0] not in {"Z", "X"} and fields[19] == identity["start"]
+                         and path.stat().st_uid == identity["uid"])
+        except FileNotFoundError:
+            alive = False
+        except (OSError, ValueError, IndexError) as exc:
+            return self.result("session_alive", "UNAVAILABLE", f"cannot inspect original process: {exc}")
+        return self.result("session_alive", "OK", "sampled original Linux incarnation", {"alive": alive})
 
     def platform_identity(self, machine: str | None = None) -> CapabilityResult:
         detected = (machine or platform.machine()).strip().lower()

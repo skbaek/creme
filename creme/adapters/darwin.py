@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+import ctypes
+import errno
 import platform
 import re
+import struct
 import subprocess
 import time
 from dataclasses import replace
@@ -10,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from .base import Adapter, CapabilityResult
+from .session import valid_identity
 from ..reclaim import (
     Process,
     is_lean_worker as _is_lean_worker,
@@ -34,6 +38,66 @@ class DarwinAdapter(Adapter):
     @staticmethod
     def _run(argv: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+    def _process_scope(self) -> str:
+        result = self._run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"])
+        value = result.stdout.strip()
+        if result.returncode or not re.fullmatch(r"[0-9A-Fa-f-]{36}", value):
+            raise OSError("boot session UUID is unavailable")
+        return value
+
+    @staticmethod
+    def _process_record(pid: int) -> tuple[int, str, bool]:
+        # Darwin's public PROC_PIDTBSDINFO ABI (xnu/bsd/sys/proc_info.h):
+        # proc_bsdinfo is 136 bytes, with microsecond process birth time at
+        # offsets 120/128. ps lstart only has seconds and cannot fence reuse.
+        library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        query = library.proc_pidinfo
+        query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        query.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(136)
+        size = query(pid, 3, 0, buffer, len(buffer))
+        if size != len(buffer):
+            error = ctypes.get_errno()
+            if size == 0 and error == errno.ESRCH:
+                raise ProcessLookupError(error, "client has exited")
+            raise OSError(error, "process incarnation is unavailable")
+        status = struct.unpack_from("=I", buffer, 4)[0]
+        reported_pid, uid = struct.unpack_from("=I", buffer, 12)[0], struct.unpack_from("=I", buffer, 20)[0]
+        seconds, micros = struct.unpack_from("=QQ", buffer, 120)
+        if reported_pid != pid or seconds == 0 or micros >= 1_000_000:
+            raise OSError("invalid process incarnation response")
+        return uid, f"{seconds}.{micros:06d}", status == 5  # SZOMB
+
+    def process_identity(self, pid: int) -> CapabilityResult:
+        try:
+            scope = self._process_scope()
+            uid, start, zombie = self._process_record(pid)
+            if zombie:
+                raise ProcessLookupError("client has exited")
+        except (OSError, AttributeError, subprocess.SubprocessError) as exc:
+            return self.result("session_identity", "UNAVAILABLE", str(exc))
+        return self.result("session_identity", "OK", "Darwin boot/start-time identity",
+                           {"kind": "darwin-process", "pid": pid, "scope": scope, "start": start, "uid": uid})
+
+    def session_alive(self, identity: dict) -> CapabilityResult:
+        if not valid_identity(identity) or identity["kind"] != "darwin-process":
+            return super().session_alive(identity)
+        try:
+            scope = self._process_scope()
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self.result("session_alive", "UNAVAILABLE", str(exc))
+        try:
+            if scope != identity["scope"]:
+                alive = False
+            else:
+                uid, start, zombie = self._process_record(identity["pid"])
+                alive = not zombie and (uid, start) == (identity["uid"], identity["start"])
+        except ProcessLookupError:
+            alive = False
+        except (OSError, AttributeError) as exc:
+            return self.result("session_alive", "UNAVAILABLE", str(exc))
+        return self.result("session_alive", "OK", "sampled original Darwin incarnation", {"alive": alive})
 
     def platform_identity(self, machine: str | None = None) -> CapabilityResult:
         detected = (machine or platform.machine()).strip().lower()

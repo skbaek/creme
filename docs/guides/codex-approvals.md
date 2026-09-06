@@ -26,7 +26,7 @@ documentation](https://learn.chatgpt.com/docs/sandboxing/auto-review).
 ## Verify the running conversation
 
 Run `python3 -m creme doctor` from the active Creme session. Its approval rows
-keep three kinds of evidence separate:
+keep the following evidence separate:
 
 - User and project configuration: reviewer intent on disk, including legacy
   inline profiles selected within those files. CLI-selected
@@ -39,6 +39,9 @@ keep three kinds of evidence separate:
   `CODEX_THREAD_ID` (or compatibility `CODEX_SESSION_ID`), including its reviewer
   and restricted boundary. The diagnostic never chooses somebody else's
   latest conversation as a substitute.
+- Recorded thread settings: an own-thread `thread_settings_applied` event,
+  when present. These defaults govern subsequent turns; they do not prove the
+  active turn adopted them. Only the approval fields are retained.
 
 `AUTO_REVIEW_INACTIVE` fails when disk or desktop state requests automatic
 review but the recorded reviewer is `user`. The mismatch can occur with a
@@ -48,9 +51,14 @@ automatic review in the running client, or start a new conversation using the
 updated configuration, then check again. A changed saved preference alone
 does not close the mismatch.
 
-An `OK` recorded row establishes what the latest context says. It is not a
+An `OK` context row establishes what the latest context says. It is not a
 live settings query: a current-turn settings update may not yet have produced
-a new context record. Runtime acceptance additionally requires an actual
+a new context record. If a thread-settings event follows that context in the
+record, doctor reports `CONTEXT_PREDATES_SETTINGS` as a warning instead of
+treating the old reviewer as current or claiming the new defaults are active.
+A subsequently recorded context restores the normal context verdict. Malformed
+settings records leave the evidence unverified. Runtime acceptance requires
+native confirmation that the current-turn update applied, plus an actual
 harmless, non-allowlisted escalation to receive native automatic approval,
 with the intended permission profile still active. Use a safe rejection
 control to verify the reviewer can still refuse inappropriate actions; do
@@ -60,8 +68,9 @@ Missing, unsupported, inaccessible, malformed, or older metadata produces
 `UNVERIFIED`, never a guessed activation. Python versions without `tomllib`
 or `tomli` cannot parse configuration for this optional diagnostic; session
 evidence remains independently available. These observations do not authorize
-execution or change settings. The diagnostic decodes only the invoking
-session's context records and emits allowlisted fields; conversation content,
+execution or change settings. The diagnostic decodes only recognized context
+and thread-setting envelopes in the invoking session's record; unrelated event
+messages are not decoded. It emits allowlisted fields; conversation content,
 reviewer reasoning, credentials, session IDs, and rollout paths are excluded.
 The supported compatibility spelling `guardian_subagent` is normalized to
 `auto_review`; generated configuration uses the canonical `auto_review` name.

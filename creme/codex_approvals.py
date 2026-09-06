@@ -1,8 +1,8 @@
 """Read-only approval routing observations; never a permission authority.
 
-Only the invoking session's turn_context records are decoded. Conversation,
-reviewer output, credentials, session identifiers, and rollout paths are never
-returned. Disk configuration and saved UI state are intent, not activation.
+Only the invoking session's turn_context and thread_settings_applied records
+are decoded. Conversation, reviewer output, credentials, session identifiers,
+and rollout paths are never returned. Thread defaults are not active-turn proof.
 """
 from __future__ import annotations
 
@@ -11,17 +11,26 @@ import os
 import re
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 
 _UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
-_CONTEXT = re.compile(
+_ENVELOPE = (
     rb'^\s*\{\s*(?:(?:"timestamp"\s*:\s*"[^"\r\n]*"|'
     rb'"ordinal"\s*:\s*[0-9]+)\s*,\s*)*'
+)
+_CONTEXT = re.compile(
+    _ENVELOPE +
     rb'"type"\s*:\s*"turn_context"\s*,'
 )
+_THREAD_SETTINGS = re.compile(
+    _ENVELOPE + rb'"type"\s*:\s*"event_msg"\s*,\s*"payload"\s*:\s*\{\s*'
+    rb'"type"\s*:\s*"thread_settings_applied"\s*,'
+)
 _CONTEXT_MARKER = re.compile(rb'(?<!\\)"type"\s*:\s*"turn_context"')
+_SETTINGS_MARKER = re.compile(rb'(?<!\\)"type"\s*:\s*"thread_settings_applied"')
 _LIMIT = 4 * 1024 * 1024
 
 
@@ -41,6 +50,32 @@ def _policy(value: Any) -> str:
     if isinstance(value, dict) and isinstance(value.get("granular"), dict):
         return "granular"
     return _enum(value, {"on-request", "never", "untrusted", "on-failure"})
+
+
+def _routing_fields(metadata: dict[str, Any]) -> dict[str, str]:
+    """Immediately discard every field except normalized approval metadata."""
+    sandbox = metadata.get("sandbox_policy")
+    sandbox = _enum(sandbox.get("type") if isinstance(sandbox, dict) else None,
+                    {"workspace-write", "read-only", "danger-full-access", "external-sandbox"})
+    profile = metadata.get("active_permission_profile")
+    name = profile.get("id") if isinstance(profile, dict) else None
+    name = name if (isinstance(name, str) and not _UUID.fullmatch(name.lstrip(":"))
+                    and re.fullmatch(r":?[A-Za-z][A-Za-z0-9_.:-]{0,63}", name)) else "unverified"
+    permissions = metadata.get("permission_profile")
+    filesystem = permissions.get("file_system") if isinstance(permissions, dict) else None
+    filesystem = _enum(filesystem.get("type") if isinstance(filesystem, dict) else None,
+                       {"restricted", "unrestricted"})
+    return {
+        "reviewer": _reviewer(metadata.get("approvals_reviewer")),
+        "policy": _policy(metadata.get("approval_policy")),
+        "sandbox": sandbox, "profile": name, "filesystem": filesystem,
+    }
+
+
+def _routing_summary(fields: dict[str, str]) -> str:
+    return (f"reviewer={fields['reviewer']}; approval_policy={fields['policy']}; "
+            f"permission profile={fields['profile']}; sandbox={fields['sandbox']}; "
+            f"filesystem={fields['filesystem']}. ")
 
 
 def _read_config(path: Path) -> dict[str, str]:
@@ -130,43 +165,66 @@ def _own_rollout(home: Path, session: str) -> Optional[Path]:
         return None
 
 
-def _turn_metadata(path: Path) -> Optional[dict[str, Any]]:
-    latest = None
+@dataclass
+class RoutingRecords:
+    context: Optional[dict[str, str]] = None
+    context_position: int = 0
+    settings: Optional[dict[str, str]] = None
+    settings_position: int = 0
+
+    @property
+    def context_predates_settings(self) -> bool:
+        return self.settings_position > self.context_position
+
+
+def _routing_records(path: Path, session: str) -> RoutingRecords:
+    records = RoutingRecords()
+    position = 0
     try:
         with path.open("rb") as handle:
             while True:
                 line = handle.readline(_LIMIT + 1)
                 if not line:
                     break
+                position += 1
                 context = bool(_CONTEXT.match(line))
+                settings = bool(_THREAD_SETTINGS.match(line))
                 if not context and _CONTEXT_MARKER.search(line):
                     # An unknown envelope must not leave earlier green evidence
                     # looking current. Do not decode the unrecognized record.
-                    latest = None
+                    records.context = None
+                    records.context_position = position
+                if not settings and _SETTINGS_MARKER.search(line):
+                    records.settings = None
+                    records.settings_position = position
                 oversized = len(line) > _LIMIT
                 if oversized:
                     while line and not line.endswith(b"\n"):
                         line = handle.readline(_LIMIT + 1)
-                if not context:
+                if not context and not settings:
                     continue
-                # A partial/newer malformed context invalidates older evidence.
-                latest = None
-                if oversized:
-                    continue
-                try:
-                    record = json.loads(line)
-                except (ValueError, UnicodeError):
-                    continue
-                payload = record.get("payload")
-                if isinstance(payload, dict):
-                    # Do not retain instructions, IDs, paths, or other payload.
-                    latest = {key: payload.get(key) for key in (
-                        "approvals_reviewer", "approval_policy", "sandbox_policy",
-                        "active_permission_profile", "permission_profile",
-                    )}
+                payload = None
+                if not oversized:
+                    try:
+                        payload = json.loads(line).get("payload")
+                    except (ValueError, UnicodeError):
+                        pass
+                if context:
+                    # A partial/newer malformed context invalidates older evidence.
+                    records.context_position = position
+                    records.context = _routing_fields(payload) if isinstance(payload, dict) else None
+                else:
+                    if isinstance(payload, dict) and isinstance(payload.get("thread_id"), str):
+                        if payload["thread_id"] != session:
+                            continue
+                        metadata = payload.get("thread_settings")
+                    else:
+                        metadata = None
+                    records.settings_position = position
+                    records.settings = _routing_fields(metadata) if isinstance(metadata, dict) else None
     except OSError:
-        return None
-    return latest
+        return RoutingRecords()
+    return records
 
 
 def approval_checks(root: Path, *, home: Optional[Path] = None,
@@ -202,30 +260,33 @@ def approval_checks(root: Path, *, home: Optional[Path] = None,
     rows.append(("Codex: saved desktop mode", "warn" if mode == "unverified" else "ok",
                  f"local mode={mode}; saved UI preference, not runtime evidence"))
     path = _own_rollout(home, session)
-    metadata = _turn_metadata(path) if path else None
+    records = _routing_records(path, session) if path else RoutingRecords()
+    if records.settings_position:
+        settings = records.settings
+        if settings is None:
+            status = "warn"
+            detail = "UNVERIFIED: incomplete or unsupported thread_settings_applied record. "
+        else:
+            status = "ok" if settings["reviewer"] != "unverified" else "warn"
+            detail = "latest recorded thread_settings_applied: " + _routing_summary(settings)
+        rows.append(("Codex: recorded thread settings", status, detail +
+                     "Thread defaults govern subsequent turns; this record does not prove "
+                     "the active turn's approval routing changed."))
+    metadata = records.context
     if metadata is None:
         rows.append(("Codex: recorded approval routing", "warn",
                      "UNVERIFIED: own-session turn_context unavailable; no inference from other "
                      "sessions, disk config, or saved UI. Check the running client's permissions."))
         return rows
-    reviewer = _reviewer(metadata.get("approvals_reviewer"))
-    policy = _policy(metadata.get("approval_policy"))
-    sandbox = metadata.get("sandbox_policy")
-    sandbox = _enum(sandbox.get("type") if isinstance(sandbox, dict) else None,
-                    {"workspace-write", "read-only", "danger-full-access", "external-sandbox"})
-    profile = metadata.get("active_permission_profile")
-    name = profile.get("id") if isinstance(profile, dict) else None
-    # Profile names aid diagnosing the custom-profile reviewer mismatch. A
-    # bounded allowlist keeps malformed metadata from copying arbitrary text.
-    name = name if (isinstance(name, str) and not _UUID.fullmatch(name.lstrip(":"))
-                    and re.fullmatch(r":?[A-Za-z][A-Za-z0-9_.:-]{0,63}", name)) else "unverified"
-    permissions = metadata.get("permission_profile")
-    filesystem = permissions.get("file_system") if isinstance(permissions, dict) else None
-    filesystem = _enum(filesystem.get("type") if isinstance(filesystem, dict) else None,
-                       {"restricted", "unrestricted"})
-    detail = (f"latest recorded turn_context: reviewer={reviewer}; approval_policy={policy}; "
-              f"permission profile={name}; sandbox={sandbox}; filesystem={filesystem}. ")
-    if reviewer == "user":
+    reviewer, policy = metadata["reviewer"], metadata["policy"]
+    sandbox, filesystem = metadata["sandbox"], metadata["filesystem"]
+    detail = "latest recorded turn_context: " + _routing_summary(metadata)
+    if records.context_predates_settings:
+        status = "warn"
+        detail += ("CONTEXT_PREDATES_SETTINGS: a later thread-settings record leaves the "
+                   "active turn's routing UNVERIFIED by these records; confirm native "
+                   "current-turn settings and actual approval receipts. ")
+    elif reviewer == "user":
         status = "fail" if requested_auto else "warn"
         detail += ("AUTO_REVIEW_INACTIVE: recorded requests route to a person. "
                    "Select native auto review in the running client; use `client-profile "

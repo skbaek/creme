@@ -450,6 +450,49 @@ time.sleep(20)
         self.assertTrue(semaphore.snapshot()["hard"] or semaphore.snapshot()["soft"])
 
 
+    def test_expired_hold_cannot_release_a_preserved_live_helper(self):
+        from creme.build_lifecycle import BuildTransaction, recover
+        entered, finish = threading.Event(), threading.Event()
+        worker = owned.ProcessSampler(os.getpid())
+
+        def finish_helper():
+            finish.set()
+            if worker.start_attempted:
+                self.assertTrue(worker._started.wait(5))
+                worker.stop()
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(worker.bootstrap_finished.is_set())
+
+        self.stack.callback(finish_helper)
+        tx = BuildTransaction("g")
+        self.assertTrue(semaphore.adaptive_acquire(
+            "g", "blocked sampler fixture", memory_gib=2, operation_id=tx.id,
+        )[0])
+
+        def blocked_snapshot():
+            entered.set()
+            finish.wait(15)
+            return {}
+
+        with patch.object(owned, "_process_snapshot", side_effect=blocked_snapshot):
+            tx.helpers.append((worker, "blocked sampler"))
+            worker.start()
+            self.assertTrue(entered.wait(5))
+            tx.finalize(owned._terminate_process_group, owned._close_process_pipes,
+                        owned._stop_background, False)
+            self.assertFalse(tx.cleanup_proved)
+            self.assertTrue(worker.is_alive())
+            self.assertFalse(recover(tx.id)[0])
+            hold = semaphore.snapshot()["soft"][0]
+            expired_time = hold["renewed_at"] + hold["lease_seconds"] + 1
+            with patch.object(semaphore, "_now", return_value=expired_time):
+                ok, detail = semaphore.break_expired("g", "expired fixture", HeadroomAdapter())
+            self.assertFalse(ok, detail)
+            self.assertTrue(worker.is_alive())
+            self.assertEqual(semaphore.snapshot()["soft"][0]["operation_id"], tx.id)
+
+
 class RecoveryTest(FixtureTest):
     def writer(self, resource=False):
         script = '''import gc, json, os, sys, threading

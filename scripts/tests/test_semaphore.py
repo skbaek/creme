@@ -263,6 +263,30 @@ class SemaphoreTest(unittest.TestCase):
         self.assertTrue(semaphore.break_expired("old", "orphaned", HeadroomAdapter())[0])
         self.assertTrue(semaphore.acquire("hard", "new", "timing")[0])
 
+    def test_expired_operation_holds_require_exact_recovery(self):
+        operation_id = "a" * 32
+        for contention in ("tolerant", "sensitive"):
+            with self.subTest(contention=contention):
+                ok, detail = semaphore.adaptive_acquire(
+                    "operation", "fixture", memory_gib=2,
+                    contention=contention, operation_id=operation_id,
+                )
+                self.assertTrue(ok, detail)
+                self.expire("operation")
+                state_path = Path(self.tmp.name) / "state.json"
+                before = state_path.read_bytes()
+                with mock.patch.object(self.adapter, "quiet_host") as quiet:
+                    ok, detail = semaphore.break_expired(
+                        "operation", "expired fixture", self.adapter,
+                    )
+                self.assertFalse(ok, detail)
+                self.assertIn(f"build-recover {operation_id}", detail)
+                quiet.assert_not_called()
+                self.assertEqual(state_path.read_bytes(), before)
+                self.assertTrue(semaphore.adaptive_release(
+                    "operation", operation_id=operation_id,
+                )[0])
+
     def test_adaptive_acquire_chooses_soft_when_parallel_budget_fits(self):
         ok, detail = semaphore.adaptive_acquire("goal", "proof", memory_gib=2)
 

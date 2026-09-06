@@ -2270,6 +2270,8 @@ def break_expired(label: str, reason: str, adapter: Optional[Adapter] = None) ->
             return False, "hold not found"
         if not _expired(hold):
             return False, "hold lease is still live"
+        if hold.get("operation_id"):
+            return False, _operation_refusal(hold)
         if hold.get("manual"):
             sessions = selected.gui_sessions(int(hold["uid"]))
             if sessions.status != "OK":

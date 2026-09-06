@@ -165,7 +165,11 @@ class HostWrappersTest(unittest.TestCase):
             with patch.dict(os.environ, {"CODEX_HOME": str(temporary / "codex")}):
                 written = install_host_bundle(root, output, rules, replace=False)
             self.assertIn(output / BROKER_NAME, written)
-            self.assertEqual(check_host_wrappers(root, output, rules)[0].status, STATUS_OK)
+            check = check_host_wrappers(root, output, rules)[0]
+            self.assertEqual(check.status, STATUS_OK)
+            self.assertIn("contained Lake builds", check.detail)
+            self.assertIn("installed files match on disk", check.detail)
+            self.assertIn("are not verified by this check", check.detail)
 
             preflight.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
             check = check_host_wrappers(root, output, rules)[0]
@@ -256,6 +260,21 @@ class HostWrappersTest(unittest.TestCase):
             root, output, rules = self._layout(temporary)
             checks = check_host_wrappers(root, output, rules)
             self.assertEqual(checks[0].status, STATUS_WARN)
+
+    def test_doctor_does_not_claim_uninstalled_build_or_loaded_policy_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            root, output, rules = self._layout(temporary)
+            with patch.dict(os.environ, {"CODEX_HOME": str(temporary / "codex")}):
+                install_host_bundle(root, output, rules, replace=False)
+            check = check_host_wrappers(root, output, rules)[0]
+            self.assertEqual(check.status, STATUS_OK)
+            self.assertIn("coverage: telemetry, reclaim --dry-run and --wind-down", check.detail)
+            self.assertNotIn("contained Lake builds", check.detail)
+            self.assertIn("arbitrary gate/fixture commands are not covered", check.detail)
+            self.assertIn("Running-client rule loading", check.detail)
+            self.assertIn("managed/MCP approval policy", check.detail)
+            self.assertIn("are not verified by this check", check.detail)
 
     def test_doctor_rejects_partial_stale_linked_and_permissive_bundles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

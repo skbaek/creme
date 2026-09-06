@@ -16,6 +16,7 @@ from .guidance import default_path as default_guidance_path
 from .guidance import load as load_guidance
 from .host_wrappers import (
     BROKER_NAME,
+    WORKFLOW_BROKER_NAME,
     RULES_FILENAME,
     default_output_dir as default_host_wrapper_output_dir,
     default_rules_dir as default_host_rules_dir,
@@ -597,13 +598,17 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
     return _sem_result(False, f"unknown action: {action}")
 
 
-def render_codex_profile(workspace: Path) -> str:
+def render_codex_profile(workspace: Path, auto_review: bool = False) -> str:
     creme = workspace / "creme"
     jaune = workspace / "jaune"
     blanc = workspace / "blanc"
     roots = [creme, jaune, blanc]
     lines = [
         'default_permissions = "creme-relay"',
+        *([
+            'approval_policy = "on-request"',
+            'approvals_reviewer = "auto_review"',
+        ] if auto_review else []),
         "",
         "[features]",
         "network_proxy = true",
@@ -633,7 +638,7 @@ def render_codex_profile(workspace: Path) -> str:
 
 def cmd_client_profile(arguments: argparse.Namespace) -> int:
     workspace = Path(arguments.workspace_root).expanduser().resolve() if arguments.workspace_root else ROOT.parent
-    rendered = render_codex_profile(workspace)
+    rendered = render_codex_profile(workspace, auto_review=arguments.auto_review)
     if not arguments.write:
         print("# PREVIEW — review before writing; permission profiles are client-version-sensitive.")
         print(rendered, end="")
@@ -683,6 +688,7 @@ def cmd_host_wrappers(arguments: argparse.Namespace) -> int:
     if not arguments.write:
         expected_rules = render_host_rules(
             output, include_build=BROKER_NAME in rendered,
+            include_workflow=WORKFLOW_BROKER_NAME in rendered,
         )
         rules_changed = not _path_has_text(rules / RULES_FILENAME, expected_rules)
         _json({
@@ -719,6 +725,7 @@ def cmd_host_wrappers(arguments: argparse.Namespace) -> int:
     try:
         expected_rules = render_host_rules(
             output, include_build=BROKER_NAME in rendered,
+            include_workflow=WORKFLOW_BROKER_NAME in rendered,
         )
         rules_changed = not _path_has_text(rules / RULES_FILENAME, expected_rules)
         written = install_host_bundle(
@@ -1059,6 +1066,10 @@ def parser() -> argparse.ArgumentParser:
 
     client = commands.add_parser("client-profile", help="preview a machine-local Codex sibling-access profile")
     client.add_argument("--workspace-root")
+    client.add_argument(
+        "--auto-review", action="store_true",
+        help="opt in to native risk-based approval review; preserve the workspace sandbox",
+    )
     client.add_argument("--output")
     client.add_argument("--write", action="store_true")
     client.add_argument("--replace", action="store_true")

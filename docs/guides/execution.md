@@ -22,6 +22,10 @@ commits, owned paths, last green evidence, active packets, open decisions, and
 the next coherent unit. State may live in any configured goal store; it never
 becomes a hidden dependency of the public workflow.
 
+Before launching the planned units, apply the [escalation procedure](escalation.md)
+to their access and capability needs as a group. Preserve the resulting coverage
+inventory in the state brief and update it when operations or policy change.
+
 ## Delegate by ownership
 
 Delegate only bounded packets with disjoint file ownership, stated authority,

@@ -80,7 +80,8 @@ class ManagedRunnerTest(FixtureTest):
         sink = io.StringIO()
         executor = runner.ManagedExecutor("managed-fixture", self.root, diagnostics=sink, estimates=estimates)
         executor.bind(context)
-        return executor, Spec(1, key, "fixture", "body", role, argv, str(self.root), resource, "contract", "inputs"), sink
+        return executor, Spec(1, key, "fixture", "body", role, argv, str(self.root), resource, "contract", "inputs",
+                              timeout=180 if role == "material" else None), sink
 
     def test_separate_bytes_and_light_no_hold(self):
         executor, spec, sink = self.operation("import os; os.write(1,b'\\xffA\\r\\n'); os.write(2,b'OK fake summary\\n')")
@@ -100,6 +101,22 @@ class ManagedRunnerTest(FixtureTest):
         self.assertEqual(acquire.call_count, 1)
         self.assertEqual(release.call_count, 1)
         self.assertEqual(acquire.call_args.kwargs["operation_id"], release.call_args.kwargs["operation_id"])
+
+    def test_direct_child_signal_is_fatal_after_cleanup(self):
+        for resource, role in (("light", "gate"), ("elaboration", "material")):
+            executor, spec, _ = self.operation("import os,signal; os.write(1,b'OK printed before signal\\n'); os.kill(os.getpid(),signal.SIGTERM)", resource, role)
+            with patch.object(semaphore, "adaptive_release", wraps=semaphore.adaptive_release) as release:
+                with self.assertRaisesRegex(Fatal, "child terminated by signal 15"):
+                    executor.capture(spec)
+            self.assertEqual(release.call_count, 0 if resource == "light" else 1)
+            self.assertTrue(all(proc.poll() is not None for proc, _ in self.children))
+
+    def test_ordinary_positive_child_failure_remains_a_result(self):
+        for status in (2, 143):
+            executor, spec, _ = self.operation(f"import sys; sys.exit({status})", "elaboration", "material")
+            result = executor.capture(spec)
+            self.assertEqual(result.returncode, status)
+            self.assertEqual(result.lifecycle, "released")
 
     def test_failed_cleanup_cannot_credit_printed_green(self):
         executor, spec, _ = self.operation("print('OK — fixture: green')", "elaboration")

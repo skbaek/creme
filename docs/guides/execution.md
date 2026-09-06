@@ -325,9 +325,12 @@ ordinary owned-build bootstrap followed by another `--requirements` inventory.
 This initial conservative protocol still requires justified replacement
 estimates when cost-relevant inputs change; it does not infer that old measured
 peaks bound new work. For artifact integrity, the inventory additionally binds
-checked power-of-two upper bounds on cache/output file population and largest
-file size. A recorded estimate must cover that entire envelope. These bounds
-are cost-input descriptors, never a memory estimate or permission to lower one.
+checked power-of-two upper bounds on all cache/output entries (including empty
+directories), total retained path bytes and largest regular-file size. The
+nonexecuting census refuses symlinks, special entries, missing roots and repeated
+directory identities before admission; it does not silently omit traversed
+aliases. A recorded estimate must cover that entire envelope plus runtime
+overhead. These descriptors never infer a memory estimate or permit lowering one.
 
 Each non-build operation reuses the accepted transaction journal, gated group
 launch, deferred cancellation and exact release/recovery protocol. Actual
@@ -338,6 +341,10 @@ Blanc's ignored `.lake/managed-gate-receipts/`, and is displayed even on failed
 prerequisites. Gate manifests record actual operations and cleanup outcomes.
 The new command is an application entry point, not an installed permission
 delegate, and does not expand a containment broker or allow arbitrary commands.
+Known direct-child signal termination (a negative POSIX return code) is fatal
+after cleanup/release, including material fingerprint phases. Ordinary positive
+failure statuses retain their prior semantics; a shell/Lake-encoded positive
+status alone does not prove that an inner process received a signal.
 
 ## Wind down Lean work
 

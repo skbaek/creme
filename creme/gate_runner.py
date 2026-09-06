@@ -277,6 +277,12 @@ class ManagedExecutor:
             raise fatal(f"managed renewal refused: {renewer.refused}")
         if failure is not None:
             raise fatal(f"managed operation failed: {type(failure).__name__}: {failure}") from failure
+        # Popen's negative POSIX status proves that the directly owned child
+        # died by signal. Classify it only after finalization, before callers
+        # can turn a failed material result into an ordinary input fallback.
+        # Positive shell/Lake statuses do not uniquely identify inner signals.
+        if status < 0:
+            raise fatal(f"managed child terminated by signal {-status}")
         receipt = {"kind": "owned-gate", "key": spec.key, "phase": spec.phase,
                    "admission": "released" if heavy else "not-required-light",
                    "cost_identity": spec.cost_identity,

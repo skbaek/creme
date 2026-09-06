@@ -55,6 +55,21 @@ def _wait_dead(pid: int, timeout: float = 3.0) -> bool:
     return not _pid_alive(pid)
 
 
+def _reap_fixture(pid: int, *, group_pid: Optional[int] = None) -> bool:
+    """Best-effort finalizer for a process owned by a real-process fixture."""
+    if _pid_alive(pid) and group_pid is not None:
+        try:
+            os.killpg(group_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return _wait_dead(pid)
+
+
 @contextmanager
 def _ledger_and_log():
     """Isolate both the build ledger and the shared coordination log."""
@@ -1027,13 +1042,8 @@ class BuildOwnershipTest(unittest.TestCase):
                 self.assertTrue(_wait_dead(direct))
                 self.assertTrue(_wait_dead(descendant))
             finally:
-                if _pid_alive(direct) or _pid_alive(descendant):
-                    try:
-                        os.killpg(direct, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                self.assertTrue(_wait_dead(direct))
-                self.assertTrue(_wait_dead(descendant))
+                self.assertTrue(_reap_fixture(direct, group_pid=direct))
+                self.assertTrue(_reap_fixture(descendant, group_pid=direct))
 
     def test_priority_launcher_preflight_reaps_before_interrupt_propagation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1096,12 +1106,7 @@ class BuildOwnershipTest(unittest.TestCase):
                         if proc.poll() is None:
                             proc.kill()
                             proc.wait(timeout=2)
-                        if _pid_alive(direct):
-                            try:
-                                os.killpg(direct, signal.SIGKILL)
-                            except ProcessLookupError:
-                                pass
-                        self.assertTrue(_wait_dead(direct))
+                        self.assertTrue(_reap_fixture(direct, group_pid=direct))
 
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_failed_launch_preflight_precedes_admission_and_writes_no_hold_rows(
@@ -1419,7 +1424,7 @@ class BuildOwnershipTest(unittest.TestCase):
             child = int(child_path.read_text())
             self.assertEqual(code, 7)
             self.assertEqual(released, ["dead"])
-            self.assertTrue(_wait_dead(child))
+            self.assertTrue(_reap_fixture(child))
 
     def test_parent_only_sigterm_cleans_children_before_release(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1574,12 +1579,7 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path({str(w
                         if proc.poll() is None:
                             proc.kill()
                             proc.wait(timeout=2)
-                        if _pid_alive(child):
-                            try:
-                                os.killpg(child, signal.SIGKILL)
-                            except ProcessLookupError:
-                                pass
-                        self.assertTrue(_wait_dead(child))
+                        self.assertTrue(_reap_fixture(child, group_pid=child))
 
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_denied_cleanup_preserves_the_admission_hold(self, _probe: Mock) -> None:

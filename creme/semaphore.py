@@ -695,7 +695,7 @@ def _admission_decision(
         return _refuse(
             "ALREADY_HELD", "label already owns the hard hold; use renew", waitable=False
         )
-    if matching_soft and requested_kind != "hard":
+    if matching_soft:
         return _refuse(
             "ALREADY_HELD", "label already owns a soft hold; use renew", waitable=False
         )
@@ -713,7 +713,6 @@ def _admission_decision(
             "DEFER_FOR_HARD", f"soft holds block hard acquisition: {labels}", waitable=True
         )
 
-    converting = requested_kind == "hard" and bool(matching_soft)
     # A queue pass evaluates every waiter against one sample so arrival order
     # is decided from a single view of the host, not a drifting one.
     if sample is None:
@@ -727,7 +726,7 @@ def _admission_decision(
     requires_hard = requested_kind == "hard" or contention != "tolerant"
     reasons = []
 
-    if not converting and free_percent is not None and free_percent < ADMISSION_DRAIN_PERCENT:
+    if free_percent is not None and free_percent < ADMISSION_DRAIN_PERCENT:
         return _refuse(
             "LIGHT_ONLY",
             f"available memory is {free_percent}% (<{ADMISSION_DRAIN_PERCENT}%); "
@@ -735,11 +734,11 @@ def _admission_decision(
             waitable=False,
         )
 
-    if not converting and free_percent is None:
+    if free_percent is None:
         requires_hard = True
         reasons.append(f"memory headroom unavailable ({sample.detail}); limited mode serializes heavy work")
 
-    if not converting and reserve_gib is not None:
+    if reserve_gib is not None:
         capacity_gib = max(0.0, float(total_gib) - reserve_gib)
         if charged_gib > capacity_gib:
             # No amount of waiting shrinks the request below the host budget.
@@ -1421,6 +1420,20 @@ def _admit(
     if invalid:
         return False, invalid
     with locked_state() as (path, state):
+        queue, _notes = _load_queue(path.parent)
+        now = _now()
+        queue["waiters"], dropped = _prune_waiters(queue["waiters"], now)
+        _log_dropped_waiters(path.parent, dropped, now)
+        if dropped:
+            _save_queue(path.parent, queue)
+        conflict = _goal_lane_conflict(state, queue["waiters"], label)
+        if conflict is not None:
+            decision, detail = conflict
+            _log_to(
+                path.parent, f"{requested_kind}-acquire", label, "REFUSED",
+                f"{decision}: {detail}",
+            )
+            return False, f"{decision} — {detail}"
         signals = _refresh_signals(path.parent, state, selected, _now())
         admitted, selected_kind, decision, detail, _ = _admission_decision(
             state,
@@ -1552,6 +1565,28 @@ def _wait_summary(
     return summary
 
 
+def _goal_lane_conflict(
+    state: dict[str, Any],
+    waiters: list[dict[str, Any]],
+    label: str,
+    *,
+    waiter_id: Optional[str] = None,
+) -> Optional[tuple[str, str]]:
+    """Return the older live lane that prevents a same-goal request."""
+    hard = state["hard"]
+    if hard and hard["label"] == label:
+        return "ALREADY_HELD", "label already owns the hard hold; use renew"
+    if any(hold["label"] == label for hold in state["soft"]):
+        return "ALREADY_HELD", "label already owns a soft hold; use renew"
+    matching = [entry for entry in _ordered_waiters(waiters) if entry["label"] == label]
+    if matching and matching[0]["id"] != waiter_id:
+        return (
+            "ALREADY_WAITING",
+            "label already has a live admission request; let it finish or cancel it before retrying",
+        )
+    return None
+
+
 def _waiting_admit(
     label: str,
     note: str,
@@ -1672,6 +1707,30 @@ def _waiting_admit(
                 now = _now()
                 queue["waiters"], dropped = _prune_waiters(queue["waiters"], now)
                 _log_dropped_waiters(root, dropped, now)
+                conflict = _goal_lane_conflict(
+                    state, queue["waiters"], label, waiter_id=waiter_id
+                )
+                if conflict is not None:
+                    decision, detail = conflict
+                    was_registered = any(
+                        item["id"] == waiter_id for item in queue["waiters"]
+                    )
+                    if was_registered:
+                        queue["waiters"] = [
+                            item for item in queue["waiters"] if item["id"] != waiter_id
+                        ]
+                    if dropped or was_registered:
+                        _save_queue(root, queue)
+                    registered = False
+                    decided = True
+                    action = "wait-acquire" if announced else "adaptive-acquire"
+                    prefix = (
+                        f"{decision}: waiting cannot change this verdict; "
+                        f"waiter={waiter_id[:8]}; "
+                        if announced else f"{decision}: "
+                    )
+                    _log_to(root, action, label, "REFUSED", prefix + detail)
+                    return False, f"{decision} — {detail}"
                 queue["waiters"] = [
                     item for item in queue["waiters"] if item["id"] != waiter_id
                 ]

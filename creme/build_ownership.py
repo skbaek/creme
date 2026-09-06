@@ -1011,19 +1011,55 @@ def lean_proxy_main(argv: list[str]) -> int:
 
 
 def nice_main(argv: list[str]) -> int:
-    if len(argv) < 3 or argv[:2] != ["-n", "10"]:
+    preflight = argv == ["--preflight"]
+    if not preflight and (len(argv) < 3 or argv[:2] != ["-n", "10"]):
         print("creme priority launcher: expected `-n 10 EXECUTABLE ...`; refusing", file=os.sys.stderr)
         return GUARD_REFUSAL_EXIT
-    executable = Path(argv[2])
-    if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
-        print("creme priority launcher: executable identity is invalid; refusing", file=os.sys.stderr)
-        return GUARD_REFUSAL_EXIT
+    executable: Optional[Path] = None
+    if not preflight:
+        executable = Path(argv[2])
+        if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
+            print("creme priority launcher: executable identity is invalid; refusing", file=os.sys.stderr)
+            return GUARD_REFUSAL_EXIT
     try:
         os.nice(10)
     except OSError as exc:
         print(f"creme priority launcher: cannot apply niceness: {exc}; refusing", file=os.sys.stderr)
         return GUARD_REFUSAL_EXIT
+    if preflight:
+        return 0
+    assert executable is not None
     os.execv(str(executable), [str(executable), *argv[3:]])
+
+
+def _preflight_priority_launcher(
+    launcher: Path,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: float = 5.0,
+) -> tuple[bool, str]:
+    """Exercise niceness in a bounded child without changing the parent."""
+    try:
+        completed = subprocess.run(
+            [str(launcher), "--preflight"],
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=timeout_seconds,
+            start_new_session=True,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"priority launcher did not finish within {timeout_seconds:g}s"
+    except OSError as exc:
+        return False, f"priority launcher could not start: {exc}"
+    detail = completed.stdout.strip()
+    if completed.returncode != 0:
+        return False, detail or f"priority launcher exited {completed.returncode}"
+    return True, "priority launch preflight passed"
 
 
 def _swap_gib() -> Optional[float]:
@@ -2433,6 +2469,27 @@ def run_lake_build(
         and probe_evidence["stale"] == 0
         and not census
     )
+    try:
+        priority_launcher = guard_bin() / "nice"
+    except (OSError, RuntimeError) as exc:
+        print(json.dumps({
+            "status": "REFUSED",
+            "detail": f"priority launch preflight failed: launcher is unavailable: {exc}",
+        }, sort_keys=True), file=output)
+        return GUARD_REFUSAL_EXIT
+    env = lake_env()
+    env["LEAN_NUM_THREADS"] = str(threads)
+    preflight_ok, preflight_detail = _preflight_priority_launcher(
+        priority_launcher, cwd=worktree, env=env
+    )
+    if not preflight_ok:
+        print(json.dumps({
+            "status": "REFUSED",
+            "detail": f"priority launch preflight failed: {preflight_detail}",
+        }, sort_keys=True), file=output)
+        return GUARD_REFUSAL_EXIT
+    args = [str(priority_launcher), "-n", "10", *lake_args]
+
     if fresh:
         # Nothing is stale: the build restores or links, and elaborates no
         # module.  It takes no hold, so a session behind a fresh checkpoint
@@ -2472,6 +2529,12 @@ def run_lake_build(
             "estimate": estimate_evidence,
         }, sort_keys=True), file=output)
         return 2
+
+    def release_hold() -> tuple[bool, str]:
+        if fresh:
+            return True, "no hold was taken"
+        return semaphore.adaptive_release(goal)
+
     dependency_rev: Optional[str] = None
     if census:
         update = subprocess.run(
@@ -2490,22 +2553,8 @@ def run_lake_build(
             }, sort_keys=True), file=output)
             return update.returncode or 2
         digests = worktree_digests(worktree)
-    def release_hold() -> tuple[bool, str]:
-        if fresh:
-            return True, "no hold was taken"
-        return semaphore.adaptive_release(goal)
-
-    try:
-        priority_launcher = guard_bin() / "nice"
-    except (OSError, RuntimeError) as exc:
-        release_hold()
-        print(json.dumps({"status": "REFUSED", "detail": f"priority launcher is unavailable: {exc}"}, sort_keys=True), file=output)
-        return GUARD_REFUSAL_EXIT
-    args = [str(priority_launcher), "-n", "10", *lake_args]
     before = _swap_gib()
     started = time.monotonic()
-    env = lake_env()
-    env["LEAN_NUM_THREADS"] = str(threads)
     proc: Optional[subprocess.Popen[str]] = None
     sampler: Optional[ProcessSampler] = None
     renewer: Optional[RenewalThread] = None

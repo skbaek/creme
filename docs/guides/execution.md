@@ -103,6 +103,12 @@ pressure-gated; they cannot bypass a low-memory refusal. `release` removes
 whichever hold kind adaptive admission selected. Explicit soft/hard releases
 remain available for compatibility.
 
+One goal label has one live heavy-admission lane. A second request receives
+`ALREADY_WAITING` while that goal has a queued request, or `ALREADY_HELD` while
+it owns a hold; it does not replace, upgrade, or join the earlier operation.
+Let the request finish, cancel its wait, or release its hold before retrying.
+The label identifies ownership scope, not command identity.
+
 ### Wait in one call; never poll by hand
 
 `--wait SECS` on `adaptive-acquire` and on `creme lake-build` queues the
@@ -360,6 +366,14 @@ catalogue's full target at checkpoints. Bare `lake build`, MCP `lean_build`,
 `lean_profile_proof` (which shells to `lake env lean`), language-server
 dependency builds, and startup cache downloads are not compilation owners and
 are refused or disabled.
+
+Before queueing or taking a hold, an owned build runs the generated niceness
+launcher once in a bounded child preflight. The child checks the same
+`nice -n 10` capability without changing the wrapper process's priority. A
+failure refuses before admission and writes no enqueue, hold, or release row;
+the real build launch repeats the niceness check so a later failure still goes
+through the existing process cleanup and hold release path. Probes remain
+admission-free, and a fresh build still takes no hold.
 
 Creme supplies `LAKE_CACHE_DIR` as the canonical checkout's
 `.creme/lake-cache/` for owned builds, probes, and guarded MCP processes,

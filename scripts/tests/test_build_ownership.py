@@ -355,7 +355,10 @@ class BuildOwnershipTest(unittest.TestCase):
     def test_refused_admission_spawns_no_lake(self, resolve: Mock, goal_label: Mock, acquire: Mock, popen: Mock, probe: Mock) -> None:
         acquire.return_value = (False, "DEFER_FOR_HARD — foreign hard hold")
         output = io.StringIO()
-        with _ledger_and_log():
+        with _ledger_and_log(), patch(
+            "creme.build_ownership._preflight_priority_launcher",
+            return_value=(True, "priority launch preflight passed"),
+        ):
             self.assertEqual(
                 owned.run_lake_build("g", ["T"], contention="sensitive", memory_gib=8, stdout=output),
                 2,
@@ -890,6 +893,59 @@ class BuildOwnershipTest(unittest.TestCase):
             self.assertEqual(owned.nice_main(["-n", "10", "/bin/sh", "-c", "true"]), owned.GUARD_REFUSAL_EXIT)
             execv.assert_not_called()
 
+    def test_priority_launcher_preflight_checks_niceness_without_exec(self) -> None:
+        with patch("creme.build_ownership.os.nice") as nice, patch(
+            "creme.build_ownership.os.execv"
+        ) as execv:
+            self.assertEqual(owned.nice_main(["--preflight"]), 0)
+        nice.assert_called_once_with(10)
+        execv.assert_not_called()
+
+    def test_priority_launcher_preflight_reports_niceness_refusal(self) -> None:
+        with patch(
+            "creme.build_ownership.os.nice", side_effect=PermissionError("denied")
+        ), patch("creme.build_ownership.os.execv") as execv:
+            self.assertEqual(
+                owned.nice_main(["--preflight"]), owned.GUARD_REFUSAL_EXIT
+            )
+        execv.assert_not_called()
+
+    @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
+    def test_failed_launch_preflight_precedes_admission_and_writes_no_hold_rows(
+        self, _probe: Mock,
+    ) -> None:
+        output = io.StringIO()
+        with _ledger_and_log() as (_ledger, log), patch(
+            "creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")
+        ), patch(
+            "creme.build_ownership.resolve_toolchain",
+            return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool")),
+        ), patch(
+            "creme.build_ownership.guard_bin", return_value=Path("/guard")
+        ), patch(
+            "creme.build_ownership._preflight_priority_launcher",
+            return_value=(False, "creme priority launcher: cannot apply niceness: denied; refusing"),
+        ) as preflight, patch(
+            "creme.build_ownership.semaphore.adaptive_acquire"
+        ) as acquire, patch(
+            "creme.build_ownership.semaphore.adaptive_release"
+        ) as release, patch(
+            "creme.build_ownership.subprocess.Popen"
+        ) as popen:
+            code = owned.run_lake_build(
+                "g", ["T"], contention="sensitive", memory_gib=8, stdout=output
+            )
+            semaphore_log = log.read_text(encoding="utf-8") if log.exists() else ""
+
+        self.assertEqual(code, owned.GUARD_REFUSAL_EXIT)
+        preflight.assert_called_once()
+        acquire.assert_not_called()
+        release.assert_not_called()
+        for call in popen.call_args_list:
+            self.assertNotIn("/tool/lake", " ".join(map(str, call.args[0])))
+        self.assertEqual(semaphore_log, "")
+        self.assertIn("launch preflight failed", output.getvalue())
+
     def test_parent_only_sigterm_cleans_children_before_release(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -907,7 +963,13 @@ class BuildOwnershipTest(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_lake.chmod(0o700)
-            fake_nice.write_text("#!/bin/sh\nshift 2\nexec \"$@\"\n", encoding="utf-8")
+            fake_nice.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--preflight\" ]; then exit 0; fi\n"
+                "shift 2\n"
+                "exec \"$@\"\n",
+                encoding="utf-8",
+            )
             fake_nice.chmod(0o700)
             script = f"""
 import os
@@ -988,6 +1050,9 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
         output = io.StringIO()
         with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), patch(
             "creme.build_ownership.resolve_toolchain", return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))
+        ), patch(
+            "creme.build_ownership._preflight_priority_launcher",
+            return_value=(True, "priority launch preflight passed"),
         ), patch("creme.build_ownership.semaphore.adaptive_acquire", return_value=(True, "ADMITTED_HARD")), patch(
             "creme.build_ownership.semaphore.adaptive_release"
         ) as release, patch("creme.build_ownership.guard_bin", return_value=Path("/guard")), patch(
@@ -1065,6 +1130,9 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
 
         with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), patch(
             "creme.build_ownership.resolve_toolchain", return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))
+        ), patch(
+            "creme.build_ownership._preflight_priority_launcher",
+            return_value=(True, "priority launch preflight passed"),
         ), patch("creme.build_ownership.semaphore.adaptive_acquire", return_value=(True, "ADMITTED_HARD")), patch(
             "creme.build_ownership.semaphore.adaptive_release", side_effect=release
         ), patch("creme.build_ownership.guard_bin", return_value=Path("/guard")), patch(
@@ -1292,7 +1360,8 @@ class RowEvidenceTest(unittest.TestCase):
 
     def run_build(self, ledger: Path, *, exit_code: int, rebuilt: list[str],
                   peak_mib: float, memory_gib: int = 4, contention="sensitive",
-                  probe: Optional[dict] = None, classify=None):
+                  probe: Optional[dict] = None, classify=None,
+                  lifecycle: Optional[list[str]] = None):
         captured: list[dict] = []
         output = io.StringIO()
         probe_patch = patch(
@@ -1338,16 +1407,34 @@ class RowEvidenceTest(unittest.TestCase):
             def stop(self):
                 pass
 
+        def mark(name: str, value):
+            if lifecycle is not None:
+                lifecycle.append(name)
+            return value
+
         with probe_patch, classify_patch, \
              patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), \
              patch("creme.build_ownership.resolve_toolchain",
                    return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))), \
              patch("creme.build_ownership.semaphore.adaptive_acquire",
-                   return_value=(True, "ADMITTED_HARD")), \
+                   side_effect=lambda *_args, **_kwargs: mark(
+                       "acquire", (True, "ADMITTED_HARD")
+                   )), \
              patch("creme.build_ownership.semaphore.adaptive_release",
-                   return_value=(True, "released")), \
+                   side_effect=lambda *_args, **_kwargs: mark(
+                       "release", (True, "released")
+                   )), \
              patch("creme.build_ownership.guard_bin", return_value=Path("/guard")), \
-             patch("creme.build_ownership.subprocess.Popen", return_value=FakeProc()), \
+             patch("creme.build_ownership._preflight_priority_launcher",
+                   side_effect=lambda *_args, **_kwargs: mark(
+                       "preflight", (True, "priority launch preflight passed")
+                   )), \
+             patch("creme.build_ownership.subprocess.Popen",
+                   side_effect=lambda args, **_kwargs: (
+                       mark("launch", FakeProc())
+                       if args and str(args[0]) == "/guard/nice"
+                       else FakeProc()
+                   )), \
              patch("creme.build_ownership.ProcessSampler", FakeSampler), \
              patch("creme.build_ownership.RenewalThread", FakeRenewer), \
              patch("creme.build_ownership._process_group_alive", return_value=False), \
@@ -1375,6 +1462,47 @@ class RowEvidenceTest(unittest.TestCase):
                 ledger, exit_code=0, rebuilt=["A"], peak_mib=3642.0, memory_gib=4
             )
         self.assertEqual(row["estimate_under_cover_gib"], 0.0)
+
+    def test_a_fresh_build_keeps_the_no_hold_fast_path_after_preflight(self) -> None:
+        lifecycle: list[str] = []
+        with _ledger_and_log() as (ledger, _):
+            _code, row, text = self.run_build(
+                ledger,
+                exit_code=0,
+                rebuilt=[],
+                peak_mib=100.0,
+                probe={
+                    "roots": ["T"], "package_roots": ["T"],
+                    "resolution": "T (module)", "stale": 0,
+                    "detail": "fresh fixture", "stale_set": [], "graph": {},
+                },
+                lifecycle=lifecycle,
+            )
+        self.assertEqual(row["admission"], "NOT_REQUIRED_FRESH")
+        self.assertIn("takes no hold", text)
+        self.assertEqual(lifecycle, ["preflight", "launch"])
+
+    def test_preflight_precedes_admission_and_real_launch_keeps_nice_command(self) -> None:
+        lifecycle: list[str] = []
+        with _ledger_and_log() as (ledger, _):
+            code, row, _text = self.run_build(
+                ledger, exit_code=0, rebuilt=["A"], peak_mib=100.0,
+                lifecycle=lifecycle,
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(lifecycle, ["preflight", "acquire", "launch", "release"])
+        self.assertEqual(row["command"][:3], ["/guard/nice", "-n", "10"])
+
+    def test_late_priority_launcher_failure_still_releases_the_hold(self) -> None:
+        lifecycle: list[str] = []
+        with _ledger_and_log() as (ledger, _):
+            code, row, _text = self.run_build(
+                ledger, exit_code=owned.GUARD_REFUSAL_EXIT, rebuilt=[],
+                peak_mib=0.0, lifecycle=lifecycle,
+            )
+        self.assertEqual(code, owned.GUARD_REFUSAL_EXIT)
+        self.assertEqual(lifecycle, ["preflight", "acquire", "launch", "release"])
+        self.assertEqual(row["exit"], owned.GUARD_REFUSAL_EXIT)
 
     def test_the_restart_instruction_is_its_own_stdout_line(self) -> None:
         with _ledger_and_log() as (ledger, _):

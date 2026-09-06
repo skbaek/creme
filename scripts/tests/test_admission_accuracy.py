@@ -466,6 +466,7 @@ class _Harness:
         self.rows: list[dict] = []
         self.acquire = mock.Mock(return_value=(True, "ADMITTED_SOFT"))
         self.release = mock.Mock(return_value=(True, "released"))
+        self.preflight = mock.Mock(return_value=(True, "priority launch preflight passed"))
         self.output = io.StringIO()
 
     def run(self, **kwargs) -> int:
@@ -514,6 +515,7 @@ class _Harness:
             patch("creme.build_ownership.semaphore.adaptive_acquire", self.acquire),
             patch("creme.build_ownership.semaphore.adaptive_release", self.release),
             patch("creme.build_ownership.guard_bin", return_value=Path("/guard")),
+            patch("creme.build_ownership._preflight_priority_launcher", self.preflight),
             patch("creme.build_ownership.subprocess.Popen", return_value=FakeProc()),
             patch("creme.build_ownership.ProcessSampler", FakeSampler),
             patch("creme.build_ownership.RenewalThread", FakeRenewer),
@@ -562,6 +564,7 @@ class WrapperSurfaceTest(unittest.TestCase):
         self.assertIn("Lib.C", row["stale_detail"])
         summary = json.loads(text.splitlines()[-1])
         self.assertEqual(summary["stale_set"], ["Lib.A", "Lib.B", "Lib.C"])
+        harness.preflight.assert_not_called()
 
     def test_an_unmeasurable_closure_says_so_on_the_probe(self) -> None:
         harness = _Harness(
@@ -581,6 +584,7 @@ class WrapperSurfaceTest(unittest.TestCase):
         harness.release.assert_not_called()
         self.assertEqual(harness.rows[0]["admission"], "NOT_REQUIRED_FRESH")
         self.assertIn("takes no hold", harness.output.getvalue())
+        harness.preflight.assert_called_once()
 
     def test_a_stale_build_still_takes_a_hold_and_releases_it(self) -> None:
         harness = _Harness(probe=self.probe(["A"]))

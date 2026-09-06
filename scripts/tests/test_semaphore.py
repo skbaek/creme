@@ -218,16 +218,19 @@ class SemaphoreTest(unittest.TestCase):
                             self.assertEqual(path, neutral / "state.json")
                             self.assertEqual(state, semaphore._empty_state())
 
-    def test_xy_interleaving_and_conversion(self):
+    def test_xy_interleaving_refuses_same_goal_hold_replacement(self):
         self.assertTrue(semaphore.acquire("soft", "X", "build")[0])
         self.assertTrue(semaphore.acquire("soft", "Y", "build")[0])
         self.assertFalse(semaphore.acquire("hard", "Y", "timing")[0])
         self.assertTrue(semaphore.release("soft", "X")[0])
-        self.assertTrue(semaphore.acquire("hard", "Y", "timing")[0])
+        refused, detail = semaphore.acquire("hard", "Y", "timing")
+        self.assertFalse(refused)
+        self.assertIn("ALREADY_HELD", detail)
         state = semaphore.snapshot()
-        self.assertEqual(state["hard"]["label"], "Y")
-        self.assertEqual(state["soft"], [])
-        self.assertFalse(semaphore.acquire("soft", "X", "build")[0])
+        self.assertIsNone(state["hard"])
+        self.assertEqual([hold["label"] for hold in state["soft"]], ["Y"])
+        self.assertTrue(semaphore.release("soft", "Y")[0])
+        self.assertTrue(semaphore.acquire("hard", "Y", "timing")[0])
 
     def test_expired_hold_still_blocks_until_certified_break(self):
         semaphore.acquire("soft", "old", "work", 1)
@@ -733,6 +736,119 @@ class QueueTest(unittest.TestCase):
             thread.join(timeout=15)
         self.assertEqual(admitted, ["first", "second"], results)
         self.assertTrue(all(outcome[0] for outcome in results.values()), results)
+
+    def test_same_goal_newer_tolerant_wait_cannot_overtake_older_sensitive_wait(self):
+        """E4: a newer fitting request must leave the older goal lane intact."""
+        self.assertTrue(semaphore.adaptive_acquire(
+            "holder", "blocking", memory_gib=2, contention="tolerant",
+            adapter=self.adapter, policy=self.policy,
+        )[0])
+        registered = threading.Event()
+        cancel = threading.Event()
+        older_result: dict[str, object] = {}
+
+        def controlled_sleep(_seconds):
+            registered.set()
+            if not cancel.wait(5):
+                raise AssertionError("test did not cancel the older waiter")
+            raise KeyboardInterrupt
+
+        def older_waiter():
+            try:
+                older_result["outcome"] = semaphore._waiting_admit(
+                    "same-goal", "older sensitive", 600,
+                    memory_gib=4, contention="sensitive",
+                    adapter=self.adapter, policy=self.policy,
+                    wait_seconds=30, poll_seconds=1, sleep=controlled_sleep,
+                )
+            except KeyboardInterrupt:
+                older_result["cancelled"] = True
+
+        thread = threading.Thread(target=older_waiter)
+        thread.start()
+        self.assertTrue(registered.wait(2), "older waiter did not register")
+        original = semaphore._load_queue(self.root)[0]["waiters"]
+        self.assertEqual(len(original), 1)
+        original_id = original[0]["id"]
+        try:
+            admitted, detail = self.wait_acquire(
+                "same-goal", seconds=1, memory_gib=2, contention="tolerant", poll=0.01
+            )
+            self.assertEqual(semaphore._load_queue(self.root)[0]["waiters"], original)
+            if admitted:
+                semaphore.adaptive_release("same-goal")
+        finally:
+            cancel.set()
+            thread.join(timeout=5)
+            semaphore.adaptive_release("holder")
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(admitted, detail)
+        self.assertIn("ALREADY_WAITING", detail)
+        self.assertTrue(older_result.get("cancelled"))
+        self.assertEqual(semaphore._load_queue(self.root)[0]["waiters"], [])
+        rows = [row for row in self.log_rows() if row["label"] == "same-goal"]
+        self.assertEqual(
+            [row["action"] for row in rows],
+            ["wait-enqueue", "adaptive-acquire", "wait-acquire"],
+        )
+        self.assertEqual(rows[0]["detail"].split("waiter=", 1)[1][:8], original_id[:8])
+        self.assertIn("WAIT_CANCELLED", rows[-1]["detail"])
+        retry, retry_detail = self.wait_acquire("same-goal", seconds=1, poll=0.01)
+        self.assertTrue(retry, retry_detail)
+
+    def test_immediate_request_refuses_while_same_goal_waiter_is_live(self):
+        self.seed_waiter("same-goal", pid=os.getpid(), age=1.0)
+        before = list(semaphore._load_queue(self.root)[0]["waiters"])
+
+        admitted, detail = semaphore.adaptive_acquire(
+            "same-goal", "new immediate request", memory_gib=2,
+            contention="tolerant", adapter=self.adapter, policy=self.policy,
+        )
+
+        self.assertFalse(admitted)
+        self.assertIn("ALREADY_WAITING", detail)
+        self.assertEqual(semaphore._load_queue(self.root)[0]["waiters"], before)
+        self.assertEqual(semaphore.snapshot()["soft"], [])
+
+    def test_dead_same_goal_waiter_is_pruned_before_legitimate_retry(self):
+        dead = subprocess.Popen([os.sys.executable, "-c", "pass"])
+        dead.wait()
+        self.seed_waiter("same-goal", pid=dead.pid, age=600.0)
+
+        admitted, detail = semaphore.adaptive_acquire(
+            "same-goal", "retry", memory_gib=2, contention="tolerant",
+            adapter=self.adapter, policy=self.policy,
+        )
+
+        self.assertTrue(admitted, detail)
+        self.assertEqual(semaphore._load_queue(self.root)[0]["waiters"], [])
+        dropped = [row for row in self.log_rows() if row["action"] == "wait-dropped"]
+        self.assertEqual([row["label"] for row in dropped], ["same-goal"])
+
+    def test_timed_out_same_goal_waiter_leaves_lane_available_for_retry(self):
+        self.assertTrue(semaphore.adaptive_acquire(
+            "holder", "blocking", memory_gib=2, contention="exclusive",
+            adapter=self.adapter, policy=self.policy,
+        )[0])
+        clock = {"now": 1_000.0}
+
+        def advance(seconds):
+            clock["now"] += seconds
+
+        with mock.patch.object(semaphore, "_now", side_effect=lambda: clock["now"]):
+            admitted, detail = semaphore._waiting_admit(
+                "same-goal", "will time out", 600,
+                memory_gib=2, contention="tolerant",
+                adapter=self.adapter, policy=self.policy,
+                wait_seconds=1, poll_seconds=0.5, sleep=advance,
+            )
+        self.assertFalse(admitted)
+        self.assertIn("WAIT_TIMEOUT", detail)
+        self.assertEqual(semaphore._load_queue(self.root)[0]["waiters"], [])
+        self.assertTrue(semaphore.adaptive_release("holder")[0])
+        retry, retry_detail = self.wait_acquire("same-goal", seconds=1, poll=0.01)
+        self.assertTrue(retry, retry_detail)
 
     def test_wait_returns_a_timeout_without_taking_a_hold(self):
         semaphore.adaptive_acquire(

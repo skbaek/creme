@@ -3,7 +3,10 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import signal
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,6 +54,83 @@ class BrokerStateTest(unittest.TestCase):
             os.close(descriptor)
         descriptor = self.broker["broker_lock"]()
         os.close(descriptor)
+
+    def test_contained_child_keeps_lock_after_supervisor_exit(self):
+        """The generated broker's real child retains exclusion on supervisor loss."""
+        binary = self.root / "bin" / BROKER_NAME
+        binary.parent.mkdir()
+        binary.write_text(
+            render_contained_build_broker(
+                self.temporary / "creme", "fixture", "fixture", "0" * 64,
+            )
+        )
+        repository = self.temporary / "repo"
+        repository.mkdir()
+        control = self.temporary / "child-control"
+        os.mkfifo(control)
+        child = self.temporary / "child.py"
+        child.write_text(
+            "import os,sys\n"
+            "print(f'CHILD_READY {os.getpid()}', flush=True)\n"
+            "with open(sys.argv[1], 'rb', buffering=0) as pipe:\n"
+            " pipe.read(1)\n"
+            "print('CHILD_DONE', flush=True)\n"
+        )
+        preflight = self.temporary / "preflight"
+        preflight.write_text("#!/bin/sh\nexit 0\n")
+        preflight.chmod(0o700)
+        supervisor_program = (
+            "from pathlib import Path\n"
+            "import sys\n"
+            "broker=Path(sys.argv[1])\n"
+            "namespace={'__name__':'broker_fixture','__file__':str(broker)}\n"
+            "exec(compile(broker.read_text(),str(broker),'exec'),namespace)\n"
+            "namespace['require_control_plane']=lambda:None\n"
+            "namespace['require_containment']=lambda profile:None\n"
+            "namespace['require_worktree']=lambda *args:Path(sys.argv[2])\n"
+            "namespace['build_command']=lambda *args:[sys.executable,sys.argv[3],sys.argv[4]]\n"
+            "namespace['PREFLIGHT']=Path(sys.argv[5])\n"
+            "raise SystemExit(namespace['main'](['--contained','blanc','control','--','Blanc']))\n"
+        )
+        supervisor = subprocess.Popen(
+            [
+                sys.executable, "-c", supervisor_program, str(binary),
+                str(repository), str(child), str(control), str(preflight),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        child_pid = None
+        try:
+            ready = supervisor.stdout.readline().strip()
+            self.assertRegex(ready, r"^CHILD_READY [1-9][0-9]*$")
+            child_pid = int(ready.split()[1])
+            self.refused(self.broker["broker_lock"], "another contained-build broker is active")
+
+            supervisor.terminate()
+            supervisor.wait(timeout=5)
+            self.refused(self.broker["broker_lock"], "another contained-build broker is active")
+
+            with control.open("wb", buffering=0) as pipe:
+                pipe.write(b"x")
+            self.assertEqual(supervisor.stdout.readline().strip(), "CHILD_DONE")
+            self.assertEqual(supervisor.stdout.read(), "")
+            child_pid = None
+
+            descriptor = self.broker["broker_lock"]()
+            os.close(descriptor)
+        finally:
+            if supervisor.poll() is None:
+                supervisor.terminate()
+                supervisor.wait(timeout=5)
+            if child_pid is not None:
+                try:
+                    os.kill(child_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            supervisor.stdout.close()
+            supervisor.stderr.close()
 
     def test_existing_safe_parent_is_preserved(self):
         self.parent.mkdir(mode=0o750)

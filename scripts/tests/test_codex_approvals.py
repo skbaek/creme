@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -13,6 +15,44 @@ from creme.codex_approvals import _read_config, _routing_records, approval_check
 SESSION = "12345678-abcd-1234-abcd-123456789abc"
 OTHER = "87654321-abcd-1234-abcd-123456789abc"
 
+try:
+    import tomllib as _REAL_TOML_READER
+except ImportError:
+    try:
+        import tomli as _REAL_TOML_READER
+    except ImportError:
+        _REAL_TOML_READER = None
+
+
+_FIXTURE_TOML_DOCUMENTS = {
+    'approvals_reviewer = "auto_review"\n': {"approvals_reviewer": "auto_review"},
+    'default_permissions = "creme-relay"\n': {"default_permissions": "creme-relay"},
+    'approvals_reviewer = "guardian_subagent"\n': {
+        "approvals_reviewer": "guardian_subagent",
+    },
+    'approvals_reviewer = "auto_review"\napi_key = "PRIVATE_CREDENTIAL"\n': {
+        "approvals_reviewer": "auto_review",
+        "api_key": "PRIVATE_CREDENTIAL",
+    },
+    'profile = "creme"\n[profiles.creme]\napprovals_reviewer = "auto_review"\n': {
+        "profile": "creme",
+        "profiles": {"creme": {"approvals_reviewer": "auto_review"}},
+    },
+    'approvals_reviewer = "user"\n': {"approvals_reviewer": "user"},
+}
+
+
+def _fixture_toml_loads(source):
+    try:
+        parsed = _FIXTURE_TOML_DOCUMENTS[source]
+    except KeyError as exc:
+        raise ValueError("unknown test TOML document") from exc
+    return json.loads(json.dumps(parsed))
+
+
+_FIXTURE_TOML_READER = types.ModuleType("tomli")
+_FIXTURE_TOML_READER.loads = _fixture_toml_loads
+
 
 class CodexApprovalsTest(unittest.TestCase):
     def setUp(self):
@@ -21,6 +61,10 @@ class CodexApprovalsTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.home = self.root / "codex-home"
         self.home.mkdir()
+        if _REAL_TOML_READER is None:
+            patcher = mock.patch.dict(sys.modules, {"tomli": _FIXTURE_TOML_READER})
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def config(self, text):
         (self.home / "config.toml").write_text(text)
@@ -299,6 +343,15 @@ class CodexApprovalsTest(unittest.TestCase):
         row = self.checks()[0]
         self.assertEqual(row[1], "warn")
         self.assertNotIn("PRIVATE_BAD_VALUE", row[2])
+
+    def test_fixture_toml_documents_match_real_reader_when_available(self):
+        for source, expected in _FIXTURE_TOML_DOCUMENTS.items():
+            with self.subTest(source=source):
+                self.assertEqual(_fixture_toml_loads(source), expected)
+                if _REAL_TOML_READER is not None:
+                    self.assertEqual(_REAL_TOML_READER.loads(source), expected)
+        with self.assertRaises(ValueError):
+            _fixture_toml_loads('approvals_reviewer = "PRIVATE_BAD_VALUE" trailing\n')
 
     def test_explicit_project_human_review_is_not_silent_auto_review_drift(self):
         self.config('approvals_reviewer = "auto_review"\n')

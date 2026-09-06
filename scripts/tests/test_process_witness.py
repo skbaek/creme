@@ -63,6 +63,26 @@ class ProcessWitnessTest(unittest.TestCase):
     def acquire(self, note="owner", **kwargs):
         return semaphore.master_acquire("codex", note, adapter=self.adapter, **kwargs)
 
+    @staticmethod
+    def cli_as(client, pid, *arguments):
+        """Run the real CLI parser with a deterministic synthetic client."""
+        program = (
+            "import runpy,sys\n"
+            "from unittest import mock\n"
+            "client=sys.argv.pop(1)\n"
+            "pid=int(sys.argv.pop(1))\n"
+            "detail=f'client {client} pid {pid}'\n"
+            "with mock.patch('creme.semaphore._client_process', "
+            "return_value=(pid,client,detail)):\n"
+            " runpy.run_module('creme.__main__', run_name='__main__')\n"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", program, client, str(pid), *arguments],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
     def test_crash_restart_pid_one_takes_over_without_expiry(self):
         self.assertTrue(self.acquire()[0])
         original = semaphore.master_snapshot()["lease"]
@@ -96,9 +116,12 @@ class ProcessWitnessTest(unittest.TestCase):
     def test_same_owner_renews_in_separate_cli_invocations_then_reacquires(self):
         self.assertTrue(self.acquire()[0])
         original = semaphore.master_snapshot()["lease"]
+        foreign = self.cli_as("claude", 2, "semaphore", "master-renew")
+        self.assertEqual(foreign.returncode, 1, foreign.stdout + foreign.stderr)
+        self.assertIn("this invocation: client claude pid 2", foreign.stdout + foreign.stderr)
+        self.assertEqual(semaphore.master_snapshot()["lease"], original)
         for _ in range(2):
-            result = subprocess.run([sys.executable, "-m", "creme", "semaphore", "master-renew"],
-                                    capture_output=True, text=True, timeout=10)
+            result = self.cli_as("codex", 1, "semaphore", "master-renew")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(semaphore.master_release(adapter=self.adapter)[0])
         self.assertTrue(self.acquire("reacquired")[0])

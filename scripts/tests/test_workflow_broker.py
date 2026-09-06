@@ -29,7 +29,7 @@ class WorkflowBrokerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.path = Path(self.tmp.name)
+        self.path = Path(self.tmp.name).resolve()
         self.root = self.path / "creme"
         self.root.mkdir()
         self.config = recipes(self.path)

@@ -81,7 +81,7 @@ class LakeCacheEnvironmentTest(unittest.TestCase):
 
     def test_linked_creme_worktree_uses_shared_checkout_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "creme"
+            root = Path(tmp).resolve() / "creme"
             gitdir = root / ".git" / "worktrees" / "goal"
             gitdir.mkdir(parents=True)
             (gitdir / "commondir").write_text("../..\n")

@@ -2193,21 +2193,29 @@ def _dependency_revision(worktree: Path, dependency: str) -> tuple[Optional[str]
     return None, f"dependency {dependency} is absent from the resolved manifest"
 
 
-def _process_group_alive(pgid: int) -> bool:
+def _process_group_alive(pgid: int) -> Optional[bool]:
+    """Report observed group liveness, or ``None`` when access is denied."""
     try:
         os.killpg(pgid, 0)
         return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        return None
 
 
 def _terminate_process_group(proc: subprocess.Popen[str], timeout: float = 10.0) -> bool:
     """Stop the wrapper-owned process group and prove it is gone."""
     pgid = proc.pid
-    if _process_group_alive(pgid):
+    if _process_group_alive(pgid) is not False:
         try:
             os.killpg(pgid, signal.SIGTERM)
         except ProcessLookupError:
+            pass
+        except PermissionError:
+            # A denied signal proves neither liveness nor cleanup.  Continue
+            # through the wait and final ESRCH probe, but never release a hold
+            # merely because this host could not inspect or signal the group.
             pass
     try:
         proc.wait(timeout=timeout)
@@ -2216,14 +2224,16 @@ def _terminate_process_group(proc: subprocess.Popen[str], timeout: float = 10.0)
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            pass
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return False
     deadline = time.monotonic() + timeout
-    while _process_group_alive(pgid) and time.monotonic() < deadline:
+    while _process_group_alive(pgid) is not False and time.monotonic() < deadline:
         time.sleep(0.05)
-    return not _process_group_alive(pgid)
+    return _process_group_alive(pgid) is False
 
 
 class RenewalThread(threading.Thread):
@@ -2537,7 +2547,7 @@ def run_lake_build(
         interrupted = True
         exit_code = 128 + termination_signal if termination_signal else 130
     finally:
-        if proc is not None and _process_group_alive(proc.pid):
+        if proc is not None and _process_group_alive(proc.pid) is not False:
             cleanup_proved = _terminate_process_group(proc) and cleanup_proved
         if sampler:
             sampler.stop()

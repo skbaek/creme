@@ -846,7 +846,13 @@ class BuildOwnershipTest(unittest.TestCase):
     def test_terminate_process_group_leaves_no_owned_child(self) -> None:
         proc = subprocess.Popen(["/bin/sh", "-c", "sleep 30 & wait"], start_new_session=True)
         self.assertTrue(owned._terminate_process_group(proc, timeout=2.0))
-        self.assertFalse(owned._process_group_alive(proc.pid))
+        self.assertIs(owned._process_group_alive(proc.pid), False)
+
+    def test_denied_group_liveness_is_unknown_and_cleanup_is_unproved(self) -> None:
+        proc = SimpleNamespace(pid=424242, wait=Mock(return_value=0))
+        with patch("creme.build_ownership.os.killpg", side_effect=PermissionError("denied")):
+            self.assertIsNone(owned._process_group_alive(proc.pid))
+            self.assertFalse(owned._terminate_process_group(proc, timeout=0.0))
 
     def test_sampler_reports_unavailable_instead_of_false_zero(self) -> None:
         with patch("creme.build_ownership.subprocess.run", side_effect=PermissionError("denied")):
@@ -864,7 +870,7 @@ class BuildOwnershipTest(unittest.TestCase):
             renewer.join(timeout=3)
         self.assertTrue(renewer.refused)
         self.assertTrue(renewer.cleanup_proved)
-        self.assertFalse(owned._process_group_alive(proc.pid))
+        self.assertIs(owned._process_group_alive(proc.pid), False)
 
     def test_renewal_exception_stops_current_process_group(self) -> None:
         proc = subprocess.Popen(["/bin/sh", "-c", "sleep 30 & wait"], start_new_session=True)
@@ -875,7 +881,7 @@ class BuildOwnershipTest(unittest.TestCase):
         self.assertTrue(renewer.refused)
         self.assertIn("OSError", renewer.verdicts[0])
         self.assertTrue(renewer.cleanup_proved)
-        self.assertFalse(owned._process_group_alive(proc.pid))
+        self.assertIs(owned._process_group_alive(proc.pid), False)
 
     def test_priority_launcher_refuses_before_exec_when_niceness_fails(self) -> None:
         with patch("creme.build_ownership.os.nice", side_effect=PermissionError("denied")), patch(
@@ -945,6 +951,64 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
             child = int(child_pid.read_text())
             with self.assertRaises(ProcessLookupError):
                 os.kill(child, 0)
+
+    @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
+    def test_denied_cleanup_preserves_the_admission_hold(self, _probe: Mock) -> None:
+        class FakeProc:
+            pid = 424242
+            stdout: list[str] = []
+
+            def wait(self, timeout=None):
+                return 0
+
+        class FakeSampler:
+            def __init__(self, _pid, worktree=None):
+                self.samples = 0
+                self.unavailable_samples = 0
+                self.module_peak_mib = {}
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        class FakeRenewer:
+            def __init__(self, _goal, _proc):
+                self.refused = False
+                self.cleanup_proved = True
+                self.verdicts: list[str] = []
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        output = io.StringIO()
+        with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), patch(
+            "creme.build_ownership.resolve_toolchain", return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))
+        ), patch("creme.build_ownership.semaphore.adaptive_acquire", return_value=(True, "ADMITTED_HARD")), patch(
+            "creme.build_ownership.semaphore.adaptive_release"
+        ) as release, patch("creme.build_ownership.guard_bin", return_value=Path("/guard")), patch(
+            "creme.build_ownership.subprocess.Popen", return_value=FakeProc()
+        ), patch("creme.build_ownership.ProcessSampler", FakeSampler), patch(
+            "creme.build_ownership.RenewalThread", FakeRenewer
+        ), patch("creme.build_ownership._process_group_alive", return_value=None), patch(
+            "creme.build_ownership._terminate_process_group", return_value=False
+        ) as terminate, patch("creme.build_ownership._module_hashes", return_value={}), patch(
+            "creme.build_ownership._swap_gib", return_value=None
+        ), patch("creme.build_ownership.append_ledger") as ledger:
+            self.assertEqual(
+                owned.run_lake_build(
+                    "g", ["T"], contention="sensitive", memory_gib=8, stdout=output
+                ),
+                2,
+            )
+        terminate.assert_called_once()
+        release.assert_not_called()
+        self.assertIn('"status": "HOLD_PRESERVED"', output.getvalue())
+        self.assertEqual(ledger.call_args.args[0]["exit"], 2)
 
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_measurement_snapshot_precedes_release_mutation(self, _probe: Mock) -> None:

@@ -788,6 +788,13 @@ def cmd_lake_build(arguments: argparse.Namespace) -> int:
         metavar="SECS",
         help="queue this build and return when admitted, on WAIT_TIMEOUT, or on a verdict waiting cannot change",
     )
+    options.add_argument(
+        "--threads",
+        type=int,
+        choices=(1, 2),
+        default=DEFAULT_THREADS,
+        help=f"set LEAN_NUM_THREADS for this owned build (default: {DEFAULT_THREADS})",
+    )
     options.add_argument("--probe", action="store_true")
     options.add_argument(
         "--census",
@@ -805,7 +812,7 @@ def cmd_lake_build(arguments: argparse.Namespace) -> int:
         targets,
         memory_gib=selected.memory_gib,
         contention=selected.contention,
-        threads=DEFAULT_THREADS,
+        threads=selected.threads,
         probe=selected.probe,
         wait_seconds=selected.wait,
         census=selected.census,

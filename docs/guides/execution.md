@@ -341,6 +341,7 @@ human shell cannot execute an absolute toolchain binary:
 ~/creme/scripts/creme lake-build GOAL --probe -- Narrow.Target
 ~/creme/scripts/creme lake-build GOAL --wait 600 -- Narrow.Target
 ~/creme/scripts/creme lake-build GOAL --wait 900 --                      # the full target
+~/creme/scripts/creme lake-build GOAL --threads 1 --wait 900 -- Narrow.Target
 ~/creme/scripts/creme lake-build GOAL --contention sensitive --wait 1800 -- Cold.Or.Broad.Target
 ```
 
@@ -350,6 +351,14 @@ estimate above what the evidence supports only makes the request harder to
 schedule. State a class when you know something the ledger cannot — a cold
 worktree, a rebuild you expect to be broad — and state an estimate only when
 you also know the peak.
+
+`--threads` accepts `1` or `2` and defaults to `2`; it sets
+`LEAN_NUM_THREADS` for that owned invocation. A one-thread choice does not
+change target interpretation, admission, sizing, measurement, or release, and
+does not by itself prove that only one compiler process ran. Wrapper options
+belong before `--`; every token after it remains a Lake target. The Linux
+contained-build broker keeps its separate restricted interface and does not
+gain this option.
 
 Probe first. Exit 0 means the selected artifacts are current; exit 3 means
 stale and authorizes no work by itself. The second command requests adaptive

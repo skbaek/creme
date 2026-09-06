@@ -97,6 +97,29 @@ is unknown, not successful or idle. Do not relaunch until supported inspection
 resolves the prior job and its hold. The fixed service name also refuses a
 second workflow launch while the first unit remains active.
 
+An ordinary retry of an explicitly selected registered recipe performs that
+supported recovery inside the fixed workflow service. Before changing the old
+record it verifies the exact `creme-contained-workflow.service` cgroup, acquires
+the shared broker lock inherited by recipe children, and validates the complete
+record against the pinned recipe set. Recovery is limited to `ADMITTING`,
+`RUNNING`, and `RELEASE_FAILED` records whose unit is exact and whose owner is a
+unique `workflow-` label followed by 32 lowercase hexadecimal digits. It then
+uses the existing exact-owner `hard-release` action. Only its normal success or
+the exact `matching hard hold not found` response is accepted; every other
+response leaves the prior record unresolved and starts no recipe.
+
+Recovery records the interrupted result as `RECOVERED_UNKNOWN`, never as a
+successful or idle execution. The complete previous record and exact release
+response are atomically preserved in a separate owner-derived file under the
+broker's private state directory before `workflow-last.json` changes. This
+makes a retry idempotent if interruption occurs after release, and keeps the
+unknown prior outcome inspectable after the new job overwrites the last-record
+slot. The newly requested operation then starts normally; the interrupted
+operation is never replayed automatically. A wrong unit, live inherited lock,
+missing field, linked or malformed record, foreign owner label, recipe mismatch,
+or unrecognized release response remains a refusal. Do not delete or edit these
+records as a recovery substitute.
+
 ## Installation and activation
 
 First prepare and review recipes inside Creme, then preview the entire bundle:

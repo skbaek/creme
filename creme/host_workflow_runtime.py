@@ -6,6 +6,8 @@ import json
 
 SYSTEMCTL = Path("/usr/bin/systemctl")
 UNIT = "creme-contained-workflow.service"
+WORKFLOW_OWNER_RE = re.compile(r"workflow-[0-9a-f]{32}")
+RECOVERABLE_WORKFLOW_STATUSES = {"ADMITTING", "RUNNING", "RELEASE_FAILED"}
 CERTIFICATE_CHECK = '''import runpy, sys
 from pathlib import Path
 root = Path(sys.argv[1])
@@ -94,7 +96,12 @@ def workflow_status():
     status = "OK" if telemetry.returncode == semaphore.returncode == transient.returncode == 0 else "UNAVAILABLE"
     if last is not None and not isinstance(last, dict):
         refuse("workflow record has invalid shape; execution state is unknown")
-    if last and last.get("status") in {"ADMITTING", "RUNNING"} and properties.get("ActiveState") not in {"active", "activating"}:
+    last_status = last.get("status") if last else None
+    if last and not isinstance(last_status, str):
+        refuse("workflow record has invalid status; execution state is unknown")
+    if last_status in {"ADMITTING", "RUNNING"} and properties.get("ActiveState") not in {"active", "activating"}:
+        status = "UNKNOWN"
+    if last_status == "RECOVERED_UNKNOWN":
         status = "UNKNOWN"
     if last and last.get("release_exit_code", 0) != 0:
         status = "REFUSED"
@@ -107,14 +114,23 @@ def workflow_status():
     return 0 if status == "OK" else 2
 
 
-def workflow_record(payload):
+def workflow_atomic_record(path, payload):
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        refuse(f"cannot inspect workflow record destination: {exc}")
+    else:
+        if path.is_symlink() or not path.is_file():
+            refuse("workflow record destination is not a regular file")
     descriptor, temporary = tempfile.mkstemp(prefix=".workflow-", dir=BROKER_STATE)
     try:
         with os.fdopen(descriptor, "w") as stream:
             json.dump(payload, stream)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, BROKER_STATE / "workflow-last.json")
+        os.replace(temporary, path)
         directory = os.open(BROKER_STATE, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
@@ -122,10 +138,176 @@ def workflow_record(payload):
             os.close(directory)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def workflow_record(payload):
+    workflow_atomic_record(BROKER_STATE / "workflow-last.json", payload)
     print(json.dumps(payload), flush=True)
 
 
-def require_previous_workflow_terminal():
+def require_workflow_unit():
+    try:
+        relative = next(
+            line.split(":", 2)[2] for line in Path("/proc/self/cgroup").read_text().splitlines()
+            if line.startswith("0:")
+        )
+    except (OSError, StopIteration):
+        refuse("cgroup v2 membership is unavailable")
+    if not relative.startswith("/") or relative.endswith("/") or relative.rsplit("/", 1)[-1] != UNIT:
+        refuse(f"contained recovery is outside the exact workflow unit: {relative}")
+
+
+def workflow_recovery_path(owner):
+    if not isinstance(owner, str) or WORKFLOW_OWNER_RE.fullmatch(owner) is None:
+        refuse("previous workflow owner is not an exact unique workflow label")
+    return BROKER_STATE / f"workflow-recovery-{owner}.json"
+
+
+def expected_previous_commands(previous):
+    profile = previous.get("profile")
+    goal = previous.get("goal")
+    operation = previous.get("operation")
+    mode = previous.get("mode")
+    if (
+        not isinstance(profile, str)
+        or profile not in {"jaune", "blanc"}
+        or not isinstance(goal, str)
+        or GOAL_RE.fullmatch(goal) is None
+        or goal in {".", ".."}
+        or not isinstance(operation, str)
+        or not isinstance(mode, str)
+    ):
+        refuse("previous workflow metadata has an invalid profile, goal, operation, or mode")
+    recipe = RECIPES["operations"].get(operation)
+    if recipe is None or recipe["profile"] != profile or mode not in recipe["modes"]:
+        refuse("previous workflow metadata does not name a registered recipe")
+    repository = Path(RECIPES["repositories"][profile])
+    execution = recipe["modes"][mode]
+    commands = []
+    for suffix in PURPOSE_SUFFIX.values():
+        repo = repository / ".worktrees" / f"{goal}{suffix}"
+        commands.append([
+            value.replace("{repo}", str(repo)).replace("{creme}", str(CREME_ROOT))
+            for value in execution["argv"]
+        ])
+    return commands
+
+
+def validate_interrupted_workflow(previous):
+    if not isinstance(previous, dict):
+        refuse("previous workflow is not a supported interrupted record")
+    status = previous.get("status")
+    if not isinstance(status, str) or status not in RECOVERABLE_WORKFLOW_STATUSES:
+        refuse("previous workflow is not a supported interrupted record")
+    if previous.get("unit") != UNIT:
+        refuse("previous workflow record does not name the exact workflow unit")
+    owner = previous.get("owner")
+    workflow_recovery_path(owner)
+    if previous.get("recipes_sha256") != RECIPES_SHA256:
+        refuse("previous workflow record does not match the installed recipe set")
+    argv = previous.get("argv")
+    if not isinstance(argv, list) or argv not in expected_previous_commands(previous):
+        refuse("previous workflow command does not match its recorded recipe metadata")
+    if status == "RELEASE_FAILED":
+        command_exit = previous.get("exit_code")
+        release_exit = previous.get("release_exit_code")
+        if (
+            isinstance(command_exit, bool)
+            or not isinstance(command_exit, int)
+            or isinstance(release_exit, bool)
+            or not isinstance(release_exit, int)
+            or release_exit == 0
+        ):
+            refuse("previous release-failed workflow record has invalid exit metadata")
+    return owner
+
+
+def validate_recovered_workflow(previous):
+    if not isinstance(previous, dict) or previous.get("status") != "RECOVERED_UNKNOWN":
+        refuse("previous workflow recovery record has invalid shape")
+    owner = previous.get("owner")
+    path = workflow_recovery_path(owner)
+    preserved = previous.get("previous_record")
+    recovery = previous.get("recovery")
+    if previous.get("unit") != UNIT or not isinstance(preserved, dict) or not isinstance(recovery, dict):
+        refuse("previous workflow recovery record has invalid metadata")
+    if preserved.get("owner") != owner or validate_interrupted_workflow(preserved) != owner:
+        refuse("previous workflow recovery owner does not match its preserved record")
+    outcome = recovery.get("outcome")
+    exit_code = recovery.get("exit_code")
+    stdout = recovery.get("stdout")
+    if (
+        set(recovery) != {"action", "outcome", "exit_code", "stdout"}
+        or recovery.get("action") != "hard-release"
+        or not isinstance(outcome, str)
+        or isinstance(exit_code, bool)
+        or not isinstance(exit_code, int)
+        or not isinstance(stdout, str)
+        or (outcome, exit_code, stdout) not in {
+            ("released", 0, "OK — hard hold released"),
+            ("matching-hard-hold-not-found", 1, "REFUSED — matching hard hold not found"),
+        }
+    ):
+        refuse("previous workflow recovery evidence is invalid")
+    if path.is_symlink() or not path.is_file():
+        refuse("durable workflow recovery record is missing or linked")
+    try:
+        durable = json.loads(path.read_text())
+    except (OSError, ValueError):
+        refuse("durable workflow recovery record is unreadable")
+    if durable != previous:
+        refuse("workflow recovery record does not match its durable evidence")
+
+
+def recover_interrupted_workflow(previous):
+    owner = validate_interrupted_workflow(previous)
+    recovery_path = workflow_recovery_path(owner)
+    if recovery_path.is_symlink():
+        refuse("durable workflow recovery record is linked")
+    if recovery_path.exists():
+        if not recovery_path.is_file():
+            refuse("durable workflow recovery record is not a regular file")
+        try:
+            recovered = json.loads(recovery_path.read_text())
+        except (OSError, ValueError):
+            refuse("durable workflow recovery record is unreadable")
+        validate_recovered_workflow(recovered)
+        if recovered.get("previous_record") != previous:
+            refuse("durable workflow recovery record belongs to different workflow metadata")
+        workflow_record(recovered)
+        return
+    try:
+        release = subprocess.run(
+            [str(CREME), "semaphore", "hard-release", owner],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError as exc:
+        refuse(f"cannot recover previous workflow hold: {exc}")
+    stdout = (release.stdout or "").strip()
+    stderr = (release.stderr or "").strip()
+    if release.returncode == 0 and stdout == "OK — hard hold released" and not stderr:
+        outcome = "released"
+    elif release.returncode == 1 and stdout == "REFUSED — matching hard hold not found" and not stderr:
+        outcome = "matching-hard-hold-not-found"
+    else:
+        refuse("previous workflow hard-release returned an unrecognized result; preserve it for recovery")
+    recovered = {
+        "status": "RECOVERED_UNKNOWN",
+        "unit": UNIT,
+        "owner": owner,
+        "previous_record": previous,
+        "recovery": {
+            "action": "hard-release",
+            "outcome": outcome,
+            "exit_code": release.returncode,
+            "stdout": stdout,
+        },
+    }
+    workflow_atomic_record(recovery_path, recovered)
+    workflow_record(recovered)
+
+
+def reconcile_previous_workflow():
     record = BROKER_STATE / "workflow-last.json"
     if record.is_symlink():
         refuse("previous workflow record is linked; preserve it for recovery")
@@ -135,21 +317,34 @@ def require_previous_workflow_terminal():
         previous = json.loads(record.read_text())
     except (OSError, ValueError):
         refuse("previous workflow record is unreadable; preserve it for recovery")
-    if not isinstance(previous, dict) or previous.get("status") not in {"TERMINAL", "ADMISSION_REFUSED"} or previous.get("release_exit_code", 0) != 0:
-        refuse("previous workflow is unresolved; inspect status and recover its recorded owner before retrying")
+    if not isinstance(previous, dict):
+        refuse("previous workflow record has invalid shape; preserve it for recovery")
+    status = previous.get("status")
+    if not isinstance(status, str):
+        refuse("previous workflow record has invalid status; preserve it for recovery")
+    if status in {"TERMINAL", "ADMISSION_REFUSED"} and previous.get("release_exit_code", 0) == 0:
+        return
+    if status == "RECOVERED_UNKNOWN":
+        validate_recovered_workflow(previous)
+        return
+    if status in RECOVERABLE_WORKFLOW_STATUSES:
+        recover_interrupted_workflow(previous)
+        return
+    refuse("previous workflow is unresolved; inspect status and preserve its recorded owner before retrying")
 
 
 def workflow_service(arguments, parsed):
     profile, goal, operation, mode, purpose = parsed
     require_containment(profile)
+    require_workflow_unit()
     # The service, not the disposable launcher, owns the global build/workflow
     # lock. Children inherit it so a lost supervisor cannot unlock live work.
     descriptor = broker_lock()
     os.set_inheritable(descriptor, True)
     label = "workflow-" + uuid.uuid4().hex
     try:
-        require_previous_workflow_terminal()
         workflow_control_plane()
+        reconcile_previous_workflow()
         if (CREME_ROOT / ".creme/lean-heavy-suspended").exists():
             refuse("host circuit breaker is active")
         repo = workflow_worktree(profile, goal, purpose)

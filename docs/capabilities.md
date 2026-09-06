@@ -363,3 +363,14 @@ holds, and leaves every legacy file intact. Once the neutral `state.json`
 exists, the neutral launcher selects it. A pre-neutral delegate and the legacy
 files may be retired after every session launched before the cutover winds
 down.
+
+## Optional managed gate adapter
+
+`python3 -m creme gate-run GOAL` resolves the configured Blanc goal worktree and
+requires its supported v1 catalogue protocol. `--requirements` reports only
+non-elaborating resource requirements and unresolved inputs. Actual work uses
+owned operation lifetimes and exact repository recipes; missing estimates,
+priority capability or compatible support refuse without a direct fallback.
+This CLI is not an installed host permission delegate. See
+[execution](guides/execution.md#managed-blanc-catalogue-operations) for the
+estimate schema, stream boundary and standalone compatibility.

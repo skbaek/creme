@@ -482,6 +482,13 @@ def cmd_idle_workers(arguments: argparse.Namespace) -> int:
     return 0 if result.status == "OK" else 2
 
 
+def cmd_gate_run(arguments: argparse.Namespace) -> int:
+    from .gate_runner import run
+    return run(arguments.goal, plan=arguments.plan, explain=arguments.explain,
+               fresh=arguments.fresh, echo=arguments.echo, wait_seconds=arguments.wait,
+               requirements=arguments.requirements)
+
+
 def cmd_build_recover(arguments: argparse.Namespace) -> int:
     from .build_lifecycle import recover
     ok, detail = recover(arguments.operation_id)
@@ -950,6 +957,16 @@ def parser() -> argparse.ArgumentParser:
     recovery = commands.add_parser("build-recover", help="verify a recorded owned build is absent and release its exact hold; never signals")
     recovery.add_argument("operation_id")
     recovery.set_defaults(func=cmd_build_recover)
+
+    gates = commands.add_parser("gate-run", help="run Blanc's catalogue with owned per-operation admission")
+    gates.add_argument("goal")
+    gates.add_argument("--requirements", action="store_true", help="non-elaborating operation identities and unresolved inputs")
+    gates.add_argument("--plan", action="store_true")
+    gates.add_argument("--explain", action="store_true")
+    gates.add_argument("--fresh", action="store_true")
+    gates.add_argument("--echo", action="store_true")
+    gates.add_argument("--wait", type=_positive, metavar="SECS")
+    gates.set_defaults(func=cmd_gate_run)
 
     reclaim = commands.add_parser("reclaim", help="ownership-verifying Lean-server reclamation")
     reclaim.add_argument("--dry-run", action="store_true")

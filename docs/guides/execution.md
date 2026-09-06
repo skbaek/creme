@@ -295,6 +295,50 @@ signal, and the aggregate headroom probe is intentionally independent of
 process discovery. Missing headroom forces serialization rather than an
 optimistic soft hold. Never edit semaphore state or use a bare process kill.
 
+### Managed Blanc catalogue operations
+
+`creme gate-run GOAL` optionally connects Blanc's v1 catalogue engine to owned
+per-operation admission. `--requirements` is the non-elaborating setup and
+inspection mode: it enumerates exact argv, resource classes, cost identities,
+size envelopes and unresolved prerequisites without a build, producer, timing
+body or hold. `--plan` is different: Blanc computes actual material projections
+and requires their ordinary admission and a current build certificate. The
+adapter refuses absent/incompatible repository support and has no direct
+fallback. Ordinary standalone/CI commands remain available independently.
+
+The ignored canonical `.creme/managed-gate-estimates.json` has `version: 1`,
+`host: {hostname, uid}`, and an `operations` object keyed by the reported
+operation key. Each record carries its exact `identity`, a positive integer
+`memory_gib`, `contention` (`sensitive` or `exclusive`, as reported), and a
+nonempty `basis` naming the measured or conservative whole-operation evidence.
+There is no peak or tolerant fallback. The inventory reports identities, not
+fabricated estimates. A missing file behaves as an empty estimate set; a
+malformed or foreign file refuses. A missing/stale record refuses before that
+actual operation queues. An unused, reused, certified or light body needs no
+estimate, and owned builds retain their existing stale-closure classification
+and measurement without an outer hold or gate-estimate dependency.
+
+Cost identities use each operation's declared inputs; unrelated source edits
+do not invalidate all estimates. Imported trace/source or command/class drift
+does invalidate the affected record. Initial missing traces may require the
+ordinary owned-build bootstrap followed by another `--requirements` inventory.
+This initial conservative protocol still requires justified replacement
+estimates when cost-relevant inputs change; it does not infer that old measured
+peaks bound new work. For artifact integrity, the inventory additionally binds
+checked power-of-two upper bounds on cache/output file population and largest
+file size. A recorded estimate must cover that entire envelope. These bounds
+are cost-input descriptors, never a memory estimate or permission to lower one.
+
+Each non-build operation reuses the accepted transaction journal, gated group
+launch, deferred cancellation and exact release/recovery protocol. Actual
+children have separate byte stdout/stderr; wrapper diagnostics and receipts
+never enter gate-summary recognition or material hashing. Full legacy owned-
+build text remains explicitly labelled build/wrapper receipt data, persists in
+Blanc's ignored `.lake/managed-gate-receipts/`, and is displayed even on failed
+prerequisites. Gate manifests record actual operations and cleanup outcomes.
+The new command is an application entry point, not an installed permission
+delegate, and does not expand a containment broker or allow arbitrary commands.
+
 ## Wind down Lean work
 
 Before yielding to a requested pause or restart, handing off the execution, or

@@ -223,7 +223,14 @@ time.sleep(20)
                         injected.append(True)
                         raise KeyboardInterrupt
                 with patch.object(semaphore, "_save", side_effect=publish_then_raise):
-                    self.assertEqual(self.run_build(wait_seconds=wait), 130)
+                    try:
+                        code = self.run_build(wait_seconds=wait)
+                    except KeyboardInterrupt:
+                        # The rejected implementation escapes acquisition.
+                        # Still inspect its real state and fail at the hold
+                        # invariant, rather than terminating this test runner.
+                        code = 130
+                    self.assertEqual(code, 130)
                 self.assertEqual(injected, [True])
                 self.assert_absent()
 

@@ -10,11 +10,12 @@ approvals_reviewer = "auto_review"
 
 `python3 -m creme client-profile --auto-review` previews these keys together
 with Creme's existing restricted workspace permission profile. Omitting the
-option preserves the ordinary generator output. Review and merge the fragment
-into the client's active configuration; a preview or an arbitrarily named TOML
-file does not change the client. Keep the sandbox, sibling roots, and host
-memory containment in place. This feature does not require new command allow
-rules or a custom execution broker.
+option preserves the ordinary generator output. Select the generated profile
+with a supported `--profile` option, or merge the reviewed keys into the
+client's active configuration; a preview alone does not change the client.
+See the version-sensitive [CLI setup](../setup.md#codex-cli). Keep the sandbox,
+sibling roots, and host memory containment in place. This feature does not
+require new command allow rules or a custom execution broker.
 
 The native reviewer assesses actions that already require approval. It can
 approve or reject them; a rejection directs the agent to a safer alternative
@@ -27,9 +28,10 @@ documentation](https://learn.chatgpt.com/docs/sandboxing/auto-review).
 Run `python3 -m creme doctor` from the active Creme session. Its approval rows
 keep three kinds of evidence separate:
 
-- User and project configuration: reviewer intent on disk, including an
-  explicitly selected ordinary configuration profile. Other configuration
-  layers and running-client overrides can still differ.
+- User and project configuration: reviewer intent on disk, including legacy
+  inline profiles selected within those files. CLI-selected
+  `<name>.config.toml` layers, managed configuration, and running-client
+  overrides are not resolved by these disk rows.
 - Saved desktop mode: the local desktop preference, when this client exposes
   it. A saved `guardian-approvals` preference does not prove the conversation
   uses automatic review.
@@ -61,3 +63,6 @@ evidence remains independently available. These observations do not authorize
 execution or change settings. The diagnostic decodes only the invoking
 session's context records and emits allowlisted fields; conversation content,
 reviewer reasoning, credentials, session IDs, and rollout paths are excluded.
+The supported compatibility spelling `guardian_subagent` is normalized to
+`auto_review`; generated configuration uses the canonical `auto_review` name.
+Built-in permission-profile IDs such as `:workspace` remain visible.

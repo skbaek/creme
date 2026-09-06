@@ -70,6 +70,31 @@ class CodexApprovalsTest(unittest.TestCase):
         self.assertEqual(row[1], "ok")
         self.assertIn("not a live settings query", row[2])
 
+    def test_guardian_alias_normalizes_disk_intent_and_recorded_reviewer(self):
+        self.config('approvals_reviewer = "guardian_subagent"\n')
+        self.rollout("user")
+        rows = self.checks()
+        self.assertIn("reviewer=auto_review", rows[0][2])
+        self.assertEqual(rows[-1][1], "fail")
+        self.rollout("guardian_subagent")
+        row = self.checks()[-1]
+        self.assertEqual(row[1], "ok")
+        self.assertIn("reviewer=auto_review", row[2])
+
+    def test_builtin_permission_profile_ids_remain_visible(self):
+        for name in (":workspace", ":read-only"):
+            with self.subTest(name=name):
+                self.rollout("auto_review", active_permission_profile={"id": name})
+                self.assertIn(f"permission profile={name};", self.checks()[-1][2])
+
+    def test_profile_name_redaction_survives_builtin_prefix_support(self):
+        for name in (":abcdefab-abcd-1234-abcd-123456789abc", "PRIVATE NAME\nINSTRUCTION"):
+            with self.subTest(name=name):
+                self.rollout("auto_review", active_permission_profile={"id": name})
+                detail = self.checks()[-1][2]
+                self.assertNotIn(name, detail)
+                self.assertIn("permission profile=unverified;", detail)
+
     def test_config_alone_and_other_sessions_never_prove_activation(self):
         self.config('approvals_reviewer = "auto_review"\n')
         self.rollout("auto_review", session=OTHER)

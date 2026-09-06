@@ -216,18 +216,23 @@ cd ~/creme
 python3 -m creme client-profile --workspace-root .. --auto-review
 python3 -m creme client-profile --workspace-root .. \
   --auto-review --output ~/.codex/creme.config.toml --write
+codex --profile creme
 ```
 
 Review the preview before `--write`. Permission-profile syntax is beta; compare
 the generated file with the installed client's current documentation. Creme
-does not edit the user's main Codex configuration. The output is a configuration
-fragment: merge its reviewed keys into `~/.codex/config.toml`, preserving the
-other settings. A file named `creme.config.toml` is not automatically loaded,
-and it does not define a `[profiles.creme]` configuration profile.
+does not edit the user's main Codex configuration. Codex CLI 0.153.4 documents
+`--profile NAME` as layering `$CODEX_HOME/NAME.config.toml` over the base user
+configuration, so `--profile creme` selects the generated file above. Confirm
+this behavior with the installed client's `codex --help`: older clients may
+use inline `[profiles.NAME]` tables instead. Creating the file alone does not
+select it. For clients that read the base configuration directly, merge its
+reviewed keys into `~/.codex/config.toml`, preserving other settings.
 
 The CLI alternative to the desktop project is to start Codex with
-`cd ~/creme && codex` after installation; the directory where the CLI starts is
-its project. Existing conversations can retain their prior reviewer even after
+`cd ~/creme && codex --profile creme` on clients with the documented file-layer
+support; the directory where the CLI starts is its project. Existing
+conversations can retain their prior reviewer even after
 configuration changes. Run `python3 -m creme doctor` in the new session and
 follow [native approval review verification](guides/codex-approvals.md).
 

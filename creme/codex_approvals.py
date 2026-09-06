@@ -29,6 +29,14 @@ def _enum(value: Any, choices: set[str]) -> str:
     return value if isinstance(value, str) and value in choices else "unverified"
 
 
+def _reviewer(value: Any) -> str:
+    # Accepted by current clients for compatibility; generated config uses
+    # the canonical spelling. Normalize both disk and recorded observations.
+    if value == "guardian_subagent":
+        return "auto_review"
+    return _enum(value, {"user", "auto_review"})
+
+
 def _policy(value: Any) -> str:
     if isinstance(value, dict) and isinstance(value.get("granular"), dict):
         return "granular"
@@ -53,15 +61,16 @@ def _read_config(path: Path) -> dict[str, str]:
         return {"status": "absent", "detail": "configuration absent"}
     except (OSError, UnicodeError, ValueError):
         return {"status": "unverified", "detail": "configuration unreadable or invalid"}
-    # A selected ordinary configuration profile can override top-level keys.
-    # This is distinct from default_permissions, the named permission profile.
+    # Legacy inline profiles can override top-level keys. Current CLI profiles
+    # may be separate <name>.config.toml layers; these disk observations do not
+    # resolve CLI selection or claim to reconstruct the client's merged config.
     profile = data.get("profile")
     profiles = data.get("profiles", {})
     if isinstance(profile, str) and isinstance(profiles, dict):
         override = profiles.get(profile)
         if isinstance(override, dict):
             data.update(override)
-    reviewer = _enum(data.get("approvals_reviewer"), {"user", "auto_review"})
+    reviewer = _reviewer(data.get("approvals_reviewer"))
     if "approvals_reviewer" not in data:
         reviewer = "unset"
     return {
@@ -199,7 +208,7 @@ def approval_checks(root: Path, *, home: Optional[Path] = None,
                      "UNVERIFIED: own-session turn_context unavailable; no inference from other "
                      "sessions, disk config, or saved UI. Check the running client's permissions."))
         return rows
-    reviewer = _enum(metadata.get("approvals_reviewer"), {"user", "auto_review"})
+    reviewer = _reviewer(metadata.get("approvals_reviewer"))
     policy = _policy(metadata.get("approval_policy"))
     sandbox = metadata.get("sandbox_policy")
     sandbox = _enum(sandbox.get("type") if isinstance(sandbox, dict) else None,
@@ -208,8 +217,8 @@ def approval_checks(root: Path, *, home: Optional[Path] = None,
     name = profile.get("id") if isinstance(profile, dict) else None
     # Profile names aid diagnosing the custom-profile reviewer mismatch. A
     # bounded allowlist keeps malformed metadata from copying arbitrary text.
-    name = name if (isinstance(name, str) and not _UUID.fullmatch(name)
-                    and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,63}", name)) else "unverified"
+    name = name if (isinstance(name, str) and not _UUID.fullmatch(name.lstrip(":"))
+                    and re.fullmatch(r":?[A-Za-z][A-Za-z0-9_.:-]{0,63}", name)) else "unverified"
     permissions = metadata.get("permission_profile")
     filesystem = permissions.get("file_system") if isinstance(permissions, dict) else None
     filesystem = _enum(filesystem.get("type") if isinstance(filesystem, dict) else None,

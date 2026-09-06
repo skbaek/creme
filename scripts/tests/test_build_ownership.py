@@ -1101,6 +1101,7 @@ class BuildOwnershipTest(unittest.TestCase):
                                 os.killpg(direct, signal.SIGKILL)
                             except ProcessLookupError:
                                 pass
+                        self.assertTrue(_wait_dead(direct))
 
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_failed_launch_preflight_precedes_admission_and_writes_no_hold_rows(
@@ -1578,6 +1579,7 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path({str(w
                                 os.killpg(child, signal.SIGKILL)
                             except ProcessLookupError:
                                 pass
+                        self.assertTrue(_wait_dead(child))
 
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_denied_cleanup_preserves_the_admission_hold(self, _probe: Mock) -> None:

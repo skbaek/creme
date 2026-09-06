@@ -86,8 +86,30 @@ jobs:
           python3 -m creme reclaim --dry-run > "$RUNNER_TEMP/creme-reclaim.json"
           reclaim_status=$?
           set -e
-          test "$reclaim_status" -eq 2
-          grep -q '"status": "UNAVAILABLE"' "$RUNNER_TEMP/creme-reclaim.json"
-          grep -q 'restart the client' "$RUNNER_TEMP/creme-reclaim.json"
+          cat "$RUNNER_TEMP/creme-reclaim.json"
+          test "$reclaim_status" -eq 0
+          python3 - "$RUNNER_TEMP/creme-reclaim.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              result = json.load(stream)
+          expected = {
+              "adapter": "Linux",
+              "capability": "lean_reclaim",
+              "status": "OK",
+          }
+          for key, value in expected.items():
+              if result.get(key) != value:
+                  raise SystemExit(f"reclaim {key} mismatch: {result.get(key)!r}")
+          data = result.get("data")
+          if not isinstance(data, dict):
+              raise SystemExit("reclaim data is not an object")
+          if data.get("dry_run") is not True:
+              raise SystemExit("reclaim did not report an exact dry run")
+          for key in ("owned", "termination_order"):
+              if data.get(key) != []:
+                  raise SystemExit(f"reclaim {key} is not empty: {data.get(key)!r}")
+          PY
           ./scripts/check.sh
           test -z "$(git status --short)"

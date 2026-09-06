@@ -143,6 +143,35 @@ class LakeCacheEnvironmentTest(unittest.TestCase):
 
 
 class BuildOwnershipTest(unittest.TestCase):
+    def setUp(self) -> None:
+        isolated = _ledger_and_log()
+        isolated.__enter__()
+        self.addCleanup(isolated.__exit__, None, None, None)
+        # Every real child created by a test is registered at creation, before
+        # readiness assertions. Nested explicit mocks remain local to a case.
+        real_popen = subprocess.Popen
+        def spawn(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            def reap():
+                try:
+                    if kwargs.get("start_new_session"):
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    elif proc.poll() is None:
+                        proc.kill()
+                    proc.wait(timeout=5)
+                    owned._close_process_pipes(proc)
+                finally:
+                    if proc.poll() is None:
+                        raise AssertionError("fixture direct child survived finalization")
+            self.addCleanup(reap)
+            return proc
+        patched = patch.object(subprocess, "Popen", side_effect=spawn)
+        patched.start()
+        self.addCleanup(patched.stop)
+
     def test_canonical_creme_launcher_binds_system_python(self) -> None:
         self.assertEqual((ROOT / "scripts" / "creme").read_text().splitlines()[0], "#!/usr/bin/python3")
 
@@ -976,7 +1005,7 @@ class BuildOwnershipTest(unittest.TestCase):
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        proc.communicate.assert_called_once_with(timeout=5.0)
+        proc.communicate.assert_called_once_with(timeout=0.1)
 
     @patch("creme.build_ownership._terminate_process_group", return_value=True)
     @patch("creme.build_ownership.subprocess.Popen")
@@ -1030,20 +1059,19 @@ class BuildOwnershipTest(unittest.TestCase):
                 "SLEEP": "/bin/sleep",
             })
 
-            ok, detail = owned._preflight_priority_launcher(
-                launcher, cwd=root, env=env, timeout_seconds=1.0
-            )
-
-            self.assertFalse(ok)
-            self.assertIn("did not finish", detail)
-            direct = int(direct_path.read_text())
-            descendant = int(descendant_path.read_text())
             try:
-                self.assertTrue(_wait_dead(direct))
-                self.assertTrue(_wait_dead(descendant))
+                ok, detail = owned._preflight_priority_launcher(
+                    launcher, cwd=root, env=env, timeout_seconds=1.0
+                )
+                self.assertFalse(ok)
+                self.assertIn("did not finish", detail)
+                self.assertTrue(_wait_dead(int(direct_path.read_text())))
+                self.assertTrue(_wait_dead(int(descendant_path.read_text())))
             finally:
-                self.assertTrue(_reap_fixture(direct, group_pid=direct))
-                self.assertTrue(_reap_fixture(descendant, group_pid=direct))
+                direct = int(direct_path.read_text()) if direct_path.exists() else None
+                for path in (direct_path, descendant_path):
+                    if path.exists():
+                        self.assertTrue(_reap_fixture(int(path.read_text()), group_pid=direct))
 
     def test_priority_launcher_preflight_reaps_before_interrupt_propagation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1089,13 +1117,14 @@ class BuildOwnershipTest(unittest.TestCase):
                         env=env,
                         start_new_session=True,
                     )
-                    for _ in range(200):
-                        if direct_path.exists() or proc.poll() is not None:
-                            break
-                        threading.Event().wait(0.01)
-                    self.assertTrue(direct_path.exists())
-                    direct = int(direct_path.read_text())
+                    direct = None
                     try:
+                        for _ in range(200):
+                            if direct_path.exists() or proc.poll() is not None:
+                                break
+                            threading.Event().wait(0.01)
+                        self.assertTrue(direct_path.exists())
+                        direct = int(direct_path.read_text())
                         os.kill(proc.pid, signum)
                         expected = 130 if signum == signal.SIGINT else -signum
                         self.assertEqual(proc.wait(timeout=5), expected)
@@ -1106,7 +1135,10 @@ class BuildOwnershipTest(unittest.TestCase):
                         if proc.poll() is None:
                             proc.kill()
                             proc.wait(timeout=2)
-                        self.assertTrue(_reap_fixture(direct, group_pid=direct))
+                        if direct is None and direct_path.exists():
+                            direct = int(direct_path.read_text())
+                        if direct is not None:
+                            self.assertTrue(_reap_fixture(direct, group_pid=direct))
 
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_failed_launch_preflight_precedes_admission_and_writes_no_hold_rows(
@@ -1187,8 +1219,8 @@ class BuildOwnershipTest(unittest.TestCase):
                     )
 
                 self.assertEqual(code, 2)
-                release.assert_called_once_with("g")
-                self.assertIn('"status": "ERROR"', output.getvalue())
+                release.assert_not_called()
+                self.assertIn('"status": "HOLD_PRESERVED"', output.getvalue())
                 self.assertIn("startup raised OSError", output.getvalue())
                 self.assertEqual(signal.getsignal(signal.SIGTERM), before[signal.SIGTERM])
                 self.assertEqual(signal.getsignal(signal.SIGHUP), before[signal.SIGHUP])
@@ -1283,7 +1315,7 @@ class BuildOwnershipTest(unittest.TestCase):
                     )
 
                 self.assertEqual(code, 2)
-                release.assert_called_once_with("g")
+                release.assert_called_once_with("g", operation_id=unittest.mock.ANY)
                 self.assertIn('"status": "ERROR"', output.getvalue())
                 self.assertIn("raised OSError", output.getvalue())
 
@@ -1342,7 +1374,7 @@ class BuildOwnershipTest(unittest.TestCase):
         self.assertEqual(code, 2)
         release.assert_not_called()
         self.assertIn('"status": "HOLD_PRESERVED"', output.getvalue())
-        self.assertIn('"recovery": "python3 -m creme reclaim --wind-down g"', output.getvalue())
+        self.assertRegex(output.getvalue(), r'"recovery": "python3 -m creme build-recover [0-9a-f]{32}"')
 
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_nonzero_build_reaps_descendant_before_release(self, _probe: Mock) -> None:
@@ -1394,37 +1426,40 @@ class BuildOwnershipTest(unittest.TestCase):
             fake_nice.chmod(0o700)
             released: list[str] = []
 
-            def release(_goal):
+            def release(_goal, **_kwargs):
                 child = int(child_path.read_text())
                 released.append("dead" if not _pid_alive(child) else "alive")
                 return True, "released"
 
-            with patch(
-                "creme.build_ownership._worktree_identity", return_value=(root, "g")
-            ), patch(
-                "creme.build_ownership.resolve_toolchain",
-                return_value=(fake_lake, Path("/bin/sh"), Path("/")),
-            ), patch(
-                "creme.build_ownership.guard_bin", return_value=fake_bin
-            ), patch(
-                "creme.build_ownership.semaphore.adaptive_acquire",
-                return_value=(True, "ADMITTED_HARD"),
-            ), patch(
-                "creme.build_ownership.semaphore.adaptive_release", side_effect=release
-            ), patch(
-                "creme.build_ownership.ProcessSampler", FakeSampler
-            ), patch(
-                "creme.build_ownership.RenewalThread", FakeRenewer
-            ):
-                code = owned.run_lake_build(
-                    "g", ["T"], memory_gib=2, contention="sensitive",
-                    stdout=io.StringIO(),
-                )
+            try:
+                with patch(
+                    "creme.build_ownership._worktree_identity", return_value=(root, "g")
+                ), patch(
+                    "creme.build_ownership.resolve_toolchain",
+                    return_value=(fake_lake, Path("/bin/sh"), Path("/")),
+                ), patch(
+                    "creme.build_ownership.guard_bin", return_value=fake_bin
+                ), patch(
+                    "creme.build_ownership.semaphore.adaptive_acquire",
+                    return_value=(True, "ADMITTED_HARD"),
+                ), patch(
+                    "creme.build_ownership.semaphore.adaptive_release", side_effect=release
+                ), patch(
+                    "creme.build_ownership.ProcessSampler", FakeSampler
+                ), patch(
+                    "creme.build_ownership.RenewalThread", FakeRenewer
+                ):
+                    code = owned.run_lake_build(
+                        "g", ["T"], memory_gib=2, contention="sensitive",
+                        stdout=io.StringIO(),
+                    )
 
-            child = int(child_path.read_text())
-            self.assertEqual(code, 7)
-            self.assertEqual(released, ["dead"])
-            self.assertTrue(_reap_fixture(child))
+                child = int(child_path.read_text())
+                self.assertEqual(code, 7)
+                self.assertEqual(released, ["dead"])
+            finally:
+                if child_path.exists():
+                    self.assertTrue(_reap_fixture(int(child_path.read_text())))
 
     def test_parent_only_sigterm_cleans_children_before_release(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1459,7 +1494,7 @@ from creme import build_ownership as owned
 
 child = Path({str(child_pid)!r})
 released = Path({str(released)!r})
-def release(_goal):
+def release(_goal, **_kwargs):
     pid = int(child.read_text())
     try:
         os.kill(pid, 0)
@@ -1479,20 +1514,27 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
             env = os.environ.copy()
             env["CREME_BUILD_LEDGER"] = str(ledger)
             proc = subprocess.Popen([os.sys.executable, "-c", script], cwd=ROOT, env=env)
-            for _ in range(100):
+            try:
+                for _ in range(100):
+                    if child_pid.exists():
+                        break
+                    proc.poll()
+                    if proc.returncode is not None:
+                        break
+                    threading.Event().wait(0.02)
+                self.assertTrue(child_pid.exists())
+                proc.send_signal(signal.SIGTERM)
+                self.assertEqual(proc.wait(timeout=5), 143)
+                self.assertEqual(released.read_text(), "dead")
+                child = int(child_pid.read_text())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child, 0)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=5)
                 if child_pid.exists():
-                    break
-                proc.poll()
-                if proc.returncode is not None:
-                    break
-                threading.Event().wait(0.02)
-            self.assertTrue(child_pid.exists())
-            proc.send_signal(signal.SIGTERM)
-            self.assertEqual(proc.wait(timeout=5), 143)
-            self.assertEqual(released.read_text(), "dead")
-            child = int(child_pid.read_text())
-            with self.assertRaises(ProcessLookupError):
-                os.kill(child, 0)
+                    self.assertTrue(_reap_fixture(int(child_pid.read_text())))
 
     def test_parent_only_census_signals_reap_update_before_release(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1526,7 +1568,7 @@ from creme import build_ownership as owned
 
 child = Path(os.environ['CENSUS_PID'])
 released = Path(os.environ['RELEASED'])
-def release(_goal):
+def release(_goal, **_kwargs):
     pid = int(child.read_text())
     try:
         os.kill(pid, 0)
@@ -1564,13 +1606,14 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path({str(w
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
-                    for _ in range(300):
-                        if census_pid.exists() or proc.poll() is not None:
-                            break
-                        threading.Event().wait(0.01)
-                    self.assertTrue(census_pid.exists())
-                    child = int(census_pid.read_text())
+                    child = None
                     try:
+                        for _ in range(300):
+                            if census_pid.exists() or proc.poll() is not None:
+                                break
+                            threading.Event().wait(0.01)
+                        self.assertTrue(census_pid.exists())
+                        child = int(census_pid.read_text())
                         os.kill(proc.pid, signum)
                         self.assertEqual(proc.wait(timeout=5), 128 + signum)
                         self.assertEqual(released.read_text(), "dead")
@@ -1579,7 +1622,10 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path({str(w
                         if proc.poll() is None:
                             proc.kill()
                             proc.wait(timeout=2)
-                        self.assertTrue(_reap_fixture(child, group_pid=child))
+                        if child is None and census_pid.exists():
+                            child = int(census_pid.read_text())
+                        if child is not None:
+                            self.assertTrue(_reap_fixture(child, group_pid=child))
 
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_denied_cleanup_preserves_the_admission_hold(self, _probe: Mock) -> None:
@@ -1686,7 +1732,7 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path({str(w
             events.append("hash")
             return dict(trace)
 
-        def release(_goal):
+        def release(_goal, **_kwargs):
             events.append("release")
             trace["M"] = "second"
             return True, "released"
@@ -1999,7 +2045,7 @@ class RowEvidenceTest(unittest.TestCase):
              patch("creme.build_ownership.subprocess.Popen",
                    side_effect=lambda args, **_kwargs: (
                        mark("launch", FakeProc())
-                       if args and str(args[0]) == "/guard/nice"
+                       if "/guard/nice" in args
                        else FakeProc()
                    )), \
              patch("creme.build_ownership.ProcessSampler", FakeSampler), \

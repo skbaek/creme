@@ -482,6 +482,14 @@ def cmd_idle_workers(arguments: argparse.Namespace) -> int:
     return 0 if result.status == "OK" else 2
 
 
+def cmd_build_recover(arguments: argparse.Namespace) -> int:
+    from .build_lifecycle import recover
+    ok, detail = recover(arguments.operation_id)
+    _json({"status": "OK" if ok else "REFUSED", "detail": detail,
+           "operation_id": arguments.operation_id})
+    return 0 if ok else 2
+
+
 def cmd_reclaim(arguments: argparse.Namespace) -> int:
     if getattr(arguments, "idle_workers", None) is not None:
         if arguments.hard_pressure or arguments.wind_down:
@@ -938,6 +946,10 @@ def parser() -> argparse.ArgumentParser:
     copy.add_argument("destination")
     copy.add_argument("--execute", action="store_true")
     copy.set_defaults(func=cmd_cache_copy)
+
+    recovery = commands.add_parser("build-recover", help="verify a recorded owned build is absent and release its exact hold; never signals")
+    recovery.add_argument("operation_id")
+    recovery.set_defaults(func=cmd_build_recover)
 
     reclaim = commands.add_parser("reclaim", help="ownership-verifying Lean-server reclamation")
     reclaim.add_argument("--dry-run", action="store_true")

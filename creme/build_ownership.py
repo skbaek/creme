@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, TextIO
 
 from . import semaphore
+from .build_lifecycle import (
+    BuildTransaction, OwnedThread, TerminationSignals as _TerminationSignals,
+    communicate as _communicate, output_lines as _output_lines,
+    stop_thread as _stop_background,
+)
 from .adapters import get_adapter
 from .profile import load_admission_settings
 from .task_wind_down import _goal_worktree_roots
@@ -1032,54 +1037,6 @@ def nice_main(argv: list[str]) -> int:
     os.execv(str(executable), [str(executable), *argv[3:]])
 
 
-class _TerminationSignals:
-    """Turn parent-only termination into a cleanup boundary.
-
-    A first SIGTERM or SIGHUP interrupts the active operation.  Once teardown
-    begins, later signals are remembered without interrupting cleanup.  Every
-    handler installed by this scope is restored before the caller continues.
-    """
-
-    def __init__(self) -> None:
-        self.signum: Optional[int] = None
-        self._prior: dict[int, Any] = {}
-
-    def _interrupt(self, signum: int, _frame: Any) -> None:
-        if self.signum is None:
-            self.signum = signum
-        raise KeyboardInterrupt
-
-    def _remember(self, signum: int, _frame: Any) -> None:
-        if self.signum is None:
-            self.signum = signum
-
-    def __enter__(self) -> "_TerminationSignals":
-        if threading.current_thread() is not threading.main_thread():
-            return self
-        try:
-            for signum in (signal.SIGTERM, signal.SIGHUP):
-                self._prior[signum] = signal.getsignal(signum)
-                signal.signal(signum, self._interrupt)
-        except BaseException:
-            self._restore()
-            raise
-        return self
-
-    def defer(self) -> None:
-        """Remember further termination requests without breaking teardown."""
-        for signum in self._prior:
-            signal.signal(signum, self._remember)
-
-    def _restore(self) -> None:
-        pending = list(self._prior.items())
-        self._prior.clear()
-        for signum, handler in pending:
-            signal.signal(signum, handler)
-
-    def __exit__(self, _kind: Any, _value: Any, _traceback: Any) -> None:
-        self._restore()
-
-
 def _preflight_priority_launcher(
     launcher: Path,
     *,
@@ -1108,7 +1065,7 @@ def _preflight_priority_launcher(
                 start_new_session=True,
             )
             try:
-                captured, _ = proc.communicate(timeout=timeout_seconds)
+                captured, _ = _communicate(proc, termination, timeout_seconds)
                 returncode = proc.returncode
             except subprocess.TimeoutExpired:
                 timed_out = True
@@ -1126,12 +1083,12 @@ def _preflight_priority_launcher(
                 cleanup_proved = _terminate_process_group(proc)
                 cleanup_proved = _close_process_pipes(proc) and cleanup_proved
 
-    if cancelled is not None:
+    if cancelled is not None or termination.signum is not None:
         if not cleanup_proved:
             return False, "priority launcher cancellation cleanup could not be verified"
         if termination.signum is not None:
             signal.raise_signal(termination.signum)
-        raise cancelled
+        raise cancelled if cancelled is not None else KeyboardInterrupt()
     if not cleanup_proved:
         return False, "priority launcher process cleanup could not be verified"
     if timed_out:
@@ -1226,7 +1183,7 @@ def _descendants(root_pid: int, rows: dict[int, tuple[int, int, str]]) -> set[in
     return found
 
 
-class ProcessSampler(threading.Thread):
+class ProcessSampler(OwnedThread):
     def __init__(self, pid: int, interval: float = 0.5, worktree: Optional[Path] = None):
         super().__init__(daemon=True)
         self.pid = pid
@@ -2371,32 +2328,7 @@ def _close_process_pipes(proc: subprocess.Popen[str]) -> bool:
     return closed
 
 
-def _stop_background(worker: Any, name: str) -> tuple[bool, str]:
-    """Stop one wrapper-owned helper thread and verify it did not escape."""
-    try:
-        worker.stop()
-    except RuntimeError as exc:
-        is_alive = getattr(worker, "is_alive", None)
-        if callable(is_alive) and not is_alive():
-            return True, f"{name} never started"
-        return False, f"{name} teardown raised RuntimeError: {exc}"
-    except BaseException as exc:
-        return False, f"{name} teardown raised {type(exc).__name__}: {exc}"
-    is_alive = getattr(worker, "is_alive", None)
-    if callable(is_alive):
-        try:
-            if is_alive():
-                return False, f"{name} remained alive after stop"
-        except BaseException as exc:
-            return False, f"{name} liveness check raised {type(exc).__name__}: {exc}"
-    return True, f"{name} stopped"
-
-
-def _hold_recovery(goal: str) -> str:
-    return f"python3 -m creme reclaim --wind-down {goal}"
-
-
-class RenewalThread(threading.Thread):
+class RenewalThread(OwnedThread):
     def __init__(self, goal: str, proc: subprocess.Popen[str], interval: int = RENEW_INTERVAL_SECONDS):
         super().__init__(daemon=True)
         self.goal = goal
@@ -2406,17 +2338,19 @@ class RenewalThread(threading.Thread):
         self.verdicts: list[str] = []
         self.refused = False
         self.cleanup_proved = True
+        self.operation_id: Optional[str] = None
 
     def run(self) -> None:
         while not self.stop_event.wait(self.interval):
             try:
-                ok, detail = semaphore.renew(self.goal, semaphore.ADAPTIVE_LEASE_SECONDS)
+                ok, detail = semaphore.renew(self.goal, semaphore.ADAPTIVE_LEASE_SECONDS, operation_id=self.operation_id)
             except Exception as exc:
                 ok = False
                 detail = f"renewal raised {type(exc).__name__}"
             self.verdicts.append(("OK: " if ok else "REFUSED: ") + detail)
             if not ok:
                 self.refused = True
+                self.cleanup_proved = False
                 self.cleanup_proved = _terminate_process_group(self.proc)
                 return
 
@@ -2614,58 +2548,15 @@ def run_lake_build(
         return GUARD_REFUSAL_EXIT
     args = [str(priority_launcher), "-n", "10", *lake_args]
 
-    if fresh:
-        # Nothing is stale: the build restores or links, and elaborates no
-        # module.  It takes no hold, so a session behind a fresh checkpoint
-        # is never queued for a one-second no-op.
-        admitted, admission = True, "NOT_REQUIRED_FRESH"
-        print(
-            "admission: the probe reports every selected artifact current; this build "
-            "elaborates nothing and takes no hold",
-            file=output,
-        )
-    else:
-        admitted, admission = semaphore.adaptive_acquire(
-            goal,
-            "classified lake build",
-            semaphore.ADAPTIVE_LEASE_SECONDS,
-            memory_gib=memory_gib,
-            contention=contention,
-            wait_seconds=wait_seconds,
-            estimate_source=_estimate_note(estimate_evidence),
-            **(
-                {
-                    "poll_seconds": float(settings()["wait_poll_seconds"]),
-                    "announce": lambda line: print(line, file=output, flush=True),
-                }
-                if wait_seconds is not None else {}
-            ),
-        )
-
-    if not admitted:
-        print(json.dumps({
-            "status": "REFUSED",
-            "admission": admission,
-            "contention": contention,
-            "requested_contention": requested_contention,
-            "evidence": evidence,
-            "memory_gib": memory_gib,
-            "estimate": estimate_evidence,
-        }, sort_keys=True), file=output)
-        return 2
-
-    def release_hold() -> tuple[bool, str]:
-        if fresh:
-            return True, "no hold was taken"
-        return semaphore.adaptive_release(goal)
-
     dependency_rev: Optional[str] = None
     dependency_detail = "dependency census did not run"
     update_exit = 0
     census_abort = False
     before: Optional[float] = None
     after: Optional[float] = None
-    started = time.monotonic()
+    started: Optional[float] = None
+    admission = "NOT_ADMITTED"
+    admitted = False
     proc: Optional[subprocess.Popen[str]] = None
     update_proc: Optional[subprocess.Popen[str]] = None
     sampler: Optional[ProcessSampler] = None
@@ -2679,28 +2570,74 @@ def run_lake_build(
     termination = _TerminationSignals()
     release_result: Optional[tuple[bool, str]] = None
 
+    rebuilt: list[str] = []
+    restored: list[str] = []
+    module_seconds: dict[str, float] = {}
+    hashes: dict[str, str] = {}
+    module_peaks: dict[str, float] = {}
+    peak_mib: Optional[float] = None
+    hint: Optional[str] = None
+
     with termination:
+        transaction = BuildTransaction(goal)
         try:
+            termination.check()
+            if fresh:
+                # Nothing is stale: the build restores or links, and elaborates no
+                # module.  It takes no hold, so a session behind a fresh checkpoint
+                # is never queued for a one-second no-op.
+                admitted, admission = True, "NOT_REQUIRED_FRESH"
+                print(
+                    "admission: the probe reports every selected artifact current; this build "
+                    "elaborates nothing and takes no hold",
+                    file=output,
+                )
+            else:
+                admitted, admission = semaphore.adaptive_acquire(
+                    goal,
+                    "classified lake build",
+                    semaphore.ADAPTIVE_LEASE_SECONDS,
+                    memory_gib=memory_gib,
+                    contention=contention,
+                    wait_seconds=wait_seconds,
+                    estimate_source=_estimate_note(estimate_evidence),
+                    operation_id=transaction.id,
+                    cancel_check=termination.check,
+                    **(
+                        {
+                            "poll_seconds": float(settings()["wait_poll_seconds"]),
+                            "announce": lambda line: print(line, file=output, flush=True),
+                        }
+                        if wait_seconds is not None else {}
+                    ),
+                )
+
+            termination.check()
+            if not admitted:
+                print(json.dumps({"status": "REFUSED", "admission": admission,
+                    "contention": contention, "memory_gib": memory_gib,
+                    "requested_contention": requested_contention,
+                    "evidence": evidence, "estimate": estimate_evidence}, sort_keys=True), file=output)
+                return 2
+            started = time.monotonic()
             if census:
                 phase = "dependency census startup"
-                update_proc = subprocess.Popen(
+                update_proc = transaction.launch(
                     [str(real_lake), "update", str(dependency)],
                     cwd=worktree,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    start_new_session=True,
                 )
                 phase = "dependency census output"
-                update_stdout, update_stderr = update_proc.communicate()
+                update_stdout, update_stderr = _communicate(update_proc, termination)
                 update_exit = int(update_proc.returncode or 0)
                 print(update_stdout or "", end="", file=output)
                 print(update_stderr or "", end="", file=output)
                 phase = "dependency census cleanup"
-                if (
-                    _terminate_process_group(update_proc)
-                    and _close_process_pipes(update_proc)
-                ):
+                if _terminate_process_group(update_proc):
+                    transaction.retire(update_proc)
+                    _close_process_pipes(update_proc)
                     update_proc = None
                 else:
                     census_abort = True
@@ -2720,28 +2657,62 @@ def run_lake_build(
             if not census_abort:
                 before = _swap_gib()
                 phase = "Lake process startup"
-                proc = subprocess.Popen(
+                proc = transaction.launch(
                     args, cwd=worktree, env=env, text=True,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    start_new_session=True,
                 )
                 phase = "sampler startup"
                 sampler = ProcessSampler(proc.pid, worktree=worktree)
+                transaction.helpers.append((sampler, "sampler thread"))
                 sampler.start()
+                termination.check()
                 if not fresh:
                     phase = "renewal startup"
                     renewer = RenewalThread(goal, proc)
+                    renewer.operation_id = transaction.id
+                    transaction.helpers.insert(0, (renewer, "renewal thread"))
                     renewer.start()
+                    termination.check()
                 phase = "Lake output consumption"
                 assert proc.stdout is not None
-                for line in proc.stdout:
+                for line in _output_lines(proc, termination):
                     lines.append(line)
                     print(line, end="", file=output)
                 phase = "Lake process wait"
-                exit_code = proc.wait()
+                while True:
+                    termination.check()
+                    try:
+                        exit_code = proc.wait(timeout=0.1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
                 if renewer is not None and renewer.refused:
                     exit_code = exit_code or 2
                     cleanup_proved = renewer.cleanup_proved
+            if proc is not None:
+                try:
+                    phase = "build evidence collection"
+                    rebuilt, restored, module_seconds = _parse_build_output(lines)
+                    hashes = _module_hashes(worktree, rebuilt)
+                    module_peaks = (
+                        {
+                            module: round(value, 1)
+                            for module, value in sorted(sampler.module_peak_mib.items())
+                            if module in rebuilt
+                        }
+                        if sampler and getattr(sampler, "module_peak_mib", None) else {}
+                    )
+                    peak_mib = (
+                        round(sampler.peak_rss_mib, 1)
+                        if sampler and sampler.samples else None
+                    )
+                    hint = repeat_failure(worktree, targets, settings()) if exit_code == 1 else None
+                except BaseException as exc:
+                    exit_code = exit_code or 2
+                    lifecycle_errors.append(
+                        f"{phase} raised {type(exc).__name__}"
+                        + (f": {exc}" if str(exc) else "")
+                    )
         except BaseException as exc:
             interrupted = isinstance(exc, KeyboardInterrupt)
             exit_code = (
@@ -2754,83 +2725,26 @@ def run_lake_build(
                 + (f": {exc}" if str(exc) else "")
             )
         finally:
-            # Once teardown begins, another parent-only termination request is
-            # recorded but cannot interrupt the cleanup and release decision.
-            termination.defer()
-            if proc is not None:
-                try:
-                    cleanup_proved = _terminate_process_group(proc) and cleanup_proved
-                    cleanup_proved = _close_process_pipes(proc) and cleanup_proved
-                except BaseException as exc:
-                    cleanup_proved = False
-                    lifecycle_errors.append(
-                        f"Lake process teardown raised {type(exc).__name__}: {exc}"
-                    )
-            if update_proc is not None:
-                try:
-                    cleanup_proved = _terminate_process_group(update_proc) and cleanup_proved
-                    cleanup_proved = _close_process_pipes(update_proc) and cleanup_proved
-                except BaseException as exc:
-                    cleanup_proved = False
-                    lifecycle_errors.append(
-                        f"dependency census teardown raised {type(exc).__name__}: {exc}"
-                    )
-            for worker, name in ((renewer, "renewal thread"), (sampler, "sampler thread")):
-                if worker is None:
-                    continue
-                stopped, stop_detail = _stop_background(worker, name)
-                if not stopped:
-                    cleanup_proved = False
-                    lifecycle_errors.append(stop_detail)
+            def stop_helper(worker: Any, name: str) -> tuple[bool, str]:
+                ok, detail = _stop_background(worker, name)
+                # Renewal may already have proved the build group absent.
+                # Only consume that proof after its helper has fully stopped.
+                if (ok and worker is renewer and renewer.refused
+                        and renewer.cleanup_proved and proc in transaction.processes):
+                    transaction.retire(proc)
+                return ok, detail
+            transaction.finalize(_terminate_process_group, _close_process_pipes,
+                                 stop_helper, fresh)
+            cleanup_proved = transaction.cleanup_proved
+            release_result = transaction.release_result
+            lifecycle_errors.extend(transaction.errors)
 
         if termination.signum is not None:
             interrupted = True
             exit_code = 128 + termination.signum
 
-        wall = time.monotonic() - started
+        wall = time.monotonic() - started if started is not None else 0.0
         after = _swap_gib() if proc is not None else None
-        rebuilt: list[str] = []
-        restored: list[str] = []
-        module_seconds: dict[str, float] = {}
-        hashes: dict[str, str] = {}
-        module_peaks: dict[str, float] = {}
-        peak_mib: Optional[float] = None
-        hint: Optional[str] = None
-        if proc is not None:
-            try:
-                phase = "build evidence collection"
-                rebuilt, restored, module_seconds = _parse_build_output(lines)
-                hashes = _module_hashes(worktree, rebuilt)
-                module_peaks = (
-                    {
-                        module: round(value, 1)
-                        for module, value in sorted(sampler.module_peak_mib.items())
-                        if module in rebuilt
-                    }
-                    if sampler and getattr(sampler, "module_peak_mib", None) else {}
-                )
-                peak_mib = (
-                    round(sampler.peak_rss_mib, 1)
-                    if sampler and sampler.samples else None
-                )
-                hint = repeat_failure(worktree, targets, settings()) if exit_code == 1 else None
-            except BaseException as exc:
-                exit_code = exit_code or 2
-                lifecycle_errors.append(
-                    f"{phase} raised {type(exc).__name__}"
-                    + (f": {exc}" if str(exc) else "")
-                )
-
-        if cleanup_proved:
-            try:
-                release_result = release_hold()
-            except BaseException as exc:
-                release_result = (
-                    False,
-                    f"hold release raised {type(exc).__name__}"
-                    + (f": {exc}" if str(exc) else ""),
-                )
-
     if termination.signum is not None:
         interrupted = True
         exit_code = 128 + termination.signum
@@ -2840,7 +2754,7 @@ def run_lake_build(
             print(json.dumps({
                 "status": "HOLD_PRESERVED",
                 "detail": "; ".join(lifecycle_errors) or "owned cleanup could not be verified",
-                "recovery": _hold_recovery(goal),
+                "recovery": transaction.recovery,
             }, sort_keys=True), file=output)
             return exit_code or 2
         assert release_result is not None
@@ -2848,7 +2762,7 @@ def run_lake_build(
         if not released:
             print(json.dumps({
                 "status": "RELEASE_FAILED", "detail": release_detail,
-                "recovery": _hold_recovery(goal),
+                "recovery": transaction.recovery,
             }, sort_keys=True), file=output)
             return exit_code or 2
         if census_abort and not lifecycle_errors:
@@ -2922,14 +2836,15 @@ def run_lake_build(
         assert release_result is not None
         released, release_detail = release_result
         if not released:
-            print(json.dumps({"status": "RELEASE_FAILED", "detail": release_detail}, sort_keys=True), file=output)
+            print(json.dumps({"status": "RELEASE_FAILED", "detail": release_detail,
+                              "recovery": transaction.recovery}, sort_keys=True), file=output)
             exit_code = exit_code or 2
             record["exit"] = exit_code
     else:
         print(json.dumps({
             "status": "HOLD_PRESERVED",
             "detail": "; ".join(lifecycle_errors) or "owned cleanup could not be verified",
-            "recovery": _hold_recovery(goal),
+            "recovery": transaction.recovery,
         }, sort_keys=True), file=output)
         exit_code = exit_code or 2
         record["exit"] = exit_code

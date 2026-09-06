@@ -379,11 +379,77 @@ failure refuses before admission and writes no enqueue, hold, or release row;
 the real build launch repeats the niceness check so a later failure still goes
 through owned process-group cleanup before release. Timeout, interruption and
 parent-only termination clean and reap the preflight process before returning
-or propagating. After admission, census update, build startup, sampling,
-renewal, output and teardown share the same rule: release only after cleanup is
-proved. An uncertain cleanup emits `HOLD_PRESERVED` with the goal-scoped
-wind-down recovery command. Probes remain admission-free, and a fresh build
-still takes no hold.
+or propagating. SIGINT, SIGTERM and SIGHUP are remembered in every phase,
+including successful or repeated-signal cleanup. Child I/O and owned queue
+waits check cancellation at bounded polling points; handlers do not raise
+asynchronously inside teardown. The original handlers and signal mask are
+restored after finalization. A build reports exit `128 + signal`; a cancelled
+preflight propagates the original signal after cleanup and never admits work.
+The native `Popen` and `Thread.start` primitives run to their return or
+exception before the next cancellation checkpoint. This does not promise to
+interrupt a wedged kernel primitive, SIGKILL, or interpreter failure.
+
+Before admission, the wrapper creates an ignored, private operation journal
+and kernel lifetime lock in `.semaphore/state/build-operations/`. Its random
+operation ID is published in the same atomic state replacement as the hold.
+Thus an exception after semaphore publication but before acquisition returns
+can be reconciled by exact operation identity; a prior or subsequent hold with
+the same goal label cannot be released by that reconciliation. Existing
+untagged standalone holds, explicit soft-to-hard conversion, older same-goal
+waiter priority and distinct-goal oldest-fitting remain supported. An owned
+build's tagged lane must be finalized by its operation, not converted or
+released by a label-only caller. Do not mix this hold schema with older
+loaded semaphore readers/waiters during rollout.
+
+After admission, census update, build startup, helper startup, output and
+teardown converge through one unconditional resource/hold finalizer. Build and
+update children start behind an inherited pipe gate; the existing executable
+and priority launcher run only after their group is recorded. Parent death
+before registration closes the gate, so the startup child exits without
+executing work. A proved-absent census group is retired from active cleanup
+before a later build starts; its numeric ID is never signalled a second time. An unacknowledged native thread start remains uncertain even
+when `Thread.is_alive()` is false. Its stop request persists through late
+bootstrap, and acknowledged termination and join are required. Optional
+hash/provenance collection is protected by the same finalizer; post-cleanup
+telemetry and receipt output follow the hold decision. A broken output sink
+cannot strand proved-absent resources or act as the only recovery record.
+
+An uncertain cleanup preserves the exact hold and the journal. `HOLD_PRESERVED`
+and semaphore status name the narrow recovery operation:
+
+```sh
+python3 -m creme build-recover OPERATION_ID
+```
+
+This command signals nothing. It validates the private journal and original
+lock inode, acquires the lifetime lock, reads the final journal, verifies every
+recorded build/update group absent, then matches and releases only that
+operation's hold under the semaphore mutex. PID reuse that leaves a group at
+the recorded number refuses; an unavailable liveness check, changed identity,
+missing/corrupt/symlinked file or later same-label hold also refuses. This is a
+same-user trusted local runtime protocol, not authentication against a
+malicious process already able to rewrite that user's private state.
+
+Recovery requires the original wrapper to exit after an uncertain result:
+its descriptor remains process-owned even after API return or garbage
+collection, because helper threads may still run. Finalization is single use,
+so another API call cannot retire an uncertain lifetime. The descriptor has
+close-on-exec set; only the controlled startup gate inherits it and closes it
+before registered execution. Pending gate children also
+retain that lock until exit or registered execution. Ordinary build/update
+groups are checked separately after wrapper exit. `reclaim --wind-down` checks
+Lean server roots and therefore refuses tagged build holds before performing
+its different cleanup. General Lean reclamation is unchanged. Recovery does
+not contain arbitrary descendants that deliberately leave the owned process
+group; those remain outside this wrapper's process-group contract. Probes
+remain admission-free, and a fresh build still takes no hold.
+
+Existing installed telemetry/Lean-reclaim delegates do not grant this new
+recovery command. Use it in an authorized execution context; do not broaden an
+installed delegate or bypass a denied inspection. Any host with a pinned
+contained-build runtime needs the existing bundle review/regeneration process
+for this runtime change. No blanket client restart follows on a host whose
+installed three-file telemetry/reclaim bundle remains byte-identical.
 
 Creme supplies `LAKE_CACHE_DIR` as the canonical checkout's
 `.creme/lake-cache/` for owned builds, probes, and guarded MCP processes,

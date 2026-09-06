@@ -142,8 +142,11 @@ def _validate(state: Any) -> dict[str, Any]:
         raise SemaphoreError("soft holds are malformed")
     holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
     for hold in holds:
-        if set(hold) != HOLD_KEYS:
+        if set(hold) not in (HOLD_KEYS, HOLD_KEYS | {"operation_id"}):
             raise SemaphoreError("hold has an unexpected shape")
+        if "operation_id" in hold and (not isinstance(hold["operation_id"], str)
+                or re.fullmatch(r"[0-9a-f]{32}", hold["operation_id"]) is None):
+            raise SemaphoreError("hold operation identity is malformed")
         if not isinstance(hold["label"], str) or not hold["label"]:
             raise SemaphoreError("hold label must be a non-empty string")
         if not isinstance(hold["note"], str):
@@ -170,6 +173,9 @@ def _validate(state: Any) -> dict[str, Any]:
     labels = [hold["label"] for hold in holds]
     if len(labels) != len(set(labels)):
         raise SemaphoreError("hold labels must be unique non-empty strings")
+    operations = [hold["operation_id"] for hold in holds if "operation_id" in hold]
+    if len(operations) != len(set(operations)):
+        raise SemaphoreError("owned operation IDs must be unique")
     return state
 
 
@@ -1276,13 +1282,15 @@ def _attribution_text(signal: dict[str, Any]) -> str:
     )
 
 
-def _signal_lines(label: str, signals: dict[str, dict[str, Any]], indent: str) -> list[str]:
+def _signal_lines(label: str, signals: dict[str, dict[str, Any]], indent: str,
+                  operation_id: Optional[str] = None) -> list[str]:
     signal = signals.get(label) or {}
     lines = []
     if signal.get("stranded"):
         lines.append(
             f"{indent}STRANDED: the holding process is gone and {_attribution_text(signal)}; "
-            f"run `python3 -m creme reclaim --wind-down {label}`"
+            + (f"run `python3 -m creme build-recover {operation_id}` after wrapper exit"
+               if operation_id else f"run `python3 -m creme reclaim --wind-down {label}`")
         )
     elif signal.get("idle_hold"):
         seconds = int(signal.get("idle_seconds") or 0)
@@ -1368,7 +1376,9 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
             f"memory={memory_gib}GiB contention={contention} "
             f"held={int(now - float(hard['acquired_at']))}s note={note!r}"
         )
-        lines.extend(_signal_lines(hard["label"], signals, "  "))
+        if hard.get("operation_id"):
+            lines.append("  " + _operation_refusal(hard))
+        lines.extend(_signal_lines(hard["label"], signals, "  ", hard.get("operation_id")))
     else:
         lines.append("hard: free")
     lines.append(f"soft (S={len(state['soft'])}):")
@@ -1380,7 +1390,9 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
             f"memory={memory_gib}GiB contention={contention} "
             f"held={int(now - float(hold['acquired_at']))}s note={note!r}"
         )
-        lines.extend(_signal_lines(hold["label"], signals, "    "))
+        if hold.get("operation_id"):
+            lines.append("    " + _operation_refusal(hold))
+        lines.extend(_signal_lines(hold["label"], signals, "    ", hold.get("operation_id")))
     if not state["soft"]:
         lines.append("  none")
     lines.append(f"waiting (W={len(waiters)}):")
@@ -1414,6 +1426,8 @@ def _admit(
     contention: str,
     adapter: Optional[Adapter],
     policy: Optional[dict[str, Any]],
+    operation_id: Optional[str] = None,
+    cancel_check: Optional[Callable[[], None]] = None,
 ) -> tuple[bool, str]:
     invalid, selected, selected_policy, requested_memory = _validate_request(
         label, lease, contention, memory_gib, adapter, policy
@@ -1470,6 +1484,11 @@ def _admit(
                 memory_gib=requested_memory,
                 contention=contention,
             )
+        if operation_id is not None:
+            hold = state["hard"] if selected_kind == "hard" else state["soft"][-1]
+            hold["operation_id"] = operation_id
+        if cancel_check is not None:
+            cancel_check()
         _save(path, state)
     _log(f"{requested_kind}-acquire", label, "OK", f"{decision}: {detail}")
     return True, f"{decision} — {detail}"
@@ -1591,6 +1610,9 @@ def _goal_lane_conflict(
         # soft lane.  The admission decision still refuses while another soft
         # label is active, and the waiter check above protects an older request
         # for this label from being invalidated by the conversion.
+        owned = next(hold for hold in state["soft"] if hold["label"] == label)
+        if owned.get("operation_id"):
+            return "ALREADY_HELD", _operation_refusal(owned)
         if requested_kind == "hard":
             return None
         return "ALREADY_HELD", "label already owns a soft hold; use renew"
@@ -1611,6 +1633,8 @@ def _waiting_admit(
     sleep: Callable[[float], None] = time.sleep,
     announce: Optional[Callable[[str], None]] = None,
     estimate_source: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    cancel_check: Optional[Callable[[], None]] = None,
 ) -> tuple[bool, str]:
     """Enqueue one request and return only when it is decided.
 
@@ -1701,7 +1725,7 @@ def _waiting_admit(
         raise _WaitCancelled(signum)
 
     prior_handlers: dict[int, Any] = {}
-    if threading.current_thread() is threading.main_thread():
+    if cancel_check is None and threading.current_thread() is threading.main_thread():
         for signum in (signal.SIGTERM, signal.SIGHUP):
             try:
                 prior_handlers[signum] = signal.getsignal(signum)
@@ -1711,6 +1735,8 @@ def _waiting_admit(
 
     try:
         while True:
+            if cancel_check is not None:
+                cancel_check()
             with locked_state() as (path, state):
                 root = path.parent
                 queue, notes = _load_queue(root)
@@ -1823,6 +1849,11 @@ def _waiting_admit(
                             label, note, lease,
                             memory_gib=requested_memory, contention=contention,
                         )
+                    if operation_id is not None:
+                        hold = state["hard"] if mine.kind == "hard" else state["soft"][-1]
+                        hold["operation_id"] = operation_id
+                    if cancel_check is not None:
+                        cancel_check()
                     _drop_waiter(root, waiter_id)
                     _save(path, state)
                     registered = False
@@ -1922,6 +1953,8 @@ def adaptive_acquire(
     poll_seconds: float = WAIT_POLL_SECONDS,
     announce: Optional[Callable[[str], None]] = None,
     estimate_source: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    cancel_check: Optional[Callable[[], None]] = None,
 ) -> tuple[bool, str]:
     if wait_seconds is not None:
         return _waiting_admit(
@@ -1936,6 +1969,8 @@ def adaptive_acquire(
             poll_seconds=poll_seconds,
             announce=announce,
             estimate_source=estimate_source,
+            operation_id=operation_id,
+            cancel_check=cancel_check,
         )
     return _admit(
         "adaptive",
@@ -1946,6 +1981,8 @@ def adaptive_acquire(
         contention=contention,
         adapter=adapter,
         policy=policy,
+        operation_id=operation_id,
+        cancel_check=cancel_check,
     )
 
 
@@ -1953,6 +1990,10 @@ def release(kind: str, label: str) -> tuple[bool, str]:
     if label == MANUAL_LABEL:
         return False, "manual hold requires manual-release"
     with locked_state() as (path, state):
+        holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
+        match = next((h for h in holds if h["label"] == label), None)
+        if match is not None and match.get("operation_id"):
+            return False, _operation_refusal(match)
         if kind == "hard":
             if not state["hard"] or state["hard"]["label"] != label:
                 return False, "matching hard hold not found"
@@ -1969,11 +2010,48 @@ def release(kind: str, label: str) -> tuple[bool, str]:
     return True, f"{kind} hold released"
 
 
-def adaptive_release(label: str) -> tuple[bool, str]:
+def _operation_refusal(hold: dict[str, Any]) -> str:
+    identity = hold.get("operation_id")
+    if identity:
+        return f"operation-owned hold; use python3 -m creme build-recover {identity} after wrapper exit"
+    return "hold belongs to a different operation; retained"
+
+
+def release_operation_after_cleanup(label: str, operation_id: str,
+        cleanup: Callable[[], tuple[bool, str]]) -> tuple[bool, str]:
+    """Recovery cannot authorize a later same-label hold or an untagged one."""
+    with locked_state() as (path, state):
+        holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
+        match = next((h for h in holds if h["label"] == label), None)
+        if match is not None and match.get("operation_id") != operation_id:
+            return False, "current hold identity differs from operation record; retained"
+        if match is None and any(h.get("operation_id") == operation_id for h in holds):
+            return False, "operation goal differs from its current hold; retained"
+        ok, detail = cleanup()
+        if not ok:
+            return False, detail
+        if match is not None:
+            if state["hard"] is match:
+                state["hard"] = None
+            else:
+                state["soft"].remove(match)
+            _save(path, state)
+        return True, detail + ("; exact operation hold released" if match else "; no matching hold remains")
+
+
+def adaptive_release(label: str, *, operation_id: Optional[str] = None) -> tuple[bool, str]:
     """Release the matching agent hold without guessing adaptive hold kind."""
     if not label or label == MANUAL_LABEL:
         return False, "reserved or empty label"
     with locked_state() as (path, state):
+        holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
+        match = next((h for h in holds if h["label"] == label), None)
+        if match is None and operation_id is not None:
+            if any(h.get("operation_id") == operation_id for h in holds):
+                return False, "operation goal differs from its current hold; retained"
+            return True, "no hold for this operation remains"
+        if match is not None and match.get("operation_id") != operation_id:
+            return False, _operation_refusal(match)
         if state["hard"] and state["hard"]["label"] == label:
             state["hard"] = None
             released = "hard"
@@ -2006,6 +2084,9 @@ def release_after_cleanup(
         return False, "reserved or empty label"
     with locked_state() as (path, state):
         holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
+        match = next((h for h in holds if h["label"] == label), None)
+        if match is not None and match.get("operation_id"):
+            return False, _operation_refusal(match)
         other_labels = [item["label"] for item in holds if item["label"] != label]
         if other_labels and not goal_scoped:
             detail = "other holds block task wind-down: " + ", ".join(other_labels)
@@ -2055,6 +2136,7 @@ def renew(
     *,
     adapter: Optional[Adapter] = None,
     policy: Optional[dict[str, Any]] = None,
+    operation_id: Optional[str] = None,
 ) -> tuple[bool, str]:
     if label == MANUAL_LABEL:
         return False, "manual hold has no heartbeat"
@@ -2067,6 +2149,8 @@ def renew(
         hold = next((item for item in candidates if item["label"] == label), None)
         if hold is None:
             return False, "hold not found"
+        if hold.get("operation_id") != operation_id:
+            return False, _operation_refusal(hold)
         sample = selected.memory_headroom()
         configured_total = selected_policy.get("physical_memory_gib")
         if isinstance(configured_total, bool) or not isinstance(configured_total, (int, float)):
@@ -2142,7 +2226,7 @@ def renew(
     )
     detail = f"CONTINUE_HEAVY — hold renewed; {pressure}"
     detail += "".join(
-        "\n  " + line for line in _signal_lines(label, signals["holds"], "")
+        "\n  " + line for line in _signal_lines(label, signals["holds"], "", operation_id)
     )
     idle_line = _idle_worker_line(signals["lean_workers"])
     if idle_line:

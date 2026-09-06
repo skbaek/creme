@@ -1522,10 +1522,11 @@ class MasterLeaseTest(unittest.TestCase):
 
     def test_codex_app_pipe_is_never_task_liveness(self):
         raw_pipe = str(self.root / "app-global-codex-tools.sock")
-        listener = semaphore.socket.socket(semaphore.socket.AF_UNIX, semaphore.socket.SOCK_STREAM)
-        listener.bind(raw_pipe)
-        listener.listen()
-        try:
+        # This tests identity selection, not transport connectivity. Model a
+        # socket inode so the control runs even where AF_UNIX bind is denied.
+        with mock.patch.object(semaphore.os, "stat", return_value=mock.Mock(
+            st_mode=semaphore.stat.S_IFSOCK | 0o600,
+        )) as socket_stat:
             with mock.patch.dict(os.environ, {
                 "CREME_MASTER_SESSION_ID": "",
                 "CREME_MASTER_LIVENESS_SOCKET": "",
@@ -1534,8 +1535,16 @@ class MasterLeaseTest(unittest.TestCase):
                 "CODEX_APP_TOOLS_PIPE_PATH": raw_pipe,
             }, clear=False):
                 session = semaphore._client_session("codex")
-        finally:
-            listener.close()
+                socket_stat.assert_not_called()
+                # The same socket metadata must be recognized when explicitly
+                # supplied through the task-owned interface.
+                with mock.patch.dict(os.environ, {
+                    "CREME_MASTER_LIVENESS_SOCKET": raw_pipe,
+                }, clear=False):
+                    task_session = semaphore._client_session("codex")
+                socket_stat.assert_called_once_with(raw_pipe)
+                self.assertEqual(task_session.liveness_socket, raw_pipe)
+                self.assertIsNotNone(task_session.liveness_digest)
         self.assertIsNotNone(session.digest)
         self.assertIsNone(session.liveness_digest)
         self.assertIsNone(session.liveness_socket)

@@ -12,6 +12,7 @@ from .host_build_broker import (
     broker_inputs,
     render_contained_build_broker,
 )
+from .host_workflow_broker import WORKFLOW_BROKER_NAME, render_workflow_broker
 
 
 WRAPPER_COMMANDS = (
@@ -94,10 +95,13 @@ def render_host_wrappers(creme_root: Path) -> dict[str, str]:
         rendered[BROKER_NAME] = render_contained_build_broker(
             creme_root, launcher_entry, runtime_tree, preflight_sha256,
         )
+    workflow = render_workflow_broker(creme_root)
+    if workflow is not None:
+        rendered[WORKFLOW_BROKER_NAME] = workflow
     return rendered
 
 
-def render_host_rules(output_dir: Path, *, include_build: bool = False) -> str:
+def render_host_rules(output_dir: Path, *, include_build: bool = False, include_workflow: bool = False) -> str:
     telemetry = output_dir / "codex-host-telemetry"
     reclaim = output_dir / "codex-reclaim-lean"
     telemetry_token = _quoted_rule_token(telemetry)
@@ -151,6 +155,17 @@ def render_host_rules(output_dir: Path, *, include_build: bool = False) -> str:
             f"        {json.dumps('bash /tmp/drip-contained-build.sh --probe -- Blanc.DripFresh')},\n"
             f"        {json.dumps('/usr/bin/systemd-run --user true')},\n"
             "    ],\n"
+            ")\n"
+        )
+    if include_workflow:
+        broker = output_dir / WORKFLOW_BROKER_NAME
+        rendered += (
+            "\nprefix_rule(\n"
+            f"    pattern=[{_quoted_rule_token(broker)}],\n"
+            "    decision=\"allow\",\n"
+            "    justification=\"Reviewed fixed workflow recipes through Creme's argument-rejecting contained service.\",\n"
+            f"    match=[{json.dumps(str(broker) + ' status')}],\n"
+            f"    not_match=[{json.dumps('/tmp/' + WORKFLOW_BROKER_NAME)}],\n"
             ")\n"
         )
     return rendered
@@ -256,7 +271,8 @@ def install_host_bundle(
             staged.append((target, _stage(target, content, 0o700)))
         staged.append((rule_path, _stage(
             rule_path,
-            render_host_rules(output_dir, include_build=BROKER_NAME in wrappers),
+            render_host_rules(output_dir, include_build=BROKER_NAME in wrappers,
+                              include_workflow=WORKFLOW_BROKER_NAME in wrappers),
             0o600,
         )))
 
@@ -323,7 +339,8 @@ def bundle_install_issues(
         issues.extend(_installed_file_issues(output_dir / name, expected, 0o700))
     issues.extend(_installed_file_issues(
         rules_dir / RULES_FILENAME,
-        render_host_rules(output_dir, include_build=BROKER_NAME in wrappers),
+        render_host_rules(output_dir, include_build=BROKER_NAME in wrappers,
+                          include_workflow=WORKFLOW_BROKER_NAME in wrappers),
         0o600,
     ))
     return issues

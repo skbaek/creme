@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from .adapters import Adapter, get_adapter
+from .codex_approvals import approval_checks
 from .guidance import GuidanceValidation
 from .guidance import default_path as default_guidance_path
 from .guidance import load as load_guidance
@@ -419,9 +420,16 @@ def check_host_wrappers(
         "client: host capability bundle",
         STATUS_OK,
         (
-            f"all {len(members)} installed files match; fully restart Codex after "
-            "any change because rules load at process startup; stricter managed "
-            "requirements may still override these user allows"
+            f"all {len(members)} installed files match on disk; coverage: telemetry, "
+            "reclaim --dry-run and --wind-down"
+            + (", contained Lake builds" if "codex-creme-contained-build" in rendered else "")
+            + (", reviewed workflow recipes and status" if "codex-creme-contained-workflow" in rendered else "")
+            + "; arbitrary gate/fixture commands are not covered. "
+            "Running-client rule loading and effective managed/MCP approval policy "
+            "are not verified by this check. Fully restart Codex after bundle "
+            "changes because rules load at process startup; stricter managed "
+            "requirements may still override these user allows. "
+            "See docs/guides/escalation.md"
         ),
     )]
 
@@ -499,6 +507,7 @@ def run_doctor(
     checks.extend(check_sibling("blanc", workspace / blanc_name, "github.com/skbaek/blanc"))
     checks.extend(check_goal_store(workspace, profile))
     checks.extend(check_client_surface(root))
+    checks.extend(Check(*row) for row in approval_checks(root))
     checks.extend(check_neutral_semaphore(root))
     checks.extend(check_host_wrappers(shared_root))
     checks.extend(check_public_runtime_boundary(root))

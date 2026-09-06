@@ -98,16 +98,21 @@ host for no safety benefit.
 serialization safer; `LIGHT_ONLY` means current headroom cannot preserve the
 host usability reserve. Do not retry in a loop. Reorder independent light
 work, wait for an existing heavy unit to wind down, or split the planned work.
-The explicit `soft-acquire` and `hard-acquire` compatibility commands are also
-pressure-gated; they cannot bypass a low-memory refusal. `release` removes
-whichever hold kind adaptive admission selected. Explicit soft/hard releases
-remain available for compatibility.
+New holds requested through the explicit `soft-acquire` and `hard-acquire`
+compatibility commands are also pressure-gated; they cannot bypass a
+low-memory refusal. The existing-lane conversion described below adds no new
+worker and retains its established exemption. `release` removes whichever
+hold kind adaptive admission selected. Explicit soft/hard releases remain
+available for compatibility.
 
 One goal label has one live heavy-admission lane. A second request receives
 `ALREADY_WAITING` while that goal has a queued request, or `ALREADY_HELD` while
-it owns a hold; it does not replace, upgrade, or join the earlier operation.
-Let the request finish, cancel its wait, or release its hold before retrying.
-The label identifies ownership scope, not command identity.
+it owns a hold. The public explicit `hard-acquire` command retains its atomic
+soft-to-hard conversion when the label's soft hold is the only active soft hold
+and no older request for that label is queued. That conversion changes the
+existing lane in place; every other duplicate must let the request finish,
+cancel its wait, or release its hold before retrying. The label identifies
+cooperative ownership scope, not authenticated command identity.
 
 ### Wait in one call; never poll by hand
 
@@ -372,8 +377,13 @@ launcher once in a bounded child preflight. The child checks the same
 `nice -n 10` capability without changing the wrapper process's priority. A
 failure refuses before admission and writes no enqueue, hold, or release row;
 the real build launch repeats the niceness check so a later failure still goes
-through the existing process cleanup and hold release path. Probes remain
-admission-free, and a fresh build still takes no hold.
+through owned process-group cleanup before release. Timeout, interruption and
+parent-only termination clean and reap the preflight process before returning
+or propagating. After admission, census update, build startup, sampling,
+renewal, output and teardown share the same rule: release only after cleanup is
+proved. An uncertain cleanup emits `HOLD_PRESERVED` with the goal-scoped
+wind-down recovery command. Probes remain admission-free, and a fresh build
+still takes no hold.
 
 Creme supplies `LAKE_CACHE_DIR` as the canonical checkout's
 `.creme/lake-cache/` for owned builds, probes, and guarded MCP processes,
@@ -507,7 +517,9 @@ rehearsal tree:
 ```
 
 It takes host exclusivity, keeps the dependency Git-pinned, and records the
-resolved revision on its ledger row.
+resolved revision on its ledger row. The update command runs in its own owned
+process group, so a nonzero exit, interrupt, or parent-only termination is
+cleaned and reaped before the census hold is released.
 
 Inspect the full diff and status, stage only owned paths, commit coherent green
 checkpoints, and push the goal's non-protected branch. Never force-push.

@@ -218,19 +218,43 @@ class SemaphoreTest(unittest.TestCase):
                             self.assertEqual(path, neutral / "state.json")
                             self.assertEqual(state, semaphore._empty_state())
 
-    def test_xy_interleaving_refuses_same_goal_hold_replacement(self):
+    def test_xy_interleaving_and_conversion(self):
         self.assertTrue(semaphore.acquire("soft", "X", "build")[0])
         self.assertTrue(semaphore.acquire("soft", "Y", "build")[0])
         self.assertFalse(semaphore.acquire("hard", "Y", "timing")[0])
         self.assertTrue(semaphore.release("soft", "X")[0])
-        refused, detail = semaphore.acquire("hard", "Y", "timing")
-        self.assertFalse(refused)
-        self.assertIn("ALREADY_HELD", detail)
+        converted, detail = semaphore.acquire("hard", "Y", "timing")
+        self.assertTrue(converted, detail)
+        state = semaphore.snapshot()
+        self.assertEqual(state["hard"]["label"], "Y")
+        self.assertEqual(state["soft"], [])
+        self.assertFalse(semaphore.acquire("soft", "X", "build")[0])
+
+    def test_soft_to_hard_conversion_preserves_older_same_goal_waiter(self):
+        root = Path(self.tmp.name)
+        self.assertTrue(semaphore.acquire("soft", "Y", "build")[0])
+        queue = semaphore._empty_queue()
+        now = semaphore._now()
+        queue["waiters"] = [{
+            "id": "1" * 32,
+            "label": "Y",
+            "pid": os.getpid(),
+            "uid": os.getuid(),
+            "contention": "sensitive",
+            "memory_gib": 4,
+            "enqueued_at": now - 1.0,
+            "heartbeat_at": now,
+        }]
+        semaphore._save_queue(root, queue)
+
+        converted, detail = semaphore.acquire("hard", "Y", "timing")
+
+        self.assertFalse(converted)
+        self.assertIn("ALREADY_WAITING", detail)
         state = semaphore.snapshot()
         self.assertIsNone(state["hard"])
         self.assertEqual([hold["label"] for hold in state["soft"]], ["Y"])
-        self.assertTrue(semaphore.release("soft", "Y")[0])
-        self.assertTrue(semaphore.acquire("hard", "Y", "timing")[0])
+        self.assertEqual(semaphore._load_queue(root)[0]["waiters"], queue["waiters"])
 
     def test_expired_hold_still_blocks_until_certified_break(self):
         semaphore.acquire("soft", "old", "work", 1)

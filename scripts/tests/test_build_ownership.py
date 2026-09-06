@@ -8,6 +8,7 @@ import subprocess
 import signal
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -29,6 +30,27 @@ UNPROBED = {
     "roots": ["T"], "package_roots": ["T"], "resolution": "T (module)",
     "stale": None, "detail": "probe unavailable: fixture", "stale_set": None, "graph": None,
 }
+
+
+def _pid_alive(pid: int) -> bool:
+    fixture_log = os.environ.get("CREME_TEST_FIXTURE_PID_LOG")
+    if fixture_log:
+        with Path(fixture_log).open("a", encoding="utf-8") as output:
+            output.write(f"{pid}\n")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_dead(pid: int, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        threading.Event().wait(0.02)
+    return not _pid_alive(pid)
 
 
 @contextmanager
@@ -910,11 +932,14 @@ class BuildOwnershipTest(unittest.TestCase):
             )
         execv.assert_not_called()
 
-    @patch("creme.build_ownership.subprocess.run")
+    @patch("creme.build_ownership._terminate_process_group", return_value=True)
+    @patch("creme.build_ownership.subprocess.Popen")
     def test_priority_launcher_preflight_is_bounded_and_session_scoped(
-        self, run: Mock,
+        self, popen: Mock, _terminate: Mock,
     ) -> None:
-        run.return_value = SimpleNamespace(returncode=0, stdout="")
+        proc = popen.return_value
+        proc.communicate.return_value = ("", None)
+        proc.returncode = 0
         worktree = Path("/worktree")
         env = {"LEAN_NUM_THREADS": "4"}
 
@@ -925,21 +950,25 @@ class BuildOwnershipTest(unittest.TestCase):
             (True, "priority launch preflight passed"),
         )
 
-        run.assert_called_once_with(
+        popen.assert_called_once_with(
             ["/guard/nice", "--preflight"],
             cwd=worktree,
             env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            check=False,
-            timeout=5.0,
             start_new_session=True,
         )
+        proc.communicate.assert_called_once_with(timeout=5.0)
 
-    @patch("creme.build_ownership.subprocess.run")
-    def test_priority_launcher_preflight_timeout_is_a_refusal(self, run: Mock) -> None:
-        run.side_effect = subprocess.TimeoutExpired(["/guard/nice", "--preflight"], 5)
+    @patch("creme.build_ownership._terminate_process_group", return_value=True)
+    @patch("creme.build_ownership.subprocess.Popen")
+    def test_priority_launcher_preflight_timeout_is_a_refusal(
+        self, popen: Mock, terminate: Mock,
+    ) -> None:
+        popen.return_value.communicate.side_effect = subprocess.TimeoutExpired(
+            ["/guard/nice", "--preflight"], 5
+        )
 
         ok, detail = owned._preflight_priority_launcher(
             Path("/guard/nice"), cwd=Path("/worktree"), env={}
@@ -947,15 +976,129 @@ class BuildOwnershipTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(detail, "priority launcher did not finish within 5s")
+        terminate.assert_called_once_with(popen.return_value)
 
-    @patch("creme.build_ownership.subprocess.run", side_effect=KeyboardInterrupt)
+    @patch("creme.build_ownership._terminate_process_group", return_value=True)
+    @patch("creme.build_ownership.subprocess.Popen")
     def test_priority_launcher_preflight_does_not_convert_interrupt_to_refusal(
-        self, _run: Mock,
+        self, popen: Mock, terminate: Mock,
     ) -> None:
+        popen.return_value.communicate.side_effect = KeyboardInterrupt
         with self.assertRaises(KeyboardInterrupt):
             owned._preflight_priority_launcher(
                 Path("/guard/nice"), cwd=Path("/worktree"), env={}
             )
+        terminate.assert_called_once_with(popen.return_value)
+
+    def test_priority_launcher_preflight_timeout_reaps_its_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launcher = root / "preflight"
+            direct_path = root / "direct.pid"
+            descendant_path = root / "descendant.pid"
+            launcher.write_text(
+                f"#!{Path(os.sys.executable).resolve()}\n"
+                "import os, pathlib, subprocess, time\n"
+                "pathlib.Path(os.environ['DIRECT_PID']).write_text(str(os.getpid()))\n"
+                "child = subprocess.Popen([os.environ['SLEEP'], '30'])\n"
+                "pathlib.Path(os.environ['DESCENDANT_PID']).write_text(str(child.pid))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            launcher.chmod(0o700)
+            env = dict(os.environ)
+            env.update({
+                "DIRECT_PID": str(direct_path),
+                "DESCENDANT_PID": str(descendant_path),
+                "SLEEP": "/bin/sleep",
+            })
+
+            ok, detail = owned._preflight_priority_launcher(
+                launcher, cwd=root, env=env, timeout_seconds=1.0
+            )
+
+            self.assertFalse(ok)
+            self.assertIn("did not finish", detail)
+            direct = int(direct_path.read_text())
+            descendant = int(descendant_path.read_text())
+            try:
+                self.assertTrue(_wait_dead(direct))
+                self.assertTrue(_wait_dead(descendant))
+            finally:
+                if _pid_alive(direct) or _pid_alive(descendant):
+                    try:
+                        os.killpg(direct, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                self.assertTrue(_wait_dead(direct))
+                self.assertTrue(_wait_dead(descendant))
+
+    def test_priority_launcher_preflight_reaps_before_interrupt_propagation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launcher = root / "preflight"
+            launcher.write_text(
+                f"#!{Path(os.sys.executable).resolve()}\n"
+                "import os, pathlib, time\n"
+                "pathlib.Path(os.environ['DIRECT_PID']).write_text(str(os.getpid()))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            launcher.chmod(0o700)
+            controller = (
+                "import os, pathlib, sys\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "from creme import build_ownership as owned\n"
+                "try:\n"
+                "    owned._preflight_priority_launcher(pathlib.Path(sys.argv[2]), cwd=pathlib.Path(sys.argv[3]), env=dict(os.environ), timeout_seconds=20)\n"
+                "except KeyboardInterrupt:\n"
+                "    pid = int(pathlib.Path(os.environ['DIRECT_PID']).read_text())\n"
+                "    try:\n"
+                "        os.kill(pid, 0)\n"
+                "        state = 'alive'\n"
+                "    except ProcessLookupError:\n"
+                "        state = 'dead'\n"
+                "    pathlib.Path(os.environ['INTERRUPT_STATE']).write_text(state)\n"
+                "    raise SystemExit(130)\n"
+            )
+
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+                with self.subTest(signum=signum):
+                    direct_path = root / f"direct-{signum}.pid"
+                    state_path = root / f"state-{signum}"
+                    env = dict(os.environ)
+                    env.update({
+                        "DIRECT_PID": str(direct_path),
+                        "INTERRUPT_STATE": str(state_path),
+                    })
+                    proc = subprocess.Popen(
+                        [os.sys.executable, "-c", controller, str(ROOT), str(launcher), str(root)],
+                        cwd=ROOT,
+                        env=env,
+                        start_new_session=True,
+                    )
+                    for _ in range(200):
+                        if direct_path.exists() or proc.poll() is not None:
+                            break
+                        threading.Event().wait(0.01)
+                    self.assertTrue(direct_path.exists())
+                    direct = int(direct_path.read_text())
+                    try:
+                        os.kill(proc.pid, signum)
+                        expected = 130 if signum == signal.SIGINT else -signum
+                        self.assertEqual(proc.wait(timeout=5), expected)
+                        self.assertTrue(_wait_dead(direct))
+                        if signum == signal.SIGINT:
+                            self.assertEqual(state_path.read_text(), "dead")
+                    finally:
+                        if proc.poll() is None:
+                            proc.kill()
+                            proc.wait(timeout=2)
+                        if _pid_alive(direct):
+                            try:
+                                os.killpg(direct, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
 
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_failed_launch_preflight_precedes_admission_and_writes_no_hold_rows(
@@ -992,6 +1135,288 @@ class BuildOwnershipTest(unittest.TestCase):
             self.assertNotIn("/tool/lake", " ".join(map(str, call.args[0])))
         self.assertEqual(semaphore_log, "")
         self.assertIn("launch preflight failed", output.getvalue())
+
+    @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
+    def test_admitted_startup_exceptions_release_and_restore_handlers(
+        self, _probe: Mock,
+    ) -> None:
+        for census in (False, True):
+            with self.subTest(census=census):
+                output = io.StringIO()
+                release = Mock(return_value=(True, "released"))
+                before = {
+                    signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+                    signal.SIGHUP: signal.getsignal(signal.SIGHUP),
+                }
+                with _ledger_and_log(), patch(
+                    "creme.build_ownership._worktree_identity",
+                    return_value=(Path.cwd(), "g"),
+                ), patch(
+                    "creme.build_ownership.split_worktree_suffix",
+                    return_value=("g", "rehearsal" if census else None),
+                ), patch(
+                    "creme.build_ownership.resolve_toolchain",
+                    return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool")),
+                ), patch(
+                    "creme.build_ownership.guard_bin", return_value=Path("/guard")
+                ), patch(
+                    "creme.build_ownership._preflight_priority_launcher",
+                    return_value=(True, "priority launch preflight passed"),
+                ), patch(
+                    "creme.build_ownership.semaphore.adaptive_acquire",
+                    return_value=(True, "ADMITTED_HARD"),
+                ), patch(
+                    "creme.build_ownership.semaphore.adaptive_release",
+                    side_effect=release,
+                ), patch(
+                    "creme.build_ownership.subprocess.Popen",
+                    side_effect=OSError("fixture startup failure"),
+                ):
+                    code = owned.run_lake_build(
+                        "g", ["T"], memory_gib=2, contention="sensitive",
+                        census=census, dependency="dep" if census else None,
+                        stdout=output,
+                    )
+
+                self.assertEqual(code, 2)
+                release.assert_called_once_with("g")
+                self.assertIn('"status": "ERROR"', output.getvalue())
+                self.assertIn("startup raised OSError", output.getvalue())
+                self.assertEqual(signal.getsignal(signal.SIGTERM), before[signal.SIGTERM])
+                self.assertEqual(signal.getsignal(signal.SIGHUP), before[signal.SIGHUP])
+
+    @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
+    def test_admitted_component_and_output_failures_cleanup_before_release(
+        self, _probe: Mock,
+    ) -> None:
+        class FailingOutput:
+            def __iter__(self):
+                raise OSError("fixture output failure")
+
+            def close(self):
+                pass
+
+        class FakeProc:
+            pid = 424242
+            stdout = FailingOutput()
+
+            def wait(self, timeout=None):
+                return 0
+
+        class FakeSampler:
+            samples = 0
+            unavailable_samples = 0
+            module_peak_mib: dict[str, float] = {}
+
+            def __init__(self, _pid, worktree=None):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        class FakeRenewer:
+            refused = False
+            cleanup_proved = True
+            verdicts: list[str] = []
+
+            def __init__(self, _goal, _proc):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        cases = (
+            ("sampler", OSError("sampler failed"), FakeRenewer),
+            ("renewal", FakeSampler, OSError("renewal failed")),
+            ("output", FakeSampler, FakeRenewer),
+        )
+        for name, sampler_effect, renewer_effect in cases:
+            with self.subTest(name=name):
+                output = io.StringIO()
+                release = Mock(return_value=(True, "released"))
+                sampler_patch = (
+                    patch("creme.build_ownership.ProcessSampler", side_effect=sampler_effect)
+                    if isinstance(sampler_effect, BaseException)
+                    else patch("creme.build_ownership.ProcessSampler", sampler_effect)
+                )
+                renewer_patch = (
+                    patch("creme.build_ownership.RenewalThread", side_effect=renewer_effect)
+                    if isinstance(renewer_effect, BaseException)
+                    else patch("creme.build_ownership.RenewalThread", renewer_effect)
+                )
+                with _ledger_and_log(), patch(
+                    "creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")
+                ), patch(
+                    "creme.build_ownership.resolve_toolchain",
+                    return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool")),
+                ), patch(
+                    "creme.build_ownership.guard_bin", return_value=Path("/guard")
+                ), patch(
+                    "creme.build_ownership._preflight_priority_launcher",
+                    return_value=(True, "priority launch preflight passed"),
+                ), patch(
+                    "creme.build_ownership.semaphore.adaptive_acquire",
+                    return_value=(True, "ADMITTED_HARD"),
+                ), patch(
+                    "creme.build_ownership.semaphore.adaptive_release", side_effect=release
+                ), patch(
+                    "creme.build_ownership.subprocess.Popen", return_value=FakeProc()
+                ), patch(
+                    "creme.build_ownership._terminate_process_group", return_value=True
+                ), sampler_patch, renewer_patch:
+                    code = owned.run_lake_build(
+                        "g", ["T"], memory_gib=2, contention="sensitive", stdout=output
+                    )
+
+                self.assertEqual(code, 2)
+                release.assert_called_once_with("g")
+                self.assertIn('"status": "ERROR"', output.getvalue())
+                self.assertIn("raised OSError", output.getvalue())
+
+    @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
+    def test_teardown_uncertainty_preserves_hold_with_recovery(self, _probe: Mock) -> None:
+        class FakeProc:
+            pid = 424242
+            stdout: list[str] = []
+
+            def wait(self, timeout=None):
+                return 0
+
+        class BadSampler:
+            samples = 0
+            unavailable_samples = 0
+            module_peak_mib: dict[str, float] = {}
+
+            def __init__(self, _pid, worktree=None):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self):
+                raise OSError("fixture teardown failure")
+
+        output = io.StringIO()
+        with _ledger_and_log(), patch(
+            "creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")
+        ), patch(
+            "creme.build_ownership.resolve_toolchain",
+            return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool")),
+        ), patch(
+            "creme.build_ownership.guard_bin", return_value=Path("/guard")
+        ), patch(
+            "creme.build_ownership._preflight_priority_launcher",
+            return_value=(True, "priority launch preflight passed"),
+        ), patch(
+            "creme.build_ownership.semaphore.adaptive_acquire",
+            return_value=(True, "ADMITTED_HARD"),
+        ), patch(
+            "creme.build_ownership.semaphore.adaptive_release"
+        ) as release, patch(
+            "creme.build_ownership.subprocess.Popen", return_value=FakeProc()
+        ), patch(
+            "creme.build_ownership._terminate_process_group", return_value=True
+        ), patch(
+            "creme.build_ownership.ProcessSampler", BadSampler
+        ), patch(
+            "creme.build_ownership.RenewalThread", side_effect=OSError("do not start")
+        ):
+            code = owned.run_lake_build(
+                "g", ["T"], memory_gib=2, contention="sensitive", stdout=output
+            )
+
+        self.assertEqual(code, 2)
+        release.assert_not_called()
+        self.assertIn('"status": "HOLD_PRESERVED"', output.getvalue())
+        self.assertIn('"recovery": "python3 -m creme reclaim --wind-down g"', output.getvalue())
+
+    @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
+    def test_nonzero_build_reaps_descendant_before_release(self, _probe: Mock) -> None:
+        class FakeSampler:
+            samples = 0
+            unavailable_samples = 0
+            module_peak_mib: dict[str, float] = {}
+
+            def __init__(self, _pid, worktree=None):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        class FakeRenewer(FakeSampler):
+            refused = False
+            cleanup_proved = True
+            verdicts: list[str] = []
+
+            def __init__(self, _goal, _proc):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp, _ledger_and_log():
+            root = Path(tmp)
+            fake_lake = root / "lake"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_nice = fake_bin / "nice"
+            child_path = root / "child.pid"
+            fake_lake.write_text(
+                f"#!{Path(os.sys.executable).resolve()}\n"
+                "import os, pathlib, subprocess, sys\n"
+                "child = subprocess.Popen(['/bin/sleep', '30'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+                f"pathlib.Path({str(child_path)!r}).write_text(str(child.pid))\n"
+                "raise SystemExit(7)\n",
+                encoding="utf-8",
+            )
+            fake_lake.chmod(0o700)
+            fake_nice.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--preflight\" ]; then exit 0; fi\n"
+                "shift 2\n"
+                "exec \"$@\"\n",
+                encoding="utf-8",
+            )
+            fake_nice.chmod(0o700)
+            released: list[str] = []
+
+            def release(_goal):
+                child = int(child_path.read_text())
+                released.append("dead" if not _pid_alive(child) else "alive")
+                return True, "released"
+
+            with patch(
+                "creme.build_ownership._worktree_identity", return_value=(root, "g")
+            ), patch(
+                "creme.build_ownership.resolve_toolchain",
+                return_value=(fake_lake, Path("/bin/sh"), Path("/")),
+            ), patch(
+                "creme.build_ownership.guard_bin", return_value=fake_bin
+            ), patch(
+                "creme.build_ownership.semaphore.adaptive_acquire",
+                return_value=(True, "ADMITTED_HARD"),
+            ), patch(
+                "creme.build_ownership.semaphore.adaptive_release", side_effect=release
+            ), patch(
+                "creme.build_ownership.ProcessSampler", FakeSampler
+            ), patch(
+                "creme.build_ownership.RenewalThread", FakeRenewer
+            ):
+                code = owned.run_lake_build(
+                    "g", ["T"], memory_gib=2, contention="sensitive",
+                    stdout=io.StringIO(),
+                )
+
+            child = int(child_path.read_text())
+            self.assertEqual(code, 7)
+            self.assertEqual(released, ["dead"])
+            self.assertTrue(_wait_dead(child))
 
     def test_parent_only_sigterm_cleans_children_before_release(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1060,6 +1485,97 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
             child = int(child_pid.read_text())
             with self.assertRaises(ProcessLookupError):
                 os.kill(child, 0)
+
+    def test_parent_only_census_signals_reap_update_before_release(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree = root / "g-rehearsal"
+            worktree.mkdir()
+            fake_lake = root / "lake"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_nice = fake_bin / "nice"
+            fake_lake.write_text(
+                f"#!{Path(os.sys.executable).resolve()}\n"
+                "import os, pathlib, time\n"
+                "pathlib.Path(os.environ['CENSUS_PID']).write_text(str(os.getpid()))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            fake_lake.chmod(0o700)
+            fake_nice.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--preflight\" ]; then exit 0; fi\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            fake_nice.chmod(0o700)
+            controller = f"""
+import os
+from pathlib import Path
+from unittest.mock import patch
+from creme import build_ownership as owned
+
+child = Path(os.environ['CENSUS_PID'])
+released = Path(os.environ['RELEASED'])
+def release(_goal):
+    pid = int(child.read_text())
+    try:
+        os.kill(pid, 0)
+        state = 'alive'
+    except ProcessLookupError:
+        state = 'dead'
+    released.write_text(state)
+    return True, 'released'
+
+with patch('creme.build_ownership._worktree_identity', return_value=(Path({str(worktree)!r}), 'g')), \
+     patch('creme.build_ownership.split_worktree_suffix', return_value=('g', 'rehearsal')), \
+     patch('creme.build_ownership.resolve_toolchain', return_value=(Path({str(fake_lake)!r}), Path('/bin/sh'), Path('/'))), \
+     patch('creme.build_ownership.stale_evidence', return_value={UNPROBED!r}), \
+     patch('creme.build_ownership.guard_bin', return_value=Path({str(fake_bin)!r})), \
+     patch('creme.build_ownership.semaphore.adaptive_acquire', return_value=(True, 'ADMITTED_HARD')), \
+     patch('creme.build_ownership.semaphore.adaptive_release', side_effect=release):
+    raise SystemExit(owned.run_lake_build('g', ['T'], contention='sensitive', memory_gib=2, census=True, dependency='dep'))
+"""
+            for signum in (signal.SIGTERM, signal.SIGHUP):
+                with self.subTest(signum=signum):
+                    census_pid = root / f"census-{signum}.pid"
+                    released = root / f"released-{signum}"
+                    ledger = root / f"ledger-{signum}.jsonl"
+                    env = dict(os.environ)
+                    env.update({
+                        "CENSUS_PID": str(census_pid),
+                        "RELEASED": str(released),
+                        "CREME_BUILD_LEDGER": str(ledger),
+                    })
+                    proc = subprocess.Popen(
+                        [os.sys.executable, "-c", controller],
+                        cwd=ROOT,
+                        env=env,
+                        start_new_session=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    for _ in range(300):
+                        if census_pid.exists() or proc.poll() is not None:
+                            break
+                        threading.Event().wait(0.01)
+                    self.assertTrue(census_pid.exists())
+                    child = int(census_pid.read_text())
+                    try:
+                        os.kill(proc.pid, signum)
+                        self.assertEqual(proc.wait(timeout=5), 128 + signum)
+                        self.assertEqual(released.read_text(), "dead")
+                        self.assertTrue(_wait_dead(child))
+                    finally:
+                        if proc.poll() is None:
+                            proc.kill()
+                            proc.wait(timeout=2)
+                        if _pid_alive(child):
+                            try:
+                                os.killpg(child, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
 
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_denied_cleanup_preserves_the_admission_hold(self, _probe: Mock) -> None:

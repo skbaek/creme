@@ -695,7 +695,7 @@ def _admission_decision(
         return _refuse(
             "ALREADY_HELD", "label already owns the hard hold; use renew", waitable=False
         )
-    if matching_soft:
+    if matching_soft and requested_kind != "hard":
         return _refuse(
             "ALREADY_HELD", "label already owns a soft hold; use renew", waitable=False
         )
@@ -713,6 +713,7 @@ def _admission_decision(
             "DEFER_FOR_HARD", f"soft holds block hard acquisition: {labels}", waitable=True
         )
 
+    converting = requested_kind == "hard" and bool(matching_soft)
     # A queue pass evaluates every waiter against one sample so arrival order
     # is decided from a single view of the host, not a drifting one.
     if sample is None:
@@ -726,7 +727,7 @@ def _admission_decision(
     requires_hard = requested_kind == "hard" or contention != "tolerant"
     reasons = []
 
-    if free_percent is not None and free_percent < ADMISSION_DRAIN_PERCENT:
+    if not converting and free_percent is not None and free_percent < ADMISSION_DRAIN_PERCENT:
         return _refuse(
             "LIGHT_ONLY",
             f"available memory is {free_percent}% (<{ADMISSION_DRAIN_PERCENT}%); "
@@ -734,11 +735,11 @@ def _admission_decision(
             waitable=False,
         )
 
-    if free_percent is None:
+    if not converting and free_percent is None:
         requires_hard = True
         reasons.append(f"memory headroom unavailable ({sample.detail}); limited mode serializes heavy work")
 
-    if reserve_gib is not None:
+    if not converting and reserve_gib is not None:
         capacity_gib = max(0.0, float(total_gib) - reserve_gib)
         if charged_gib > capacity_gib:
             # No amount of waiting shrinks the request below the host budget.
@@ -1426,7 +1427,9 @@ def _admit(
         _log_dropped_waiters(path.parent, dropped, now)
         if dropped:
             _save_queue(path.parent, queue)
-        conflict = _goal_lane_conflict(state, queue["waiters"], label)
+        conflict = _goal_lane_conflict(
+            state, queue["waiters"], label, requested_kind=requested_kind
+        )
         if conflict is not None:
             decision, detail = conflict
             _log_to(
@@ -1570,20 +1573,27 @@ def _goal_lane_conflict(
     waiters: list[dict[str, Any]],
     label: str,
     *,
+    requested_kind: Optional[str] = None,
     waiter_id: Optional[str] = None,
 ) -> Optional[tuple[str, str]]:
     """Return the older live lane that prevents a same-goal request."""
-    hard = state["hard"]
-    if hard and hard["label"] == label:
-        return "ALREADY_HELD", "label already owns the hard hold; use renew"
-    if any(hold["label"] == label for hold in state["soft"]):
-        return "ALREADY_HELD", "label already owns a soft hold; use renew"
     matching = [entry for entry in _ordered_waiters(waiters) if entry["label"] == label]
     if matching and matching[0]["id"] != waiter_id:
         return (
             "ALREADY_WAITING",
             "label already has a live admission request; let it finish or cancel it before retrying",
         )
+    hard = state["hard"]
+    if hard and hard["label"] == label:
+        return "ALREADY_HELD", "label already owns the hard hold; use renew"
+    if any(hold["label"] == label for hold in state["soft"]):
+        # An explicit hard acquisition may atomically convert its one existing
+        # soft lane.  The admission decision still refuses while another soft
+        # label is active, and the waiter check above protects an older request
+        # for this label from being invalidated by the conversion.
+        if requested_kind == "hard":
+            return None
+        return "ALREADY_HELD", "label already owns a soft hold; use renew"
     return None
 
 

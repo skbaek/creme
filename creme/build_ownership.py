@@ -1032,6 +1032,54 @@ def nice_main(argv: list[str]) -> int:
     os.execv(str(executable), [str(executable), *argv[3:]])
 
 
+class _TerminationSignals:
+    """Turn parent-only termination into a cleanup boundary.
+
+    A first SIGTERM or SIGHUP interrupts the active operation.  Once teardown
+    begins, later signals are remembered without interrupting cleanup.  Every
+    handler installed by this scope is restored before the caller continues.
+    """
+
+    def __init__(self) -> None:
+        self.signum: Optional[int] = None
+        self._prior: dict[int, Any] = {}
+
+    def _interrupt(self, signum: int, _frame: Any) -> None:
+        if self.signum is None:
+            self.signum = signum
+        raise KeyboardInterrupt
+
+    def _remember(self, signum: int, _frame: Any) -> None:
+        if self.signum is None:
+            self.signum = signum
+
+    def __enter__(self) -> "_TerminationSignals":
+        if threading.current_thread() is not threading.main_thread():
+            return self
+        try:
+            for signum in (signal.SIGTERM, signal.SIGHUP):
+                self._prior[signum] = signal.getsignal(signum)
+                signal.signal(signum, self._interrupt)
+        except BaseException:
+            self._restore()
+            raise
+        return self
+
+    def defer(self) -> None:
+        """Remember further termination requests without breaking teardown."""
+        for signum in self._prior:
+            signal.signal(signum, self._remember)
+
+    def _restore(self) -> None:
+        pending = list(self._prior.items())
+        self._prior.clear()
+        for signum, handler in pending:
+            signal.signal(signum, handler)
+
+    def __exit__(self, _kind: Any, _value: Any, _traceback: Any) -> None:
+        self._restore()
+
+
 def _preflight_priority_launcher(
     launcher: Path,
     *,
@@ -1040,25 +1088,59 @@ def _preflight_priority_launcher(
     timeout_seconds: float = 5.0,
 ) -> tuple[bool, str]:
     """Exercise niceness in a bounded child without changing the parent."""
-    try:
-        completed = subprocess.run(
-            [str(launcher), "--preflight"],
-            cwd=cwd,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-            timeout=timeout_seconds,
-            start_new_session=True,
-        )
-    except subprocess.TimeoutExpired:
+    proc: Optional[subprocess.Popen[str]] = None
+    captured = ""
+    returncode: Optional[int] = None
+    timed_out = False
+    failure: Optional[str] = None
+    cancelled: Optional[BaseException] = None
+    cleanup_proved = True
+    termination = _TerminationSignals()
+    with termination:
+        try:
+            proc = subprocess.Popen(
+                [str(launcher), "--preflight"],
+                cwd=cwd,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            try:
+                captured, _ = proc.communicate(timeout=timeout_seconds)
+                returncode = proc.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        except OSError as exc:
+            failure = (
+                f"priority launcher could not start: {exc}"
+                if proc is None
+                else f"priority launcher failed: {exc}"
+            )
+        except BaseException as exc:
+            cancelled = exc
+        finally:
+            termination.defer()
+            if proc is not None:
+                cleanup_proved = _terminate_process_group(proc)
+                cleanup_proved = _close_process_pipes(proc) and cleanup_proved
+
+    if cancelled is not None:
+        if not cleanup_proved:
+            return False, "priority launcher cancellation cleanup could not be verified"
+        if termination.signum is not None:
+            signal.raise_signal(termination.signum)
+        raise cancelled
+    if not cleanup_proved:
+        return False, "priority launcher process cleanup could not be verified"
+    if timed_out:
         return False, f"priority launcher did not finish within {timeout_seconds:g}s"
-    except OSError as exc:
-        return False, f"priority launcher could not start: {exc}"
-    detail = completed.stdout.strip()
-    if completed.returncode != 0:
-        return False, detail or f"priority launcher exited {completed.returncode}"
+    if failure is not None:
+        return False, failure
+    detail = captured.strip()
+    if returncode != 0:
+        return False, detail or f"priority launcher exited {returncode}"
     return True, "priority launch preflight passed"
 
 
@@ -2272,6 +2354,48 @@ def _terminate_process_group(proc: subprocess.Popen[str], timeout: float = 10.0)
     return _process_group_alive(pgid) is False
 
 
+def _close_process_pipes(proc: subprocess.Popen[str]) -> bool:
+    """Close every pipe owned by ``proc`` after it has been reaped."""
+    closed = True
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(proc, name, None)
+        if stream is None:
+            continue
+        close = getattr(stream, "close", None)
+        if not callable(close):
+            continue
+        try:
+            close()
+        except (OSError, ValueError):
+            closed = False
+    return closed
+
+
+def _stop_background(worker: Any, name: str) -> tuple[bool, str]:
+    """Stop one wrapper-owned helper thread and verify it did not escape."""
+    try:
+        worker.stop()
+    except RuntimeError as exc:
+        is_alive = getattr(worker, "is_alive", None)
+        if callable(is_alive) and not is_alive():
+            return True, f"{name} never started"
+        return False, f"{name} teardown raised RuntimeError: {exc}"
+    except BaseException as exc:
+        return False, f"{name} teardown raised {type(exc).__name__}: {exc}"
+    is_alive = getattr(worker, "is_alive", None)
+    if callable(is_alive):
+        try:
+            if is_alive():
+                return False, f"{name} remained alive after stop"
+        except BaseException as exc:
+            return False, f"{name} liveness check raised {type(exc).__name__}: {exc}"
+    return True, f"{name} stopped"
+
+
+def _hold_recovery(goal: str) -> str:
+    return f"python3 -m creme reclaim --wind-down {goal}"
+
+
 class RenewalThread(threading.Thread):
     def __init__(self, goal: str, proc: subprocess.Popen[str], interval: int = RENEW_INTERVAL_SECONDS):
         super().__init__(daemon=True)
@@ -2536,86 +2660,213 @@ def run_lake_build(
         return semaphore.adaptive_release(goal)
 
     dependency_rev: Optional[str] = None
-    if census:
-        update = subprocess.run(
-            [str(real_lake), "update", str(dependency)],
-            cwd=worktree, text=True, capture_output=True, check=False,
-        )
-        print(update.stdout, end="", file=output)
-        print(update.stderr, end="", file=output)
-        dependency_rev, dependency_detail = _dependency_revision(worktree, str(dependency))
-        if update.returncode != 0 or dependency_rev is None:
-            release_hold()
-            print(json.dumps({
-                "status": "REFUSED",
-                "detail": f"dependency census aborted before building: {dependency_detail}",
-                "exit": update.returncode,
-            }, sort_keys=True), file=output)
-            return update.returncode or 2
-        digests = worktree_digests(worktree)
-    before = _swap_gib()
+    dependency_detail = "dependency census did not run"
+    update_exit = 0
+    census_abort = False
+    before: Optional[float] = None
+    after: Optional[float] = None
     started = time.monotonic()
     proc: Optional[subprocess.Popen[str]] = None
+    update_proc: Optional[subprocess.Popen[str]] = None
     sampler: Optional[ProcessSampler] = None
     renewer: Optional[RenewalThread] = None
     lines: list[str] = []
     exit_code = 1
     interrupted = False
     cleanup_proved = True
-    termination_signal: Optional[int] = None
-    prior_handlers: dict[int, Any] = {}
+    lifecycle_errors: list[str] = []
+    phase = "admitted setup"
+    termination = _TerminationSignals()
+    release_result: Optional[tuple[bool, str]] = None
 
-    def request_termination(signum: int, _frame: Any) -> None:
-        nonlocal termination_signal
-        termination_signal = signum
-        raise KeyboardInterrupt
+    with termination:
+        try:
+            if census:
+                phase = "dependency census startup"
+                update_proc = subprocess.Popen(
+                    [str(real_lake), "update", str(dependency)],
+                    cwd=worktree,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                phase = "dependency census output"
+                update_stdout, update_stderr = update_proc.communicate()
+                update_exit = int(update_proc.returncode or 0)
+                print(update_stdout or "", end="", file=output)
+                print(update_stderr or "", end="", file=output)
+                phase = "dependency census cleanup"
+                if (
+                    _terminate_process_group(update_proc)
+                    and _close_process_pipes(update_proc)
+                ):
+                    update_proc = None
+                else:
+                    census_abort = True
+                    lifecycle_errors.append(
+                        "dependency census process-group cleanup could not be verified"
+                    )
+                phase = "dependency census manifest inspection"
+                dependency_rev, dependency_detail = _dependency_revision(
+                    worktree, str(dependency)
+                )
+                if update_exit != 0 or dependency_rev is None:
+                    census_abort = True
+                    exit_code = update_exit or 2
+                elif not census_abort:
+                    digests = worktree_digests(worktree)
 
-    if threading.current_thread() is threading.main_thread():
-        for signum in (signal.SIGTERM, signal.SIGHUP):
-            prior_handlers[signum] = signal.getsignal(signum)
-            signal.signal(signum, request_termination)
-    try:
-        proc = subprocess.Popen(
-            args, cwd=worktree, env=env, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
-        )
-        sampler = ProcessSampler(proc.pid, worktree=worktree)
-        sampler.start()
-        if not fresh:
-            renewer = RenewalThread(goal, proc)
-            renewer.start()
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            lines.append(line)
-            print(line, end="", file=output)
-        exit_code = proc.wait()
-        if renewer is not None and renewer.refused:
-            exit_code = exit_code or 2
-            cleanup_proved = renewer.cleanup_proved
-    except KeyboardInterrupt:
+            if not census_abort:
+                before = _swap_gib()
+                phase = "Lake process startup"
+                proc = subprocess.Popen(
+                    args, cwd=worktree, env=env, text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                phase = "sampler startup"
+                sampler = ProcessSampler(proc.pid, worktree=worktree)
+                sampler.start()
+                if not fresh:
+                    phase = "renewal startup"
+                    renewer = RenewalThread(goal, proc)
+                    renewer.start()
+                phase = "Lake output consumption"
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    lines.append(line)
+                    print(line, end="", file=output)
+                phase = "Lake process wait"
+                exit_code = proc.wait()
+                if renewer is not None and renewer.refused:
+                    exit_code = exit_code or 2
+                    cleanup_proved = renewer.cleanup_proved
+        except BaseException as exc:
+            interrupted = isinstance(exc, KeyboardInterrupt)
+            exit_code = (
+                128 + termination.signum
+                if termination.signum is not None
+                else 130 if interrupted else 2
+            )
+            lifecycle_errors.append(
+                f"{phase} raised {type(exc).__name__}"
+                + (f": {exc}" if str(exc) else "")
+            )
+        finally:
+            # Once teardown begins, another parent-only termination request is
+            # recorded but cannot interrupt the cleanup and release decision.
+            termination.defer()
+            if proc is not None:
+                try:
+                    cleanup_proved = _terminate_process_group(proc) and cleanup_proved
+                    cleanup_proved = _close_process_pipes(proc) and cleanup_proved
+                except BaseException as exc:
+                    cleanup_proved = False
+                    lifecycle_errors.append(
+                        f"Lake process teardown raised {type(exc).__name__}: {exc}"
+                    )
+            if update_proc is not None:
+                try:
+                    cleanup_proved = _terminate_process_group(update_proc) and cleanup_proved
+                    cleanup_proved = _close_process_pipes(update_proc) and cleanup_proved
+                except BaseException as exc:
+                    cleanup_proved = False
+                    lifecycle_errors.append(
+                        f"dependency census teardown raised {type(exc).__name__}: {exc}"
+                    )
+            for worker, name in ((renewer, "renewal thread"), (sampler, "sampler thread")):
+                if worker is None:
+                    continue
+                stopped, stop_detail = _stop_background(worker, name)
+                if not stopped:
+                    cleanup_proved = False
+                    lifecycle_errors.append(stop_detail)
+
+        if termination.signum is not None:
+            interrupted = True
+            exit_code = 128 + termination.signum
+
+        wall = time.monotonic() - started
+        after = _swap_gib() if proc is not None else None
+        rebuilt: list[str] = []
+        restored: list[str] = []
+        module_seconds: dict[str, float] = {}
+        hashes: dict[str, str] = {}
+        module_peaks: dict[str, float] = {}
+        peak_mib: Optional[float] = None
+        hint: Optional[str] = None
+        if proc is not None:
+            try:
+                phase = "build evidence collection"
+                rebuilt, restored, module_seconds = _parse_build_output(lines)
+                hashes = _module_hashes(worktree, rebuilt)
+                module_peaks = (
+                    {
+                        module: round(value, 1)
+                        for module, value in sorted(sampler.module_peak_mib.items())
+                        if module in rebuilt
+                    }
+                    if sampler and getattr(sampler, "module_peak_mib", None) else {}
+                )
+                peak_mib = (
+                    round(sampler.peak_rss_mib, 1)
+                    if sampler and sampler.samples else None
+                )
+                hint = repeat_failure(worktree, targets, settings()) if exit_code == 1 else None
+            except BaseException as exc:
+                exit_code = exit_code or 2
+                lifecycle_errors.append(
+                    f"{phase} raised {type(exc).__name__}"
+                    + (f": {exc}" if str(exc) else "")
+                )
+
+        if cleanup_proved:
+            try:
+                release_result = release_hold()
+            except BaseException as exc:
+                release_result = (
+                    False,
+                    f"hold release raised {type(exc).__name__}"
+                    + (f": {exc}" if str(exc) else ""),
+                )
+
+    if termination.signum is not None:
         interrupted = True
-        exit_code = 128 + termination_signal if termination_signal else 130
-    finally:
-        if proc is not None and _process_group_alive(proc.pid) is not False:
-            cleanup_proved = _terminate_process_group(proc) and cleanup_proved
-        if sampler:
-            sampler.stop()
-        if renewer:
-            renewer.stop()
-    wall = time.monotonic() - started
-    after = _swap_gib()
-    rebuilt, restored, module_seconds = _parse_build_output(lines)
-    hashes = _module_hashes(worktree, rebuilt)
-    module_peaks = (
-        {
-            module: round(value, 1)
-            for module, value in sorted(sampler.module_peak_mib.items())
-            if module in rebuilt
-        }
-        if sampler and getattr(sampler, "module_peak_mib", None) else {}
-    )
-    peak_mib = round(sampler.peak_rss_mib, 1) if sampler and sampler.samples else None
-    hint = repeat_failure(worktree, targets, settings()) if exit_code == 1 else None
+        exit_code = 128 + termination.signum
+
+    if proc is None:
+        if not cleanup_proved:
+            print(json.dumps({
+                "status": "HOLD_PRESERVED",
+                "detail": "; ".join(lifecycle_errors) or "owned cleanup could not be verified",
+                "recovery": _hold_recovery(goal),
+            }, sort_keys=True), file=output)
+            return exit_code or 2
+        assert release_result is not None
+        released, release_detail = release_result
+        if not released:
+            print(json.dumps({
+                "status": "RELEASE_FAILED", "detail": release_detail,
+                "recovery": _hold_recovery(goal),
+            }, sort_keys=True), file=output)
+            return exit_code or 2
+        if census_abort and not lifecycle_errors:
+            print(json.dumps({
+                "status": "REFUSED",
+                "detail": f"dependency census aborted before building: {dependency_detail}",
+                "exit": update_exit,
+            }, sort_keys=True), file=output)
+            return update_exit or 2
+        print(json.dumps({
+            "status": "ERROR",
+            "detail": "; ".join(lifecycle_errors) or "admitted launch did not start",
+            "exit": exit_code or 2,
+            "interrupted": interrupted,
+            **({"outcome": "killed"} if interrupted else {}),
+        }, sort_keys=True), file=output)
+        return exit_code or 2
+
     restart_line = (
         (
             f"rebuilt {len(rebuilt)} module(s): {', '.join(rebuilt[:12])}"
@@ -2668,19 +2919,20 @@ def run_lake_build(
         **_digest_fields(digests),
     }
     if cleanup_proved:
-        released, release_detail = release_hold()
+        assert release_result is not None
+        released, release_detail = release_result
         if not released:
             print(json.dumps({"status": "RELEASE_FAILED", "detail": release_detail}, sort_keys=True), file=output)
             exit_code = exit_code or 2
             record["exit"] = exit_code
     else:
         print(json.dumps({
-            "status": "HOLD_PRESERVED", "detail": "could not prove the Lake process group exited",
+            "status": "HOLD_PRESERVED",
+            "detail": "; ".join(lifecycle_errors) or "owned cleanup could not be verified",
+            "recovery": _hold_recovery(goal),
         }, sort_keys=True), file=output)
         exit_code = exit_code or 2
         record["exit"] = exit_code
-    for signum, handler in prior_handlers.items():
-        signal.signal(signum, handler)
     append_ledger(record)
     summary: dict[str, Any] = {
         "status": "OK" if exit_code == 0 else "ERROR", "exit": exit_code,
@@ -2697,6 +2949,8 @@ def run_lake_build(
         "memory_gib": memory_gib,
         "estimate": estimate_evidence,
     }
+    if lifecycle_errors:
+        summary["detail"] = "; ".join(lifecycle_errors)
     if interrupted:
         summary["outcome"] = "killed"
     if census:

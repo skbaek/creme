@@ -910,6 +910,53 @@ class BuildOwnershipTest(unittest.TestCase):
             )
         execv.assert_not_called()
 
+    @patch("creme.build_ownership.subprocess.run")
+    def test_priority_launcher_preflight_is_bounded_and_session_scoped(
+        self, run: Mock,
+    ) -> None:
+        run.return_value = SimpleNamespace(returncode=0, stdout="")
+        worktree = Path("/worktree")
+        env = {"LEAN_NUM_THREADS": "4"}
+
+        self.assertEqual(
+            owned._preflight_priority_launcher(
+                Path("/guard/nice"), cwd=worktree, env=env
+            ),
+            (True, "priority launch preflight passed"),
+        )
+
+        run.assert_called_once_with(
+            ["/guard/nice", "--preflight"],
+            cwd=worktree,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=5.0,
+            start_new_session=True,
+        )
+
+    @patch("creme.build_ownership.subprocess.run")
+    def test_priority_launcher_preflight_timeout_is_a_refusal(self, run: Mock) -> None:
+        run.side_effect = subprocess.TimeoutExpired(["/guard/nice", "--preflight"], 5)
+
+        ok, detail = owned._preflight_priority_launcher(
+            Path("/guard/nice"), cwd=Path("/worktree"), env={}
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "priority launcher did not finish within 5s")
+
+    @patch("creme.build_ownership.subprocess.run", side_effect=KeyboardInterrupt)
+    def test_priority_launcher_preflight_does_not_convert_interrupt_to_refusal(
+        self, _run: Mock,
+    ) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            owned._preflight_priority_launcher(
+                Path("/guard/nice"), cwd=Path("/worktree"), env={}
+            )
+
     @patch("creme.build_ownership.stale_evidence", return_value=UNPROBED)
     def test_failed_launch_preflight_precedes_admission_and_writes_no_hold_rows(
         self, _probe: Mock,

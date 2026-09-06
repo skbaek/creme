@@ -929,9 +929,71 @@ class BuildOwnershipTest(unittest.TestCase):
         with patch("creme.build_ownership.subprocess.run", side_effect=PermissionError("denied")):
             self.assertIsNone(owned._process_snapshot())
 
-    def test_public_cli_has_no_thread_cap_override(self) -> None:
-        with self.assertRaises(SystemExit):
-            cmd_lake_build(SimpleNamespace(goal="g", build_args=["--threads", "100", "--", "T"]))
+    def test_lake_build_cli_defaults_to_two_threads_and_forwards_options(self) -> None:
+        with patch("creme.cli.run_lake_build", return_value=17) as run:
+            result = cmd_lake_build(SimpleNamespace(
+                goal="g",
+                build_args=["--probe", "--wait", "7", "--", "T"],
+            ))
+        self.assertEqual(result, 17)
+        run.assert_called_once_with(
+            "g",
+            ["T"],
+            memory_gib=None,
+            contention=None,
+            threads=2,
+            probe=True,
+            wait_seconds=7,
+            census=False,
+            dependency=None,
+        )
+
+    def test_lake_build_cli_forwards_explicit_one_thread(self) -> None:
+        with patch("creme.cli.run_lake_build", return_value=0) as run:
+            result = cmd_lake_build(SimpleNamespace(
+                goal="g",
+                build_args=["--threads", "1", "--", "T"],
+            ))
+        self.assertEqual(result, 0)
+        self.assertEqual(run.call_args.kwargs["threads"], 1)
+        self.assertEqual(run.call_args.args, ("g", ["T"]))
+
+    def test_lake_build_cli_forwards_explicit_two_threads_with_census(self) -> None:
+        with patch("creme.cli.run_lake_build", return_value=0) as run:
+            result = cmd_lake_build(SimpleNamespace(
+                goal="g",
+                build_args=[
+                    "--threads", "2", "--census", "--dependency", "jaune",
+                    "--wait", "9", "--", "Blanc",
+                ],
+            ))
+        self.assertEqual(result, 0)
+        self.assertEqual(run.call_args.kwargs["threads"], 2)
+        self.assertEqual(run.call_args.kwargs["wait_seconds"], 9)
+        self.assertTrue(run.call_args.kwargs["census"])
+        self.assertEqual(run.call_args.kwargs["dependency"], "jaune")
+        self.assertEqual(run.call_args.args, ("g", ["Blanc"]))
+
+    def test_lake_build_cli_treats_options_after_separator_as_targets(self) -> None:
+        with patch("creme.cli.run_lake_build", return_value=0) as run:
+            result = cmd_lake_build(SimpleNamespace(
+                goal="g",
+                build_args=["--threads", "1", "--", "--threads", "2", "--probe", "T"],
+            ))
+        self.assertEqual(result, 0)
+        self.assertEqual(run.call_args.kwargs["threads"], 1)
+        self.assertFalse(run.call_args.kwargs["probe"])
+        self.assertEqual(run.call_args.args, ("g", ["--threads", "2", "--probe", "T"]))
+
+    def test_lake_build_cli_rejects_unbounded_threads_before_executor(self) -> None:
+        with patch("creme.cli.run_lake_build") as run, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                cmd_lake_build(SimpleNamespace(
+                    goal="g",
+                    build_args=["--threads", "100", "--", "T"],
+                ))
+        self.assertEqual(raised.exception.code, 2)
+        run.assert_not_called()
 
     def test_renewal_refusal_stops_current_process_group(self) -> None:
         proc = subprocess.Popen(["/bin/sh", "-c", "sleep 30 & wait"], start_new_session=True)

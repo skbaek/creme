@@ -33,15 +33,17 @@ UNPROBED = {
 
 
 def _pid_alive(pid: int) -> bool:
-    fixture_log = os.environ.get("CREME_TEST_FIXTURE_PID_LOG")
-    if fixture_log:
-        with Path(fixture_log).open("a", encoding="utf-8") as output:
-            output.write(f"{pid}\n")
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
-    return True
+        alive = False
+    else:
+        alive = True
+    fixture_log = os.environ.get("CREME_TEST_FIXTURE_PID_LOG")
+    if fixture_log:
+        with Path(fixture_log).open("a", encoding="utf-8") as output:
+            output.write(f"{pid}:{'alive' if alive else 'dead'}\n")
+    return alive
 
 
 def _wait_dead(pid: int, timeout: float = 3.0) -> bool:

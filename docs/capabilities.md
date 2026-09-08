@@ -240,6 +240,13 @@ named goal's worktrees — or, without `--goal`, inside any goal worktree at
 all — is reported with its owner and the command that owner should run,
 rather than signalled.
 
+Native adapters share runtime-identity construction and worker-snapshot parsing
+through `creme.adapters.native.NativeAdapter`. Linux and Darwin supply their
+own platform identity and process command; the shared sampler retains CPU,
+resident-memory and bounded ancestry fields. Add common parsing fixes there
+and exercise both adapters through `scripts/tests/test_adapters.py`. Unsupported
+systems continue to use `Adapter` and return `UNAVAILABLE` for these operations.
+
 ### Master lease
 
 `master.json` beside the hold state records at most one master lease: the

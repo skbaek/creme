@@ -65,14 +65,42 @@ class AdapterTest(unittest.TestCase):
             self.assertNotIn("/home/", result.data["uv_base_prefix"])
 
     def test_native_python_identity_fails_closed(self):
-        self.assertEqual(
-            LinuxAdapter().python_runtime("3.11", "x86_64").status,
-            "REFUSED",
-        )
-        self.assertEqual(
-            DarwinAdapter().platform_identity("mips64").status,
-            "UNAVAILABLE",
-        )
+        for adapter in (LinuxAdapter(), DarwinAdapter()):
+            with self.subTest(system=adapter.system):
+                self.assertEqual(adapter.python_runtime("3.11", "x86_64").status, "REFUSED")
+                self.assertEqual(adapter.python_runtime("3.11.9", "mips64").status, "UNAVAILABLE")
+
+    def test_native_worker_snapshot_preserves_cpu_and_ancestry(self):
+        snapshot = """10 11 32 0:00.00 /client
+11 10 32 0:00.00 /launcher
+12 10 128 1:02:03 /tool/lean --worker /path with spaces/A.lean
+13 10 128 0:01.30 /tool/lean --server
+14 10 bad 0:01.30 /tool/lean --worker
+15 10 128 nonsense /tool/lean --worker
+malformed row
+"""
+        for adapter in (LinuxAdapter(), DarwinAdapter()):
+            with self.subTest(system=adapter.system), mock.patch.object(
+                adapter, "_run", return_value=subprocess.CompletedProcess([], 0, snapshot, "")
+            ) as run:
+                result = adapter.lean_workers()
+                run.assert_called_once_with(["/bin/ps", "-axo", "pid=,ppid=,rss=,time=,command="])
+                self.assertEqual(result.status, "OK")
+                self.assertEqual(result.adapter, adapter.system)
+                self.assertEqual(result.data["workers"], [{
+                    "pid": 12, "ppid": 10, "rss_kib": 128, "cpu_seconds": 3723.0,
+                    "command": "/tool/lean --worker /path with spaces/A.lean",
+                    "ancestry": [{"pid": 10, "command": "/client"},
+                                 {"pid": 11, "command": "/launcher"}],
+                }])
+
+    def test_native_worker_snapshot_failure_is_not_an_empty_success(self):
+        for adapter in (LinuxAdapter(), DarwinAdapter()):
+            with self.subTest(system=adapter.system):
+                with mock.patch.object(adapter, "_run", return_value=subprocess.CompletedProcess([], 1, "", "denied")):
+                    self.assertEqual(adapter.lean_workers().status, "UNAVAILABLE")
+                with mock.patch.object(adapter, "_run", side_effect=OSError("denied")):
+                    self.assertEqual(adapter.lean_workers().status, "UNAVAILABLE")
 
     def test_unsupported_never_falls_through_to_another_os(self):
         adapter = get_adapter("Plan9")
@@ -83,6 +111,8 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(adapter.gui_sessions(1).status, "UNAVAILABLE")
         self.assertEqual(adapter.platform_identity().status, "UNAVAILABLE")
         self.assertEqual(adapter.python_runtime("3.11.9").status, "UNAVAILABLE")
+        self.assertEqual(adapter.python_runtime("bad version").status, "UNAVAILABLE")
+        self.assertEqual(adapter.lean_workers().status, "UNAVAILABLE")
 
     def test_shared_modules_do_not_name_platform_executables(self):
         root = Path(__file__).resolve().parents[2] / "creme"

@@ -45,9 +45,12 @@ directory is ignored and untracked, reads that record, and then tries to take
 the lease at start, before anything else:
 `~/creme/.semaphore/semaphore master-acquire --client codex --note "..."`
 (substitute the actual client label).
-`OK` makes it the master, and it says so in its first reply; a refusal for a
-live lease makes it a reader, which says so in its first reply, naming the
-holder, and may read, analyse, and converse but never writes
+An `OK` acquisition makes it the master, and it says so in its first reply.
+An explicit `already held by this session` success is authenticated re-entry:
+keep the existing acquisition identity, renew through `master-renew`, reconcile
+active work, and do not start a second heartbeat or append another acquisition
+event. A refusal for a live lease makes it a reader, which says so in its first
+reply, naming the holder, and may read, analyse, and converse but never writes
 under `master/`, merges, pushes, spawns workers, or takes heavy goal holds; a
 refusal for a lapsed or stranded lease is answered with `--take-over`. Read
 `docs/guides/master.md` for the protocol, `docs/guides/goal.md` for what a

@@ -108,10 +108,24 @@ class ProcessWitnessTest(unittest.TestCase):
         self.assertTrue(self.acquire()[0])
         original = semaphore.master_snapshot()
         self.as_session(1, task="reused-task")
+        self.assertFalse(self.acquire("replacement re-entry")[0])
         self.assertFalse(semaphore.master_renew(adapter=self.adapter)[0])
         self.assertFalse(semaphore.master_release(adapter=self.adapter)[0])
         self.assertFalse(semaphore._prepare_master_heartbeat_launch(self.adapter)[0])
         self.assertEqual(semaphore.master_snapshot(), original)
+
+    def test_same_owner_live_reentry_is_idempotent(self):
+        self.assertTrue(self.acquire("original owner", lease=321)[0])
+        original = semaphore.master_snapshot()
+        lease_path = self.root / "state" / semaphore.MASTER_NAME
+        original_bytes = lease_path.read_bytes()
+
+        ok, detail = self.acquire("ignored retry note", lease=654)
+
+        self.assertTrue(ok, detail)
+        self.assertIn("already held by this session", detail)
+        self.assertEqual(semaphore.master_snapshot(), original)
+        self.assertEqual(lease_path.read_bytes(), original_bytes)
 
     def test_same_owner_renews_in_separate_cli_invocations_then_reacquires(self):
         self.assertTrue(self.acquire()[0])
@@ -129,10 +143,13 @@ class ProcessWitnessTest(unittest.TestCase):
 
     def test_distinct_tasks_sharing_application_guard_cannot_impersonate(self):
         self.assertTrue(self.acquire()[0])
+        original = semaphore.master_snapshot()
         self.as_session(0, task="another-task")
+        self.assertFalse(self.acquire("other task")[0])
         self.assertFalse(semaphore.master_renew(adapter=self.adapter)[0])
         self.assertFalse(semaphore.master_release(adapter=self.adapter)[0])
         self.assertFalse(self.acquire("other task", take_over=True)[0])
+        self.assertEqual(semaphore.master_snapshot(), original)
 
     def test_same_session_alias_distinct_threads_cannot_impersonate(self):
         self.assertTrue(self.acquire()[0])

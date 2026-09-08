@@ -2639,6 +2639,23 @@ def master_acquire(
         if data["lease"] is not None:
             holder = _master_holder_text(data["lease"])
             if view["state"] == "live":
+                same = _same_client(
+                    data["lease"],
+                    client_pid,
+                    session.digest,
+                    family,
+                    selected,
+                )
+                if same is True:
+                    current = data["lease"]
+                    detail = (
+                        f"master lease already held by this session for client "
+                        f"{current['client']}; acquisition identity, holder label, "
+                        f"note, and {current['lease_seconds']}s lease policy unchanged; "
+                        "use `master-renew` to renew it"
+                    )
+                    _log("master-acquire", current["client"], "OK", detail)
+                    return True, detail
                 detail = (
                     f"the master lease is live: {holder}, renewed "
                     f"{int(view['since_renewal'])}s ago with {int(view['remaining'])}s left; "

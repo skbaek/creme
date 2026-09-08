@@ -121,11 +121,16 @@ anything else and whether or not the user mentions the role:
    ~/creme/.semaphore/semaphore master-acquire --client codex --note "why this session"
    ```
 
-   - `OK`: this session is the **master**. Start the heartbeat detached
+   - `OK` with `master lease acquired`: this session is a new **master**. Start the heartbeat detached
      (`master-renew --heartbeat 1500 --detach`; verify its renewal in the log,
      since some managed tool sandboxes also reap detached children), append a `master` event
      naming the client, model, and effort, rewrite the board's lease line,
      and say in the first reply that this session is the master.
+   - `OK` with `master lease already held by this session`: this is an
+     authenticated re-entry into the existing acquisition. Run the canonical
+     `master-renew`, reconcile the board with active work, and continue with the
+     recorded acquisition identity. Do not start a second detached heartbeat or
+     append another acquisition event.
    - `REFUSED` because the lease is **live**: this session is a **reader**.
      Say so in the first reply, naming the client and process that hold the
      lease, so the user never mistakes a reader for the master. A reader may
@@ -172,6 +177,12 @@ admission; it exists only so that two masters cannot coexist.
   task identity. Raw session identifiers are never written to disk or logs.
   Codex compatibility identity combines both session and thread aliases.
   Renew at every event and keep the background heartbeat running.
+- A live `master-acquire` by that strictly matched holder is idempotent. It
+  reports that the lease is already held and leaves the acquisition id, holder
+  label, note, lease duration, and renewal timestamps unchanged. The existing
+  holder uses `master-renew` for renewal. A different or unverifiable caller is
+  still refused, including another task in the same desktop application or a
+  replacement process presenting the old task identity.
 - **Lapsed** means the window passed but the client process is still alive:
   a master that stopped renewing, or a tab nobody wound down.
   `master-acquire` refuses and says so.

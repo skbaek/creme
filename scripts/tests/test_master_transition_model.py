@@ -218,7 +218,11 @@ class ReferenceModel:
             return "error"
         if action.operation == "acquire":
             if self.lease is not None:
-                return "refused"
+                return (
+                    "ok"
+                    if self._state() == "live" and self._same_holder(name)
+                    else "refused"
+                )
             self._new_lease(name)
             return "ok"
         if action.operation == "takeover":

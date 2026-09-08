@@ -227,7 +227,7 @@ class ReferenceModel:
             return "ok"
         if action.operation == "takeover":
             if self.lease is not None and self._state() == "live":
-                return "refused"
+                return "ok" if self._same_holder(name) else "refused"
             self._new_lease(name)
             return "ok"
         if action.operation == "renew":

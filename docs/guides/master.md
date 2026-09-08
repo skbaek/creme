@@ -180,9 +180,11 @@ admission; it exists only so that two masters cannot coexist.
 - A live `master-acquire` by that strictly matched holder is idempotent. It
   reports that the lease is already held and leaves the acquisition id, holder
   label, note, lease duration, and renewal timestamps unchanged. The existing
-  holder uses `master-renew` for renewal. A different or unverifiable caller is
-  still refused, including another task in the same desktop application or a
-  replacement process presenting the old task identity.
+  holder uses `master-renew` for renewal. An unnecessary `--take-over` from
+  that same live holder has the same idempotent result and records no takeover.
+  A different or unverifiable caller is still refused, including another task
+  in the same desktop application or a replacement process presenting the old
+  task identity.
 - **Lapsed** means the window passed but the client process is still alive:
   a master that stopped renewing, or a tab nobody wound down.
   `master-acquire` refuses and says so.

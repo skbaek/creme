@@ -127,6 +127,15 @@ class ProcessWitnessTest(unittest.TestCase):
         self.assertEqual(semaphore.master_snapshot(), original)
         self.assertEqual(lease_path.read_bytes(), original_bytes)
 
+        ok, detail = self.acquire(
+            "ignored take-over note", lease=987, take_over=True
+        )
+
+        self.assertTrue(ok, detail)
+        self.assertIn("already held by this session", detail)
+        self.assertEqual(semaphore.master_snapshot(), original)
+        self.assertEqual(lease_path.read_bytes(), original_bytes)
+
     def test_same_owner_renews_in_separate_cli_invocations_then_reacquires(self):
         self.assertTrue(self.acquire()[0])
         original = semaphore.master_snapshot()["lease"]

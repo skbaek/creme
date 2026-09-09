@@ -2163,6 +2163,7 @@ MASTER_V3_KEYS = MASTER_V2_KEYS | {
 MASTER_KEYS = MASTER_V3_KEYS | {"process_witness"}
 MASTER_SESSION_DIGEST_DOMAIN = b"creme-master-session-v1\0"
 MASTER_CODEX_ALIAS_DIGEST_DOMAIN = b"creme-master-codex-aliases-v2\0"
+MASTER_ANTIGRAVITY_ALIAS_DIGEST_DOMAIN = b"creme-master-antigravity-aliases-v1\0"
 MASTER_LIVENESS_DIGEST_DOMAIN = b"creme-master-liveness-v1\0"
 MASTER_HEARTBEAT_LAUNCH_DIGEST_DOMAIN = b"creme-master-heartbeat-launch-v1\0"
 MASTER_HEARTBEAT_LAUNCH_SECONDS = 30
@@ -2390,12 +2391,14 @@ def _client_family(command: str, pattern: Any) -> Optional[str]:
     if not matched:
         first = command.split(None, 1)[0] if command.strip() else ""
         matched = os.path.basename(first).lower()
-        if matched not in {"claude", "codex", "chatgpt"}:
+        if matched not in {"claude", "codex", "chatgpt", "antigravity"}:
             return None
     if "claude" in matched:
         return "claude"
     if "codex" in matched or "chatgpt" in matched:
         return "codex"
+    if "antigravity" in matched:
+        return "antigravity"
     return "agent"
 
 
@@ -2430,6 +2433,14 @@ def _client_session(client: Optional[str]) -> _ClientSession:
         raw_identity = json.dumps(aliases, separators=(",", ":")) if any(aliases) else ""
         digest_domain = MASTER_CODEX_ALIAS_DIGEST_DOMAIN
         source = "Codex compatibility alias"
+    if not raw_identity and client in {None, "antigravity"}:
+        aliases = [
+            os.environ.get("ANTIGRAVITY_CONVERSATION_ID", ""),
+            os.environ.get("ANTIGRAVITY_PROJECT_ID", ""),
+        ]
+        raw_identity = json.dumps(aliases, separators=(",", ":")) if any(aliases) else ""
+        digest_domain = MASTER_ANTIGRAVITY_ALIAS_DIGEST_DOMAIN
+        source = "Antigravity compatibility alias"
     if not raw_identity:
         return _ClientSession(None, None, None, "no stable session identity available")
     digest = _digest_session_value(digest_domain, raw_identity)
@@ -2550,10 +2561,10 @@ def _trusted_master_client_pid(
     lease: dict[str, Any],
     current_family: Optional[str] = None,
 ) -> Optional[int]:
-    """Return a task-scoped holder pid, never an app-global Codex ancestor."""
+    """Return a task-scoped holder pid, never an app-global Codex/Antigravity ancestor."""
     if (
-        lease["client"].casefold() in {"codex", "chatgpt"}
-        or current_family == "codex"
+        lease["client"].casefold() in {"codex", "chatgpt", "antigravity"}
+        or current_family in {"codex", "antigravity"}
     ):
         return None
     client_pid = lease["client_pid"]
@@ -2623,12 +2634,16 @@ def master_acquire(
         os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
     ):
         family = "codex"
+    if family is None and session.digest is not None and (
+        os.environ.get("ANTIGRAVITY_CONVERSATION_ID") or os.environ.get("ANTIGRAVITY_PROJECT_ID")
+    ):
+        family = "antigravity"
     if client is None:
         client = family
     if client is None or CLIENT_LABEL.fullmatch(client) is None:
         return False, (
             f"the agent client could not be identified ({found}); "
-            "pass --client claude, codex, or human"
+            "pass --client claude, codex, antigravity, or human"
         )
     with locked_state() as (path, _state):
         root = path.parent
@@ -2672,14 +2687,14 @@ def master_acquire(
                 _log("master-acquire", client, "REFUSED", detail)
                 return False, detail
             replaced = (view["state"], holder)
-        # A Codex Desktop task may share its visible app ancestor with other
-        # tasks. Retain process discovery for diagnostics, but never persist
+        # A Codex or Antigravity task may share its visible app ancestor with
+        # other tasks. Retain process discovery for diagnostics, but never persist
         # that shared pid as holder identity or liveness evidence.
-        shared_codex_process = (
-            family == "codex"
-            or client.casefold() in {"codex", "chatgpt"}
+        shared_app_process = (
+            family in {"codex", "antigravity"}
+            or client.casefold() in {"codex", "chatgpt", "antigravity"}
         )
-        recorded_client_pid = None if shared_codex_process else client_pid
+        recorded_client_pid = None if shared_app_process else client_pid
         data["lease"] = {
             "client": client,
             "client_pid": recorded_client_pid,

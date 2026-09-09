@@ -26,7 +26,7 @@ class DarwinAdapter(NativeAdapter):
         "human_gui_sessions", "memory_pressure", "apfs_clone", "lean_reclaim",
     )
     client_pattern = re.compile(
-        r"(?:/Applications/(?:ChatGPT|Codex|Claude)\.app/|/(?:codex|claude)$|claude\.app/)",
+        r"(?:/Applications/(?:ChatGPT|Codex|Claude|Antigravity)\.app/|/(?:codex|claude|antigravity)$|claude\.app/)",
         re.IGNORECASE,
     )
 

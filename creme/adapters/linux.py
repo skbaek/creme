@@ -24,7 +24,7 @@ class LinuxAdapter(NativeAdapter):
     system = "Linux"
     optional_capabilities = ("reflink_copy", "lean_reclaim")
     client_pattern = re.compile(
-        r"^(?:\S*/)?(?:ChatGPT|codex|claude|codex-code-mode-host|codex-linux-sandbox)(?:\s|$)",
+        r"^(?:\S*/)?(?:ChatGPT|codex|claude|antigravity|codex-code-mode-host|codex-linux-sandbox)(?:\s|$)",
         re.IGNORECASE,
     )
 

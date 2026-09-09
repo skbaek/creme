@@ -384,6 +384,8 @@ class ConcreteWorld:
                     "CREME_MASTER_LIVENESS_SOCKET": "",
                     "CODEX_SESSION_ID": "",
                     "CODEX_THREAD_ID": "",
+                    "ANTIGRAVITY_CONVERSATION_ID": "",
+                    "ANTIGRAVITY_PROJECT_ID": "",
                 },
                 clear=False,
             ),

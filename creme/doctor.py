@@ -351,6 +351,24 @@ def check_client_surface(root: Path) -> list[Check]:
         STATUS_OK if portable else STATUS_FAIL,
         f"relative additionalDirectories={directories!r}",
     ))
+    gemini_mcp = Path.home() / ".gemini" / "config" / "mcp_config.json"
+    if gemini_mcp.is_file():
+        try:
+            gemini_payload = json.loads(gemini_mcp.read_text(encoding="utf-8"))
+            gemini_server = gemini_payload.get("mcpServers", {}).get("lean-lsp-mcp", {})
+            gemini_pin = _extract_pin(" ".join(gemini_server.get("args", [])))
+            gemini_ok = (
+                gemini_pin == expected_pin
+                and gemini_server.get("command") == "/usr/bin/python3"
+                and gemini_server.get("args") == expected_args
+            )
+            checks.append(Check(
+                "client: Antigravity global MCP",
+                STATUS_OK if gemini_ok else STATUS_WARN,
+                f"pinned {gemini_pin} through Creme Lake guard" if gemini_ok else f"drift or unconfigured in {gemini_mcp}",
+            ))
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            checks.append(Check("client: Antigravity global MCP", STATUS_WARN, f"unreadable: {gemini_mcp}"))
     return checks
 
 

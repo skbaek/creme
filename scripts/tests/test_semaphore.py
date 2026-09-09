@@ -1309,6 +1309,8 @@ class MasterLeaseTest(unittest.TestCase):
                 "CODEX_SESSION_ID": "",
                 "CODEX_THREAD_ID": "",
                 "CODEX_APP_TOOLS_PIPE_PATH": "",
+                "ANTIGRAVITY_CONVERSATION_ID": "",
+                "ANTIGRAVITY_PROJECT_ID": "",
             }, clear=False),
             mock.patch("creme.semaphore.get_adapter", return_value=self.adapter),
             mock.patch("creme.semaphore._runtime_admission_policy", return_value=self.policy),
@@ -1630,6 +1632,35 @@ class MasterLeaseTest(unittest.TestCase):
             self.assertIn("holder verified", detail)
             ok, detail = semaphore.master_release()
             self.assertTrue(ok, detail)
+
+    def test_cosmetic_label_preserves_discovered_antigravity_compatibility_identity(self):
+        self.as_client(os.getpid(), "antigravity")
+        with mock.patch.dict(os.environ, {
+            "ANTIGRAVITY_CONVERSATION_ID": "conv-123",
+            "ANTIGRAVITY_PROJECT_ID": "proj-456",
+        }, clear=False):
+            ok, detail = semaphore.master_acquire("custom-client", "renamed antigravity")
+            self.assertTrue(ok, detail)
+            lease = semaphore.master_snapshot()["lease"]
+            self.assertEqual(lease["client"], "custom-client")
+            self.assertIsNone(lease["client_pid"])
+            self.assertIsNotNone(lease["session_digest"])
+            self.assertIn("Antigravity compatibility alias identity", detail)
+            ok, detail = semaphore.master_renew()
+            self.assertTrue(ok, detail)
+            self.assertIn("holder verified", detail)
+            ok, detail = semaphore.master_heartbeat(
+                1500,
+                sleep=lambda _seconds: None,
+                max_beats=1,
+            )
+            self.assertTrue(ok, detail)
+            self.assertIn("beat limit reached", detail)
+            ok, detail, captured = self.capture_detached_launch()
+            self.assertTrue(ok, detail)
+            command = captured["command"]
+            self.assertNotIn(semaphore.master_snapshot()["lease"]["lease_id"], command)
+            semaphore.master_release(force=True, reason="test cleanup")
 
     def test_session_listener_loss_stops_an_orphaned_heartbeat(self):
         self.as_client(None, None)
@@ -2189,6 +2220,8 @@ class MasterLeaseTest(unittest.TestCase):
         self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (20, "claude"))
         adapter.processes[3]["command"] = "codex"
         self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (20, "codex"))
+        adapter.processes[3]["command"] = "antigravity"
+        self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (20, "antigravity"))
         adapter.processes[3]["command"] = "python3"
         adapter.processes[1]["command"] = "bash"
         self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (None, None))

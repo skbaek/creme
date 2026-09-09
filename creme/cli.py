@@ -319,19 +319,74 @@ def cmd_master_digest(arguments: argparse.Namespace) -> int:
         _json({"schema_version": 1, "status": status, "detail": plan.detail})
         return 2
     try:
+        lookups = [
+            (kind, identifier)
+            for kind, identifier in (
+                ("goal", arguments.goal),
+                ("decision", arguments.decision),
+                ("finding", arguments.finding),
+            )
+            if identifier is not None
+        ]
+        if arguments.after_goal is not None and not arguments.focused:
+            raise master_operations.MasterOperationError(
+                "--after-goal requires --focused"
+            )
+        if lookups:
+            if (
+                arguments.focused
+                or arguments.after_goal is not None
+                or arguments.reconcile
+                or arguments.human
+                or arguments.goals_limit is not None
+                or arguments.decisions_limit is not None
+                or arguments.findings_limit is not None
+                or arguments.discrepancies_limit is not None
+            ):
+                raise master_operations.MasterOperationError(
+                    "exact lookup cannot be combined with focused, pagination, human, "
+                    "reconciliation, or limit options"
+                )
+            kind, identifier = lookups[0]
+            _json(master_operations.lookup_digest_record(
+                location.record_root,
+                kind=kind,
+                identifier=identifier,
+            ))
+            return 0
         reconciliation = (
             master_operations.reconcile_location(location)
             if arguments.reconcile
             else None
         )
-        digest = master_operations.digest_record(
-            location.record_root,
-            goals_limit=arguments.goals_limit,
-            decisions_limit=arguments.decisions_limit,
-            findings_limit=arguments.findings_limit,
-            discrepancies_limit=arguments.discrepancies_limit,
-            live_reconciliation=reconciliation,
+        digest_function = (
+            master_operations.focused_digest_record
+            if arguments.focused
+            else master_operations.digest_record
         )
+        digest_options = {
+            "goals_limit": (
+                master_operations.DEFAULT_DIGEST_LIMIT
+                if arguments.goals_limit is None else arguments.goals_limit
+            ),
+            "decisions_limit": (
+                master_operations.DEFAULT_DIGEST_LIMIT
+                if arguments.decisions_limit is None else arguments.decisions_limit
+            ),
+            "findings_limit": (
+                master_operations.DEFAULT_DIGEST_LIMIT
+                if arguments.findings_limit is None else arguments.findings_limit
+            ),
+            "discrepancies_limit": (
+                master_operations.DEFAULT_DIGEST_LIMIT
+                if arguments.discrepancies_limit is None
+                else arguments.discrepancies_limit
+            ),
+            "live_reconciliation": reconciliation,
+        }
+        if arguments.focused:
+            digest_options["goals_after"] = arguments.after_goal
+        digest = digest_function(location.record_root, **digest_options)
     except (
         master_operations.MasterOperationError,
         master_reconcile.ReconciliationError,
@@ -914,10 +969,30 @@ def parser() -> argparse.ArgumentParser:
         "digest",
         help="read a bounded source-validated continuity digest without acquiring",
     )
-    master_digest.add_argument("--goals-limit", type=_nonnegative, default=20)
-    master_digest.add_argument("--decisions-limit", type=_nonnegative, default=20)
-    master_digest.add_argument("--findings-limit", type=_nonnegative, default=20)
-    master_digest.add_argument("--discrepancies-limit", type=_nonnegative, default=20)
+    master_digest.add_argument("--goals-limit", type=_nonnegative)
+    master_digest.add_argument("--decisions-limit", type=_nonnegative)
+    master_digest.add_argument("--findings-limit", type=_nonnegative)
+    master_digest.add_argument("--discrepancies-limit", type=_nonnegative)
+    master_digest.add_argument(
+        "--focused",
+        action="store_true",
+        help="prioritize current goals and show bounded actionable continuity",
+    )
+    master_digest.add_argument(
+        "--after-goal",
+        metavar="GOAL_ID",
+        help="continue a focused goal page after its last shown goal",
+    )
+    digest_lookup = master_digest.add_mutually_exclusive_group()
+    digest_lookup.add_argument(
+        "--goal", metavar="GOAL_ID", help="retrieve one exact goal row"
+    )
+    digest_lookup.add_argument(
+        "--decision", metavar="DECISION_ID", help="retrieve one exact open decision row"
+    )
+    digest_lookup.add_argument(
+        "--finding", metavar="FINDING_ID", help="retrieve one exact open finding row"
+    )
     master_digest.add_argument(
         "--reconcile",
         action="store_true",

@@ -449,6 +449,149 @@ class MasterOperationsTest(unittest.TestCase):
         with self.assertRaisesRegex(master_operations.MasterOperationError, "0..100"):
             master_operations.digest_record(root, goals_limit=101, lease_snapshot=lease.snapshot)
 
+    def test_focused_digest_prioritizes_pages_and_recovers_every_obligation(self):
+        root = self.initialize()
+        lease = LeaseHarness()
+        lease.acquire("codex", "focused synthetic")
+        writer = master_runtime.RecordWriter(
+            root,
+            renew=lease.renew,
+            lease_snapshot=lease.snapshot,
+        )
+        long_next_unit = "next-" + ("x" * 1000)
+        goal_rows = [
+            (f"a-complete-{index:02d}", "complete") for index in range(25)
+        ] + [
+            ("w-paused", "paused"),
+            ("x-blocked", "blocked"),
+            ("y-ready", "ready"),
+            ("z-active", "active"),
+        ]
+        for goal_id, status in goal_rows:
+            writer.append("goal", {
+                "goal_id": goal_id,
+                "status": status,
+                "worktree": f"/private/worktrees/{goal_id}",
+                "branch": f"codex/{goal_id}",
+                "checkpoint": f"checkpoint-{goal_id}",
+                "next_unit": long_next_unit if goal_id == "z-active" else f"unit-{goal_id}",
+            })
+        for decision_id, authority in (("decision-a", "master"), ("decision-z", "user")):
+            writer.append("decision", {
+                "decision_id": decision_id,
+                "status": "open",
+                "title": f"title {decision_id}",
+                "choice": f"choice {decision_id}",
+                "reason": f"full reason {decision_id}",
+                "alternatives": [f"alternative {decision_id}"],
+                "reversible": False,
+                "undo": None,
+                "evidence": f"evidence/{decision_id}.json",
+                "authority": authority,
+            })
+        writer.append("audit", {
+            "audit_id": "audit-focused",
+            "audit_kind": "continuity",
+            "verdict": "REJECT",
+            "report": "reports/focused.md",
+            "findings": [
+                {
+                    "finding_id": "finding-a",
+                    "status": "open",
+                    "severity": "low",
+                    "summary": "first finding",
+                    "evidence": "evidence/finding-a.json",
+                },
+                {
+                    "finding_id": "finding-z",
+                    "status": "open",
+                    "severity": "high",
+                    "summary": "late high finding",
+                    "evidence": "evidence/finding-z.json",
+                },
+            ],
+        })
+        board_path = root / master_runtime.BOARD_NAME
+        board_path.write_bytes(master_runtime.render_board(()))
+        before = self.nonfollowing_tree_snapshot(root)
+
+        focused = master_operations.focused_digest_record(
+            root,
+            goals_limit=2,
+            decisions_limit=1,
+            findings_limit=1,
+            lease_snapshot=lease.snapshot,
+            lease_status=lambda: "master: codex (live)\n",
+        )
+        self.assertEqual(
+            [row["goal_id"] for row in focused["goals"]["items"]],
+            ["z-active", "y-ready"],
+        )
+        self.assertEqual(focused["goals"]["continuation_key"], "y-ready")
+        self.assertEqual(focused["goals"]["omitted"], 27)
+        self.assertEqual(
+            focused["open_decisions"]["all_ids"],
+            ["decision-a", "decision-z"],
+        )
+        self.assertEqual(
+            focused["open_audit_findings"]["all_ids"],
+            ["finding-a", "finding-z"],
+        )
+        human = master_operations.render_digest_human(focused)
+        self.assertIn("decision-z", human)
+        self.assertIn("finding-z", human)
+        self.assertIn("[truncated; retrieve:", human)
+        self.assertIn("--after-goal y-ready", human)
+        self.assertLess(len(human), 7000)
+
+        continued = master_operations.focused_digest_record(
+            root,
+            goals_limit=2,
+            goals_after="y-ready",
+            lease_snapshot=lease.snapshot,
+            lease_status=lambda: "master: codex (live)\n",
+        )
+        self.assertEqual(
+            [row["goal_id"] for row in continued["goals"]["items"]],
+            ["x-blocked", "w-paused"],
+        )
+        self.assertEqual(continued["goals"]["continuation_key"], "w-paused")
+
+        goal = master_operations.lookup_digest_record(
+            root, kind="goal", identifier="z-active"
+        )
+        self.assertEqual(goal["lookup"]["item"]["worktree"], "/private/worktrees/z-active")
+        self.assertEqual(goal["lookup"]["item"]["next_unit"], long_next_unit)
+        decision = master_operations.lookup_digest_record(
+            root, kind="decision", identifier="decision-z"
+        )["lookup"]["item"]
+        self.assertEqual(decision["reason"], "full reason decision-z")
+        self.assertEqual(decision["alternatives"], ["alternative decision-z"])
+        self.assertEqual(decision["evidence"], "evidence/decision-z.json")
+        self.assertEqual(decision["authority"], "user")
+        finding = master_operations.lookup_digest_record(
+            root, kind="finding", identifier="finding-z"
+        )["lookup"]["item"]
+        self.assertEqual(finding["severity"], "high")
+        self.assertEqual(finding["evidence"], "evidence/finding-z.json")
+        self.assertEqual(finding["report"], "reports/focused.md")
+        self.assertEqual(self.nonfollowing_tree_snapshot(root), before)
+
+        with self.assertRaisesRegex(master_operations.MasterOperationError, "unknown goal cursor"):
+            master_operations.focused_digest_record(
+                root,
+                goals_after="missing-goal",
+                lease_snapshot=lease.snapshot,
+            )
+        with self.assertRaisesRegex(master_operations.MasterOperationError, "unknown decision ID"):
+            master_operations.lookup_digest_record(
+                root, kind="decision", identifier="missing-decision"
+            )
+        with self.assertRaisesRegex(master_operations.MasterOperationError, "1..100"):
+            master_operations.focused_digest_record(
+                root, goals_limit=0, lease_snapshot=lease.snapshot
+            )
+
     def test_start_acquires_resumes_and_records_once_per_acquisition(self):
         root = self.initialize()
         lease = LeaseHarness()
@@ -817,6 +960,62 @@ class MasterOperationsTest(unittest.TestCase):
             ):
                 self.assertEqual(cli.main(["master", "digest", "--human"]), 0)
             self.assertIn("descriptive, not authority", output.getvalue())
+
+            output = io.StringIO()
+            with (
+                mock.patch("creme.cli._master_location", return_value=(self.location, None)),
+                mock.patch(
+                    "creme.cli.master_operations.lookup_digest_record",
+                    return_value={"schema_version": 1, "status": "OK", "view": "lookup"},
+                ) as lookup,
+                mock.patch("sys.stdout", output),
+            ):
+                self.assertEqual(
+                    cli.main(["master", "digest", "--goal", "goal-exact"]), 0
+                )
+            lookup.assert_called_once_with(
+                self.location.record_root,
+                kind="goal",
+                identifier="goal-exact",
+            )
+            self.assertEqual(json.loads(output.getvalue())["view"], "lookup")
+
+            output = io.StringIO()
+            with (
+                mock.patch("creme.cli._master_location", return_value=(self.location, None)),
+                mock.patch("sys.stdout", output),
+            ):
+                self.assertEqual(
+                    cli.main(["master", "digest", "--after-goal", "goal-exact"]), 2
+                )
+            self.assertIn("requires --focused", json.loads(output.getvalue())["detail"])
+
+            output = io.StringIO()
+            with (
+                mock.patch("creme.cli._master_location", return_value=(self.location, None)),
+                mock.patch("sys.stdout", output),
+            ):
+                self.assertEqual(
+                    cli.main([
+                        "master", "digest", "--goal", "goal-exact", "--human",
+                    ]),
+                    2,
+                )
+            self.assertIn("cannot be combined", json.loads(output.getvalue())["detail"])
+
+            output = io.StringIO()
+            with (
+                mock.patch("creme.cli._master_location", return_value=(self.location, None)),
+                mock.patch("sys.stdout", output),
+            ):
+                self.assertEqual(
+                    cli.main([
+                        "master", "digest", "--decision", "decision-exact",
+                        "--decisions-limit", "20",
+                    ]),
+                    2,
+                )
+            self.assertIn("limit options", json.loads(output.getvalue())["detail"])
 
 
 if __name__ == "__main__":

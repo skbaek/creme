@@ -17,6 +17,18 @@ from .profile import DEFAULT_RELATIVE_PROFILE, load as load_profile
 DIGEST_SCHEMA_VERSION = 1
 DEFAULT_DIGEST_LIMIT = 20
 MAX_DIGEST_LIMIT = 100
+HUMAN_PREVIEW_CHARS = 160
+
+_DIGEST_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,127}")
+_GOAL_PRIORITY = {
+    "active": 0,
+    "ready": 1,
+    "blocked": 2,
+    "queued": 3,
+    "paused": 4,
+    "complete": 5,
+    "retired": 6,
+}
 
 
 class MasterOperationError(RuntimeError):
@@ -276,6 +288,59 @@ def _bounded(
     }
 
 
+def _focused_page(
+    rows: Sequence[dict[str, Any]],
+    limit: int,
+    *,
+    key: str,
+    after: Optional[str],
+) -> dict[str, Any]:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= MAX_DIGEST_LIMIT
+    ):
+        raise MasterOperationError(f"focused digest limit must be 1..{MAX_DIGEST_LIMIT}")
+    start = 0
+    if after is not None:
+        _validate_lookup_id(after, "goal cursor")
+        for index, row in enumerate(rows):
+            if row[key] == after:
+                start = index + 1
+                break
+        else:
+            raise MasterOperationError(f"unknown goal cursor: {after}")
+    items = list(rows[start:start + limit])
+    omitted = max(0, len(rows) - start - len(items))
+    return {
+        "items": items,
+        "limit": limit,
+        "total": len(rows),
+        "after": after,
+        "omitted": omitted,
+        # Focused pagination resumes after the last row actually shown.
+        "continuation_key": items[-1][key] if omitted and items else None,
+    }
+
+
+def _validate_lookup_id(value: str, what: str) -> str:
+    if not isinstance(value, str) or _DIGEST_IDENTIFIER.fullmatch(value) is None:
+        raise MasterOperationError(f"{what} must be a valid master-record identifier")
+    return value
+
+
+def _record_metadata(view: master_runtime.RecordView) -> dict[str, Any]:
+    rendered_board = master_runtime.render_board(view.events)
+    return {
+        "source": view.expected_board["source"],
+        "board_current": view.board_current,
+        "board_repair": {
+            "required": not view.board_current,
+            "rendered_sha256": hashlib.sha256(rendered_board).hexdigest(),
+        },
+    }
+
+
 def _safe_lease(
     snapshot: Any,
     events: Sequence[dict[str, Any]],
@@ -322,8 +387,9 @@ def digest_record(
     live_reconciliation: Optional[master_reconcile.ReconciliationResult] = None,
     lease_snapshot: Snapshot = semaphore.master_snapshot,
     lease_status: LeaseStatus = semaphore.status_text,
+    _view: Optional[master_runtime.RecordView] = None,
 ) -> dict[str, Any]:
-    view = master_runtime.read_record(root)
+    view = _view if _view is not None else master_runtime.read_record(root)
     lease = _safe_lease(lease_snapshot(), view.events, lease_status())
     board = view.expected_board
     reconciliation: list[dict[str, Any]] = []
@@ -359,7 +425,6 @@ def digest_record(
         }
         for row in board["open_audit_findings"]
     ]
-    rendered_board = master_runtime.render_board(view.events)
     master = board["master"]
     recorded_role = (
         "none"
@@ -373,14 +438,7 @@ def digest_record(
         "status": "OK",
         "role": {"recorded": recorded_role, "authoritative": False},
         "lease": lease,
-        "record": {
-            "source": board["source"],
-            "board_current": view.board_current,
-            "board_repair": {
-                "required": not view.board_current,
-                "rendered_sha256": hashlib.sha256(rendered_board).hexdigest(),
-            },
-        },
+        "record": _record_metadata(view),
         "goals": _bounded(goals, goals_limit, "goal_id"),
         "open_decisions": _bounded(decisions, decisions_limit, "decision_id"),
         "open_audit_findings": _bounded(findings, findings_limit, "finding_id"),
@@ -405,7 +463,106 @@ def digest_record(
     return digest
 
 
+def focused_digest_record(
+    root: Path,
+    *,
+    goals_limit: int = DEFAULT_DIGEST_LIMIT,
+    goals_after: Optional[str] = None,
+    decisions_limit: int = DEFAULT_DIGEST_LIMIT,
+    findings_limit: int = DEFAULT_DIGEST_LIMIT,
+    discrepancies_limit: int = DEFAULT_DIGEST_LIMIT,
+    live_reconciliation: Optional[master_reconcile.ReconciliationResult] = None,
+    lease_snapshot: Snapshot = semaphore.master_snapshot,
+    lease_status: LeaseStatus = semaphore.status_text,
+) -> dict[str, Any]:
+    """Return a prioritized, paged continuity view without changing the record."""
+    view = master_runtime.read_record(root)
+    digest = digest_record(
+        root,
+        goals_limit=MAX_DIGEST_LIMIT,
+        decisions_limit=decisions_limit,
+        findings_limit=findings_limit,
+        discrepancies_limit=discrepancies_limit,
+        live_reconciliation=live_reconciliation,
+        lease_snapshot=lease_snapshot,
+        lease_status=lease_status,
+        _view=view,
+    )
+    board = view.expected_board
+    goals = [
+        {
+            key: row[key]
+            for key in ("goal_id", "status", "branch", "checkpoint", "next_unit")
+        }
+        for row in board["goals"]
+    ]
+    goals.sort(key=lambda row: (_GOAL_PRIORITY[row["status"]], row["goal_id"]))
+    digest["view"] = "focused"
+    digest["goals"] = _focused_page(
+        goals,
+        goals_limit,
+        key="goal_id",
+        after=goals_after,
+    )
+    digest["open_decisions"]["all_ids"] = [
+        row["decision_id"] for row in board["open_decisions"]
+    ]
+    digest["open_decisions"]["retrieve"] = (
+        "python3 -m creme master digest --decision DECISION_ID"
+    )
+    digest["open_audit_findings"]["all_ids"] = [
+        row["finding_id"] for row in board["open_audit_findings"]
+    ]
+    digest["open_audit_findings"]["retrieve"] = (
+        "python3 -m creme master digest --finding FINDING_ID"
+    )
+    return digest
+
+
+def lookup_digest_record(root: Path, *, kind: str, identifier: str) -> dict[str, Any]:
+    """Return one complete validated projection row, selected by exact identifier."""
+    plural = {
+        "goal": ("goals", "goal_id"),
+        "decision": ("open_decisions", "decision_id"),
+        "finding": ("open_audit_findings", "finding_id"),
+    }
+    if kind not in plural:
+        raise MasterOperationError(f"unsupported digest lookup kind: {kind}")
+    _validate_lookup_id(identifier, f"{kind} ID")
+    view = master_runtime.read_record(root)
+    section, key = plural[kind]
+    selected = next(
+        (row for row in view.expected_board[section] if row[key] == identifier),
+        None,
+    )
+    if selected is None:
+        raise MasterOperationError(f"unknown {kind} ID: {identifier}")
+    return {
+        "schema_version": DIGEST_SCHEMA_VERSION,
+        "status": "OK",
+        "view": "lookup",
+        "record": _record_metadata(view),
+        "lookup": {
+            "kind": kind,
+            "id": identifier,
+            "item": dict(selected),
+        },
+    }
+
+
+def _human_preview(value: Optional[str], route: str) -> str:
+    if not value:
+        return "<none>"
+    single_line = " ".join(value.split())
+    if len(single_line) <= HUMAN_PREVIEW_CHARS:
+        return single_line
+    prefix = single_line[:HUMAN_PREVIEW_CHARS - 1].rstrip()
+    return f"{prefix}… [truncated; retrieve: {route}]"
+
+
 def render_digest_human(digest: dict[str, Any]) -> str:
+    if digest.get("view") == "focused":
+        return render_focused_digest_human(digest)
     source = digest["record"]["source"]
     lease = digest["lease"]
     lines = [
@@ -424,6 +581,94 @@ def render_digest_human(digest: dict[str, Any]) -> str:
             f"live_reconciliation: {len(live['items'])} shown, {live['omitted']} omitted"
         )
     lines.append(f"next unit: {digest['next_unit'] or '<none>'}")
+    return "\n".join(lines) + "\n"
+
+
+def render_focused_digest_human(digest: dict[str, Any]) -> str:
+    source = digest["record"]["source"]
+    lease = digest["lease"]
+    lines = [
+        f"master continuity schema {digest['schema_version']}",
+        f"role: {digest['role']['recorded']} (descriptive, not authority)",
+        f"lease: {lease['client'] if lease['present'] else 'none'} ({lease['state']})",
+        f"events: {source['event_count']} ({source['log_digest']})",
+        f"board repair required: {str(digest['record']['board_repair']['required']).lower()}",
+        "",
+        "goals (active, ready, and blocked first):",
+    ]
+    goals = digest["goals"]
+    for row in goals["items"]:
+        route = f"python3 -m creme master digest --goal {row['goal_id']}"
+        lines.extend([
+            f"- {row['goal_id']} [{row['status']}]",
+            f"  branch: {_human_preview(row['branch'], route)}",
+            f"  checkpoint: {_human_preview(row['checkpoint'], route)}",
+            f"  next unit: {_human_preview(row['next_unit'], route)}",
+            f"  retrieve: {route}",
+        ])
+    if not goals["items"]:
+        lines.append("- <none>")
+    if goals["omitted"]:
+        cursor = goals["continuation_key"]
+        lines.append(
+            f"more goals: {goals['omitted']}; continue after last shown ({cursor}): "
+            f"python3 -m creme master digest --focused --after-goal {cursor} --human"
+        )
+
+    decisions = digest["open_decisions"]
+    lines.extend([
+        "",
+        f"open decision IDs ({len(decisions['all_ids'])}): "
+        + (", ".join(decisions["all_ids"]) or "<none>"),
+        f"retrieve any decision: {decisions['retrieve']}",
+    ])
+    for row in decisions["items"]:
+        route = f"python3 -m creme master digest --decision {row['decision_id']}"
+        lines.append(
+            f"- {row['decision_id']} [{row['authority']}]: "
+            f"{_human_preview(row['title'], route)}"
+        )
+    if decisions["omitted"]:
+        lines.append(
+            f"decision prose previews omitted: {decisions['omitted']}; all IDs remain listed above"
+        )
+
+    findings = digest["open_audit_findings"]
+    lines.extend([
+        "",
+        f"open finding IDs ({len(findings['all_ids'])}): "
+        + (", ".join(findings["all_ids"]) or "<none>"),
+        f"retrieve any finding: {findings['retrieve']}",
+    ])
+    for row in findings["items"]:
+        route = f"python3 -m creme master digest --finding {row['finding_id']}"
+        lines.append(
+            f"- {row['finding_id']} [{row['severity']}, {row['status']}]: "
+            f"{_human_preview(row['summary'], route)}"
+        )
+    if findings["omitted"]:
+        lines.append(
+            f"finding prose previews omitted: {findings['omitted']}; all IDs remain listed above"
+        )
+
+    discrepancies = digest["reconciliation_discrepancies"]
+    lines.extend([
+        "",
+        "recorded reconciliation discrepancies: "
+        f"{len(discrepancies['items']) + discrepancies['omitted']}; retrieve: "
+        "python3 -m creme master digest",
+    ])
+    if "live_reconciliation" in digest:
+        live = digest["live_reconciliation"]["discrepancies"]
+        lines.append(
+            "live reconciliation discrepancies: "
+            f"{len(live['items']) + live['omitted']}; retrieve: "
+            "python3 -m creme master digest --reconcile"
+        )
+    lines.append(
+        "next unit: "
+        + _human_preview(digest["next_unit"], "python3 -m creme master digest")
+    )
     return "\n".join(lines) + "\n"
 
 

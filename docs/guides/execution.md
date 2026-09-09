@@ -494,6 +494,21 @@ tree still works, the control fails at the intended boundary, and removing only
 that control restores green. Use disposable worktrees for destructive
 mutations. Preserve source artifacts and fail on stale generated output.
 
+Capture control evidence when each command or tool call completes: save the
+exact submitted source or mutation, command/tool request, and unnormalized
+result, bound to the source candidate. Retain the positive run, intended
+rejection, exact restoration, and restored green result. This includes LSP
+controls and cleanup receipts; a later diagnostic summary is not the original
+response. Save the raw result once in the goal's evidence directory and link
+it from the report rather than copying it into every checkpoint.
+
+If an original result was not retained, record that gap explicitly; do not
+reconstruct a transcript from memory. Schedule any necessary replacement
+control with the next appropriate validation unit. Reuse retained evidence
+when its identity and coverage satisfy the goal and repository catalogue;
+missing provenance must not become either a false acceptance or a reason to
+repeat unrelated green work.
+
 A disposable tree for goal `GOAL` belongs at `.worktrees/GOAL-control`,
 `.worktrees/GOAL-mutation`, or `.worktrees/GOAL-rehearsal`; the build owner
 accepts those three suffixes as that goal's own and refuses any other. Never

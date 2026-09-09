@@ -41,7 +41,9 @@ of choosing the convenient source.
 One session at a time is the user's representative for all Jaune/Blanc work
 on this host and holds the master lease. Every session launched with Creme as
 its project resolves the configured goal store, verifies its `master/` runtime
-directory is ignored and untracked, reads that record, and then tries to take
+directory is ignored and untracked, reads `python3 -m creme master digest
+--focused --human` and the required full intent/decision records (see the
+master guide), and then tries to take
 the lease at start, before anything else:
 `~/creme/.semaphore/semaphore master-acquire --client codex --note "..."`
 (substitute the actual client label).
@@ -68,6 +70,13 @@ change the master guide classifies as reserved goes to the user, and then as a
 decision packet with a recommendation. Retiring a procedure requires a logged
 `procedure` event naming the failure it prevented and what prevents that
 failure now.
+
+Keep current state and reports concise under
+[compact continuity](docs/guides/master.md#compact-continuity): replace
+superseded status, link immutable history/evidence, and retain every open
+obligation and decision. Read selected full records after the bounded digest;
+do not dump the entire historical board on routine startup. Quality and
+inspectable evidence take precedence over brevity.
 
 ## Before changing a sibling
 

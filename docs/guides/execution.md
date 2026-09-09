@@ -22,6 +22,11 @@ commits, owned paths, last green evidence, active packets, open decisions, and
 the next coherent unit. State may live in any configured goal store; it never
 becomes a hidden dependency of the public workflow.
 
+Maintain that brief by replacement at checkpoints, following
+[compact continuity](master.md#compact-continuity). Keep detailed commands and
+verdicts in evidence and link them; retain all open obligations and qualifying
+failures. Do not prepend repeated historical status to current documents.
+
 Before launching the planned units, apply the [escalation procedure](escalation.md)
 to their access and capability needs as a group. Preserve the resulting coverage
 inventory in the state brief and update it when operations or policy change.

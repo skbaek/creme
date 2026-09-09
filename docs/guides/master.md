@@ -103,6 +103,54 @@ fresh session of any client on the same host can continue from it alone, with
 nothing reconstructed from a predecessor's memory. That test is run as the
 handoff rehearsal below and as the `continuity` audit kind.
 
+## Compact continuity
+
+Keep current state as a replacement summary, not an accumulating transcript.
+At each green checkpoint, replace superseded status and next-step prose rather
+than prepending another dated account. The current state must carry the active
+objective, exact source/worktree/branch, accepted evidence, unresolved outcomes,
+open decisions and findings, ownership, and next coherent unit. A completion
+report maintains one condition-to-evidence table; it need not replay the work.
+
+Keep detailed commands and terminal verdicts in the evidence artifact, with a
+short result and exact pointer in the state/report. Record a fact once in its
+canonical owner and refer to it from other surfaces. Goal events should carry
+short checkpoint/next-unit fields and the state/report pointer, not copy the
+whole report into the derived board.
+
+Before removing historical prose from a current document, verify its exact
+prior bytes are committed and recoverable. Leave the immutable commit and
+repository-relative path (retrieve with `git show COMMIT:PATH`), or a verified
+immutable archive pointer for non-Git evidence. A mutable branch name or a
+client transcript is not enough. Preserve the disposition of failed attempts
+and any caveat that qualifies current acceptance in the current summary.
+Never compact away a reserved decision, open finding, unfulfilled condition,
+semantic limit, or ownership boundary. Do not rewrite the authoritative event
+log, user intent, independent audits, or raw evidence to reduce reading cost.
+Private master data stays private; this rule never authorizes committing it.
+
+Start with `python3 -m creme master digest --focused --human`. This read-only
+view prioritizes active, ready and blocked goals, bounds prose previews, and
+lists every open decision/finding ID. Follow the displayed continuation command
+to page goals. Retrieve an exact full record with `master digest --goal ID`,
+`--decision ID`, or `--finding ID` (prefix each with `python3 -m creme`). The
+original unfiltered JSON digest remains available for existing consumers.
+
+Retrieve the complete records for selected goals and every open decision/finding
+before allocation. Explicit
+omission counts and truncation markers are navigation cues, not permission to
+ignore obligations. Read the named goal/brief and applicable authorities in
+full; retrieve historical artifacts only when an unresolved question needs
+them. Avoid dumping all of board.json or replaying every completed goal on
+ordinary re-entry. No summary grants lease authority or replaces gate evidence.
+
+Use the normal checkpoint and handoff review to maintain this discipline;
+do not add a word-count gate or a separate summarization campaign. Concision
+serves quality: keep necessary details even when they exceed a preferred size.
+A worker return should state what changed since its last checkpoint, the
+condition/evidence result, unresolved issues and next step. The durable report
+supplies the complete evidence rather than being copied into each message.
+
 ## Session start: master or reader
 
 Every session launched with Creme as its project runs this at start, before
@@ -112,9 +160,12 @@ anything else and whether or not the user mentions the role:
    resolves the configured goal store and verifies that its `master/`
    subtree is ignored and untracked. If no store is configured, or this
    privacy check fails, do not enter persistent master mode.
-2. Read `master/README.md`, `master/board.json`, the tail of
-   `master/events.jsonl`,
-   every file in `master/intent/`, and the open findings in `master/audits/`.
+2. Read `master/README.md`, the bounded validated continuity digest, every
+   file in `master/intent/`, and the open findings in `master/audits/`.
+   Retrieve full selected goal records and all open decisions/findings using
+   the digest's exact lookup/pagination instructions. Follow the current state
+   and report pointers; use raw board/event history only for a specific unresolved
+   question. See [compact continuity](#compact-continuity).
 3. Try to take the lease:
 
    ```sh

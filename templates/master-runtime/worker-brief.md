@@ -98,6 +98,12 @@ owned paths, commit, push when authorized, and update the state brief.
 - Final report: `{{FINAL_REPORT}}`
 - Evidence tree: `{{EVIDENCE_TREE}}`
 
+Update the state brief in place at each checkpoint; do not accumulate dated
+status accounts. Keep one current condition/evidence map, link detailed command
+receipts and immutable prior history, and preserve open decisions, findings,
+limits and unfinished conditions. Follow the master's
+[compact continuity](../../docs/guides/master.md#compact-continuity) rules.
+
 These files, exact candidate commits, and terminal verdicts are durable
 evidence. A chat summary is not acceptance evidence.
 

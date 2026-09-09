@@ -460,7 +460,7 @@ class MasterOperationsTest(unittest.TestCase):
         )
         long_next_unit = "next-" + ("x" * 1000)
         goal_rows = [
-            (f"a-complete-{index:02d}", "complete") for index in range(25)
+            (f"a-complete-{index:03d}", "complete") for index in range(103)
         ] + [
             ("w-paused", "paused"),
             ("x-blocked", "blocked"),
@@ -528,7 +528,7 @@ class MasterOperationsTest(unittest.TestCase):
             ["z-active", "y-ready"],
         )
         self.assertEqual(focused["goals"]["continuation_key"], "y-ready")
-        self.assertEqual(focused["goals"]["omitted"], 27)
+        self.assertEqual(focused["goals"]["omitted"], 105)
         self.assertEqual(
             focused["open_decisions"]["all_ids"],
             ["decision-a", "decision-z"],
@@ -556,6 +556,30 @@ class MasterOperationsTest(unittest.TestCase):
             ["x-blocked", "w-paused"],
         )
         self.assertEqual(continued["goals"]["continuation_key"], "w-paused")
+
+        expected_order = [
+            "z-active",
+            "y-ready",
+            "x-blocked",
+            "w-paused",
+            *[f"a-complete-{index:03d}" for index in range(103)],
+        ]
+        recovered = []
+        cursor = None
+        while True:
+            page = master_operations.focused_digest_record(
+                root,
+                goals_limit=17,
+                goals_after=cursor,
+                lease_snapshot=lease.snapshot,
+                lease_status=lambda: "master: codex (live)\n",
+            )["goals"]
+            recovered.extend(row["goal_id"] for row in page["items"])
+            cursor = page["continuation_key"]
+            if cursor is None:
+                break
+        self.assertEqual(recovered, expected_order)
+        self.assertEqual(len(recovered), len(set(recovered)))
 
         goal = master_operations.lookup_digest_record(
             root, kind="goal", identifier="z-active"

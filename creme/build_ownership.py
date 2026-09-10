@@ -2429,6 +2429,19 @@ def _target_keyed_estimate(
     )
     fallback_rows = list(rows)
     if input_identity is None and identity_detail is not None:
+        # The source/configuration collector can be incomplete while Git still
+        # proves that a previous linked worktree belongs to this repository.
+        # Widen only this conservative target-keyed floor; the empty context
+        # deliberately cannot turn the row into exact or tolerant evidence.
+        repository = repository_identity(worktree)
+        if repository is not None:
+            fallback_identity = {
+                "repository_identity": repository, "input_context": "", "module_inputs": {},
+            }
+            fallback_rows, _fallback_detail = _measured_rows(
+                worktree, targets, *digests, settings, require_elaboration, members=True,
+                input_identity=fallback_identity,
+            )
         fallback_peak = max(
             (float(row["peak_rss_mib"]) for row in fallback_rows), default=0.0,
         ) / 1024.0

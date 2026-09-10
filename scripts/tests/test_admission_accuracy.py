@@ -560,16 +560,24 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
             old = _row(
                 "2026-09-08T00:00:00Z", ["A"], 12.0, lean_gib=11.5,
                 module_peaks={"A": 11.5}, worktree=str(repository / "old-worktree"),
-                identity=self.identity(repo=owned.repository_identity(fresh)), samples=3,
+                identity=self.identity(repo=owned.repository_identity(fresh)), samples=3, targets=("A",),
             )
             (state / "ledger.jsonl").write_text(json.dumps(old) + "\n", encoding="utf-8")
             estimate, evidence = owned.derive_memory_gib(
                 fresh, ["A"], SETTINGS, ("tc", "mf"), 8, stale=self.STALE,
                 input_identity=None, identity_detail="dirty dependency checkout",
             )
+            target_estimate, target_evidence = owned.derive_memory_gib(
+                fresh, ["A"], SETTINGS, ("tc", "mf"), 8,
+                stale={**self.STALE, "stale": None, "stale_set": None, "graph": None},
+                input_identity=None, identity_detail="dirty dependency checkout",
+            )
         self.assertEqual(estimate, 13)
         self.assertEqual(evidence["kind"], "profile default")
         self.assertIn("identity unavailable", evidence["source"])
+        self.assertEqual(target_estimate, 13)
+        self.assertEqual(target_evidence["kind"], "profile default")
+        self.assertIn("conservative target fallback peak 12.00 GiB", target_evidence["source"])
 
 
 class InputIdentityCollectionTest(unittest.TestCase):

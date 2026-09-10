@@ -270,20 +270,11 @@ def _valid_ledger_row(row: Any) -> bool:
         row["resolved_roots"] is None or _string_list(row["resolved_roots"])
     ):
         return False
-    identity_fields = ("repository_identity", "input_context", "module_inputs")
-    present_identity = [field in row for field in identity_fields]
-    if any(present_identity) and not all(present_identity):
-        return False
-    if all(present_identity) and not (
-        isinstance(row["repository_identity"], str)
-        and isinstance(row["input_context"], str)
-        and isinstance(row["module_inputs"], dict)
-        and all(isinstance(module, str) and isinstance(digest, str)
-                for module, digest in row["module_inputs"].items())
-    ):
-        return False
-    if "identity_status" in row and not isinstance(row["identity_status"], str):
-        return False
+    # Identity is additive evidence.  A partially written or malformed
+    # identity must not make an otherwise valid historical RSS measurement
+    # disappear: exact selection below rejects it, while conservative fallback
+    # can still retain its known cost.  New writers construct these fields from
+    # `build_input_identity`; readers deliberately remain more tolerant.
     return "renewals" not in row or _string_list(row["renewals"])
 
 
@@ -1916,11 +1907,19 @@ def _usable_sample(row: dict[str, Any]) -> bool:
 
 def _exact_context_row(row: dict[str, Any], identity: dict[str, Any]) -> bool:
     """Whether a row measured the same repository/configuration/execution mode."""
+    repository = identity.get("repository_identity")
+    context = identity.get("input_context")
+    inputs = identity.get("module_inputs")
     if row.get("identity_status") != "exact":
         return False
     if (
-        row.get("repository_identity") != identity.get("repository_identity")
-        or row.get("input_context") != identity.get("input_context")
+        not isinstance(repository, str) or not repository
+        or not isinstance(context, str) or not context
+        or not isinstance(inputs, dict)
+        or not all(isinstance(module, str) and isinstance(digest, str) and digest
+                   for module, digest in inputs.items())
+        or row.get("repository_identity") != repository
+        or row.get("input_context") != context
         or not isinstance(row.get("module_inputs"), dict)
     ):
         return False
@@ -1931,10 +1930,14 @@ def _exact_context_row(row: dict[str, Any], identity: dict[str, Any]) -> bool:
 
 def _exact_module_row(row: dict[str, Any], identity: dict[str, Any], module: str) -> bool:
     inputs = identity.get("module_inputs")
+    recorded = row.get("module_inputs")
+    current_digest = inputs.get(module) if isinstance(inputs, dict) else None
+    recorded_digest = recorded.get(module) if isinstance(recorded, dict) else None
     return (
         _exact_context_row(row, identity)
-        and isinstance(inputs, dict)
-        and inputs.get(module) == (row.get("module_inputs") or {}).get(module)
+        and isinstance(current_digest, str) and bool(current_digest)
+        and isinstance(recorded_digest, str) and bool(recorded_digest)
+        and current_digest == recorded_digest
     )
 
 
@@ -1966,7 +1969,6 @@ def _evidence_rows(
         and not row.get("probe")
         and row.get("exit") == 0
         and _finite_positive(row.get("peak_rss_mib"))
-        and (row.get("identity_status") != "exact" or _usable_sample(row))
     ]
     if input_identity is None:
         matching = [
@@ -2076,6 +2078,7 @@ def module_cost_evidence(
     sample = int(settings["estimate_sample_rows"])
     peaks: dict[str, list[float]] = {}
     fallback_peaks: dict[str, list[float]] = {}
+    fallback_build_peaks: dict[str, list[float]] = {}
     exact_seconds: dict[str, float] = {}
     fallback_seconds: dict[str, float] = {}
     overheads: list[float] = []
@@ -2100,6 +2103,13 @@ def module_cost_evidence(
         # conservative lower bound if current evidence is absent.  It never
         # makes `unmeasured` disappear or relaxes the contention class.
         for module in rebuilt:
+            # A source-drifted narrow measurement cannot prove the current
+            # module cheap, but its complete process/Lake aggregate is still
+            # a lower bound.  Keep this separately from the module's lean RSS
+            # so changing a source does not drop known 7.32 GiB work to the
+            # old 6.74 GiB lean-only signal.
+            if input_identity is not None and len(rebuilt) <= narrow:
+                fallback_build_peaks.setdefault(module, []).append(peak_gib)
             value = recorded.get(module) if isinstance(recorded, dict) else None
             if _finite_positive(value):
                 fallback_peaks.setdefault(module, []).append(float(value) / 1024.0)
@@ -2132,6 +2142,10 @@ def module_cost_evidence(
         },
         "fallback_peak_gib": {
             module: max(values[-sample:]) for module, values in fallback_peaks.items()
+            if module not in peaks
+        },
+        "fallback_build_peak_gib": {
+            module: max(values[-sample:]) for module, values in fallback_build_peaks.items()
             if module not in peaks
         },
         "seconds": {
@@ -2207,7 +2221,8 @@ def _model_peak(
 
 
 def _covering_rows(
-    rows: list[dict[str, Any]], stale: list[str], unmeasured: list[str]
+    rows: list[dict[str, Any]], stale: list[str], unmeasured: list[str],
+    input_identity: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     """Broader successful rebuilds that included nearly all the unmeasured modules."""
     wanted = set(unmeasured)
@@ -2217,6 +2232,14 @@ def _covering_rows(
         if len(rebuilt) < len(stale):
             continue
         if wanted and len(rebuilt & wanted) < 0.9 * len(wanted):
+            continue
+        # Context alone is not a source cohort.  A broad historical rebuild
+        # whose wanted modules have drifted is useful as a conservative floor,
+        # never as a current "broader rebuild" measurement.
+        if input_identity is not None and any(
+            not _exact_module_row(row, input_identity, module)
+            for module in rebuilt & wanted
+        ):
             continue
         covering.append(row)
     return covering
@@ -2255,7 +2278,11 @@ def size_stale_set(
         name: evidence["fallback_peak_gib"][name]
         for name in unmeasured if name in evidence["fallback_peak_gib"]
     }
-    fallback_floor = max(fallback.values(), default=0.0)
+    fallback_build = {
+        name: evidence["fallback_build_peak_gib"][name]
+        for name in unmeasured if name in evidence["fallback_build_peak_gib"]
+    }
+    fallback_floor = max([*fallback.values(), *fallback_build.values()], default=0.0)
     heavy = sorted(
         ((name, evidence["seconds"][name]) for name in unmeasured
          if evidence["seconds"].get(name, 0.0) >= heavy_seconds),
@@ -2267,6 +2294,7 @@ def size_stale_set(
         "unmeasured": unmeasured,
         "heavy": [name for name, _seconds in heavy],
         "fallback_modules": sorted(fallback),
+        "fallback_build_modules": sorted(fallback_build),
         "fallback_peak_gib": round(fallback_floor, 2),
         "overhead_gib": round(float(evidence["overhead_gib"]), 2),
         "rows": evidence["rows"],
@@ -2304,7 +2332,7 @@ def size_stale_set(
         estimate = max(
             floor, narrow_default,
             math.ceil(measured_peak) + margin if measured else 0,
-            math.ceil(fallback_floor) + margin if fallback else 0,
+            math.ceil(fallback_floor) + margin if fallback or fallback_build else 0,
         )
         result.update({
             "kind": "narrow default",
@@ -2322,7 +2350,7 @@ def size_stale_set(
         estimate = max(
             floor, int(default_gib),
             math.ceil(measured_peak) + margin if measured else 0,
-            math.ceil(fallback_floor) + margin if fallback else 0,
+            math.ceil(fallback_floor) + margin if fallback or fallback_build else 0,
         )
         result.update({
             "kind": "heavy module",
@@ -2339,7 +2367,7 @@ def size_stale_set(
         [row for row in rows if _exact_context_row(row, input_identity)]
         if input_identity is not None else rows
     )
-    covering = _covering_rows(context_rows, names, unmeasured)
+    covering = _covering_rows(context_rows, names, unmeasured, input_identity)
     if covering:
         tightest = min(covering, key=lambda row: float(row["peak_rss_mib"]))
         peak = float(tightest["peak_rss_mib"]) / 1024.0
@@ -2360,7 +2388,7 @@ def size_stale_set(
         return result
     estimate = max(
         floor, int(default_gib), math.ceil(measured_peak) + margin if measured else 0,
-        math.ceil(fallback_floor) + margin if fallback else 0,
+        math.ceil(fallback_floor) + margin if fallback or fallback_build else 0,
     )
     result.update({
         "kind": "profile default",
@@ -2581,8 +2609,20 @@ def derive_memory_gib(
             identity_detail,
         )
     if input_identity is None and identity_detail is not None:
-        rows, detail = _evidence_rows(worktree, *digests)
-        fallback = size_stale_set(list(stale_set), stale.get("graph"), rows, settings, default_gib)
+        # Exact input collection may fail for a dirty dependency or incomplete
+        # configuration, while Git can still establish that another linked
+        # worktree belongs to this repository.  Use that narrow scope only for
+        # a conservative fallback; the deliberately invalid context cannot
+        # make any row exact.
+        repository = repository_identity(worktree)
+        fallback_identity = (
+            {"repository_identity": repository, "input_context": "", "module_inputs": {}}
+            if repository is not None else None
+        )
+        rows, detail = _evidence_rows(worktree, *digests, fallback_identity)
+        fallback = size_stale_set(
+            list(stale_set), stale.get("graph"), rows, settings, default_gib, fallback_identity,
+        )
         estimate = max(floor, default_gib, int(fallback["estimate_gib"]))
         return estimate, {
             "kind": "profile default",
@@ -3013,6 +3053,11 @@ def run_lake_build(
             ),
         )
 
+    def release_hold() -> tuple[bool, str]:
+        if fresh:
+            return True, "no hold was taken"
+        return semaphore.adaptive_release(goal)
+
     if not admitted:
         print(json.dumps({
             "status": "REFUSED",
@@ -3042,10 +3087,6 @@ def run_lake_build(
             }, sort_keys=True), file=output)
             return update.returncode or 2
         digests = worktree_digests(worktree)
-    def release_hold() -> tuple[bool, str]:
-        if fresh:
-            return True, "no hold was taken"
-        return semaphore.adaptive_release(goal)
 
     if not census and input_identity is not None:
         launch_digests = worktree_digests(worktree)

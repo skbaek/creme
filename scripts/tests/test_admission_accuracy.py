@@ -433,6 +433,81 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                 self.assertNotEqual(evidence["kind"], "measured")
                 self.assertEqual(verdict, "sensitive")
 
+    def test_missing_or_malformed_additive_identity_is_fallback_not_exact(self) -> None:
+        current = self.identity()
+        missing = _row(
+            "2026-09-08T00:00:00Z", ["A"], 12.0, lean_gib=11.5,
+            module_peaks={"A": 11.5},
+            identity={"repository_identity": "repo-a", "input_context": "tc-mf-config-threads2",
+                      "module_inputs": {}}, samples=3,
+        )
+        malformed = _row(
+            "2026-09-08T00:01:00Z", ["A"], 12.0, lean_gib=11.5,
+            module_peaks={"A": 11.5}, identity=current, samples=0,
+        )
+        malformed["module_inputs"] = {"A": None}
+        for row in (missing, malformed):
+            with self.subTest(row=row["time"]):
+                estimate, evidence, verdict, _classification = self.derive([row], current)
+                self.assertEqual(estimate, 13)
+                self.assertNotEqual(evidence["kind"], "measured")
+                self.assertEqual(verdict, "sensitive")
+
+    def test_changed_source_preserves_the_prior_whole_build_floor(self) -> None:
+        old = _row(
+            "2026-09-08T00:00:00Z", ["A"], 7.32, lean_gib=6.74,
+            module_peaks={"A": 6.74}, identity=self.identity(source="old"), samples=3,
+        )
+        estimate, evidence, verdict, _classification = self.derive(
+            [old], self.identity(source="new"),
+        )
+        # The old whole-build peak (not just its 6.74 GiB lean subprocess) is
+        # a conservative lower bound until a current exact row arrives.
+        self.assertEqual(estimate, 9)
+        self.assertEqual(evidence["kind"], "narrow default")
+        self.assertEqual(verdict, "sensitive")
+
+    def test_changed_source_broad_row_is_not_current_covering_evidence(self) -> None:
+        modules = [f"M{index}" for index in range(13)]
+        old_identity = {
+            "repository_identity": "repo-a", "input_context": "tc-mf-config-threads2",
+            "module_inputs": {module: "old" for module in modules},
+        }
+        current = {**old_identity, "module_inputs": {module: "new" for module in modules}}
+        old = _row(
+            "2026-09-08T00:00:00Z", modules, 7.32, lean_gib=6.74,
+            identity=old_identity, samples=3,
+        )
+        stale = {"roots": modules, "package_roots": modules, "resolution": "fixture",
+                 "stale": len(modules), "detail": "fixture", "stale_set": modules,
+                 "graph": {module: set() for module in modules}}
+        with _isolated() as root:
+            (root / "ledger.jsonl").write_text(json.dumps(old) + "\n", encoding="utf-8")
+            estimate, evidence = owned.derive_memory_gib(
+                self.WORKTREE, modules, SETTINGS, ("tc", "mf"), 8,
+                stale=stale, input_identity=current,
+            )
+        self.assertEqual(estimate, 8)
+        self.assertEqual(evidence["kind"], "profile default")
+
+    def test_broad_aggregate_does_not_charge_a_known_tiny_drifted_module(self) -> None:
+        modules = [f"M{index}" for index in range(40)]
+        old_identity = {
+            "repository_identity": "repo-a", "input_context": "tc-mf-config-threads2",
+            "module_inputs": {module: "old" for module in modules},
+        }
+        current = {**old_identity, "module_inputs": {module: "new" for module in modules}}
+        old = _row(
+            "2026-09-08T00:00:00Z", modules, 12.0, lean_gib=10.0,
+            module_peaks={"M0": 1.5}, identity=old_identity, samples=3,
+        )
+        sizing = owned.size_stale_set(["M0"], {"M0": set()}, [old], SETTINGS, 8, current)
+        # A broad 12 GiB process does not say that this module cost 12 GiB;
+        # its direct old module peak is retained as fallback but it stays
+        # unmeasured/current-sensitive until an exact row exists.
+        self.assertEqual(sizing["kind"], "narrow default")
+        self.assertEqual(sizing["estimate_gib"], SETTINGS["narrow_default_gib"])
+
     def test_identity_unavailable_keeps_a_legacy_high_peak_as_a_floor(self) -> None:
         legacy = _row(
             "2026-09-08T00:00:00Z", ["A"], 12.0, lean_gib=11.5,
@@ -467,6 +542,34 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
             )
         self.assertEqual(estimate, 13)
         self.assertNotEqual(evidence["kind"], "measured")
+
+    def test_identity_unavailable_in_a_new_linked_worktree_keeps_same_repo_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, _isolated() as state:
+            repository = Path(tmp) / "repo"
+            subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
+            (repository / "README").write_text("fixture\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "add", "README"], check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "-c", "user.email=test@example.com",
+                 "-c", "user.name=Test", "commit", "-m", "initial"],
+                check=True, capture_output=True, text=True,
+            )
+            fresh = repository / "fresh"
+            subprocess.run(["git", "-C", str(repository), "worktree", "add", "--detach", str(fresh)],
+                           check=True, capture_output=True, text=True)
+            old = _row(
+                "2026-09-08T00:00:00Z", ["A"], 12.0, lean_gib=11.5,
+                module_peaks={"A": 11.5}, worktree=str(repository / "old-worktree"),
+                identity=self.identity(repo=owned.repository_identity(fresh)), samples=3,
+            )
+            (state / "ledger.jsonl").write_text(json.dumps(old) + "\n", encoding="utf-8")
+            estimate, evidence = owned.derive_memory_gib(
+                fresh, ["A"], SETTINGS, ("tc", "mf"), 8, stale=self.STALE,
+                input_identity=None, identity_detail="dirty dependency checkout",
+            )
+        self.assertEqual(estimate, 13)
+        self.assertEqual(evidence["kind"], "profile default")
+        self.assertIn("identity unavailable", evidence["source"])
 
 
 class InputIdentityCollectionTest(unittest.TestCase):
@@ -811,12 +914,13 @@ class _Harness:
     """A `run_lake_build` with Lake, the semaphore, and the sampler replaced."""
 
     def __init__(self, *, probe, exit_code=0, rebuilt=("A",), peak_mib=2100.0,
-                 lake_run=None, identity_snapshot=None):
+                 lake_run=None, identity_snapshot=None, apparent_goal="g"):
         self.probe = probe
         self.exit_code = exit_code
         self.rebuilt = list(rebuilt)
         self.peak_mib = peak_mib
         self.lake_run = lake_run
+        self.apparent_goal = apparent_goal
         self.identity_snapshot = identity_snapshot or (
             lambda _worktree, modules, *_rest: (
                 {
@@ -871,6 +975,7 @@ class _Harness:
 
         patches = [
             patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")),
+            patch("creme.build_ownership._apparent_goal", return_value=self.apparent_goal),
             patch("creme.build_ownership.resolve_toolchain",
                   return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))),
             patch("creme.build_ownership.stale_evidence", return_value=self.probe),
@@ -890,6 +995,7 @@ class _Harness:
             patch("creme.build_ownership._parse_build_output",
                   return_value=(self.rebuilt, [], {m: 1.0 for m in self.rebuilt})),
             patch("creme.build_ownership._swap_gib", return_value=1.0),
+            patch("creme.build_ownership._dependency_revision", return_value=(None, "fixture failure")),
             patch("creme.build_ownership.append_ledger", side_effect=self.rows.append),
         ]
         if self.lake_run is not None:
@@ -1021,6 +1127,17 @@ class WrapperSurfaceTest(unittest.TestCase):
         row = harness.rows[0]
         self.assertNotIn("repository_identity", row)
         self.assertIn("changed during build", row["identity_status"])
+
+    def test_failed_census_update_releases_its_admission(self) -> None:
+        harness = _Harness(
+            probe=self.probe(["A"]), apparent_goal="g-rehearsal",
+            lake_run=SimpleNamespace(returncode=1, stdout="", stderr=""),
+        )
+        with _isolated():
+            self.assertEqual(harness.run(census=True, dependency="dep"), 1)
+        harness.acquire.assert_called_once()
+        harness.release.assert_called_once()
+        self.assertIn("dependency census aborted", harness.output.getvalue())
 
 
 class SamplerAttributionTest(unittest.TestCase):

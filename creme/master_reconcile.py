@@ -13,6 +13,18 @@ from . import master_runtime
 RECONCILIATION_SCHEMA_VERSION = 1
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
+# A recorded checkpoint is free prose as often as it is a bare object name, so a
+# ref claim inside prose is recognized conservatively: only a standalone
+# full-length lowercase SHA-1 object name counts. That length is what Git prints
+# for a complete object name and is the one shape this record's prose does not
+# also use for other data. Shorter runs are words ("effaced"), decimal data,
+# abbreviated merkle roots, and 32-hex record event ids; 64-hex runs are content
+# digests; longer runs are a name glued to a neighbouring word by compaction.
+# `0x` data is EVM, never a Git object.
+_PROSE_OBJECT_NAME = re.compile(r"(?<![0-9a-f])(?<!0x)(?<!0X)[0-9a-f]{40}(?![0-9a-f])")
+CENSUS_REPOSITORY = "master-record"
+CENSUS_SUBJECT = "reconciliation-census"
+
 
 class ReconciliationError(RuntimeError):
     pass
@@ -85,6 +97,40 @@ class ReconciliationResult:
             "repositories": list(self.repositories),
             "discrepancies": list(self.discrepancies),
         }
+
+
+@dataclass(frozen=True)
+class CheckpointClaim:
+    """What a recorded goal checkpoint asserts about Git objects."""
+
+    commit: Optional[str]
+    candidates: tuple[str, ...]
+
+
+def _is_object_name_claim(token: str) -> bool:
+    # An all-decimal run is a count, a date, or a quantity; no object name Git
+    # printed is free of a-f at this length.
+    return any(character in "abcdef" for character in token)
+
+
+def checkpoint_claim(checkpoint: str) -> CheckpointClaim:
+    """Classify a recorded checkpoint into the ref claims it actually makes.
+
+    A field that is exactly one object name is a bare commit claim. Anything
+    else is prose, which claims only that the full object names it cites exist
+    somewhere in the configured workspace. Prose that cites no full object name
+    makes no ref claim at all and is never reported as a missing ref.
+    """
+    text = checkpoint.strip()
+    if _COMMIT.fullmatch(text) is not None:
+        return CheckpointClaim(text, ())
+    candidates: list[str] = []
+    for match in _PROSE_OBJECT_NAME.finditer(text):
+        token = match.group(0)
+        if not _is_object_name_claim(token) or token in candidates:
+            continue
+        candidates.append(token)
+    return CheckpointClaim(None, tuple(candidates))
 
 
 def run_git(root: Path, arguments: Sequence[str]) -> GitResult:
@@ -525,6 +571,175 @@ def _commit_exists(root: Path, commit: str, runner: GitRunner) -> Optional[bool]
     return None
 
 
+def _object_exists(root: Path, token: str, runner: GitRunner) -> Optional[bool]:
+    """Whether `token` names an object this repository holds.
+
+    A prose candidate may abbreviate a commit, so the peeling form used for a
+    bare checkpoint is deliberately not used here: the question is only whether
+    Git knows the named object. Only Git's own quiet contracts decide absence;
+    anything else, including an ambiguous abbreviation, stays unknown.
+    """
+    try:
+        result = runner(root, ["cat-file", "-e", token])
+    except ReconciliationError:
+        return None
+    if result.stdout:
+        return None
+    if result.returncode == 0 and not result.stderr:
+        return True
+    if result.returncode == 1 and not result.stderr:
+        # A well-formed object name that this repository does not hold.
+        return False
+    missing = f"fatal: Not a valid object name {token}\n".encode("ascii")
+    if result.returncode == 128 and result.stderr == missing:
+        # No object in this repository matches the named prefix.
+        return False
+    return None
+
+
+class _WorkspaceObjects:
+    """Memoized `exists anywhere in the configured workspace` resolution."""
+
+    def __init__(self, roots: Sequence[Path], runner: GitRunner) -> None:
+        self._roots = tuple(roots)
+        self._runner = runner
+        self._objects: dict[str, Optional[bool]] = {}
+        self._commits: dict[str, Optional[bool]] = {}
+
+    def _resolve(
+        self,
+        token: str,
+        probe: Callable[[Path, str, GitRunner], Optional[bool]],
+        cache: dict[str, Optional[bool]],
+    ) -> Optional[bool]:
+        if token in cache:
+            return cache[token]
+        verdict: Optional[bool] = False if self._roots else None
+        for root in self._roots:
+            present = probe(root, token, self._runner)
+            if present:
+                verdict = True
+                break
+            if present is None:
+                verdict = None
+        cache[token] = verdict
+        return verdict
+
+    def resolve_object(self, token: str) -> Optional[bool]:
+        return self._resolve(token, _object_exists, self._objects)
+
+    def resolve_commit(self, commit: str) -> Optional[bool]:
+        return self._resolve(commit, _commit_exists, self._commits)
+
+
+def _claim_text(candidates: Sequence[str], *, limit: int = 8) -> str:
+    shown = list(candidates[:limit])
+    text = " ".join(shown)
+    remaining = len(candidates) - len(shown)
+    if remaining:
+        text = f"{text} (+{remaining} further candidates)"
+    return text
+
+
+def _sort_key(row: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        row["repository"],
+        row["kind"],
+        row["subject"],
+        row["recorded"] or "",
+        row["observed"] or "",
+    )
+
+
+def _census(rows: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, int]]:
+    counts: dict[tuple[str, str], int] = {}
+    for row in rows:
+        key = (row["repository"], row["kind"])
+        counts[key] = counts.get(key, 0) + 1
+    return [(repository, kind, counts[(repository, kind)]) for repository, kind in sorted(counts)]
+
+
+def _census_row(rows: Sequence[Mapping[str, Any]], retained: int, limit: int) -> dict[str, Any]:
+    total = len(rows)
+    census = _census(rows)
+    head = (
+        f"observed reconciliation exceeds the {limit}-row record cap; "
+        f"{total} discrepancies observed and {retained} representative rows recorded, "
+        f"covering every observed repository and kind; the census follows and is "
+        f"authoritative for the counts"
+    )
+    budget = master_runtime.MAX_TEXT_BYTES - 256
+    detail = head
+    shown = 0
+    for repository, kind, count in census:
+        entry = f"; {repository}/{kind}={count}"
+        if len(detail.encode("utf-8")) + len(entry.encode("utf-8")) > budget:
+            break
+        detail += entry
+        shown += 1
+    omitted = len(census) - shown
+    if omitted:
+        detail += f"; census lists {shown} of {len(census)} groups, {omitted} omitted"
+    return {
+        "repository": CENSUS_REPOSITORY,
+        "kind": "inaccessible-fact",
+        "subject": CENSUS_SUBJECT,
+        "recorded": f"observed={total}",
+        "observed": f"recorded={retained}",
+        "detail": detail,
+    }
+
+
+def _representative_selection(
+    rows: Sequence[Mapping[str, Any]],
+    budget: int,
+) -> list[dict[str, Any]]:
+    """Round-robin one row per (repository, kind) group until the budget is spent."""
+    groups: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault((row["repository"], row["kind"]), []).append(row)
+    order = sorted(groups)
+    selected: list[dict[str, Any]] = []
+    index = 0
+    while len(selected) < budget:
+        progressed = False
+        for key in order:
+            bucket = groups[key]
+            if index >= len(bucket):
+                continue
+            selected.append(dict(bucket[index]))
+            progressed = True
+            if len(selected) >= budget:
+                break
+        if not progressed:
+            break
+        index += 1
+    selected.sort(key=_sort_key)
+    return selected
+
+
+def summarize_for_record(
+    result: ReconciliationResult,
+    *,
+    limit: int = master_runtime.MAX_LIST_ITEMS,
+) -> list[dict[str, Any]]:
+    """Bound observed discrepancies to what one record event may carry.
+
+    Under the cap the observed rows are recorded unchanged. Over it, the event
+    carries an explicit census row stating the observed total and every
+    repository/kind count, followed by a representative selection that shows at
+    least one row of every observed group. The count is therefore never
+    understated and the record never silently drops what was observed.
+    """
+    if limit < 1:
+        raise ReconciliationError("record reconciliation limit must be positive")
+    rows = [dict(row) for row in result.discrepancies]
+    if len(rows) <= limit:
+        return rows
+    selected = _representative_selection(rows, limit - 1)
+    return [_census_row(rows, len(selected), limit), *selected]
+
+
 def reconcile_record(
     record_root: Path,
     repository_roots: Mapping[str, Path],
@@ -551,6 +766,10 @@ def reconcile_record(
         discrepancies.extend(findings)
         inspected.append((_logical_absolute(configured_root), fact))
 
+    objects = _WorkspaceObjects(
+        [root for root, fact in inspected if fact.status == "OK"], runner
+    )
+
     for goal in view.expected_board["goals"]:
         matches: list[tuple[Path, RepositoryFact, WorktreeFact]] = []
         for root, fact in inspected:
@@ -574,6 +793,7 @@ def reconcile_record(
                 )
             )
             continue
+        claim = checkpoint_claim(goal["checkpoint"])
         for root, fact, worktree in matches:
             worktree.goal_ids = tuple(sorted({*worktree.goal_ids, goal["goal_id"]}))
             branch_subject = f"goal:{goal['goal_id']}:branch"
@@ -611,39 +831,112 @@ def reconcile_record(
                         detail="registered worktree branch differs from the board claim",
                     )
                 )
+            if claim.commit is None:
+                continue
             checkpoint_subject = f"goal:{goal['goal_id']}:checkpoint"
-            checkpoint_exists = _commit_exists(root, goal["checkpoint"], runner)
-            if checkpoint_exists is None:
-                discrepancies.append(
-                    _discrepancy(
-                        fact.repository,
-                        "inaccessible-fact",
-                        checkpoint_subject,
-                        recorded=goal["checkpoint"],
-                        observed=None,
-                        detail="recorded goal checkpoint could not be inspected",
+            checkpoint_exists = _commit_exists(root, claim.commit, runner)
+            if checkpoint_exists is not True:
+                # A goal may be recorded with worktrees in several configured
+                # repositories while its checkpoint names a commit in one of
+                # them, so absence is only asserted workspace-wide. A commit the
+                # workspace holds elsewhere is HEAD drift here, never a missing
+                # ref.
+                elsewhere = objects.resolve_commit(claim.commit)
+                if elsewhere is True:
+                    # This repository does not hold the commit, so it cannot be
+                    # this worktree HEAD.
+                    discrepancies.append(
+                        _discrepancy(
+                            fact.repository,
+                            "head-drift",
+                            checkpoint_subject,
+                            recorded=claim.commit,
+                            observed=worktree.head,
+                            detail=(
+                                "board checkpoint commit is held by another configured "
+                                "repository and is not this worktree HEAD"
+                            ),
+                        )
                     )
-                )
-            elif not checkpoint_exists:
+                    continue
+                if elsewhere is None or checkpoint_exists is None:
+                    discrepancies.append(
+                        _discrepancy(
+                            fact.repository,
+                            "inaccessible-fact",
+                            checkpoint_subject,
+                            recorded=claim.commit,
+                            observed=None,
+                            detail="recorded goal checkpoint could not be inspected",
+                        )
+                    )
+                    continue
                 discrepancies.append(
                     _discrepancy(
                         fact.repository,
                         "missing-ref",
                         checkpoint_subject,
-                        recorded=goal["checkpoint"],
+                        recorded=claim.commit,
                         observed=None,
-                        detail="recorded goal checkpoint commit is missing",
+                        detail=(
+                            "recorded goal checkpoint commit is missing from every "
+                            "configured repository"
+                        ),
                     )
                 )
-            elif worktree.head != goal["checkpoint"]:
+            elif worktree.head != claim.commit:
                 discrepancies.append(
                     _discrepancy(
                         fact.repository,
                         "head-drift",
                         checkpoint_subject,
-                        recorded=goal["checkpoint"],
+                        recorded=claim.commit,
                         observed=worktree.head,
                         detail="registered worktree HEAD differs from the board checkpoint",
+                    )
+                )
+        if claim.commit is None and claim.candidates:
+            # A prose checkpoint names no repository, so each full object name
+            # it cites is asserted against the whole configured workspace. Every
+            # cited name is judged on its own: one name that resolves does not
+            # excuse another that resolves nowhere.
+            verdicts = [objects.resolve_object(token) for token in claim.candidates]
+            absent = [
+                token
+                for token, verdict in zip(claim.candidates, verdicts)
+                if verdict is False
+            ]
+            unknown = any(verdict is None for verdict in verdicts)
+            subject = f"goal:{goal['goal_id']}:checkpoint"
+            recorded = _claim_text(absent or claim.candidates)
+            if not absent and not unknown:
+                pass
+            elif not absent:
+                discrepancies.append(
+                    _discrepancy(
+                        "workspace",
+                        "inaccessible-fact",
+                        subject,
+                        recorded=recorded,
+                        observed=None,
+                        detail=(
+                            "recorded goal checkpoint cites a full object name that "
+                            "could not be inspected in any configured repository"
+                        ),
+                    )
+                )
+            else:
+                discrepancies.append(
+                    _discrepancy(
+                        "workspace",
+                        "missing-ref",
+                        subject,
+                        recorded=recorded,
+                        observed=None,
+                        detail=(
+                            "recorded goal checkpoint cites a full object name that "
+                            "resolves in no configured repository"
+                        ),
                     )
                 )
 
@@ -661,15 +954,7 @@ def reconcile_record(
                     )
                 )
 
-    discrepancies.sort(
-        key=lambda row: (
-            row["repository"],
-            row["kind"],
-            row["subject"],
-            row["recorded"] or "",
-            row["observed"] or "",
-        )
-    )
+    discrepancies.sort(key=_sort_key)
     repositories = tuple(
         fact.summary() for _, fact in sorted(inspected, key=lambda item: item[1].repository)
     )

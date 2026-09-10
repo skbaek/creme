@@ -709,7 +709,15 @@ def start_master(
 ) -> dict[str, Any]:
     if not isinstance(client, str) or semaphore.CLIENT_LABEL.fullmatch(client) is None:
         raise MasterOperationError("client must be a short client label")
-    reconciliation_rows = [] if reconciliation is None else list(reconciliation.discrepancies)
+    # The record bounds one event's row count, and a drifted host can observe
+    # more discrepancies than that cap. Entry must still succeed with the
+    # observed total and census recorded, so the rows are summarized rather
+    # than refused or silently truncated.
+    reconciliation_rows = (
+        []
+        if reconciliation is None
+        else master_reconcile.summarize_for_record(reconciliation)
+    )
     master_runtime.validate_payload("master", {
         "action": "start",
         "model": model,

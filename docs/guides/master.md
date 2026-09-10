@@ -198,6 +198,21 @@ anything else and whether or not the user mentions the role:
    master's workers did not survive it; the board says what each was doing,
    and this session respawns them from their briefs and worktrees.
 
+Reconciliation reads two fields of every board goal against Git, and both
+readings are deliberately narrow. A checkpoint field that is exactly one object
+name is asserted as a commit claim; any other checkpoint is prose, and only the
+full object names it cites are asserted, each against every configured
+repository, because prose names no repository. Prose that cites no full object
+name makes no ref claim and produces no row: an abbreviation, a 32-hex event id,
+a content digest, `0x` data, and a name glued to a neighbouring word are not
+ref claims. Entry never fails because reality is drifted: when the observed
+discrepancies exceed one event's row cap, the recorded `reconciliation` opens
+with a census row (`master-record` / `inaccessible-fact`, subject
+`reconciliation-census`) stating the observed total and every repository/kind count,
+followed by a representative selection carrying at least one row of every
+observed group. The census total, not the number of recorded rows, is what was
+observed.
+
 The user's rule is therefore simple: at most one session does agentic work at
 a time. To replace the master, wind it down or close its tab, then open a new
 session from `~/creme` with whichever client. Auditor sessions are launched

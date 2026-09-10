@@ -474,6 +474,284 @@ class MasterReconciliationTest(unittest.TestCase):
             )
         self.assertIs(start.call_args.kwargs["reconciliation"], reconciliation)
 
+    def synthetic_rows(self, census: dict[tuple[str, str], int]) -> list[dict]:
+        rows = []
+        for (repository, kind), count in census.items():
+            for index in range(count):
+                rows.append(
+                    master_reconcile._discrepancy(
+                        repository,
+                        kind,
+                        f"subject-{index:04d}",
+                        recorded="recorded",
+                        observed=None,
+                        detail="synthetic row",
+                    )
+                )
+        return rows
+
+    def test_checkpoint_ref_claims_are_classified_instead_of_assumed(self):
+        commit = "a" * 39 + "7"
+        bare = master_reconcile.checkpoint_claim(f"  {commit}  ")
+        self.assertEqual((bare.commit, bare.candidates), (commit, ()))
+        sha256 = "b" * 63 + "4"
+        self.assertEqual(master_reconcile.checkpoint_claim(sha256).commit, sha256)
+
+        prose = master_reconcile.checkpoint_claim(
+            f"Source {commit} pushed; re-verified at {commit}."
+        )
+        self.assertIsNone(prose.commit)
+        self.assertEqual(prose.candidates, (commit,))
+
+        # Every shape below is data this record's prose actually carries, and
+        # none of it is a Git object name the reconciler may accuse.
+        not_claims = {
+            "abbreviation": "Source 7b3a1e8 pushed; 39 proof recipes verified",
+            "word": "the control was effaced and defaced; 39 recipes",
+            "decimal": "cost is " + "1" * 40 + " calls over 12900000000 gas",
+            "event-id": "detail retained verbatim in events.jsonl event " + "c" * 32,
+            "content-digest": "author wind-down OK raw hash" + sha256 + " verified",
+            "evm-address": "WETH10 at 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2 is fixed",
+            "glued-run": "Clean source" + commit + "; narrow build green",
+            "upper-case": f"HEAD {commit.upper()} recorded",
+        }
+        for label, checkpoint in not_claims.items():
+            with self.subTest(shape=label):
+                claim = master_reconcile.checkpoint_claim(checkpoint)
+                self.assertIsNone(claim.commit)
+                self.assertEqual(claim.candidates, ())
+
+    def test_prose_checkpoint_whose_named_commit_exists_is_not_a_missing_ref(self):
+        repository, _ = self.make_repository("prose-present")
+        head = self.git(repository, "rev-parse", "HEAD")
+        record, writer = self.new_record("prose-present")
+        self.add_goal(
+            writer,
+            repository,
+            goal_id="prose-present-goal",
+            checkpoint=(
+                f"Source {head} pushed; CreationCoordinatesCertificate complete; "
+                "39 proof recipes verified; root 2cbd0ff0 sealed"
+            ),
+        )
+        result = self.reconcile_unchanged(record, repository)
+        self.assertEqual(result.discrepancies, ())
+
+    def test_prose_checkpoint_naming_an_absent_commit_is_still_reported(self):
+        repository, _ = self.make_repository("prose-absent")
+        head = self.git(repository, "rev-parse", "HEAD")
+        absent = "f" * 40
+        record, writer = self.new_record("prose-absent")
+        self.add_goal(
+            writer,
+            repository,
+            goal_id="prose-absent-goal",
+            checkpoint=(
+                f"Repair green at head {head} off main; evidence commit {absent} "
+                "pushed; not merged"
+            ),
+        )
+        result = self.reconcile_unchanged(record, repository)
+        self.assertEqual(self.kinds(result), ["missing-ref"])
+        row = result.discrepancies[0]
+        self.assertEqual(row["repository"], "workspace")
+        self.assertEqual(row["subject"], "goal:prose-absent-goal:checkpoint")
+        # The resolvable name does not excuse the absent one, and only the
+        # absent name is accused.
+        self.assertEqual(row["recorded"], absent)
+
+    def test_prose_checkpoint_without_a_ref_claim_is_never_reported(self):
+        repository, _ = self.make_repository("prose-quiet")
+        record, writer = self.new_record("prose-quiet")
+        # An abbreviation that resolves nowhere is deliberately not asserted:
+        # compaction glues names to neighbouring words, so a partial run cannot
+        # be attributed. Absence is only claimed for a full object name.
+        self.add_goal(
+            writer,
+            repository,
+            goal_id="prose-quiet-goal",
+            checkpoint=(
+                "ACCEPTANCE WITHDRAWN. The tranche at deadbee is RED in isolation; "
+                "nine sponges enumerated three independent ways; manifest root "
+                + "d" * 32
+                + "; oracle at 0x" + "e" * 40
+            ),
+        )
+        result = self.reconcile_unchanged(record, repository)
+        self.assertEqual(result.discrepancies, ())
+
+    def test_prose_checkpoint_that_cannot_be_inspected_is_not_called_missing(self):
+        repository, _ = self.make_repository("prose-denied")
+        record, writer = self.new_record("prose-denied")
+        self.add_goal(
+            writer,
+            repository,
+            goal_id="prose-denied-goal",
+            checkpoint="evidence commit " + "f" * 40 + " pushed",
+        )
+
+        def denied(root, arguments):
+            if arguments[0] == "cat-file":
+                return master_reconcile.GitResult(128, b"", b"fatal: permission denied\n")
+            return master_reconcile.run_git(root, arguments)
+
+        result = self.reconcile_unchanged(record, repository, runner=denied)
+        self.assertEqual(self.kinds(result), ["inaccessible-fact"])
+        self.assertEqual(result.discrepancies[0]["repository"], "workspace")
+
+    def test_checkpoint_held_by_another_configured_repository_is_head_drift(self):
+        alpha, _ = self.make_repository("alpha")
+        beta, _ = self.make_repository("beta")
+        (beta / "beta.txt").write_text("beta only\n", encoding="utf-8")
+        self.git(beta, "add", "beta.txt")
+        self.git(beta, "commit", "-q", "-m", "beta only")
+        self.git(beta, "push", "-q", "origin", "main")
+        beta_head = self.git(beta, "rev-parse", "HEAD")
+        alpha_head = self.git(alpha, "rev-parse", "HEAD")
+        self.assertNotEqual(alpha_head, beta_head)
+        record, writer = self.new_record("cross-repository")
+        self.add_goal(
+            writer,
+            alpha,
+            goal_id="cross-goal",
+            worktree=str(alpha),
+            checkpoint=beta_head,
+        )
+        result = master_reconcile.reconcile_record(
+            record,
+            {"alpha": alpha, "beta": beta},
+        )
+        self.assertEqual(self.kinds(result), ["head-drift"])
+        row = result.discrepancies[0]
+        self.assertEqual(row["repository"], "alpha")
+        self.assertEqual((row["recorded"], row["observed"]), (beta_head, alpha_head))
+
+        absent_record, absent_writer = self.new_record("cross-absent")
+        self.add_goal(
+            absent_writer,
+            alpha,
+            goal_id="cross-absent-goal",
+            worktree=str(alpha),
+            checkpoint="f" * 40,
+        )
+        absent = master_reconcile.reconcile_record(
+            absent_record,
+            {"alpha": alpha, "beta": beta},
+        )
+        self.assertEqual(self.kinds(absent), ["missing-ref"])
+
+    def test_reconciliation_at_and_above_the_record_cap_is_recorded_with_a_census(self):
+        limit = master_runtime.MAX_LIST_ITEMS
+        census = {
+            ("blanc", "missing-worktree"): limit - 40,
+            ("blanc", "detached-head"): 30,
+            ("goal-store", "missing-worktree"): 60,
+            ("goal-store", "upstream-drift"): 6,
+            ("workspace", "missing-ref"): 1,
+        }
+        total = sum(census.values())
+        self.assertGreater(total, limit)
+        rows = self.synthetic_rows(census)
+
+        at_cap = master_reconcile.ReconciliationResult((), tuple(rows[:limit]))
+        self.assertEqual(
+            master_reconcile.summarize_for_record(at_cap),
+            list(rows[:limit]),
+        )
+        master_runtime.validate_payload("master", {
+            "action": "start",
+            "model": "synthetic-model",
+            "effort": "high",
+            "note": "synthetic",
+            "next_unit": "",
+            "reconciliation": master_reconcile.summarize_for_record(at_cap),
+        })
+
+        over_cap = master_reconcile.ReconciliationResult((), tuple(rows))
+        recorded = master_reconcile.summarize_for_record(over_cap)
+        self.assertEqual(len(recorded), limit)
+        master_runtime.validate_payload("master", {
+            "action": "start",
+            "model": "synthetic-model",
+            "effort": "high",
+            "note": "synthetic",
+            "next_unit": "",
+            "reconciliation": recorded,
+        })
+        head = recorded[0]
+        self.assertEqual(head["repository"], master_reconcile.CENSUS_REPOSITORY)
+        self.assertEqual(head["subject"], master_reconcile.CENSUS_SUBJECT)
+        self.assertEqual(head["recorded"], f"observed={total}")
+        self.assertEqual(head["observed"], f"recorded={limit - 1}")
+        # The census states every observed group, so the count is never
+        # understated by the bounded selection.
+        accounted = 0
+        for (repository, kind), count in census.items():
+            entry = f"{repository}/{kind}={count}"
+            self.assertIn(entry, head["detail"])
+            accounted += count
+        self.assertEqual(accounted, total)
+        self.assertNotIn("omitted", head["detail"])
+        selected = {(row["repository"], row["kind"]) for row in recorded[1:]}
+        self.assertEqual(selected, set(census))
+        self.assertEqual(
+            recorded[1:],
+            sorted(recorded[1:], key=master_reconcile._sort_key),
+        )
+
+        # A budget smaller than the number of groups still states every group
+        # and the true total.
+        narrow = master_reconcile.summarize_for_record(over_cap, limit=3)
+        self.assertEqual(len(narrow), 3)
+        self.assertEqual(narrow[0]["recorded"], f"observed={total}")
+        for (repository, kind), count in census.items():
+            self.assertIn(f"{repository}/{kind}={count}", narrow[0]["detail"])
+
+    def test_master_start_enters_when_observed_discrepancies_exceed_the_cap(self):
+        limit = master_runtime.MAX_LIST_ITEMS
+        census = {
+            ("blanc", "missing-worktree"): limit,
+            ("goal-store", "missing-worktree"): 48,
+            ("workspace", "missing-ref"): 1,
+        }
+        total = sum(census.values())
+        rows = self.synthetic_rows(census)
+        reconciliation = master_reconcile.ReconciliationResult((), tuple(rows))
+        record, _ = self.new_record("over-cap-start")
+        lease = None
+
+        def snapshot():
+            return {"schema_version": 4, "lease": lease}
+
+        def acquire(client, note, *, take_over=False):
+            nonlocal lease
+            lease = {"client": client, "lease_id": "3" * 32}
+            return True, "acquired"
+
+        result = master_operations.start_master(
+            record,
+            client="codex",
+            model="synthetic-model",
+            effort="high",
+            note="synthetic start over the cap",
+            reconciliation=reconciliation,
+            acquire=acquire,
+            renew=lambda: (True, "renewed"),
+            release=lambda: (True, "released"),
+            heartbeat=lambda interval: (True, "started"),
+            lease_snapshot=snapshot,
+            lease_status=lambda: "master: codex (live)\n",
+        )
+        self.assertEqual(result["status"], "master")
+        persisted = master_runtime.read_record(record).events[-1]["payload"]["reconciliation"]
+        self.assertEqual(len(persisted), limit)
+        self.assertEqual(persisted[0]["recorded"], f"observed={total}")
+        self.assertEqual(persisted[0]["subject"], master_reconcile.CENSUS_SUBJECT)
+        # The observed result itself is untouched and still reaches the session.
+        self.assertEqual(len(reconciliation.discrepancies), total)
+        self.assertEqual(result["digest"]["live_reconciliation"]["schema_version"], 1)
+
+
 
 if __name__ == "__main__":
     unittest.main()

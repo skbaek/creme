@@ -355,7 +355,10 @@ class BuildOwnershipTest(unittest.TestCase):
     def test_refused_admission_spawns_no_lake(self, resolve: Mock, goal_label: Mock, acquire: Mock, popen: Mock, probe: Mock) -> None:
         acquire.return_value = (False, "DEFER_FOR_HARD — foreign hard hold")
         output = io.StringIO()
-        with _ledger_and_log():
+        # This fixture replaces Lake's process launcher.  It does not model a
+        # Git worktree, so keep the new repository-only fallback seam explicit
+        # instead of letting its Git query reach the Popen fake.
+        with _ledger_and_log(), patch("creme.build_ownership.repository_identity", return_value=None):
             self.assertEqual(
                 owned.run_lake_build("g", ["T"], contention="sensitive", memory_gib=8, stdout=output),
                 2,
@@ -1049,6 +1052,8 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
 
         output = io.StringIO()
         with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), patch(
+            "creme.build_ownership.repository_identity", return_value=None
+        ), patch(
             "creme.build_ownership.resolve_toolchain", return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))
         ), patch("creme.build_ownership.semaphore.adaptive_acquire", return_value=(True, "ADMITTED_HARD")), patch(
             "creme.build_ownership.semaphore.adaptive_release"
@@ -1126,6 +1131,8 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
             captured.append(row)
 
         with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), patch(
+            "creme.build_ownership.repository_identity", return_value=None
+        ), patch(
             "creme.build_ownership.resolve_toolchain", return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))
         ), patch("creme.build_ownership.semaphore.adaptive_acquire", return_value=(True, "ADMITTED_HARD")), patch(
             "creme.build_ownership.semaphore.adaptive_release", side_effect=release
@@ -1402,6 +1409,7 @@ class RowEvidenceTest(unittest.TestCase):
 
         with probe_patch, classify_patch, \
              patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), \
+             patch("creme.build_ownership.repository_identity", return_value=None), \
              patch("creme.build_ownership.resolve_toolchain",
                    return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))), \
              patch("creme.build_ownership.semaphore.adaptive_acquire",

@@ -1300,13 +1300,28 @@ def _lake_config_digest(worktree: Path) -> Optional[str]:
 
 
 def _execution_environment_digest() -> str:
-    """Fingerprint effective Lean/Lake overrides without recording their values."""
+    """Fingerprint relevant execution overrides without recording their values."""
     effective = lake_env()
     entries: list[str] = []
     for name in sorted(effective):
-        if name.startswith(("LEAN_", "LAKE_")) and name != "LEAN_NUM_THREADS":
+        if name.startswith(("LEAN_", "LAKE_", "MIMALLOC_", "MALLOC_")) and name != "LEAN_NUM_THREADS":
             entries.extend((name, effective[name]))
     return _identity_digest(entries)
+
+
+def resolved_toolchain_identity(
+    real_lake: Path, real_lean: Path, sysroot: Path,
+) -> str:
+    """Bind evidence to the executables Elan actually resolved for this run.
+
+    The guarded wrapper has already checked that these resolved paths form one
+    coherent sysroot.  Their host-local paths distinguish an `ELAN_TOOLCHAIN`
+    override from merely identical `lean-toolchain` file text without writing
+    those paths into the ledger.
+    """
+    return _identity_digest([
+        "resolved-toolchain", str(real_lake.resolve()), str(real_lean.resolve()), str(sysroot.resolve()),
+    ])
 
 
 def _dependency_checkout_identity(worktree: Path) -> tuple[Optional[str], str]:
@@ -1484,6 +1499,7 @@ def build_input_identity(
     graph: Optional[dict[str, set[str]]],
     digests: tuple[Optional[str], Optional[str]],
     threads: Any,
+    resolved_toolchain: Optional[str] = None,
 ) -> tuple[Optional[dict[str, Any]], str]:
     """Collect exact-evidence inputs before admission and again before publish."""
     toolchain_digest, manifest_digest = digests
@@ -1491,6 +1507,8 @@ def build_input_identity(
         return None, "toolchain or manifest digest unavailable"
     if not isinstance(threads, int) or isinstance(threads, bool) or threads <= 0:
         return None, "thread setting is not a positive integer"
+    if resolved_toolchain is not None and not isinstance(resolved_toolchain, str):
+        return None, "resolved toolchain identity is invalid"
     repository = repository_identity(worktree)
     if repository is None:
         return None, "linked-worktree repository identity unavailable"
@@ -1505,7 +1523,7 @@ def build_input_identity(
         return None, module_detail
     context = _identity_digest([
         "context", toolchain_digest, manifest_digest, config, dependencies,
-        _execution_environment_digest(), str(threads),
+        _execution_environment_digest(), resolved_toolchain or "unresolved-toolchain", str(threads),
     ])
     return {
         "repository_identity": repository,
@@ -2842,11 +2860,12 @@ def run_lake_build(
         }, sort_keys=True), file=output)
         return 2
     try:
-        real_lake, _, _ = resolve_toolchain(worktree)
+        real_lake, real_lean, sysroot = resolve_toolchain(worktree)
     except RuntimeError as exc:
         print(json.dumps({"status": "REFUSED", "detail": str(exc)}, sort_keys=True), file=output)
         return GUARD_REFUSAL_EXIT
     digests = worktree_digests(worktree)
+    toolchain_identity = resolved_toolchain_identity(real_lake, real_lean, sysroot)
     requested_contention = contention
     evidence: dict[str, Any] = {}
     probe_evidence: Optional[dict[str, Any]] = None
@@ -2871,6 +2890,7 @@ def run_lake_build(
             return None, "stale source closure was not available"
         return build_input_identity(
             worktree, modules, probe_state.get("graph"), snapshot_digests or digests, threads,
+            toolchain_identity,
         )
 
     if census:

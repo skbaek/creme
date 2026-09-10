@@ -494,9 +494,11 @@ when freshness itself is the subject under test or the named goal requires it.
 The host-local build ledger is performance evidence, not a verdict manifest.
 Its newer measured rows can reuse an exact module cost across linked worktrees
 of one Git repository only when they share a complete input identity: the
-repository's Git common directory, the selected toolchain and manifest, Lake
+repository's Git common directory, the toolchain executables Elan actually
+resolved (including an effective `ELAN_TOOLCHAIN` override), the selected
+toolchain file and manifest, Lake
 configuration, clean Git-pinned dependency checkout revisions, effective
-`LEAN_`/`LAKE_` settings, thread count, and the module's transitive local
+`LEAN_`/`LAKE_` and allocator settings, thread count, and the module's transitive local
 source closure. The source collector reads each header and its imports from
 the same bytes; an unsupported header form, missing known-local source, dirty
 or differently checked-out dependency, missing configuration, or unknown
@@ -517,6 +519,11 @@ are excluded from cross-worktree selection. Fallback can keep a known costly
 module expensive, but it cannot make a stale set `tolerant` or override a
 newer exact cohort. New exact reuse begins only with newly recorded applicable
 measurements.
+
+This is a same-host, same-user performance boundary. The guarded resolver
+checks one coherent Lean/Lake sysroot and the exact identity stores only a
+digest of its resolved paths; it assumes the host's managed toolchain store is
+immutable for the duration of a run. The ledger is not cross-host evidence.
 
 For a non-vacuity or enforcement claim, show all three controls: the surrounding
 tree still works, the control fails at the intended boundary, and removing only

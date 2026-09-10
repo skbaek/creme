@@ -654,6 +654,16 @@ class InputIdentityCollectionTest(unittest.TestCase):
                     self.assertIsNone(value)
                     self.assertIn("thread setting", detail)
 
+    def test_resolved_toolchain_and_relevant_allocator_environment_change_context(self) -> None:
+        first = owned.resolved_toolchain_identity(Path("/toolchains/a/lake"), Path("/toolchains/a/lean"), Path("/toolchains/a"))
+        second = owned.resolved_toolchain_identity(Path("/toolchains/b/lake"), Path("/toolchains/b/lean"), Path("/toolchains/b"))
+        self.assertNotEqual(first, second)
+        with patch.dict(os.environ, {"MIMALLOC_SHOW_STATS": "0"}, clear=False):
+            before = owned._execution_environment_digest()
+        with patch.dict(os.environ, {"MIMALLOC_SHOW_STATS": "1"}, clear=False):
+            after = owned._execution_environment_digest()
+        self.assertNotEqual(before, after)
+
 
 class B11ReplayTest(unittest.TestCase):
     """prorata's B11 waits, replayed from rows cut from the real ledger."""
@@ -808,7 +818,7 @@ class _Harness:
         self.peak_mib = peak_mib
         self.lake_run = lake_run
         self.identity_snapshot = identity_snapshot or (
-            lambda _worktree, modules, _graph, _digests, _threads: (
+            lambda _worktree, modules, *_rest: (
                 {
                     "repository_identity": "repo",
                     "input_context": "context",

@@ -489,6 +489,35 @@ identical verdict-relevant identity. A routine draft push does not become an
 all-fresh campaign merely because it is a push. Use an explicitly fresh run
 when freshness itself is the subject under test or the named goal requires it.
 
+### Build-measurement identity
+
+The host-local build ledger is performance evidence, not a verdict manifest.
+Its newer measured rows can reuse an exact module cost across linked worktrees
+of one Git repository only when they share a complete input identity: the
+repository's Git common directory, the selected toolchain and manifest, Lake
+configuration, clean Git-pinned dependency checkout revisions, effective
+`LEAN_`/`LAKE_` settings, thread count, and the module's transitive local
+source closure. The source collector reads each header and its imports from
+the same bytes; an unsupported header form, missing known-local source, dirty
+or differently checked-out dependency, missing configuration, or unknown
+thread setting leaves the identity unknown. It does not infer an identity from
+a `.trace` input hash or an old artifact.
+
+The wrapper snapshots those inputs when it sizes a real stale closure and
+checks them again after admission before launching Lake. A change there
+returns `SOURCE_CHANGED_REPROBE` and releases the hold, so a new source is not
+run under an old estimate. A change during the build records a non-exact row;
+only a successful elaborating row with usable samples can be exact evidence.
+A fresh/no-elaboration build still takes no hold.
+
+Older rows are never migrated or retrospectively asserted exact. When Git can
+still prove a removed linked worktree belonged to the same repository, legacy
+peaks and durations may remain conservative fallback floors; otherwise they
+are excluded from cross-worktree selection. Fallback can keep a known costly
+module expensive, but it cannot make a stale set `tolerant` or override a
+newer exact cohort. New exact reuse begins only with newly recorded applicable
+measurements.
+
 For a non-vacuity or enforcement claim, show all three controls: the surrounding
 tree still works, the control fails at the intended boundary, and removing only
 that control restores green. Use disposable worktrees for destructive

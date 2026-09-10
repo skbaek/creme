@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,7 +59,7 @@ def _isolated():
 
 def _row(time: str, rebuilt, peak_gib: float, *, lean_gib=None, concurrency=1,
          seconds=None, module_peaks=None, targets=("T",), worktree="/w",
-         exit_code=0) -> dict:
+         exit_code=0, identity=None, samples=None) -> dict:
     rebuilt = list(rebuilt)
     row = {
         "schema_version": 1, "time": time, "kind": "build", "goal": "g",
@@ -74,6 +75,11 @@ def _row(time: str, rebuilt, peak_gib: float, *, lean_gib=None, concurrency=1,
         row["peak_lean_rss_mib"] = lean_gib * 1024.0
     if module_peaks is not None:
         row["module_peak_mib"] = {module: gib * 1024.0 for module, gib in module_peaks.items()}
+    if samples is not None:
+        row["sampling_samples"] = samples
+        row["sampling_unavailable"] = 0
+    if identity is not None:
+        row.update({"identity_status": "exact", **identity})
     return row
 
 
@@ -311,6 +317,344 @@ class StaleSetSizingTest(unittest.TestCase):
         self.assertFalse(owned._valid_ledger_row(row))
 
 
+class MeasurementIdentitySelectionTest(unittest.TestCase):
+    """Exact source cohorts can move across worktrees without forgetting risk."""
+
+    WORKTREE = Path("/current")
+    STALE = {
+        "roots": ["A"], "package_roots": ["A"], "resolution": "A (module)",
+        "stale": 1, "detail": "fixture", "stale_set": ["A"], "graph": {"A": set()},
+    }
+
+    @staticmethod
+    def identity(*, repo="repo-a", context="tc-mf-config-threads2", source="source-a") -> dict:
+        return {
+            "repository_identity": repo,
+            "input_context": context,
+            "module_inputs": {"A": source},
+        }
+
+    def derive(self, rows: list[dict], identity=None, detail=None):
+        with _isolated() as root:
+            (root / "ledger.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8",
+            )
+            estimate, evidence = owned.derive_memory_gib(
+                self.WORKTREE, ["A"], SETTINGS, ("tc", "mf"), 8,
+                stale=self.STALE, input_identity=identity, identity_detail=detail,
+            )
+            verdict, classification = owned.classify_contention(
+                self.WORKTREE, ["A"], Path("/lake"), SETTINGS, ("tc", "mf"),
+                self.STALE, identity, detail,
+            )
+        return estimate, evidence, verdict, classification
+
+    def test_identical_linked_worktree_source_is_exact_and_tolerant(self) -> None:
+        identity = self.identity()
+        row = _row(
+            "2026-09-08T00:00:00Z", ["A"], 2.0, lean_gib=1.5,
+            module_peaks={"A": 1.5}, worktree="/old-worktree", identity=identity, samples=3,
+        )
+        estimate, evidence, verdict, _classification = self.derive([row], identity)
+        self.assertEqual(estimate, 3)
+        self.assertEqual(evidence["kind"], "measured")
+        self.assertEqual(verdict, "tolerant")
+
+    def test_exact_new_low_measurement_replaces_old_drifted_high_peak(self) -> None:
+        current = self.identity(source="current")
+        old = _row(
+            "2026-09-08T00:00:00Z", ["A"], 12.0, lean_gib=11.5,
+            module_peaks={"A": 11.5}, identity=self.identity(source="old"), samples=3,
+        )
+        new = _row(
+            "2026-09-09T00:00:00Z", ["A"], 2.0, lean_gib=1.5,
+            module_peaks={"A": 1.5}, worktree="/new-worktree", identity=current, samples=3,
+        )
+        estimate, evidence, verdict, _classification = self.derive([old, new], current)
+        self.assertEqual(estimate, 3)
+        self.assertEqual(evidence["kind"], "measured")
+        self.assertEqual(verdict, "tolerant")
+
+    def test_changed_source_or_local_dependency_is_not_current_module_evidence(self) -> None:
+        old = _row(
+            "2026-09-08T00:00:00Z", ["A"], 12.0, lean_gib=11.5,
+            module_peaks={"A": 11.5}, identity=self.identity(source="old"), samples=3,
+        )
+        for changed in ("changed-own-source", "changed-transitive-local-dependency"):
+            with self.subTest(changed=changed):
+                estimate, evidence, verdict, _classification = self.derive(
+                    [old], self.identity(source=changed),
+                )
+                self.assertEqual(estimate, 13)  # old peak remains a lower bound, never exact
+                self.assertNotEqual(evidence["kind"], "measured")
+                self.assertEqual(verdict, "sensitive")
+
+    def test_toolchain_manifest_configuration_and_thread_contexts_do_not_match(self) -> None:
+        old = _row(
+            "2026-09-08T00:00:00Z", ["A"], 12.0, lean_gib=11.5,
+            module_peaks={"A": 11.5}, identity=self.identity(), samples=3,
+        )
+        for context in ("other-toolchain", "other-manifest", "other-lake-config", "threads1"):
+            with self.subTest(context=context):
+                estimate, evidence, verdict, _classification = self.derive(
+                    [old], self.identity(context=context),
+                )
+                self.assertEqual(estimate, 13)
+                self.assertNotEqual(evidence["kind"], "measured")
+                self.assertEqual(verdict, "sensitive")
+
+    def test_another_repository_with_the_same_module_name_cannot_contribute(self) -> None:
+        other = _row(
+            "2026-09-08T00:00:00Z", ["A"], 12.0, lean_gib=11.5,
+            module_peaks={"A": 11.5}, identity=self.identity(repo="repo-b"), samples=3,
+        )
+        estimate, evidence, verdict, _classification = self.derive([other], self.identity())
+        self.assertEqual(estimate, 4)
+        self.assertEqual(evidence["kind"], "narrow default")
+        self.assertEqual(verdict, "sensitive")
+
+    def test_cached_failed_or_unusable_samples_are_never_exact(self) -> None:
+        current = self.identity()
+        cached = _row(
+            "2026-09-08T00:00:00Z", [], 2.0, identity=current, samples=3,
+        )
+        failed = _row(
+            "2026-09-08T00:01:00Z", ["A"], 2.0, lean_gib=1.5,
+            module_peaks={"A": 1.5}, identity=current, samples=3, exit_code=1,
+        )
+        unusable = _row(
+            "2026-09-08T00:02:00Z", ["A"], 2.0, lean_gib=1.5,
+            module_peaks={"A": 1.5}, identity=current, samples=0,
+        )
+        for row in (cached, failed, unusable):
+            with self.subTest(row=row["time"]):
+                estimate, evidence, verdict, _classification = self.derive([row], current)
+                self.assertEqual(estimate, 4)
+                self.assertNotEqual(evidence["kind"], "measured")
+                self.assertEqual(verdict, "sensitive")
+
+    def test_identity_unavailable_keeps_a_legacy_high_peak_as_a_floor(self) -> None:
+        legacy = _row(
+            "2026-09-08T00:00:00Z", ["A"], 12.0, lean_gib=11.5,
+            module_peaks={"A": 11.5}, samples=None,
+        )
+        # Same-worktree legacy rows can still bound an unavailable identity,
+        # but the resulting estimate is labelled profile/default, never exact.
+        legacy["worktree"] = str(self.WORKTREE)
+        estimate, evidence, verdict, _classification = self.derive(
+            [legacy], None, "fixture identity unavailable",
+        )
+        self.assertEqual(estimate, 13)
+        self.assertEqual(evidence["kind"], "profile default")
+        self.assertIn("compatibility fallback", evidence["source"])
+        self.assertEqual(verdict, "sensitive")
+
+    def test_removed_legacy_linked_worktree_keeps_a_scoped_high_peak_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, _isolated() as state:
+            repository = Path(tmp) / "repo"
+            subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
+            (repository / ".worktrees").mkdir()
+            removed = repository / ".worktrees" / "gone"
+            identity = self.identity(repo=owned.repository_identity(repository))
+            legacy = _row(
+                "2026-09-08T00:00:00Z", ["A"], 12.0, lean_gib=11.5,
+                module_peaks={"A": 11.5}, worktree=str(removed), samples=None,
+            )
+            (state / "ledger.jsonl").write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+            estimate, evidence = owned.derive_memory_gib(
+                repository, ["A"], SETTINGS, ("tc", "mf"), 8,
+                stale=self.STALE, input_identity=identity,
+            )
+        self.assertEqual(estimate, 13)
+        self.assertNotEqual(evidence["kind"], "measured")
+
+
+class InputIdentityCollectionTest(unittest.TestCase):
+    def complete_worktree(self, parent: Path):
+        worktree = parent / "worktree"
+        dependency = worktree / ".lake" / "packages" / "dep"
+        dependency.mkdir(parents=True)
+        subprocess.run(["git", "init", str(worktree)], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "init", str(dependency)], check=True, capture_output=True, text=True)
+        (dependency / "Dep.lean").write_text("theorem dep : True := by trivial\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(dependency), "add", "Dep.lean"], check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-C", str(dependency), "-c", "user.email=test@example.com", "-c", "user.name=Test",
+             "commit", "-m", "initial"], check=True, capture_output=True, text=True,
+        )
+        revision = subprocess.run(
+            ["git", "-C", str(dependency), "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        (worktree / "lean-toolchain").write_text("leanprover/lean4:v4\n", encoding="utf-8")
+        (worktree / "lakefile.lean").write_text("package Demo\n", encoding="utf-8")
+        (worktree / "lake-manifest.json").write_text(json.dumps({
+            "packagesDir": ".lake/packages",
+            "packages": [{"name": "dep", "type": "git", "rev": revision}],
+        }), encoding="utf-8")
+        (worktree / "A.lean").write_text("import B\n theorem a : True := by trivial\n", encoding="utf-8")
+        (worktree / "B.lean").write_text("theorem b : True := by trivial\n", encoding="utf-8")
+        (worktree / "C.lean").write_text("theorem c : True := by trivial\n", encoding="utf-8")
+        return worktree, dependency
+
+    def identity(self, worktree: Path, threads=2):
+        return owned.build_input_identity(
+            worktree, ["A"], {"A": {"B"}, "B": set()}, owned.worktree_digests(worktree), threads,
+        )
+
+    def test_module_snapshot_reparses_current_imports_instead_of_trusting_an_old_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "A.lean").write_text("import B\n theorem a : True := by trivial\n", encoding="utf-8")
+            (worktree / "B.lean").write_text("theorem b : True := by trivial\n", encoding="utf-8")
+            (worktree / "C.lean").write_text("theorem c : True := by trivial\n", encoding="utf-8")
+            old_graph = {"A": {"B"}, "B": set()}
+            before, _detail = owned.module_input_identities(worktree, ["A"], old_graph)
+            (worktree / "A.lean").write_text("import C\n theorem a : True := by trivial\n", encoding="utf-8")
+            after, _detail = owned.module_input_identities(worktree, ["A"], old_graph)
+        self.assertIsNotNone(before)
+        self.assertIsNotNone(after)
+        self.assertNotEqual(before, after)
+
+    def test_supported_header_forms_all_enter_the_local_source_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "A.lean").write_text(
+                "import B C\n/- keep reading the header -/\npublic import D\n"
+                "meta import E\nmodule A\ntheorem a : True := by trivial\n",
+                encoding="utf-8",
+            )
+            for name in ("B", "C", "D", "E"):
+                (worktree / f"{name}.lean").write_text(
+                    f"theorem {name.lower()} : True := by trivial\n", encoding="utf-8",
+                )
+            before, detail = owned.module_input_identities(worktree, ["A"], {"A": {"B", "C", "D", "E"}})
+            self.assertIsNotNone(before, detail)
+            (worktree / "E.lean").write_text("theorem e : False := by sorry\n", encoding="utf-8")
+            after, detail = owned.module_input_identities(worktree, ["A"], {"A": {"B", "C", "D", "E"}})
+        self.assertIsNotNone(after, detail)
+        self.assertNotEqual(before, after)
+
+    def test_missing_known_local_source_is_unknown_even_if_an_old_artifact_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "A.lean").write_text("import B\ntheorem a : True := by trivial\n", encoding="utf-8")
+            (worktree / "B.lean").write_text("theorem b : True := by trivial\n", encoding="utf-8")
+            graph = {"A": {"B"}, "B": set()}
+            complete, detail = owned.module_input_identities(worktree, ["A"], graph)
+            self.assertIsNotNone(complete, detail)
+            (worktree / "B.lean").unlink()
+            artifact = worktree / ".lake" / "build" / "lib" / "lean" / "B.olean"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"old artifact")
+            missing, detail = owned.module_input_identities(worktree, ["A"], graph)
+        self.assertIsNone(missing)
+        self.assertIn("incomplete", detail)
+
+    def test_missing_lake_configuration_is_unknown_not_an_empty_exact_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(owned._lake_config_digest(Path(tmp)))
+
+    def test_real_worktree_identity_covers_sources_dependency_config_toolchain_and_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree, dependency = self.complete_worktree(Path(tmp))
+            baseline, detail = self.identity(worktree)
+            self.assertIsNotNone(baseline, detail)
+
+            # Own source options and a transitive local source both change A's
+            # closure identity.  Adding an import is read from the same source
+            # snapshot, even when an old graph still lists only B.
+            (worktree / "A.lean").write_text(
+                "import B\n set_option autoImplicit false\n theorem a : True := by trivial\n",
+                encoding="utf-8",
+            )
+            own_change, _detail = self.identity(worktree)
+            self.assertNotEqual(own_change, baseline)
+            (worktree / "A.lean").write_text("import B\n theorem a : True := by trivial\n", encoding="utf-8")
+            (worktree / "B.lean").write_text("theorem b : False := by sorry\n", encoding="utf-8")
+            dependency_change, _detail = self.identity(worktree)
+            self.assertNotEqual(dependency_change, baseline)
+            (worktree / "B.lean").write_text("theorem b : True := by trivial\n", encoding="utf-8")
+            (worktree / "A.lean").write_text("import C\n theorem a : True := by trivial\n", encoding="utf-8")
+            added_import, _detail = self.identity(worktree)
+            self.assertNotEqual(added_import, baseline)
+            (worktree / "A.lean").write_text("import B\n theorem a : True := by trivial\n", encoding="utf-8")
+
+            same_source, _detail = self.identity(worktree)
+            self.assertEqual(same_source, baseline)
+            (worktree / "lakefile.lean").write_text("package Demo\nset_option pp.universes true\n", encoding="utf-8")
+            config_change, _detail = self.identity(worktree)
+            self.assertNotEqual(config_change["input_context"], baseline["input_context"])
+            (worktree / "lakefile.lean").write_text("package Demo\n", encoding="utf-8")
+            (worktree / "lean-toolchain").write_text("leanprover/lean4:v5\n", encoding="utf-8")
+            toolchain_change, _detail = self.identity(worktree)
+            self.assertNotEqual(toolchain_change["input_context"], baseline["input_context"])
+            (worktree / "lean-toolchain").write_text("leanprover/lean4:v4\n", encoding="utf-8")
+            thread_change, _detail = self.identity(worktree, threads=1)
+            self.assertNotEqual(thread_change["input_context"], baseline["input_context"])
+
+            (dependency / "Dep.lean").write_text("theorem dep : False := by sorry\n", encoding="utf-8")
+            dirty_dependency, detail = self.identity(worktree)
+            self.assertIsNone(dirty_dependency)
+            self.assertIn("local source changes", detail)
+
+            (dependency / "Dep.lean").write_text("theorem dep : True := by trivial\n", encoding="utf-8")
+            (dependency / "Next.lean").write_text("theorem next : True := by trivial\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(dependency), "add", "Next.lean"], check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-C", str(dependency), "-c", "user.email=test@example.com", "-c", "user.name=Test",
+                 "commit", "-m", "different head"], check=True, capture_output=True, text=True,
+            )
+            wrong_head, detail = self.identity(worktree)
+            self.assertIsNone(wrong_head)
+            self.assertIn("revision differs", detail)
+
+    def test_dependency_identity_rejects_a_clean_checkout_at_the_wrong_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "lake-manifest.json").write_text(json.dumps({
+                "packagesDir": ".lake/packages",
+                "packages": [{"name": "dep", "type": "git", "rev": "expected"}],
+            }), encoding="utf-8")
+            checkout = (worktree / ".lake" / "packages" / "dep").resolve()
+
+            def git_text(path, arguments):
+                self.assertEqual(path.resolve(), checkout)
+                if arguments == ["rev-parse", "--show-toplevel"]:
+                    return str(checkout)
+                if arguments == ["rev-parse", "HEAD"]:
+                    return "different"
+                self.fail(f"unexpected Git query: {arguments}")
+
+            with patch("creme.build_ownership._git_text", side_effect=git_text):
+                value, detail = owned._dependency_checkout_identity(worktree)
+        self.assertIsNone(value)
+        self.assertIn("revision differs", detail)
+
+    def test_dependency_identity_rejects_dirty_or_parent_discovered_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "lake-manifest.json").write_text(json.dumps({
+                "packages": [{"name": "dep", "type": "git", "rev": "expected"}],
+            }), encoding="utf-8")
+            checkout = (worktree / ".lake" / "packages" / "dep").resolve()
+            responses = iter((str(worktree),))
+            with patch("creme.build_ownership._git_text", side_effect=lambda *_args: next(responses)):
+                value, detail = owned._dependency_checkout_identity(worktree)
+        self.assertIsNone(value)
+        self.assertIn("root is not", detail)
+
+    def test_unknown_or_non_integer_thread_mode_cannot_form_exact_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            for threads in (None, True, 1.5, 0):
+                with self.subTest(threads=threads):
+                    value, detail = owned.build_input_identity(
+                        worktree, ["A"], {"A": set()}, ("tc", "mf"), threads,
+                    )
+                    self.assertIsNone(value)
+                    self.assertIn("thread setting", detail)
+
+
 class B11ReplayTest(unittest.TestCase):
     """prorata's B11 waits, replayed from rows cut from the real ledger."""
 
@@ -457,12 +801,22 @@ class _Harness:
     """A `run_lake_build` with Lake, the semaphore, and the sampler replaced."""
 
     def __init__(self, *, probe, exit_code=0, rebuilt=("A",), peak_mib=2100.0,
-                 lake_run=None):
+                 lake_run=None, identity_snapshot=None):
         self.probe = probe
         self.exit_code = exit_code
         self.rebuilt = list(rebuilt)
         self.peak_mib = peak_mib
         self.lake_run = lake_run
+        self.identity_snapshot = identity_snapshot or (
+            lambda _worktree, modules, _graph, _digests, _threads: (
+                {
+                    "repository_identity": "repo",
+                    "input_context": "context",
+                    "module_inputs": {str(module): f"input-{module}" for module in modules},
+                },
+                "fixture identity",
+            )
+        )
         self.rows: list[dict] = []
         self.acquire = mock.Mock(return_value=(True, "ADMITTED_SOFT"))
         self.release = mock.Mock(return_value=(True, "released"))
@@ -511,6 +865,10 @@ class _Harness:
                   return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))),
             patch("creme.build_ownership.stale_evidence", return_value=self.probe),
             patch("creme.build_ownership.worktree_digests", return_value=("tc", "mf")),
+            patch(
+                "creme.build_ownership.build_input_identity",
+                side_effect=self.identity_snapshot,
+            ),
             patch("creme.build_ownership.semaphore.adaptive_acquire", self.acquire),
             patch("creme.build_ownership.semaphore.adaptive_release", self.release),
             patch("creme.build_ownership.guard_bin", return_value=Path("/guard")),
@@ -618,6 +976,41 @@ class WrapperSurfaceTest(unittest.TestCase):
             harness.run(contention="exclusive", memory_gib=8)
         harness.acquire.assert_not_called()
         self.assertEqual(harness.rows[0]["admission"], "NOT_REQUIRED_FRESH")
+
+    def test_changed_inputs_after_admission_refuse_before_lake_launch(self) -> None:
+        first = {
+            "repository_identity": "repo", "input_context": "context",
+            "module_inputs": {"A": "before"},
+        }
+        changed = {**first, "module_inputs": {"A": "after"}}
+        snapshots = iter([(first, "before"), (changed, "after")])
+        harness = _Harness(
+            probe=self.probe(["A"]),
+            identity_snapshot=lambda *_args: next(snapshots),
+        )
+        with _isolated():
+            self.assertEqual(harness.run(), 2)
+        harness.acquire.assert_called_once()
+        harness.release.assert_called_once()
+        self.assertEqual(harness.rows, [])
+        self.assertIn("SOURCE_CHANGED_REPROBE", harness.output.getvalue())
+
+    def test_changed_inputs_during_build_cannot_publish_exact_evidence(self) -> None:
+        first = {
+            "repository_identity": "repo", "input_context": "context",
+            "module_inputs": {"A": "before"},
+        }
+        changed = {**first, "module_inputs": {"A": "after"}}
+        snapshots = iter([(first, "before"), (first, "before"), (changed, "after")])
+        harness = _Harness(
+            probe=self.probe(["A"]),
+            identity_snapshot=lambda *_args: next(snapshots),
+        )
+        with _isolated():
+            self.assertEqual(harness.run(), 0)
+        row = harness.rows[0]
+        self.assertNotIn("repository_identity", row)
+        self.assertIn("changed during build", row["identity_status"])
 
 
 class SamplerAttributionTest(unittest.TestCase):

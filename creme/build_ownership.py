@@ -52,6 +52,12 @@ _SAFE_LEDGER_KEYS = {
     # module's own `lean` process, so a later build of the same modules is
     # sized from what they cost rather than from the spelling of a target list.
     "module_peak_mib",
+    # Additive, from creme-memory-evidence-v1: a host-local repository scope
+    # plus the complete source/configuration/execution identity used when a
+    # measured build was admitted.  These fields deliberately do not attempt
+    # to retrofit identity to old rows; missing identity is compatibility
+    # evidence only, never an assertion that an old peak is exact today.
+    "repository_identity", "input_context", "module_inputs", "identity_status",
 }
 DEFAULT_LAKE_OVERHEAD_GIB = 1.0
 # A stale set this small has its concurrency computed exactly from the import
@@ -263,6 +269,20 @@ def _valid_ledger_row(row: Any) -> bool:
     if "resolved_roots" in row and not (
         row["resolved_roots"] is None or _string_list(row["resolved_roots"])
     ):
+        return False
+    identity_fields = ("repository_identity", "input_context", "module_inputs")
+    present_identity = [field in row for field in identity_fields]
+    if any(present_identity) and not all(present_identity):
+        return False
+    if all(present_identity) and not (
+        isinstance(row["repository_identity"], str)
+        and isinstance(row["input_context"], str)
+        and isinstance(row["module_inputs"], dict)
+        and all(isinstance(module, str) and isinstance(digest, str)
+                for module, digest in row["module_inputs"].items())
+    ):
+        return False
+    if "identity_status" in row and not isinstance(row["identity_status"], str):
         return False
     return "renewals" not in row or _string_list(row["renewals"])
 
@@ -1203,12 +1223,305 @@ def worktree_digests(worktree: Path) -> tuple[Optional[str], Optional[str]]:
     )
 
 
+def _identity_digest(parts: Iterable[str]) -> str:
+    """A domain-separated digest for locally collected performance inputs."""
+    digest = hashlib.sha256(b"creme-build-input-v1\0")
+    for part in parts:
+        encoded = part.encode("utf-8", errors="surrogateescape")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()[:32]
+
+
+def _git_text(worktree: Path, arguments: list[str]) -> Optional[str]:
+    """Read a small Git fact, without treating a failed read as identity."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), *arguments],
+            text=True, capture_output=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+def repository_identity(worktree: Path) -> Optional[str]:
+    """A stable scope for linked worktrees of one local Git repository.
+
+    A remote URL is neither unique nor immutable enough to distinguish local
+    repositories.  Git's common directory is shared by linked worktrees and
+    is private host-local state, so only its domain-separated digest reaches
+    the ledger.
+    """
+    common = _git_text(worktree, ["rev-parse", "--git-common-dir"])
+    if not common:
+        return None
+    path = Path(common)
+    if not path.is_absolute():
+        path = (worktree / path).resolve()
+    else:
+        path = path.resolve()
+    return _identity_digest(["repository", str(path)])
+
+
+def _legacy_repository_identity(recorded_worktree: Any) -> Optional[str]:
+    """Recover scope for an old linked-worktree row only from live Git state.
+
+    A removed `.worktrees/GOAL` directory still has its repository root beside
+    it.  Asking Git at that root can recover the shared common directory.  A
+    path spelling alone never does: if neither the recorded checkout nor that
+    conventional parent can be inspected, the legacy row remains unscoped and
+    is excluded from a different worktree.
+    """
+    if not isinstance(recorded_worktree, str) or not recorded_worktree:
+        return None
+    path = Path(recorded_worktree)
+    if path.is_dir():
+        found = repository_identity(path)
+        if found is not None:
+            return found
+    if path.parent.name == ".worktrees" and path.parent.parent.is_dir():
+        return repository_identity(path.parent.parent)
+    return None
+
+
+def _lake_config_digest(worktree: Path) -> Optional[str]:
+    """Digest every Lake configuration file that can affect target semantics."""
+    entries: list[str] = []
+    for name in ("lakefile.lean", "lakefile.toml"):
+        path = worktree / name
+        if not path.exists():
+            continue
+        value = _digest_file(path)
+        if value is None:
+            return None
+        entries.extend((name, value))
+    return _identity_digest(entries) if entries else None
+
+
+def _execution_environment_digest() -> str:
+    """Fingerprint effective Lean/Lake overrides without recording their values."""
+    effective = lake_env()
+    entries: list[str] = []
+    for name in sorted(effective):
+        if name.startswith(("LEAN_", "LAKE_")) and name != "LEAN_NUM_THREADS":
+            entries.extend((name, effective[name]))
+    return _identity_digest(entries)
+
+
+def _dependency_checkout_identity(worktree: Path) -> tuple[Optional[str], str]:
+    """Accept only clean, manifest-resolved dependency checkouts as exact.
+
+    Hashing every dependency source tree for each module would make narrow
+    admission expensive.  The manifest already identifies clean pinned trees;
+    a bounded Git-status check detects a dirty checkout and deliberately makes
+    exact reuse unavailable.  That avoids equating a locally edited dependency
+    with its manifest revision.
+    """
+    try:
+        manifest = json.loads((worktree / "lake-manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, "lake manifest unreadable"
+    packages_dir = manifest.get("packagesDir", ".lake/packages")
+    if not isinstance(packages_dir, str):
+        return None, "lake manifest packages directory is invalid"
+    relative = Path(packages_dir)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None, "lake manifest packages directory is outside the worktree"
+    root = worktree / relative
+    packages = manifest.get("packages")
+    if not isinstance(packages, list):
+        return None, "lake manifest packages are invalid"
+    entries: list[str] = []
+    for package in packages:
+        if not isinstance(package, dict):
+            return None, "lake manifest package entry is invalid"
+        name = package.get("name")
+        revision = package.get("rev")
+        if package.get("type") != "git" or not isinstance(name, str) or not isinstance(revision, str):
+            return None, "lake manifest contains a non-Git or unpinned dependency"
+        checkout = (root / name).resolve()
+        top_level = _git_text(checkout, ["rev-parse", "--show-toplevel"])
+        if top_level is None or Path(top_level).resolve() != checkout:
+            return None, f"dependency {name} checkout root is not the resolved package directory"
+        head = _git_text(checkout, ["rev-parse", "HEAD"])
+        if head != revision:
+            return None, f"dependency {name} checkout revision differs from the manifest"
+        status = _git_text(checkout, ["status", "--porcelain", "--untracked-files=all"])
+        if status is None:
+            return None, f"dependency {name} checkout is unavailable"
+        if status:
+            return None, f"dependency {name} checkout has local source changes"
+        entries.extend((name, revision))
+    return _identity_digest(entries), f"{len(entries) // 2} clean pinned dependency checkout(s)"
+
+
+def _module_source_path(worktree: Path, module: str) -> Path:
+    return worktree.joinpath(*module.split(".")).with_suffix(".lean")
+
+
+def module_input_identities(
+    worktree: Path,
+    modules: Iterable[str],
+    graph: Optional[dict[str, set[str]]],
+) -> tuple[Optional[dict[str, str]], str]:
+    """Digest each module and its transitive *local* import closure.
+
+    Imports and bytes come from one source read per module.  In particular, a
+    graph parsed before an admission wait cannot make a newly-added import
+    disappear from the pre-launch or post-build snapshot.  Existing local
+    source imports recurse; external imports are covered by the clean pinned
+    dependency identity.  File bytes are cached per call, so several stale
+    modules sharing imports do not rehash the repository.
+    """
+    wanted = sorted(set(str(module) for module in modules))
+    if not wanted:
+        return {}, "no stale module source inputs"
+    closure_digests: dict[str, str] = {}
+    visiting: set[str] = set()
+    # The graph is not used to obtain imports — that would be stale after a
+    # wait — but it can prove that a disappeared source used to be local.  An
+    # old artifact for such a module is not an external dependency.
+    expected_local = set((graph or {}).keys())
+
+    def header_imports(content: bytes) -> Optional[set[str]]:
+        """Read supported Lean import forms, or decline exact identity.
+
+        This deliberately handles multi-import and visibility forms.  An
+        unfamiliar import form is unknown rather than a partially hashed
+        closure.  Block comments between imports remain inside the header.
+        """
+        imports: set[str] = set()
+        saw_import = False
+        block_depth = 0
+        for index, raw_line in enumerate(content.decode("utf-8", errors="replace").splitlines()):
+            line = raw_line.strip()
+            if block_depth:
+                block_depth += line.count("/-") - line.count("-/")
+                if block_depth < 0:
+                    return None
+                if block_depth == 0 and "-/" in line and line.rsplit("-/", 1)[1].strip():
+                    return None
+                continue
+            if line.startswith("/-"):
+                block_depth = line.count("/-") - line.count("-/")
+                if block_depth < 0:
+                    return None
+                if block_depth == 0 and "-/" in line and line.rsplit("-/", 1)[1].strip():
+                    return None
+                continue
+            if not line or line.startswith("--"):
+                continue
+            match = _IMPORT_HEADER_RE.match(raw_line)
+            if match:
+                payload = match.group(1).split("--", 1)[0].strip()
+                names = payload.split()
+                while names and names[0] in {"public", "protected", "private", "meta"}:
+                    names.pop(0)
+                if not names or not all(_IMPORT_NAME_RE.fullmatch(name) for name in names):
+                    return None
+                imports.update(_normalise_module(name) for name in names)
+                saw_import = True
+                continue
+            if "import" in line.split()[:3]:
+                return None
+            if saw_import or index >= _HEADER_SCAN_LINES:
+                break
+        return None if block_depth else imports
+
+    def source_snapshot(module: str) -> Optional[tuple[str, set[str]]]:
+        try:
+            content = _module_source_path(worktree, module).read_bytes()
+        except OSError:
+            return None
+        parsed = header_imports(content)
+        if parsed is None:
+            return None
+        imports: set[str] = set()
+        for imported in parsed:
+            source = _module_source_path(worktree, imported)
+            if source.is_file():
+                imports.add(imported)
+            elif imported in expected_local:
+                return None
+        return hashlib.sha256(content).hexdigest()[:16], imports
+
+    def digest_module(module: str) -> Optional[str]:
+        if module in closure_digests:
+            return closure_digests[module]
+        if module in visiting:
+            return None
+        visiting.add(module)
+        snapshot = source_snapshot(module)
+        if snapshot is None:
+            visiting.remove(module)
+            return None
+        source_digest, imports = snapshot
+        imported: list[str] = []
+        for dependency in sorted(imports):
+            dependency_digest = digest_module(dependency)
+            if dependency_digest is None:
+                visiting.remove(module)
+                return None
+            imported.extend((dependency, dependency_digest))
+        visiting.remove(module)
+        value = _identity_digest(["module", module, source_digest, *imported])
+        closure_digests[module] = value
+        return value
+
+    result: dict[str, str] = {}
+    for module in wanted:
+        value = digest_module(module)
+        if value is None:
+            return None, f"source closure for {module} is incomplete"
+        result[module] = value
+    return result, f"{len(result)} module source closure(s)"
+
+
+def build_input_identity(
+    worktree: Path,
+    modules: Iterable[str],
+    graph: Optional[dict[str, set[str]]],
+    digests: tuple[Optional[str], Optional[str]],
+    threads: Any,
+) -> tuple[Optional[dict[str, Any]], str]:
+    """Collect exact-evidence inputs before admission and again before publish."""
+    toolchain_digest, manifest_digest = digests
+    if toolchain_digest is None or manifest_digest is None:
+        return None, "toolchain or manifest digest unavailable"
+    if not isinstance(threads, int) or isinstance(threads, bool) or threads <= 0:
+        return None, "thread setting is not a positive integer"
+    repository = repository_identity(worktree)
+    if repository is None:
+        return None, "linked-worktree repository identity unavailable"
+    config = _lake_config_digest(worktree)
+    if config is None:
+        return None, "Lake configuration digest unavailable"
+    dependencies, dependency_detail = _dependency_checkout_identity(worktree)
+    if dependencies is None:
+        return None, dependency_detail
+    module_inputs, module_detail = module_input_identities(worktree, modules, graph)
+    if module_inputs is None:
+        return None, module_detail
+    context = _identity_digest([
+        "context", toolchain_digest, manifest_digest, config, dependencies,
+        _execution_environment_digest(), str(threads),
+    ])
+    return {
+        "repository_identity": repository,
+        "input_context": context,
+        "module_inputs": module_inputs,
+    }, f"{module_detail}; {dependency_detail}; threads={threads}"
+
+
 _STALE_FAILURE_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_'.]+)\s*$")
 # Lean allows a component of a module name to be written in guillemets, and
 # Jaune's `Main.lean` does exactly that (`import «Jaune».Execution`).  Dropping
 # such an import would under-report the closure and could widen a class on
 # evidence that is not there, so the scanner reads them and normalises.
 _IMPORT_RE = re.compile(r"^import\s+([A-Za-z0-9_'.\u00ab\u00bb]+)")
+_IMPORT_HEADER_RE = re.compile(r"^\s*(?:(?:public|protected|private|meta)\s+)?import\s+(.+?)\s*$")
+_IMPORT_NAME_RE = re.compile(r"[A-Za-z0-9_'.\u00ab\u00bb]+$")
 _HEADER_SCAN_LINES = 400
 
 
@@ -1562,16 +1875,64 @@ def stale_evidence(
     }
 
 
+def _finite_positive(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(float(value)) and float(value) > 0.0
+    )
+
+
+def _usable_sample(row: dict[str, Any]) -> bool:
+    if not _finite_positive(row.get("peak_rss_mib")):
+        return False
+    samples = row.get("sampling_samples")
+    if not isinstance(samples, int) or isinstance(samples, bool) or samples <= 0:
+        return False
+    unavailable = row.get("sampling_unavailable")
+    return (
+        unavailable is None
+        or (isinstance(unavailable, (int, float)) and not isinstance(unavailable, bool)
+            and math.isfinite(float(unavailable)) and float(unavailable) >= 0.0)
+    )
+
+
+def _exact_context_row(row: dict[str, Any], identity: dict[str, Any]) -> bool:
+    """Whether a row measured the same repository/configuration/execution mode."""
+    if row.get("identity_status") != "exact":
+        return False
+    if (
+        row.get("repository_identity") != identity.get("repository_identity")
+        or row.get("input_context") != identity.get("input_context")
+        or not isinstance(row.get("module_inputs"), dict)
+    ):
+        return False
+    if not isinstance(row.get("threads"), int) or isinstance(row.get("threads"), bool) or row["threads"] <= 0:
+        return False
+    return _usable_sample(row)
+
+
+def _exact_module_row(row: dict[str, Any], identity: dict[str, Any], module: str) -> bool:
+    inputs = identity.get("module_inputs")
+    return (
+        _exact_context_row(row, identity)
+        and isinstance(inputs, dict)
+        and inputs.get(module) == (row.get("module_inputs") or {}).get(module)
+    )
+
+
 def _evidence_rows(
     worktree: Path,
     toolchain_digest: Optional[str],
     manifest_digest: Optional[str],
+    input_identity: Optional[dict[str, Any]] = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Every successful, measured build row of this worktree on its pinned inputs.
+    """Successful measured rows in the relevant repository evidence cohort.
 
-    The worktree, toolchain digest, and Lake manifest digest are what make an
-    older measurement comparable; the spelling of the target list is not, so
-    it is not a key here.
+    Old callers retain the former same-worktree behaviour.  Current build
+    paths provide an identity: exact rows may then cross compatible linked
+    worktrees, while rows with a different repository identity never enter the
+    cohort.  Rows lacking the additive identity fields are retained only from
+    the same worktree as conservative legacy fallback.
     """
     try:
         rows, _corrupt = read_ledger("30d")
@@ -1581,19 +1942,52 @@ def _evidence_rows(
         return [], "ledger unreadable"
     if toolchain_digest is None or manifest_digest is None:
         return [], "worktree toolchain or manifest digest unavailable"
-    matching = [
+    measured = [
         row for row in rows
         if row.get("kind") == "build"
         and not row.get("probe")
         and row.get("exit") == 0
-        and str(row.get("worktree")) == str(worktree)
-        and row.get("toolchain_digest") == toolchain_digest
-        and row.get("manifest_digest") == manifest_digest
-        and isinstance(row.get("peak_rss_mib"), (int, float))
-        and not isinstance(row.get("peak_rss_mib"), bool)
+        and _finite_positive(row.get("peak_rss_mib"))
+        and (row.get("identity_status") != "exact" or _usable_sample(row))
     ]
+    if input_identity is None:
+        matching = [
+            row for row in measured
+            if str(row.get("worktree")) == str(worktree)
+            and row.get("toolchain_digest") == toolchain_digest
+            and row.get("manifest_digest") == manifest_digest
+        ]
+        detail = f"{len(matching)} measured row(s) on the pinned inputs"
+    else:
+        repository = input_identity.get("repository_identity")
+        matching = []
+        legacy_scopes: dict[str, Optional[str]] = {}
+        for row in measured:
+            row_repository = row.get("repository_identity")
+            if isinstance(row_repository, str):
+                if row_repository == repository:
+                    matching.append(row)
+                continue
+            recorded = str(row.get("worktree") or "")
+            if recorded not in legacy_scopes:
+                legacy_scopes[recorded] = _legacy_repository_identity(recorded)
+            # A legacy row may survive a removed linked worktree when Git can
+            # still prove that its `.worktrees/GOAL` parent belongs to this
+            # repository.  It remains fallback only: it cannot satisfy
+            # `_exact_context_row` without the new fields.
+            if (
+                legacy_scopes[recorded] == repository
+                and row.get("toolchain_digest") == toolchain_digest
+                and row.get("manifest_digest") == manifest_digest
+            ):
+                matching.append(row)
+        exact_context = sum(1 for row in matching if _exact_context_row(row, input_identity))
+        detail = (
+            f"{len(matching)} repository-scoped measurement(s); "
+            f"{exact_context} exact configuration/execution row(s)"
+        )
     matching.sort(key=lambda row: str(row["time"]))
-    return matching, f"{len(matching)} measured row(s) on the pinned inputs"
+    return matching, detail
 
 
 def _measured_rows(
@@ -1604,6 +1998,7 @@ def _measured_rows(
     settings: dict[str, int],
     require_elaboration: bool = False,
     members: bool = False,
+    input_identity: Optional[dict[str, Any]] = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Ledger rows that measured *this* worktree, targets, and pinned inputs.
 
@@ -1615,7 +2010,7 @@ def _measured_rows(
     A row that restored everything from the artifact cache measured a build
     that elaborated nothing; it cannot size one that will.
     """
-    rows, detail = _evidence_rows(worktree, toolchain_digest, manifest_digest)
+    rows, detail = _evidence_rows(worktree, toolchain_digest, manifest_digest, input_identity)
     if not rows and detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
         return [], detail
     wanted = set(targets)
@@ -1646,7 +2041,8 @@ def _measured_rows(
 
 
 def module_cost_evidence(
-    rows: list[dict[str, Any]], settings: dict[str, int]
+    rows: list[dict[str, Any]], settings: dict[str, int],
+    input_identity: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Per-module cost from the ledger: what each module's `lean` process peaked at.
 
@@ -1661,32 +2057,51 @@ def module_cost_evidence(
     narrow = int(settings["tolerant_module_count"])
     sample = int(settings["estimate_sample_rows"])
     peaks: dict[str, list[float]] = {}
-    seconds: dict[str, float] = {}
+    fallback_peaks: dict[str, list[float]] = {}
+    exact_seconds: dict[str, float] = {}
+    fallback_seconds: dict[str, float] = {}
     overheads: list[float] = []
     concurrency = 1
+    context_rows = 0
     for row in rows:
         rebuilt = [str(module) for module in (row.get("modules_rebuilt") or [])]
         if not rebuilt:
             continue
-        for module, value in (row.get("module_seconds") or {}).items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                seconds[str(module)] = max(seconds.get(str(module), 0.0), float(value))
         peak_gib = float(row["peak_rss_mib"]) / 1024.0
         lean_peak = row.get("peak_lean_rss_mib")
-        lean_gib = (
-            float(lean_peak) / 1024.0
-            if isinstance(lean_peak, (int, float)) and not isinstance(lean_peak, bool)
-            else None
-        )
+        lean_gib = float(lean_peak) / 1024.0 if _finite_positive(lean_peak) else None
+        recorded = row.get("module_peak_mib") or {}
+        for module, value in (row.get("module_seconds") or {}).items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and float(value) >= 0.0:
+                name = str(module)
+                fallback_seconds[name] = max(fallback_seconds.get(name, 0.0), float(value))
+                if input_identity is None or _exact_module_row(row, input_identity, name):
+                    exact_seconds[name] = max(exact_seconds.get(name, 0.0), float(value))
+        # A row from the same repository but a different source identity is
+        # not a measured current module.  Its direct module peak is still a
+        # conservative lower bound if current evidence is absent.  It never
+        # makes `unmeasured` disappear or relaxes the contention class.
+        for module in rebuilt:
+            value = recorded.get(module) if isinstance(recorded, dict) else None
+            if _finite_positive(value):
+                fallback_peaks.setdefault(module, []).append(float(value) / 1024.0)
+            elif len(rebuilt) <= narrow:
+                fallback_peaks.setdefault(module, []).append(
+                    lean_gib if lean_gib is not None else peak_gib
+                )
+        if input_identity is not None and not _exact_context_row(row, input_identity):
+            continue
+        context_rows += 1
         seen = row.get("max_concurrent_lean")
         seen = int(seen) if isinstance(seen, int) and not isinstance(seen, bool) and seen > 0 else 1
         concurrency = max(concurrency, seen)
         if lean_gib is not None and seen == 1:
             overheads.append(max(0.0, peak_gib - lean_gib))
-        recorded = row.get("module_peak_mib") or {}
         for module in rebuilt:
+            if input_identity is not None and not _exact_module_row(row, input_identity, module):
+                continue
             value = recorded.get(module) if isinstance(recorded, dict) else None
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if _finite_positive(value):
                 cost = float(value) / 1024.0
             elif len(rebuilt) <= narrow:
                 cost = lean_gib if lean_gib is not None else peak_gib
@@ -1697,11 +2112,19 @@ def module_cost_evidence(
         "lean_peak_gib": {
             module: max(values[-sample:]) for module, values in peaks.items()
         },
-        "seconds": seconds,
+        "fallback_peak_gib": {
+            module: max(values[-sample:]) for module, values in fallback_peaks.items()
+            if module not in peaks
+        },
+        "seconds": {
+            module: exact_seconds.get(module, fallback)
+            for module, fallback in fallback_seconds.items()
+        },
         "overhead_gib": max(overheads[-sample:]) if overheads else DEFAULT_LAKE_OVERHEAD_GIB,
         "overhead_measured": bool(overheads),
         "concurrency": concurrency,
-        "rows": len(rows),
+        "rows": context_rows if input_identity is not None else len(rows),
+        "exact_modules": sorted(peaks),
     }
 
 
@@ -1787,6 +2210,7 @@ def size_stale_set(
     rows: list[dict[str, Any]],
     settings: dict[str, int],
     default_gib: int,
+    input_identity: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Size a build from the modules it will elaborate, never from a target's name.
 
@@ -1805,10 +2229,15 @@ def size_stale_set(
     limit = int(settings["tolerant_module_count"])
     narrow_default = int(settings["narrow_default_gib"])
     heavy_seconds = float(settings["heavy_module_seconds"])
-    evidence = module_cost_evidence(rows, settings)
+    evidence = module_cost_evidence(rows, settings, input_identity)
     names = sorted(set(stale))
     measured = {name: evidence["lean_peak_gib"][name] for name in names if name in evidence["lean_peak_gib"]}
     unmeasured = [name for name in names if name not in measured]
+    fallback = {
+        name: evidence["fallback_peak_gib"][name]
+        for name in unmeasured if name in evidence["fallback_peak_gib"]
+    }
+    fallback_floor = max(fallback.values(), default=0.0)
     heavy = sorted(
         ((name, evidence["seconds"][name]) for name in unmeasured
          if evidence["seconds"].get(name, 0.0) >= heavy_seconds),
@@ -1819,6 +2248,8 @@ def size_stale_set(
         "measured": sorted(measured),
         "unmeasured": unmeasured,
         "heavy": [name for name, _seconds in heavy],
+        "fallback_modules": sorted(fallback),
+        "fallback_peak_gib": round(fallback_floor, 2),
         "overhead_gib": round(float(evidence["overhead_gib"]), 2),
         "rows": evidence["rows"],
     }
@@ -1852,7 +2283,11 @@ def size_stale_set(
     if measured:
         measured_peak, _width, _top = _model_peak(measured, graph, evidence)
     if len(names) <= limit and not heavy:
-        estimate = max(floor, narrow_default, math.ceil(measured_peak) + margin if measured else 0)
+        estimate = max(
+            floor, narrow_default,
+            math.ceil(measured_peak) + margin if measured else 0,
+            math.ceil(fallback_floor) + margin if fallback else 0,
+        )
         result.update({
             "kind": "narrow default",
             "peak_gib": round(measured_peak, 2),
@@ -1866,7 +2301,11 @@ def size_stale_set(
         return result
     if len(names) <= limit:
         name, seconds = heavy[0]
-        estimate = max(floor, int(default_gib), math.ceil(measured_peak) + margin if measured else 0)
+        estimate = max(
+            floor, int(default_gib),
+            math.ceil(measured_peak) + margin if measured else 0,
+            math.ceil(fallback_floor) + margin if fallback else 0,
+        )
         result.update({
             "kind": "heavy module",
             "peak_gib": round(measured_peak, 2),
@@ -1878,11 +2317,15 @@ def size_stale_set(
             ),
         })
         return result
-    covering = _covering_rows(rows, names, unmeasured)
+    context_rows = (
+        [row for row in rows if _exact_context_row(row, input_identity)]
+        if input_identity is not None else rows
+    )
+    covering = _covering_rows(context_rows, names, unmeasured)
     if covering:
         tightest = min(covering, key=lambda row: float(row["peak_rss_mib"]))
         peak = float(tightest["peak_rss_mib"]) / 1024.0
-        peak = max(peak, measured_peak)
+        peak = max(peak, measured_peak, fallback_floor)
         result.update({
             "kind": "broader rebuild",
             "peak_gib": round(peak, 2),
@@ -1897,7 +2340,10 @@ def size_stale_set(
             ),
         })
         return result
-    estimate = max(floor, int(default_gib), math.ceil(measured_peak) + margin if measured else 0)
+    estimate = max(
+        floor, int(default_gib), math.ceil(measured_peak) + margin if measured else 0,
+        math.ceil(fallback_floor) + margin if fallback else 0,
+    )
     result.update({
         "kind": "profile default",
         "peak_gib": round(measured_peak, 2),
@@ -1918,6 +2364,8 @@ def _target_keyed_estimate(
     digests: tuple[Optional[str], Optional[str]],
     default_gib: int,
     stale_modules: Optional[int],
+    input_identity: Optional[dict[str, Any]] = None,
+    identity_detail: Optional[str] = None,
 ) -> tuple[int, dict[str, Any]]:
     """The fallback when the probe could not name the stale set.
 
@@ -1930,14 +2378,47 @@ def _target_keyed_estimate(
     floor = int(settings["minimum_estimate_gib"])
     require_elaboration = stale_modules != 0
     rows, detail = _measured_rows(
-        worktree, targets, *digests, settings, require_elaboration, members=True
+        worktree, targets, *digests, settings, require_elaboration, members=True,
+        input_identity=input_identity,
     )
-    if not rows:
-        return max(floor, default_gib), {
+    fallback_rows = list(rows)
+    if input_identity is None and identity_detail is not None:
+        fallback_peak = max(
+            (float(row["peak_rss_mib"]) for row in fallback_rows), default=0.0,
+        ) / 1024.0
+        estimate = max(floor, default_gib, math.ceil(fallback_peak) + int(settings["estimate_margin_gib"]))
+        return estimate, {
             "kind": "profile default",
-            "source": f"profile default ({detail})",
+            "source": (
+                f"profile default (exact input identity unavailable: {identity_detail})"
+                + (f"; conservative target fallback peak {fallback_peak:.2f} GiB" if fallback_peak else "")
+            ),
+            "rows": len(fallback_rows),
+            "keyed_on_elaboration": require_elaboration,
+            "measured_peak_gib": round(fallback_peak, 2) if fallback_peak else None,
+        }
+    if input_identity is not None:
+        rows = [row for row in rows if _exact_context_row(row, input_identity)]
+        if not rows:
+            detail = "no exact configuration/execution measurement for these targets"
+    if not rows:
+        fallback_peak = max(
+            (float(row["peak_rss_mib"]) for row in fallback_rows), default=0.0,
+        ) / 1024.0
+        estimate = max(floor, default_gib, math.ceil(fallback_peak) + int(settings["estimate_margin_gib"]))
+        return estimate, {
+            "kind": "profile default",
+            "source": (
+                f"profile default ({identity_detail or detail})"
+                + (
+                    f"; conservative target fallback peak {fallback_peak:.2f} GiB"
+                    if fallback_peak else ""
+                )
+            ),
             "rows": 0,
             "keyed_on_elaboration": require_elaboration,
+            "measured_peak_gib": round(fallback_peak, 2) if fallback_peak else None,
+            "estimate_gib": estimate,
         }
     peak_gib = max(float(row["peak_rss_mib"]) for row in rows) / 1024.0
     estimate = max(floor, math.ceil(peak_gib) + int(settings["estimate_margin_gib"]))
@@ -1964,6 +2445,8 @@ def classify_contention(
     settings: dict[str, int],
     digests: tuple[Optional[str], Optional[str]],
     stale: Optional[dict[str, Any]] = None,
+    input_identity: Optional[dict[str, Any]] = None,
+    identity_detail: Optional[str] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Choose a contention class from measurement, defaulting to `sensitive`.
 
@@ -1981,6 +2464,9 @@ def classify_contention(
     evidence["resolution"] = probe["resolution"]
     evidence["stale_modules"] = stale_count
     evidence["stale_detail"] = probe["detail"]
+    if input_identity is None and identity_detail is not None:
+        evidence["reason"] = f"exact input identity unavailable: {identity_detail}"
+        return "sensitive", evidence
     if probe["roots"] is None:
         evidence["reason"] = probe["resolution"]
         return "sensitive", evidence
@@ -1996,7 +2482,10 @@ def classify_contention(
     if stale_set is None:
         # The probe counted but did not name the modules: the target-keyed
         # fallback is the only evidence there is.
-        rows, rows_detail = _measured_rows(worktree, targets, *digests, settings, members=True)
+        rows, rows_detail = _measured_rows(
+            worktree, targets, *digests, settings, members=True,
+            input_identity=input_identity,
+        )
         evidence["measurements"] = rows_detail
         if not rows:
             evidence["reason"] = rows_detail
@@ -2015,12 +2504,14 @@ def classify_contention(
         evidence["reason"] = "nothing is stale; the build elaborates no module and takes no hold"
         evidence["measured_peak_gib"] = 0.0
         return "tolerant", evidence
-    rows, rows_detail = _evidence_rows(worktree, *digests)
+    rows, rows_detail = _evidence_rows(worktree, *digests, input_identity)
     evidence["measurements"] = rows_detail
     if not rows and rows_detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
         evidence["reason"] = rows_detail
         return "sensitive", evidence
-    sizing = size_stale_set(list(stale_set), probe.get("graph"), rows, settings, 0)
+    sizing = size_stale_set(
+        list(stale_set), probe.get("graph"), rows, settings, 0, input_identity,
+    )
     evidence["measured_peak_gib"] = sizing["peak_gib"]
     evidence["sizing"] = sizing["kind"]
     if sizing["unmeasured"]:
@@ -2051,6 +2542,8 @@ def derive_memory_gib(
     default_gib: int,
     stale_modules: Optional[int] = None,
     stale: Optional[dict[str, Any]] = None,
+    input_identity: Optional[dict[str, Any]] = None,
+    identity_detail: Optional[str] = None,
 ) -> tuple[int, dict[str, Any]]:
     """Propose a whole-GiB estimate from measurement, never below the floor.
 
@@ -2065,8 +2558,25 @@ def derive_memory_gib(
     stale_set = stale.get("stale_set") if stale is not None else None
     if stale_set is None:
         count = stale["stale"] if stale is not None else stale_modules
-        return _target_keyed_estimate(worktree, targets, settings, digests, default_gib, count)
-    rows, detail = _evidence_rows(worktree, *digests)
+        return _target_keyed_estimate(
+            worktree, targets, settings, digests, default_gib, count, input_identity,
+            identity_detail,
+        )
+    if input_identity is None and identity_detail is not None:
+        rows, detail = _evidence_rows(worktree, *digests)
+        fallback = size_stale_set(list(stale_set), stale.get("graph"), rows, settings, default_gib)
+        estimate = max(floor, default_gib, int(fallback["estimate_gib"]))
+        return estimate, {
+            "kind": "profile default",
+            "source": (
+                f"profile default (exact input identity unavailable: {identity_detail}); "
+                f"compatibility fallback: {fallback['source']}"
+            ),
+            "rows": fallback["rows"],
+            "keyed_on_elaboration": True,
+            "measured_peak_gib": fallback["peak_gib"],
+        }
+    rows, detail = _evidence_rows(worktree, *digests, input_identity)
     if not rows and detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
         return max(floor, default_gib), {
             "kind": "profile default",
@@ -2074,7 +2584,9 @@ def derive_memory_gib(
             "rows": 0,
             "keyed_on_elaboration": True,
         }
-    sizing = size_stale_set(list(stale_set), stale.get("graph"), rows, settings, default_gib)
+    sizing = size_stale_set(
+        list(stale_set), stale.get("graph"), rows, settings, default_gib, input_identity,
+    )
     return int(sizing["estimate_gib"]), {
         "kind": sizing["kind"],
         "source": sizing["source"],
@@ -2347,18 +2859,38 @@ def run_lake_build(
             probe_evidence = stale_evidence(worktree, targets, real_lake)
         return probe_evidence
 
+    input_identity: Optional[dict[str, Any]] = None
+    identity_detail = "stale source closure was not available"
+
+    def input_snapshot(
+        snapshot_digests: Optional[tuple[Optional[str], Optional[str]]] = None,
+    ) -> tuple[Optional[dict[str, Any]], str]:
+        probe_state = stale()
+        modules = probe_state.get("stale_set")
+        if modules is None:
+            return None, "stale source closure was not available"
+        return build_input_identity(
+            worktree, modules, probe_state.get("graph"), snapshot_digests or digests, threads,
+        )
+
     if census:
         contention = "exclusive"
         evidence["reason"] = "a dependency census rebuilds the full closure"
-    elif contention is None:
-        contention, evidence = classify_contention(
-            worktree, targets, real_lake, settings(), digests, stale()
-        )
     else:
+        # This snapshot is the evidence used for selection.  It is taken after
+        # the probe and rechecked after any admission wait, before Lake starts.
+        input_identity, identity_detail = input_snapshot()
+    if not census and contention is None:
+        contention, evidence = classify_contention(
+            worktree, targets, real_lake, settings(), digests, stale(),
+            input_identity, identity_detail,
+        )
+    elif not census:
         # The class is stated, but the probe still runs: it is what tells the
         # wrapper that nothing is stale and no hold is needed, and it is what
         # the estimate is sized from.  One Lake `--no-build` costs a second.
-        stale()
+        # `input_snapshot` above already ran that one probe.
+        pass
     estimate_evidence: dict[str, Any] = {}
     # The estimate reuses the class's probe: the two answers describe one
     # stale set.
@@ -2366,7 +2898,7 @@ def run_lake_build(
     if memory_gib is None:
         memory_gib, estimate_evidence = derive_memory_gib(
             worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale,
-            probe_evidence,
+            probe_evidence, input_identity, identity_detail,
         )
     elif probe_evidence is not None:
         # An explicit estimate is honoured, but the reader is told what the
@@ -2374,7 +2906,7 @@ def run_lake_build(
         # be passed over by every smaller request on a busy host.
         derived, derived_evidence = derive_memory_gib(
             worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale,
-            probe_evidence,
+            probe_evidence, input_identity, identity_detail,
         )
         estimate_evidence = {
             "source": "explicit",
@@ -2495,6 +3027,22 @@ def run_lake_build(
             return True, "no hold was taken"
         return semaphore.adaptive_release(goal)
 
+    if not census and input_identity is not None:
+        launch_digests = worktree_digests(worktree)
+        launch_identity, launch_detail = input_snapshot(launch_digests)
+        if launch_identity != input_identity:
+            released, release_detail = release_hold()
+            print(json.dumps({
+                "status": "REFUSED",
+                "detail": (
+                    "SOURCE_CHANGED_REPROBE: build inputs changed after sizing and before "
+                    f"Lake launch ({launch_detail}); {release_detail}"
+                ),
+                "admission": admission,
+            }, sort_keys=True), file=output)
+            return 2 if released else GUARD_REFUSAL_EXIT
+        digests = launch_digests
+
     try:
         priority_launcher = guard_bin() / "nice"
     except (OSError, RuntimeError) as exc:
@@ -2557,6 +3105,26 @@ def run_lake_build(
     after = _swap_gib()
     rebuilt, restored, module_seconds = _parse_build_output(lines)
     hashes = _module_hashes(worktree, rebuilt)
+    identity_fields: dict[str, Any] = {}
+    record_digests = worktree_digests(worktree)
+    if census:
+        identity_status = "census dependency update is not exact measurement evidence"
+    elif exit_code != 0:
+        identity_status = "non-successful build is not exact measurement evidence"
+    elif not rebuilt:
+        identity_status = "no elaboration is not exact measurement evidence"
+    elif input_identity is None:
+        identity_status = f"exact input identity unavailable: {identity_detail}"
+    else:
+        post_identity, post_detail = input_snapshot(record_digests)
+        if post_identity == input_identity:
+            identity_fields = dict(input_identity)
+            identity_status = "exact"
+        else:
+            identity_status = (
+                "source/configuration inputs changed during build; "
+                f"post-build identity unavailable or different ({post_detail})"
+            )
     module_peaks = (
         {
             module: round(value, 1)
@@ -2616,7 +3184,9 @@ def run_lake_build(
         **({"outcome": "killed"} if interrupted else {}),
         **({"census": True, "dependency": str(dependency)} if census else {}),
         **({"dependency_rev": dependency_rev} if dependency_rev else {}),
-        **_digest_fields(digests),
+        "identity_status": identity_status,
+        **identity_fields,
+        **_digest_fields(record_digests),
     }
     if cleanup_proved:
         released, release_detail = release_hold()

@@ -4,5 +4,5 @@
   "lean_toolchain": "leanprover/lean4:v4.32.1",
   "python_minimum": "3.9",
   "supported_os": ["Darwin", "Linux"],
-  "clients": ["Codex", "Claude Code", "Antigravity"]
+  "clients": ["Codex", "Claude Code", "Antigravity", "Muse"]
 }

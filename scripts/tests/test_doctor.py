@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from creme.adapters.base import Adapter
 from creme.doctor import (
+    check_client_surface,
     check_goal_store,
     STATUS_FAIL,
     STATUS_OK,
@@ -126,6 +129,50 @@ class DoctorTest(unittest.TestCase):
 
             self.assertEqual(checks[0].status, STATUS_FAIL)
             self.assertIn("not ignored", checks[0].detail)
+
+    def test_muse_global_mcp_check_follows_settings_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "creme"
+            (root / "scripts").mkdir(parents=True)
+            (root / "scripts" / "versions.json").write_text(
+                json.dumps({"lean_lsp_mcp": "0.26.1"}), encoding="utf-8"
+            )
+            home = Path(tmp) / "home"
+            settings = home / ".config" / "muse" / "settings.json"
+
+            def muse_check():
+                with mock.patch.object(Path, "home", return_value=home):
+                    checks = check_client_surface(root)
+                return [c for c in checks if c.name == "client: Muse global MCP"]
+
+            self.assertEqual(muse_check(), [])
+            settings.parent.mkdir(parents=True)
+            settings.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+            missing = muse_check()
+            self.assertEqual(len(missing), 1)
+            self.assertEqual(missing[0].status, STATUS_WARN)
+            self.assertIn("not configured", missing[0].detail)
+            settings.write_text(json.dumps({"mcpServers": {"lean-lsp-mcp": {
+                "transport": "stdio",
+                "command": "/usr/bin/python3",
+                "args": ["-m", "creme", "lean-mcp", "--", "uvx", "lean-lsp-mcp==0.26.1"],
+                "env": {
+                    "LEAN_MCP_DISABLED_TOOLS": "lean_build,lean_profile_proof",
+                    "LEAN_LSP_MAX_OPEN_FILES": "2",
+                    "LEAN_LSP_TEST_MODE": "1",
+                },
+            }}}), encoding="utf-8")
+            matching = muse_check()
+            self.assertEqual(len(matching), 1)
+            self.assertEqual(matching[0].status, STATUS_OK, matching[0].detail)
+            self.assertIn("pinned 0.26.1", matching[0].detail)
+            drifted = json.loads(settings.read_text(encoding="utf-8"))
+            drifted["mcpServers"]["lean-lsp-mcp"]["args"][-1] = "lean-lsp-mcp==0.0.0"
+            settings.write_text(json.dumps(drifted), encoding="utf-8")
+            stale = muse_check()
+            self.assertEqual(len(stale), 1)
+            self.assertEqual(stale[0].status, STATUS_WARN)
+            self.assertIn("drift", stale[0].detail)
 
 
 if __name__ == "__main__":

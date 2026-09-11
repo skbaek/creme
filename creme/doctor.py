@@ -369,6 +369,41 @@ def check_client_surface(root: Path) -> list[Check]:
             ))
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             checks.append(Check("client: Antigravity global MCP", STATUS_WARN, f"unreadable: {gemini_mcp}"))
+    muse_settings = Path.home() / ".config" / "muse" / "settings.json"
+    if muse_settings.is_file():
+        try:
+            muse_payload = json.loads(muse_settings.read_text(encoding="utf-8"))
+            if not isinstance(muse_payload, dict):
+                muse_payload = {}
+            muse_servers = muse_payload.get("mcpServers")
+            muse_server = muse_servers.get("lean-lsp-mcp") if isinstance(muse_servers, dict) else None
+            if not isinstance(muse_server, dict):
+                muse_server = {}
+            if not muse_server:
+                checks.append(Check(
+                    "client: Muse global MCP",
+                    STATUS_WARN,
+                    f"lean-lsp-mcp is not configured in {muse_settings}",
+                ))
+            else:
+                muse_args = muse_server.get("args", [])
+                muse_pin = _extract_pin(" ".join(muse_args)) if isinstance(muse_args, list) and all(isinstance(arg, str) for arg in muse_args) else None
+                muse_env = muse_server.get("env") if isinstance(muse_server.get("env"), dict) else {}
+                muse_env_ok = all(muse_env.get(key) == value for key, value in required_env.items())
+                muse_ok = (
+                    muse_server.get("transport", "stdio") == "stdio"
+                    and muse_pin == expected_pin
+                    and muse_server.get("command") == "/usr/bin/python3"
+                    and muse_server.get("args") == expected_args
+                    and muse_env_ok
+                )
+                checks.append(Check(
+                    "client: Muse global MCP",
+                    STATUS_OK if muse_ok else STATUS_WARN,
+                    f"pinned {muse_pin} through Creme Lake guard" if muse_ok else f"drift or unconfigured in {muse_settings}",
+                ))
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            checks.append(Check("client: Muse global MCP", STATUS_WARN, f"unreadable: {muse_settings}"))
     return checks
 
 

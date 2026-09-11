@@ -15,7 +15,7 @@ sources when changing this surface or upgrading a client.
 | --- | --- | --- | --- | --- |
 | Root instructions | `AGENTS.md` | `CLAUDE.md` imports `@AGENTS.md` | `AGENTS.md` | `AGENTS.md` |
 | Project skills | `.agents/skills/<name>/SKILL.md` | `.claude/skills/<name>` points to the matching `.agents/skills/<name>` directory | `.agents/skills/<name>/SKILL.md` | `.agents/skills/<name>/SKILL.md` |
-| Lean MCP | `.codex/config.toml` | `.mcp.json` | `.agents/mcp_config.json` | User-global `settings.json` `mcpServers` entry (shape unverified) |
+| Lean MCP | `.codex/config.toml` | `.mcp.json` | `.agents/mcp_config.json` | User-global `settings.json` `mcpServers` stdio entry |
 | Sibling access | Generated machine-local permission profile | `.claude/settings.json` relative `permissions.additionalDirectories` | Not acceptance-supported yet | CLI sandbox flags; no committed profile surface |
 | Trust | User accepts Creme as a trusted project; trust state is never committed | User accepts workspace trust and the pinned project MCP server | Not acceptance-supported yet | User trust action; trust state is never committed |
 
@@ -205,13 +205,14 @@ Official evidence:
 
 Muse is **experimental and not a v0.1 acceptance-supported client**. The notes
 below were checked against the installed client (`muse-bin-1.1.1`) by observed
-behavior in a Creme-root session on 2026-09-11, not against official
-documentation, and the Lean MCP leg is still unverified.
+behavior in Creme-root sessions on 2026-09-11, not against official
+documentation.
 
 Demonstrated:
 
 - Root instructions: `AGENTS.md` loads as project rules. `muse init` scaffolds
-  that file and names it the project-rules surface.
+  that file and names it the project-rules surface. Muse warns that root
+  `CLAUDE.md` is shadowed by `AGENTS.md`; that shim stays for Claude Code.
 - Project skills: `.agents/skills/<name>/SKILL.md` resolves as project skills;
   `muse skills list --source project` shows both Lean skills active.
 - Master lease: `master-acquire --client muse` with a `CREME_MASTER_SESSION_ID`
@@ -219,25 +220,38 @@ Demonstrated:
 - Process attribution: the session runs as `muse-bin-<version>`, a
   per-invocation child of the launching shell (the `muse` launcher script
   execs into it), attributed as a task-scoped client pid like Claude Code.
+- Lean MCP: muse loads none of the committed project shims (`.mcp.json`,
+  `.agents/mcp_config.json`, `.codex/config.toml` are all inert here), but a
+  user-global `mcpServers` stdio entry with the guarded launcher, the pinned
+  `lean-lsp-mcp==0.26.1`, and the `.mcp.json` environment loads in a fresh
+  process. A headless `muse exec` probe from `~/creme` reported the exact 20
+  enabled tools with `lean_build` and `lean_profile_proof` absent, both Lean
+  skills, and the Creme project root. The recipe is in
+  [setup](setup.md#muse-sessions); `doctor` checks the installed entry.
 
 Not demonstrated:
 
-- Lean MCP: muse loads none of the committed project shims (`.mcp.json`,
-  `.agents/mcp_config.json`, `.codex/config.toml` are all inert here — a
-  session started with all three present exposes no Lean tools). The client
-  supports user-global `mcpServers` entries including a stdio shape, but the
-  exact entry keys are unverified, so there is no reviewed shim and no doctor
-  check. A Lean proof worker under muse needs that entry added by the user
-  and a client restart first.
-- Sibling access beyond CLI flags: the demonstrated session runs `muse
+- Sibling access beyond CLI flags: the demonstrated sessions run `muse
   --disable-sandbox` from `~/creme`. There is no committed permission-profile
-  surface for muse.
-- Host capability delegates: the generated bundle is Codex-scoped.
+  surface for muse; named profiles are managed configuration.
+- Host capability delegates: the generated bundle is Codex-scoped. It is not
+  needed while muse runs unsandboxed.
+- Per-worker model or effort selection: muse workers inherit the session
+  route. In 1.1.1 the model is session-level on the wire (`session/start` and
+  `session/setModel` take it; no subagent spawn params exist in the stable or
+  experimental schema) and effort is launch-only, so no preset file or spawn
+  flag can select them per worker. See
+  [the briefs guide](guides/briefs.md#model-choice).
 
 Muse exports no stable session identifier of its own, so master identity is
 the neutral `CREME_MASTER_SESSION_ID` the launcher is started with. The
 task-scoped pid reading held with a single session on the host; re-verify it
-if concurrent muse sessions ever share one process.
+if concurrent muse sessions ever share one process. The first call of each MCP
+tool requests human approval (allow once, allow for the session, or abort);
+there is no user-configurable standing selective rule, so a headless probe of
+a tool call needs `--disable-approval` and must record that it ran
+approval-isolated. Whether a worker subagent's MCP approvals surface to its
+interactive master is untested; the first restarted worker session settles it.
 
 ## Known limitations
 

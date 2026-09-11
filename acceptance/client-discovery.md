@@ -96,6 +96,41 @@ claude mcp list
 Pass criteria are the same as Codex. The permission view must show Jaune and
 Blanc as relative additional directories derived from Creme's shared settings.
 
+## Muse positive control
+
+Muse is experimental; its evidence column records observed behavior and does
+not satisfy either required v0.1 client column. The user-global `mcpServers`
+entry from the setup guide must already be installed: a new muse process
+reads it at startup.
+
+```sh
+cd "${CREME_ROOT:?set CREME_ROOT}"
+muse exec --reasoning-effort minimal "Do not call any tools. Reply with \
+exactly three lines: (1) PROJECT-ROOT: <your current project root>, \
+(2) LEAN-TOOLS: <comma-separated lean-lsp-mcp tool names, or NONE>, \
+(3) SKILLS: <lean skill ids you see, or NONE>."
+muse exec --reasoning-effort low "Call lean_diagnostic_messages exactly once \
+on <absolute Blanc fixture path> and reply with two lines: DIAG-COUNT: \
+<number of messages>, DIAG-FIRST: <first 100 chars of the first message, or \
+EMPTY>. Make no edits and do not run a build."
+```
+
+Pass: the first answer identifies Creme as the project root, lists the exact
+20 enabled Lean tools with `lean_build` and `lean_profile_proof` absent, and
+names both Lean skills. The second returns MCP diagnostics for the named
+sibling fixture. A skipped trust decision, absent skill, unavailable MCP
+server, wrong root, or denied sibling read is a failure, not a limited pass.
+An interactive master session covers the trust ceremony and the
+`CREME_MASTER_SESSION_ID` lease path, which headless probes cannot.
+
+Approval behavior is part of the record. The listing probe calls no tools and
+runs under default approval. A headless diagnostics probe parks on a human
+approval request for the MCP tool call (choices: allow once, allow for the
+session, abort); add `--disable-approval` to that probe only, and record that
+the call ran approval-isolated. There is no user-configurable standing
+selective rule for MCP tools: no tool-rule keys exist in user settings, the
+reviewer is human, and the managed-policy planes are absent.
+
 ## Wrong-root controls
 
 Start fresh sessions from a projectless temporary Git repository, Jaune, and
@@ -149,22 +184,22 @@ Do not alter the real client home or global settings during this control.
 
 ## Evidence record
 
-| Check | Codex | Claude Code |
-| --- | --- | --- |
-| Client version recorded | CLI 0.151.0-alpha.7.1 | Desktop 1.34493.1; CLI absent |
-| Exact Creme commit recorded | `2c4511e272e3d7cddd07a7d5156777e7f856f938` for latest trusted-client liveness | OPEN |
-| CWD/project is Creme | PASS, four ephemeral tasks | OPEN; desktop locked |
-| Root instructions observed | PASS | OPEN |
-| `lean-inspector` observed and invoked | PASS in current trusted client | OPEN |
-| `lean-prover` observed | PASS | OPEN |
-| Pinned Lean MCP observed | 22 tools in current trusted client; zero with ignored user trust | OPEN |
-| Lean MCP diagnostics returned | PASS for Jaune `ae1b7d5` and post-Proxy Blanc `18ca2b4` in current trusted client | OPEN |
-| Jaune ordinary read succeeded | PASS | OPEN |
-| Blanc ordinary read succeeded | PASS | OPEN |
-| Representative sibling edit | FAILED SAFELY under hard host pressure; no acceptance claimed | OPEN |
-| Wrong-root control omitted Creme discovery | synthetic PASS; live client matrix OPEN | OPEN |
-| Synthetic access-without-discovery control passed | PASS | PASS static fixture only |
-| Trust and approvals explicitly recorded | OPEN; ignored-user-config plus an invocation-only trust override still exposed zero MCP tools | OPEN |
+| Check | Codex | Claude Code | Muse |
+| --- | --- | --- | --- |
+| Client version recorded | CLI 0.151.0-alpha.7.1 | Desktop 1.34493.1; CLI absent | muse-bin-1.1.1-R2514.1 |
+| Exact Creme commit recorded | `2c4511e272e3d7cddd07a7d5156777e7f856f938` for latest trusted-client liveness | OPEN | `ebeee65` (probe-time main) |
+| CWD/project is Creme | PASS, four ephemeral tasks | OPEN; desktop locked | PASS, headless exec |
+| Root instructions observed | PASS | OPEN | PASS (`AGENTS.md`; client-emitted `CLAUDE.md`-shadowed warning) |
+| `lean-inspector` observed and invoked | PASS in current trusted client | OPEN | Observed PASS; explicit invocation OPEN |
+| `lean-prover` observed | PASS | OPEN | PASS |
+| Pinned Lean MCP observed | 22 tools in current trusted client; zero with ignored user trust | OPEN | PASS, exact 20 enabled tools, disabled pair absent |
+| Lean MCP diagnostics returned | PASS for Jaune `ae1b7d5` and post-Proxy Blanc `18ca2b4` in current trusted client | OPEN | PASS, 0 messages on Blanc `ForwardMstore8.lean` at `a3d23af`, approval-isolated |
+| Jaune ordinary read succeeded | PASS | OPEN | OPEN headless control (interactive reads proven) |
+| Blanc ordinary read succeeded | PASS | OPEN | OPEN headless control (interactive reads proven) |
+| Representative sibling edit | FAILED SAFELY under hard host pressure; no acceptance claimed | OPEN | OPEN (not attempted; setup-only session) |
+| Wrong-root control omitted Creme discovery | synthetic PASS; live client matrix OPEN | OPEN | OPEN |
+| Synthetic access-without-discovery control passed | PASS | PASS static fixture only | OPEN |
+| Trust and approvals explicitly recorded | OPEN; ignored-user-config plus an invocation-only trust override still exposed zero MCP tools | OPEN | PASS: trust user-config; first MCP tool call requests human approval (allow once/session/abort); no standing selective rule; headless parks without `--disable-approval` |
 
 Task identifiers, the two Codex configuration controls, and the later direct
 MCP task are recorded in `acceptance/self-hosting.md`. This table is

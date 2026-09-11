@@ -59,15 +59,23 @@ model, and re-dispatch the remainder to smaller workers.
 Use the client-visible model name, not a redundant API-family prefix or suffix
 that the user does not select. As reconciled on 2026-08-31, this workflow's
 Codex choices are **Sol**, **Terra**, and **Luna**; its Claude Code choices are
-**Fable** and **Opus**. Recheck those names at launch rather than treating this
-snapshot as a permanent product catalogue.
+**Fable** and **Opus**; its Muse choice, reconciled 2026-09-11, is
+**muse-spark**, selected at launch with `--model`. Recheck those names at
+launch rather than treating this snapshot as a permanent product catalogue.
 
 Two tiers matter for dispatch, whatever a client calls them:
 
-| tier | what it is for | Codex today | Claude Code today |
-|---|---|---|---|
-| the standard model | the balanced everyday worker and reviewer: bounded engineering, gate runs, document authoring, routine proof repair | Terra, with Luna for efficient bounded work whose route and falsifier are already clear | Opus |
-| the frontier model | the hardest quality-first judgment that cannot be packetized | Sol | Fable |
+| tier | what it is for | Codex today | Claude Code today | Muse today |
+|---|---|---|---|---|
+| the standard model | the balanced everyday worker and reviewer: bounded engineering, gate runs, document authoring, routine proof repair | Terra, with Luna for efficient bounded work whose route and falsifier are already clear | Opus | muse-spark at the session's effort |
+| the frontier model | the hardest quality-first judgment that cannot be packetized | Sol | Fable | muse-spark at ceiling effort (no second family observed) |
+
+A Muse worker inherits its master's model and effort route; the client offers
+no per-worker model or effort selector. Size a Muse worker by launching (or
+relaunching) the session at the route its hardest brief needs, record that
+session route in the board and the state brief instead of a per-worker
+selection, and get model diversity from a session running a different route
+rather than from a dispatch flag.
 
 **The default is the standard model.** A Claude session strongly prefers Opus
 workers and escalates to Fable only when the added power is clearly necessary
@@ -76,7 +84,9 @@ walked within Opus; a Fable dispatch is justified in one line in the master
 log. This is a cost-of-power rule, not a capability ranking: do not claim a
 fixed Fable-versus-Opus ordering without a current representative comparison,
 and do not read the default as a reason to under-size a genuinely frontier
-judgment.
+judgment. A Muse session has no per-worker choice to prefer: its workers
+inherit its route, so the session itself is launched at the effort its hardest
+brief needs.
 
 Model diversity is a separate reason to choose a model. An independent review
 of work produced by one model is more useful from another, and the audit and
@@ -84,18 +94,23 @@ reviewer roles should be dispatched accordingly.
 
 ## The six-selector model
 
-Codex and Claude Code currently expose six user-visible selector positions.
+Codex, Claude Code, and Muse currently expose six user-visible selector positions.
 The first five form the intelligence ladder. The sixth is an orchestration
 mode, not a higher intelligence effort:
 
-| Position | Codex label | Claude Code label | Use |
-|---|---|---|---|
-| 1 | Light | `low` | Fast bounded work: inventories, direct edits, routine checks, and other tasks with a short falsifiable route. |
-| 2 | Medium | `medium` | Ordinary multi-step implementation with clear semantics and modest ambiguity. |
-| 3 | High | `high` | Complex implementation or proof repair along a known architecture; latency is secondary to reliability. |
-| 4 | Extra High | `xhigh` / extra | Hard architecture, proof strategy, integration, or ambiguous diagnosis that benefits from sustained reasoning. |
-| 5 | Max | `max` | The intelligence ceiling: the hardest quality-first, non-delegable reasoning chains. Compare against position 4; more effort can add latency or overthinking without a measured gain. |
-| orchestration | Ultra: Max reasoning with automatic task delegation | `ultracode` / Ultra: automatic multi-agent orchestration; recheck its effective lead effort at launch | Choose an orchestration mode when automatic decomposition across genuinely independent workstreams is itself desired. Do not infer one client's exact lead-reasoning semantics from the other's label. |
+| Position | Codex label | Claude Code label | Muse label | Use |
+|---|---|---|---|---|
+| 1 | Light | `low` | `low` | Fast bounded work: inventories, direct edits, routine checks, and other tasks with a short falsifiable route. |
+| 2 | Medium | `medium` | `medium` | Ordinary multi-step implementation with clear semantics and modest ambiguity. |
+| 3 | High | `high` | `high` | Complex implementation or proof repair along a known architecture; latency is secondary to reliability. |
+| 4 | Extra High | `xhigh` / extra | `xhigh` | Hard architecture, proof strategy, integration, or ambiguous diagnosis that benefits from sustained reasoning. |
+| 5 | Max | `max` | `max` | The intelligence ceiling: the hardest quality-first, non-delegable reasoning chains. Compare against position 4; more effort can add latency or overthinking without a measured gain. |
+| orchestration | Ultra: Max reasoning with automatic task delegation | `ultracode` / Ultra: automatic multi-agent orchestration; recheck its effective lead effort at launch | `ultra`; recheck its exact orchestration semantics at launch | Choose an orchestration mode when automatic decomposition across genuinely independent workstreams is itself desired. Do not infer one client's exact lead-reasoning semantics from the other's label. |
+
+Muse also accepts `minimal` and `none` below position 1 for trivial bounded
+calls, and its launch default is `high`. Its effort flag is
+`--reasoning-effort`; it applies to the whole session, which its workers
+inherit.
 
 Current OpenAI model guidance describes Codex Max as maximum reasoning for one
 task and Codex Ultra as maximum reasoning with automatic task delegation. The

@@ -372,6 +372,12 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertIn("Muse is **experimental and not a v0.1 acceptance-supported client**", discovery)
         self.assertIn("| Muse |", discovery)
         self.assertIn("muse-bin-", discovery)
+        self.assertIn("setup.md#muse-sessions", discovery)
+        acceptance = (ROOT / "acceptance/client-discovery.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("## Muse positive control", acceptance)
+        self.assertIn("| Muse |", acceptance)
 
     def test_first_machine_setup_is_public_and_self_contained(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -408,6 +414,9 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertIn("project whose primary folder is Jaune or Blanc", setup)
         self.assertIn("public-only acceptance run", setup)
         self.assertIn("Plans is not the method authority", setup)
+        self.assertIn("muse --version", setup)
+        self.assertIn("### Muse sessions", setup)
+        self.assertIn("CREME_MASTER_SESSION_ID=$(uuidgen) muse --disable-sandbox", setup)
         self.assertNotIn("~/elanc", setup)
         self.assertNotIn("/" + "Users" + "/", setup)
         self.assertNotRegex(setup, r"/home/[^/]+/")
@@ -431,7 +440,7 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertNotIn(
             "Extra-High-class lead reasoning plus automatic", guide
         )
-        for model in ("Sol", "Terra", "Luna", "Fable", "Opus"):
+        for model in ("Sol", "Terra", "Luna", "Fable", "Opus", "muse-spark"):
             self.assertIn(model, guide)
         for selector in (
             "Light",

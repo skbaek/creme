@@ -44,11 +44,12 @@ elan --version
 uvx --version
 codex --version
 claude --version
+muse --version
 ```
 
 Missing optional commands may print `command not found`; record that rather
 than treating the inventory itself as a failure. Only one supported agent
-client, Codex or Claude Code, is required.
+client, Codex, Claude Code, or Muse, is required.
 
 The base system packages are Git, curl, CA certificates, Python 3.9 or newer,
 and a C/C++ build toolchain. On macOS, install Apple's Command Line Tools if
@@ -112,6 +113,13 @@ Its recommended native installer for macOS and Linux is:
 curl -fsSL https://claude.ai/install.sh | bash
 claude --version
 claude doctor
+```
+
+For Muse, install the client per its vendor documentation, then verify:
+
+```sh
+muse --version
+muse skills list --source project --workspace ~/creme --trust-workspace
 ```
 
 Remote installers must be reviewed and approved under the safety boundary
@@ -330,7 +338,55 @@ when prompted, and review the pinned `lean-lsp-mcp` project server before
 approving it. The relative sibling access in `.claude/settings.json` does not
 copy or trust user-global state.
 
-For either client, always launch from `~/creme`. Launching from `~/jaune`,
+### Muse sessions
+
+Muse users launch from `~/creme` with the sandbox disabled so the session can
+reach the sibling checkouts (there is no committed permission-profile surface
+for muse; named profiles are managed configuration):
+
+```sh
+cd ~/creme
+CREME_MASTER_SESSION_ID=$(uuidgen) muse --disable-sandbox
+```
+
+Set `CREME_MASTER_SESSION_ID` from a fresh UUID for every master session; it
+is the neutral lease identity muse has no native equivalent for. Muse reads
+`AGENTS.md` as project rules and `.agents/skills` as project skills with no
+further configuration, and warns that root `CLAUDE.md` is shadowed by
+`AGENTS.md` (that shim stays for Claude Code).
+
+Muse loads no committed MCP shim. Its `lean-lsp-mcp` entry lives in the
+user-global settings file as a stdio server with the same guarded launcher,
+pin, and environment as `.mcp.json`:
+
+```json
+"mcpServers": {
+  "lean-lsp-mcp": {
+    "transport": "stdio",
+    "command": "/usr/bin/python3",
+    "args": ["-m", "creme", "lean-mcp", "--", "uvx", "lean-lsp-mcp==0.26.1"],
+    "env": {
+      "LEAN_LOG_LEVEL": "INFO",
+      "LEAN_MCP_DISABLED_TOOLS": "lean_build,lean_profile_proof",
+      "LEAN_LSP_MAX_OPEN_FILES": "2",
+      "LEAN_LSP_TEST_MODE": "1"
+    },
+    "enabled": true,
+    "mode": "required"
+  }
+}
+```
+
+Copy the `env` block exactly from `.mcp.json`, including
+`LEAN_MCP_TOOL_DESCRIPTIONS`. A new muse process reads the file at startup;
+verify with `python3 -m creme doctor` (the Muse global MCP check) and a fresh
+`muse exec` probe that lists the Lean tools before relying on it. The first
+call of each MCP tool requests human approval with allow-once and
+allow-for-session choices; record observed prompts per the escalation guide
+rather than pre-approving them, and use `--disable-approval` only to isolate
+approval out of a headless probe, recorded as such.
+
+For every client, always launch from `~/creme`. Launching from `~/jaune`,
 `~/blanc`, or a projectless directory does not select Creme's instructions,
 skills, or MCP configuration. See [client discovery and trust](client-discovery.md)
 for the complete contract.
@@ -436,6 +492,12 @@ After both builds pass, launch the selected client from `~/creme` and confirm:
    grants it.
 5. A small representative diagnostic or edit in a disposable branch/worktree
    succeeds without starting an unplanned whole-repository rebuild.
+
+For Muse, step 3 means the user-global `mcpServers` entry from the Muse
+sessions section above, read by a fresh process: confirm the exact 20 enabled
+tools (no `lean_build`, no `lean_profile_proof`) with `muse exec` before
+relying on it. Step 4 for Muse is governed by its CLI sandbox flags rather
+than a committed profile.
 
 Treat a large unexpected rebuild or severe memory pressure as a diagnostic
 failure: stop the exact client-owned process group, preserve evidence, and

@@ -355,6 +355,30 @@ is the neutral lease identity muse has no native equivalent for. Muse reads
 further configuration, and warns that root `CLAUDE.md` is shadowed by
 `AGENTS.md` (that shim stays for Claude Code).
 
+Muse has no saved equivalent for the sandbox flag, so keep the launch line in
+a shell function. Fish (`~/.config/fish/conf.d/musec.fish`):
+
+```fish
+function musec --description 'Muse master session from ~/creme'
+    cd ~/creme; or return 1
+    CREME_MASTER_SESSION_ID=(uuidgen) muse --disable-sandbox $argv
+end
+```
+
+POSIX `sh` (`~/.profile` or equivalent):
+
+```sh
+musec() {
+    cd ~/creme || return 1
+    CREME_MASTER_SESSION_ID=$(uuidgen) muse --disable-sandbox "$@"
+}
+```
+
+Extra arguments forward to muse, so `musec --reasoning-effort max` selects a
+route. Approval choices and `/permission` edits stay session-scoped; `muse
+resume` continues a session journal with its approvals, while a fresh `musec`
+launch starts from defaults.
+
 Muse loads no committed MCP shim. Its `lean-lsp-mcp` entry lives in the
 user-global settings file as a stdio server with the same guarded launcher,
 pin, and environment as `.mcp.json`:

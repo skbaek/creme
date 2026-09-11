@@ -417,6 +417,8 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertIn("muse --version", setup)
         self.assertIn("### Muse sessions", setup)
         self.assertIn("CREME_MASTER_SESSION_ID=$(uuidgen) muse --disable-sandbox", setup)
+        self.assertIn("function musec", setup)
+        self.assertIn("musec() {", setup)
         self.assertNotIn("~/elanc", setup)
         self.assertNotIn("/" + "Users" + "/", setup)
         self.assertNotRegex(setup, r"/home/[^/]+/")

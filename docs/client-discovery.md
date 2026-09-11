@@ -11,13 +11,13 @@ sources when changing this surface or upgrading a client.
 
 ## Supported public surface
 
-| Concern | Codex | Claude Code | Antigravity |
-| --- | --- | --- | --- |
-| Root instructions | `AGENTS.md` | `CLAUDE.md` imports `@AGENTS.md` | `AGENTS.md` |
-| Project skills | `.agents/skills/<name>/SKILL.md` | `.claude/skills/<name>` points to the matching `.agents/skills/<name>` directory | `.agents/skills/<name>/SKILL.md` |
-| Lean MCP | `.codex/config.toml` | `.mcp.json` | `.agents/mcp_config.json` |
-| Sibling access | Generated machine-local permission profile | `.claude/settings.json` relative `permissions.additionalDirectories` | Not acceptance-supported yet |
-| Trust | User accepts Creme as a trusted project; trust state is never committed | User accepts workspace trust and the pinned project MCP server | Not acceptance-supported yet |
+| Concern | Codex | Claude Code | Antigravity | Muse |
+| --- | --- | --- | --- | --- |
+| Root instructions | `AGENTS.md` | `CLAUDE.md` imports `@AGENTS.md` | `AGENTS.md` | `AGENTS.md` |
+| Project skills | `.agents/skills/<name>/SKILL.md` | `.claude/skills/<name>` points to the matching `.agents/skills/<name>` directory | `.agents/skills/<name>/SKILL.md` | `.agents/skills/<name>/SKILL.md` |
+| Lean MCP | `.codex/config.toml` | `.mcp.json` | `.agents/mcp_config.json` | User-global `settings.json` `mcpServers` entry (shape unverified) |
+| Sibling access | Generated machine-local permission profile | `.claude/settings.json` relative `permissions.additionalDirectories` | Not acceptance-supported yet | CLI sandbox flags; no committed profile surface |
+| Trust | User accepts Creme as a trusted project; trust state is never committed | User accepts workspace trust and the pinned project MCP server | Not acceptance-supported yet | User trust action; trust state is never committed |
 
 The public files contain relative paths and reviewed version pins only. They do
 not contain credentials, approval databases, copied trust state, absolute home
@@ -201,10 +201,48 @@ Official evidence:
 - [Antigravity GCLI migration guide](https://www.antigravity.google/docs/cli/gcli-migration/)
 - [Antigravity MCP](https://antigravity.google/docs/mcp)
 
+## Muse disposition
+
+Muse is **experimental and not a v0.1 acceptance-supported client**. The notes
+below were checked against the installed client (`muse-bin-1.1.1`) by observed
+behavior in a Creme-root session on 2026-09-11, not against official
+documentation, and the Lean MCP leg is still unverified.
+
+Demonstrated:
+
+- Root instructions: `AGENTS.md` loads as project rules. `muse init` scaffolds
+  that file and names it the project-rules surface.
+- Project skills: `.agents/skills/<name>/SKILL.md` resolves as project skills;
+  `muse skills list --source project` shows both Lean skills active.
+- Master lease: `master-acquire --client muse` with a `CREME_MASTER_SESSION_ID`
+  identity acquires, renews, heartbeats, and records master events.
+- Process attribution: the session runs as `muse-bin-<version>`, a
+  per-invocation child of the launching shell (the `muse` launcher script
+  execs into it), attributed as a task-scoped client pid like Claude Code.
+
+Not demonstrated:
+
+- Lean MCP: muse loads none of the committed project shims (`.mcp.json`,
+  `.agents/mcp_config.json`, `.codex/config.toml` are all inert here — a
+  session started with all three present exposes no Lean tools). The client
+  supports user-global `mcpServers` entries including a stdio shape, but the
+  exact entry keys are unverified, so there is no reviewed shim and no doctor
+  check. A Lean proof worker under muse needs that entry added by the user
+  and a client restart first.
+- Sibling access beyond CLI flags: the demonstrated session runs `muse
+  --disable-sandbox` from `~/creme`. There is no committed permission-profile
+  surface for muse.
+- Host capability delegates: the generated bundle is Codex-scoped.
+
+Muse exports no stable session identifier of its own, so master identity is
+the neutral `CREME_MASTER_SESSION_ID` the launcher is started with. The
+task-scoped pid reading held with a single session on the host; re-verify it
+if concurrent muse sessions ever share one process.
+
 ## Known limitations
 
 - Static tests validate public file shape and the negative-control harness;
-  they do not execute Codex, Claude Code, Antigravity, or the Lean MCP server.
+  they do not execute Codex, Claude Code, Antigravity, Muse, or the Lean MCP server.
 - Trust and MCP approval are intentional user actions and cannot be proven by
   committed configuration.
 - Codex permission-profile syntax is beta and must be checked against the

@@ -218,7 +218,7 @@ a time. To replace the master, wind it down or close its tab, then open a new
 session from `~/creme` with whichever client. Auditor sessions are launched
 from outside `~/creme` and never run this protocol.
 
-The launch shape is client-specific — `claude` from `~/creme`, or the Codex
+The launch shape is client-specific — `claude` or `muse` from `~/creme`, or the Codex
 project whose primary folder is Creme — and is documented in
 [client discovery](../client-discovery.md). The protocol above is not.
 

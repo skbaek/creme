@@ -2222,6 +2222,14 @@ class MasterLeaseTest(unittest.TestCase):
         self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (20, "codex"))
         adapter.processes[3]["command"] = "antigravity"
         self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (20, "antigravity"))
+        adapter.processes[3]["command"] = "muse"
+        self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (20, "muse"))
+        adapter.processes[3]["command"] = "muse-bin-1.1.1-R2514.1"
+        self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (20, "muse"))
+        # A longer name that merely contains the substring is not the client.
+        adapter.processes[3]["command"] = "amuse"
+        adapter.processes[1]["command"] = "bash"
+        self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (None, None))
         adapter.processes[3]["command"] = "python3"
         adapter.processes[1]["command"] = "bash"
         self.assertEqual(semaphore._client_process(adapter, start_pid=30)[:2], (None, None))

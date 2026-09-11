@@ -1112,7 +1112,7 @@ def parser() -> argparse.ArgumentParser:
     )
     master_acquire.add_argument(
         "--client",
-        help="claude, codex, or human; detected from the process ancestry when omitted",
+        help="claude, codex, muse, or human; detected from the process ancestry when omitted",
     )
     master_acquire.add_argument("--note", required=True)
     master_acquire.add_argument("--lease", type=int, default=semaphore.MASTER_LEASE_SECONDS)

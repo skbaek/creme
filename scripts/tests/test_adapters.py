@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from creme import idle_workers, semaphore
 from creme.adapters import get_adapter
 from creme.adapters.base import Adapter
 from creme.adapters.darwin import DarwinAdapter
@@ -32,6 +33,108 @@ class AdapterTest(unittest.TestCase):
         self.assertIsInstance(get_adapter("Darwin"), DarwinAdapter)
         self.assertIsInstance(get_adapter("Linux"), LinuxAdapter)
         self.assertEqual(get_adapter("Plan9").system, "Plan9")
+
+    def test_client_patterns_recognize_the_muse_session_binary(self):
+        observed = (
+            "/Users/agent/.local/bin/muse-bin-1.1.1-R2514.1",
+            "/Users/agent/.local/bin/muse-bin-1.1.1-R2514.1 --disable-sandbox",
+            "/Users/agent/.local/bin/muse",
+            "/Users/agent/.local/bin/muse --disable-sandbox",
+        )
+        for adapter in (DarwinAdapter(), LinuxAdapter()):
+            with self.subTest(system=adapter.system):
+                for command in observed:
+                    self.assertIsNotNone(
+                        adapter.client_pattern.search(command), command
+                    )
+                    self.assertEqual(
+                        semaphore._client_family(command, adapter.client_pattern),
+                        "muse",
+                        command,
+                    )
+
+    def test_client_patterns_reject_muse_lookalikes(self):
+        lookalikes = (
+            "/usr/bin/amuse",
+            "/opt/muse/bin/python",
+            "/Users/agent/.local/bin/museum",
+        )
+        for adapter in (DarwinAdapter(), LinuxAdapter()):
+            with self.subTest(system=adapter.system):
+                for command in lookalikes:
+                    self.assertIsNone(
+                        adapter.client_pattern.search(command), command
+                    )
+                    self.assertIsNone(
+                        semaphore._client_family(command, adapter.client_pattern),
+                        command,
+                    )
+
+    def test_client_family_names_versioned_muse_basenames(self):
+        # Snapshots store basenames, so the versioned binary resolves through
+        # the fallback rather than the path-shaped pattern.
+        for adapter in (DarwinAdapter(), LinuxAdapter()):
+            with self.subTest(system=adapter.system):
+                self.assertEqual(
+                    semaphore._client_family(
+                        "muse-bin-1.1.1-R2514.1", adapter.client_pattern
+                    ),
+                    "muse",
+                )
+                self.assertEqual(
+                    semaphore._client_family("muse", adapter.client_pattern), "muse"
+                )
+
+    def test_idle_owner_names_a_muse_ancestor(self):
+        worker = {
+            "pid": 999401,
+            "ppid": 47896,
+            "ancestry": [{
+                "pid": 47896,
+                "command": "/Users/agent/.local/bin/muse-bin-1.1.1-R2514.1 --disable-sandbox",
+            }],
+        }
+        for adapter in (DarwinAdapter(), LinuxAdapter()):
+            with self.subTest(system=adapter.system):
+                self.assertEqual(
+                    idle_workers.owner_label(worker, {}, adapter.client_pattern),
+                    "client muse pid 47896",
+                )
+
+    @mock.patch("creme.adapters.darwin.DarwinAdapter.memory_headroom")
+    @mock.patch("creme.adapters.darwin.DarwinAdapter._run")
+    def test_darwin_telemetry_attributes_muse_rss(self, run, headroom):
+        adapter = DarwinAdapter()
+        headroom.return_value = adapter.result(
+            "memory_headroom", "OK", "fixture", {"memory_free_percent": 80}
+        )
+        run.return_value = subprocess.CompletedProcess(
+            ["ps"], 0, stdout=(
+                "    1     0  32880 /sbin/launchd\n"
+                "47896 83263 203120 /Users/agent/.local/bin/muse-bin-1.1.1-R2514.1\n"
+            ),
+        )
+        result = adapter.telemetry()
+        self.assertEqual(result.status, "OK")
+        families = result.data["client_family_rss_kib"]
+        self.assertEqual(families["muse"], 203120)
+        self.assertEqual(families["total"], 203120)
+
+    @mock.patch("creme.adapters.linux.LinuxAdapter.memory_headroom")
+    @mock.patch("creme.adapters.linux.subprocess.run")
+    def test_linux_telemetry_attributes_truncated_muse_comm(self, run, headroom):
+        adapter = LinuxAdapter()
+        headroom.return_value = adapter.result(
+            "memory_headroom", "OK", "fixture", {"memory_free_percent": 80}
+        )
+        run.return_value = subprocess.CompletedProcess(
+            ["ps"], 0, stdout="47896 83263 203120 Ssl muse-bin-1.1.1-R251\n"
+        )
+        result = adapter.telemetry()
+        self.assertEqual(result.status, "OK")
+        families = result.data["client_family_rss_kib"]
+        self.assertEqual(families["muse"], 203120)
+        self.assertEqual(families["total"], 203120)
 
     def test_native_platform_keys_normalize_os_architecture_aliases(self):
         darwin = DarwinAdapter().platform_identity("aarch64")

@@ -2349,7 +2349,7 @@ def _client_process(
     """Find the agent client above this invocation: ``(pid, family, detail)``.
 
     The launcher's own pid dies with the command, so the lease records the
-    client process — the Claude Code or Codex session — found by walking the
+    client process — the agent session above the launcher — found by walking the
     process table upwards from the launcher's parent.  A snapshot the sandbox
     denies leaves the client unknown; the lease then degrades toward
     take-over once its window passes, never toward two masters.
@@ -2391,7 +2391,7 @@ def _client_family(command: str, pattern: Any) -> Optional[str]:
     if not matched:
         first = command.split(None, 1)[0] if command.strip() else ""
         matched = os.path.basename(first).lower()
-        if matched not in {"claude", "codex", "chatgpt", "antigravity"}:
+        if matched not in {"claude", "codex", "chatgpt", "antigravity", "muse"} and not matched.startswith("muse-bin-"):
             return None
     if "claude" in matched:
         return "claude"
@@ -2399,6 +2399,8 @@ def _client_family(command: str, pattern: Any) -> Optional[str]:
         return "codex"
     if "antigravity" in matched:
         return "antigravity"
+    if "muse" in matched:
+        return "muse"
     return "agent"
 
 
@@ -2643,7 +2645,7 @@ def master_acquire(
     if client is None or CLIENT_LABEL.fullmatch(client) is None:
         return False, (
             f"the agent client could not be identified ({found}); "
-            "pass --client claude, codex, antigravity, or human"
+            "pass --client claude, codex, muse, antigravity, or human"
         )
     with locked_state() as (path, _state):
         root = path.parent

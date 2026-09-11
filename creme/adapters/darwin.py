@@ -26,7 +26,7 @@ class DarwinAdapter(NativeAdapter):
         "human_gui_sessions", "memory_pressure", "apfs_clone", "lean_reclaim",
     )
     client_pattern = re.compile(
-        r"(?:/Applications/(?:ChatGPT|Codex|Claude|Antigravity)\.app/|/(?:codex|claude|antigravity)$|claude\.app/)",
+        r"(?:/Applications/(?:ChatGPT|Codex|Claude|Antigravity)\.app/|/(?:codex|claude|antigravity)$|claude\.app/|/muse-bin-[^/\s]+|/muse(?=\s|$))",
         re.IGNORECASE,
     )
 
@@ -132,7 +132,7 @@ class DarwinAdapter(NativeAdapter):
             return self.result("telemetry", "UNAVAILABLE", str(exc))
         if processes.returncode:
             return self.result("telemetry", "UNAVAILABLE", "Darwin process snapshot failed")
-        clients = {"codex": 0, "claude": 0}
+        clients = {"codex": 0, "claude": 0, "muse": 0}
         lean = []
         largest = []
         for line in processes.stdout.splitlines():
@@ -148,6 +148,8 @@ class DarwinAdapter(NativeAdapter):
                 clients["codex"] += rss
             elif "Claude.app" in command or command.endswith("/claude"):
                 clients["claude"] += rss
+            elif Path(command).name == "muse" or Path(command).name.startswith("muse-bin-"):
+                clients["muse"] += rss
             if command.endswith("/lean") or command.endswith("/lake") or "lean-lsp-mcp" in command:
                 lean.append({"pid": int(pid), "ppid": int(ppid), "rss_kib": rss, "command": Path(command).name})
             largest.append({"pid": int(pid), "ppid": int(ppid), "rss_kib": rss, "command": Path(command).name})

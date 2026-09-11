@@ -24,7 +24,7 @@ class LinuxAdapter(NativeAdapter):
     system = "Linux"
     optional_capabilities = ("reflink_copy", "lean_reclaim")
     client_pattern = re.compile(
-        r"^(?:\S*/)?(?:ChatGPT|codex|claude|antigravity|codex-code-mode-host|codex-linux-sandbox)(?:\s|$)",
+        r"^(?:\S*/)?(?:ChatGPT|codex|claude|antigravity|muse(?:-bin-[\w.+-]+)?|codex-code-mode-host|codex-linux-sandbox)(?:\s|$)",
         re.IGNORECASE,
     )
 
@@ -126,7 +126,7 @@ class LinuxAdapter(NativeAdapter):
             return self.result("telemetry", "UNAVAILABLE", str(exc))
         if processes.returncode:
             return self.result("telemetry", "UNAVAILABLE", "ps failed")
-        clients = {"codex": 0, "claude": 0}
+        clients = {"codex": 0, "claude": 0, "muse": 0}
         lean = []
         largest = []
         for line in processes.stdout.splitlines():
@@ -145,6 +145,8 @@ class LinuxAdapter(NativeAdapter):
                 clients["codex"] += rss
             elif base == "claude":
                 clients["claude"] += rss
+            elif base == "muse" or base.startswith("muse-bin-"):
+                clients["muse"] += rss
             if base in {"lean", "lake"} or "lean-lsp-mcp" in command:
                 lean.append({"pid": int(pid), "ppid": int(ppid), "rss_kib": rss, "command": base})
             largest.append({"pid": int(pid), "ppid": int(ppid), "rss_kib": rss, "command": base})

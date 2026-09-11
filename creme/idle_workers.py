@@ -138,7 +138,7 @@ def owner_label(
             # path can contain spaces, so the first token is not its name.
             matched = match.group(0).lower()
             family = next(
-                (name for name in ("codex", "chatgpt", "claude") if name in matched),
+                (name for name in ("codex", "chatgpt", "claude", "muse") if name in matched),
                 "agent",
             )
             return f"client {family} pid {ancestor['pid']}"

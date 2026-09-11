@@ -366,6 +366,13 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertIn("experimental and not a v0.1 acceptance-supported client", discovery)
         self.assertIn("retained experimental compatibility", acceptance)
 
+    def test_muse_is_documented_but_not_acceptance_supported(self) -> None:
+        discovery = (ROOT / "docs/client-discovery.md").read_text(encoding="utf-8")
+        self.assertIn("## Muse disposition", discovery)
+        self.assertIn("Muse is **experimental and not a v0.1 acceptance-supported client**", discovery)
+        self.assertIn("| Muse |", discovery)
+        self.assertIn("muse-bin-", discovery)
+
     def test_first_machine_setup_is_public_and_self_contained(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         setup = (ROOT / "docs/setup.md").read_text(encoding="utf-8")

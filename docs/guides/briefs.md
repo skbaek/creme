@@ -24,6 +24,23 @@ A brief is not a substitute for a goal document when the work fixes product
 semantics. If writing the brief requires inventing an answer the user has not
 given, write or amend a goal instead.
 
+### Name the hold the gates themselves take
+
+A brief that names a gate must also say whether the worker may hold the
+semaphore *around* it. A repository's gate runner may take its own inner hold,
+and an outer hold the master or worker took under a different label does not
+satisfy it: admission is keyed on exact label equality, so the inner request
+arrives as a distinct competitor and is refused. The gate runner then reports a
+prerequisite failure having verified nothing, and a long host-exclusive slot is
+spent at row zero.
+
+State in the brief which of these applies — that the worker takes no outer hold
+and lets the runner coordinate itself, that the outer hold uses the label the
+runner will ask for, or that the runner is told to inherit the caller's hold
+through whatever mechanism the repository provides. Read the owning
+repository's `scripts/GATES.md` for which label its runner derives and which
+mechanism it offers; the guide does not restate a repository's catalogue.
+
 ## Sizing a worker
 
 Choose each worker's model and effort for the **hardest non-delegable judgment**

@@ -682,7 +682,8 @@ class QueueTest(unittest.TestCase):
             poll_seconds=poll,
         )
 
-    def seed_waiter(self, label, *, pid, memory_gib=2, contention="tolerant", age=10.0):
+    def seed_waiter(self, label, *, pid, memory_gib=2, contention="tolerant", age=10.0,
+                    estimate_source=None):
         queue = semaphore._load_queue(self.root)[0]
         now = semaphore._now()
         queue["waiters"].append({
@@ -692,6 +693,7 @@ class QueueTest(unittest.TestCase):
             "uid": os.getuid(),
             "contention": contention,
             "memory_gib": memory_gib,
+            "estimate_source": estimate_source,
             "enqueued_at": now - age,
             "heartbeat_at": now,
         })
@@ -787,7 +789,8 @@ class QueueTest(unittest.TestCase):
         started = time.monotonic()
         ok, detail = self.wait_acquire("enormous", seconds=30, memory_gib=30)
         self.assertFalse(ok)
-        self.assertIn("heavy-work budget", detail)
+        self.assertIn("NEVER_FITS", detail)
+        self.assertIn("largest fitting estimate is 14 GiB", detail)
         self.assertLess(time.monotonic() - started, 5)
 
     def test_a_ten_minute_wait_adds_two_log_rows(self):
@@ -2516,3 +2519,146 @@ class MasterLeaseTest(unittest.TestCase):
         self.assertTrue(ok, detail)
         self.assertEqual(naps, [60])
         self.assertEqual(self.log_actions().count("master-renew"), 2)
+
+
+class NeverFitsAdmissionTest(unittest.TestCase):
+    """Asks no host state can satisfy fail fast instead of starving on waitable
+    LIGHT_ONLY. Regression test for the 24GB-host starvation: estimate 13 needs
+    ~22.3 GiB free, but the host's tranquil maximum is ~19.4."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.adapter = HeadroomAdapter(free_percent=81, total_gib=24)
+        self.policy = {
+            "task_memory_gib": 2,
+            "heavy_workers": 4,
+            "light_workers": 4,
+            "physical_memory_gib": 24.0,
+            "profile_status": "VALID",
+        }
+        patcher = mock.patch.dict(os.environ, {"CREME_SEMAPHORE_DIR": self.tmp.name}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        adapter_patcher = mock.patch("creme.semaphore.get_adapter", return_value=self.adapter)
+        adapter_patcher.start()
+        self.addCleanup(adapter_patcher.stop)
+        policy_patcher = mock.patch(
+            "creme.semaphore._runtime_admission_policy",
+            return_value=self.policy,
+        )
+        policy_patcher.start()
+        self.addCleanup(policy_patcher.stop)
+
+    def test_impossible_ask_reports_never_fits(self):
+        semaphore.status_text()
+        ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=13)
+
+        self.assertFalse(ok, detail)
+        self.assertIn("NEVER_FITS", detail)
+        self.assertIn("split or reduce", detail)
+
+    def test_never_fits_names_largest_fitting_estimate(self):
+        semaphore.status_text()
+        ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=13)
+
+        self.assertFalse(ok, detail)
+        self.assertIn("10 GiB", detail)
+
+    def test_never_fits_is_not_waitable(self):
+        semaphore.status_text()
+        sample = self.adapter.memory_headroom()
+        decision = semaphore._admission_decision(
+            {"hard": None, "soft": []}, "adaptive", "goal", 13, "tolerant",
+            self.adapter, self.policy, sample, tranquil_max_gib=19.44,
+        )
+
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.verdict, "NEVER_FITS")
+        self.assertFalse(decision.waitable)
+
+    def test_stale_baseline_falls_back_to_transient_wait(self):
+        root = Path(self.tmp.name)
+        (root / "queue.json").write_text(json.dumps({
+            "schema_version": semaphore.QUEUE_SCHEMA_VERSION,
+            "waiters": [], "activity": {}, "workers": {},
+            "tranquil_max_gib": 19.44,
+            "tranquil_max_at": 1.0,
+        }), encoding="utf-8")
+        ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=13)
+
+        self.assertFalse(ok, detail)
+        self.assertIn("LIGHT_ONLY", detail)
+        self.assertNotIn("NEVER_FITS", detail)
+
+    def test_tranquil_baseline_ratchets_up_only(self):
+        semaphore.status_text()
+        first = json.loads((Path(self.tmp.name) / "queue.json").read_text())["tranquil_max_gib"]
+        self.adapter.free_percent = 50
+        semaphore.status_text()
+        second = json.loads((Path(self.tmp.name) / "queue.json").read_text())["tranquil_max_gib"]
+        self.adapter.free_percent = 90
+        semaphore.status_text()
+        third = json.loads((Path(self.tmp.name) / "queue.json").read_text())["tranquil_max_gib"]
+
+        self.assertAlmostEqual(first, 19.44)
+        self.assertAlmostEqual(second, 19.44)
+        self.assertAlmostEqual(third, 21.6)
+
+
+class MeasuredTierChargeTest(unittest.TestCase):
+    """The e1e8bb8 single margin prices measured builds; every other kind keeps
+    today's charge. Provenance comes from estimate_source."""
+
+    def test_kind_parsing(self):
+        self.assertEqual(
+            semaphore._estimate_kind("derived: measured stale set: 3 module(s) all measured"),
+            "measured",
+        )
+        self.assertEqual(semaphore._estimate_kind("derived: max of target rows"), "default")
+        self.assertEqual(semaphore._estimate_kind("derived: narrow default"), "default")
+        self.assertEqual(semaphore._estimate_kind("explicit --memory-gib"), "default")
+        self.assertEqual(semaphore._estimate_kind(None), "default")
+
+    def test_measured_charge_is_single_margin_unceiled(self):
+        self.assertAlmostEqual(semaphore._charged_memory_gib(9, "measured"), 11.7)
+        self.assertAlmostEqual(semaphore._charged_memory_gib(4, "measured"), 5.2)
+
+    def test_default_charge_unchanged(self):
+        self.assertEqual(semaphore._charged_memory_gib(9), 12)
+        self.assertEqual(semaphore._charged_memory_gib(9, None), 12)
+        self.assertEqual(semaphore._charged_memory_gib(9, "default"), 12)
+
+    def test_measured_tier_admits_where_uniform_refuses(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        adapter = HeadroomAdapter(free_percent=74.17, total_gib=24)
+        policy = {
+            "task_memory_gib": 2, "heavy_workers": 4, "light_workers": 4,
+            "physical_memory_gib": 24.0, "profile_status": "VALID",
+        }
+        with mock.patch.dict(os.environ, {"CREME_SEMAPHORE_DIR": tmp.name}, clear=False), \
+                mock.patch("creme.semaphore.get_adapter", return_value=adapter), \
+                mock.patch("creme.semaphore._runtime_admission_policy", return_value=policy):
+            ok, detail = semaphore.adaptive_acquire(
+                "goal", "measured build", memory_gib=9,
+                estimate_source="derived: measured stale set: 3 module(s) all measured",
+            )
+            self.assertTrue(ok, detail)
+            self.assertIn("ADMITTED", detail)
+            semaphore.adaptive_release("goal")
+            refused, detail = semaphore.adaptive_acquire("goal", "blind build", memory_gib=9)
+            self.assertFalse(refused, detail)
+            self.assertIn("LIGHT_ONLY", detail)
+
+    def test_legacy_waiter_without_source_stays_valid_and_uniform(self):
+        entry = {
+            "id": "abc123", "label": "goal", "pid": 100, "uid": 1000,
+            "contention": "tolerant", "memory_gib": 8,
+            "enqueued_at": 1000.0, "heartbeat_at": 1000.0,
+        }
+        self.assertTrue(semaphore._valid_waiter(entry))
+        with_source = dict(entry, estimate_source="derived: measured stale set: x")
+        self.assertTrue(semaphore._valid_waiter(with_source))
+        bad = dict(entry, estimate_source=123)
+        self.assertFalse(semaphore._valid_waiter(bad))

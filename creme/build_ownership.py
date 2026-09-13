@@ -2073,12 +2073,24 @@ def module_cost_evidence(
     breadth and the concurrency, not any one member.  ``module_seconds`` is
     kept from every row, broad or narrow, because elaboration time is the one
     signal a broad row does give about a single module.
+
+    A source-drifted narrow row still floors the module it names, but a
+    multi-module row's whole-build aggregate prices sibling breadth and
+    concurrency, so when the row recorded the module's own peak that direct
+    evidence is the floor for the row instead of the aggregate.  A
+    single-module row has no siblings: its aggregate stays the floor, as
+    does any narrow row without a recorded peak.  ``fallback_origin``
+    records, for each fallback module, which row and which kind of evidence
+    set its floor, so the estimate can name it.
     """
     narrow = int(settings["tolerant_module_count"])
     sample = int(settings["estimate_sample_rows"])
     peaks: dict[str, list[float]] = {}
     fallback_peaks: dict[str, list[float]] = {}
     fallback_build_peaks: dict[str, list[float]] = {}
+    fallback_origins: dict[str, list[str]] = {}
+    fallback_kinds: dict[str, list[str]] = {}
+    fallback_build_origins: dict[str, list[str]] = {}
     exact_seconds: dict[str, float] = {}
     fallback_seconds: dict[str, float] = {}
     overheads: list[float] = []
@@ -2102,21 +2114,36 @@ def module_cost_evidence(
         # not a measured current module.  Its direct module peak is still a
         # conservative lower bound if current evidence is absent.  It never
         # makes `unmeasured` disappear or relaxes the contention class.
+        row_time = str(row.get("time"))
         for module in rebuilt:
             # A source-drifted narrow measurement cannot prove the current
             # module cheap, but its complete process/Lake aggregate is still
             # a lower bound.  Keep this separately from the module's lean RSS
             # so changing a source does not drop known 7.32 GiB work to the
             # old 6.74 GiB lean-only signal.
-            if input_identity is not None and len(rebuilt) <= narrow:
-                fallback_build_peaks.setdefault(module, []).append(peak_gib)
+            #
+            # Sibling rule: a multi-module narrow row's aggregate prices the
+            # breadth and concurrency of its siblings, not any one member,
+            # so when the row recorded the module's own peak that direct
+            # evidence (kept in `fallback_peaks` below) is the conservative
+            # floor for this row — never the aggregate.  A single-module row
+            # has no siblings, so its aggregate stays the floor there, as
+            # does any narrow row without a recorded peak for the module.
             value = recorded.get(module) if isinstance(recorded, dict) else None
+            if input_identity is not None and len(rebuilt) <= narrow:
+                if len(rebuilt) == 1 or not _finite_positive(value):
+                    fallback_build_peaks.setdefault(module, []).append(peak_gib)
+                    fallback_build_origins.setdefault(module, []).append(row_time)
             if _finite_positive(value):
                 fallback_peaks.setdefault(module, []).append(float(value) / 1024.0)
+                fallback_origins.setdefault(module, []).append(row_time)
+                fallback_kinds.setdefault(module, []).append("module peak")
             elif len(rebuilt) <= narrow:
                 fallback_peaks.setdefault(module, []).append(
                     lean_gib if lean_gib is not None else peak_gib
                 )
+                fallback_origins.setdefault(module, []).append(row_time)
+                fallback_kinds.setdefault(module, []).append("narrow-row bound")
         if input_identity is not None and not _exact_context_row(row, input_identity):
             continue
         context_rows += 1
@@ -2136,6 +2163,39 @@ def module_cost_evidence(
             else:
                 continue
             peaks.setdefault(module, []).append(cost)
+    # Which row and which kind of evidence set each module's fallback floor:
+    # the sampled maximum across both fallback lists.  Ties prefer the more
+    # specific kind, then the earliest sampled row.
+    specificity = {"module peak": 0, "narrow-row bound": 1, "whole-build aggregate": 2}
+    fallback_origin: dict[str, dict[str, Any]] = {}
+    for module in set(fallback_peaks) | set(fallback_build_peaks):
+        if module in peaks:
+            continue
+        triples = [
+            *zip(
+                fallback_peaks.get(module, [])[-sample:],
+                fallback_kinds.get(module, [])[-sample:],
+                fallback_origins.get(module, [])[-sample:],
+            ),
+            *(
+                (value, "whole-build aggregate", time)
+                for value, time in zip(
+                    fallback_build_peaks.get(module, [])[-sample:],
+                    fallback_build_origins.get(module, [])[-sample:],
+                )
+            ),
+        ]
+        best: Optional[tuple[float, str, str]] = None
+        for gib, kind, time in triples:
+            if (
+                best is None or gib > best[0]
+                or (gib == best[0] and specificity[kind] < specificity[best[1]])
+            ):
+                best = (gib, kind, time)
+        if best is not None:
+            fallback_origin[module] = {
+                "peak_gib": best[0], "kind": best[1], "row_time": best[2],
+            }
     return {
         "lean_peak_gib": {
             module: max(values[-sample:]) for module, values in peaks.items()
@@ -2148,6 +2208,7 @@ def module_cost_evidence(
             module: max(values[-sample:]) for module, values in fallback_build_peaks.items()
             if module not in peaks
         },
+        "fallback_origin": fallback_origin,
         "seconds": {
             module: exact_seconds.get(module, fallback)
             for module, fallback in fallback_seconds.items()
@@ -2245,6 +2306,36 @@ def _covering_rows(
     return covering
 
 
+def _fallback_clause(
+    evidence: dict[str, Any],
+    fallback: dict[str, float],
+    fallback_build: dict[str, float],
+    fallback_floor: float,
+) -> str:
+    """Name the fallback module, peak, and row a fallback-driven ask comes from.
+
+    Callers append this when the fallback contribution alone set the ask, so
+    the `source` string — and the `fit:` line that quotes it — never prints
+    a bare default while asking for fallback-priced memory.
+    """
+    if not (fallback or fallback_build):
+        return ""
+    combined = {
+        name: max(fallback.get(name, 0.0), fallback_build.get(name, 0.0))
+        for name in set(fallback) | set(fallback_build)
+    }
+    winners = sorted(name for name, value in combined.items() if value == fallback_floor)
+    if not winners:
+        return ""
+    name = winners[0]
+    origin = evidence.get("fallback_origin", {}).get(name, {})
+    gib = origin.get("peak_gib", fallback_floor)
+    time = origin.get("row_time", "?")
+    kind = origin.get("kind", "fallback")
+    extra = f" (+{len(winners) - 1} more)" if len(winners) > 1 else ""
+    return f"; fallback prices {name} at {gib:.2f} GiB from row {time} ({kind}){extra}"
+
+
 def size_stale_set(
     stale: list[str],
     graph: Optional[dict[str, set[str]]],
@@ -2263,7 +2354,8 @@ def size_stale_set(
     rebuild takes the profile default, because that member is a heavy one
     whose cost is simply not yet recorded on its own; a large set is bounded
     by the tightest broader rebuild that included its members, and by the
-    profile default when none did.
+    profile default when none did.  When a drifted row's fallback peak alone
+    sets the ask, the source names the module, peak, and row it came from.
     """
     floor = int(settings["minimum_estimate_gib"])
     margin = int(settings["estimate_margin_gib"])
@@ -2283,6 +2375,8 @@ def size_stale_set(
         for name in unmeasured if name in evidence["fallback_build_peak_gib"]
     }
     fallback_floor = max([*fallback.values(), *fallback_build.values()], default=0.0)
+    has_fallback = bool(fallback or fallback_build)
+    fallback_term = math.ceil(fallback_floor) + margin if has_fallback else 0
     heavy = sorted(
         ((name, evidence["seconds"][name]) for name in unmeasured
          if evidence["seconds"].get(name, 0.0) >= heavy_seconds),
@@ -2329,10 +2423,14 @@ def size_stale_set(
     if measured:
         measured_peak, _width, _top = _model_peak(measured, graph, evidence)
     if len(names) <= limit and not heavy:
-        estimate = max(
+        base = max(
             floor, narrow_default,
             math.ceil(measured_peak) + margin if measured else 0,
-            math.ceil(fallback_floor) + margin if fallback or fallback_build else 0,
+        )
+        estimate = max(base, fallback_term)
+        clause = (
+            _fallback_clause(evidence, fallback, fallback_build, fallback_floor)
+            if has_fallback and fallback_term > base else ""
         )
         result.update({
             "kind": "narrow default",
@@ -2342,15 +2440,19 @@ def size_stale_set(
                 f"narrow default {narrow_default} GiB: {len(unmeasured)} of {len(names)} stale "
                 f"module(s) unmeasured ({listed(unmeasured)}) and none of them elaborated for "
                 f"{heavy_seconds:.0f}s or more in any measured rebuild"
-            ),
+            ) + clause,
         })
         return result
     if len(names) <= limit:
         name, seconds = heavy[0]
-        estimate = max(
+        base = max(
             floor, int(default_gib),
             math.ceil(measured_peak) + margin if measured else 0,
-            math.ceil(fallback_floor) + margin if fallback or fallback_build else 0,
+        )
+        estimate = max(base, fallback_term)
+        clause = (
+            _fallback_clause(evidence, fallback, fallback_build, fallback_floor)
+            if has_fallback and fallback_term > base else ""
         )
         result.update({
             "kind": "heavy module",
@@ -2360,7 +2462,7 @@ def size_stale_set(
                 f"profile default (heavy module): {name} elaborated for {seconds:.0f}s in a "
                 f"broad rebuild but has no measurement of its own; {len(unmeasured)} of "
                 f"{len(names)} stale module(s) unmeasured"
-            ),
+            ) + clause,
         })
         return result
     context_rows = (
@@ -2370,8 +2472,13 @@ def size_stale_set(
     covering = _covering_rows(context_rows, names, unmeasured, input_identity)
     if covering:
         tightest = min(covering, key=lambda row: float(row["peak_rss_mib"]))
-        peak = float(tightest["peak_rss_mib"]) / 1024.0
-        peak = max(peak, measured_peak, fallback_floor)
+        cover_peak = float(tightest["peak_rss_mib"]) / 1024.0
+        peak = max(cover_peak, measured_peak, fallback_floor)
+        clause = (
+            _fallback_clause(evidence, fallback, fallback_build, fallback_floor)
+            if has_fallback and fallback_floor > cover_peak
+            and fallback_floor > measured_peak else ""
+        )
         result.update({
             "kind": "broader rebuild",
             "peak_gib": round(peak, 2),
@@ -2383,12 +2490,16 @@ def size_stale_set(
                 f"the tightest of {len(covering)} successful rebuild(s) of at least {len(names)} "
                 f"modules that included them ({len(tightest.get('modules_rebuilt') or [])} modules "
                 f"at {str(tightest.get('time'))}) peaked at {peak:.2f} GiB, plus {margin} GiB"
-            ),
+            ) + clause,
         })
         return result
-    estimate = max(
+    base = max(
         floor, int(default_gib), math.ceil(measured_peak) + margin if measured else 0,
-        math.ceil(fallback_floor) + margin if fallback or fallback_build else 0,
+    )
+    estimate = max(base, fallback_term)
+    clause = (
+        _fallback_clause(evidence, fallback, fallback_build, fallback_floor)
+        if has_fallback and fallback_term > base else ""
     )
     result.update({
         "kind": "profile default",
@@ -2398,7 +2509,7 @@ def size_stale_set(
             f"profile default: {len(unmeasured)} of {len(names)} stale module(s) unmeasured "
             f"({listed(unmeasured)}), the set is above the narrow limit of {limit}, and no "
             "broader successful rebuild included them"
-        ),
+        ) + clause,
     })
     return result
 

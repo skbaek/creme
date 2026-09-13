@@ -1624,7 +1624,7 @@ class LiveStateCompatibilityTest(unittest.TestCase):
         self.assertEqual(set(hold), semaphore.HOLD_KEYS)
         note, gib, contention = semaphore._decode_admission_note(hold["note"], 8)
         self.assertEqual((note, gib, contention), ("note", 4, "tolerant"))
-        self.assertEqual(set(semaphore._empty_queue()), {"schema_version", "waiters", "activity", "workers"})
+        self.assertEqual(set(semaphore._empty_queue()), {"schema_version", "waiters", "activity", "workers", "tranquil_max_gib", "tranquil_max_at"})
 
 
 if __name__ == "__main__":

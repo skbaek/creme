@@ -64,6 +64,8 @@ DEFAULT_LAKE_OVERHEAD_GIB = 1.0
 # order; a larger one is bounded by the concurrency the ledger has seen.
 _WIDTH_BRUTE_FORCE_LIMIT = 12
 SANCTIONED_WORKTREE_SUFFIXES = ("control", "mutation", "rehearsal")
+_LEGACY_OWN_SINGLETON = "_legacy_own_singleton"
+_LEGACY_OWN_SINGLETON_TOKEN = object()
 
 
 def _iso(moment: datetime) -> str:
@@ -1941,11 +1943,56 @@ def _exact_module_row(row: dict[str, Any], identity: dict[str, Any], module: str
     )
 
 
+def _legacy_own_singleton_sample(row: dict[str, Any], threads: Optional[int]) -> bool:
+    """Whether a selector-scoped legacy row completely sampled one own module.
+
+    This is deliberately narrower than generic legacy fallback.  The caller
+    has already revalidated the row's Git repository plus toolchain and
+    manifest.  Here we require the execution facts that old rows did record;
+    partial typed identity is not legacy absence and never qualifies.
+    """
+    identity_keys = {
+        "repository_identity", "input_context", "module_inputs", "identity_status",
+    }
+    if any(key in row for key in identity_keys):
+        return False
+    rebuilt = row.get("modules_rebuilt")
+    if not isinstance(rebuilt, list) or len(rebuilt) != 1 or not isinstance(rebuilt[0], str):
+        return False
+    module = rebuilt[0]
+    module_peaks = row.get("module_peak_mib")
+    lean_peak = row.get("peak_lean_rss_mib")
+    own_peak = module_peaks.get(module) if isinstance(module_peaks, dict) else None
+    return (
+        isinstance(threads, int) and not isinstance(threads, bool) and threads > 0
+        and isinstance(row.get("threads"), int)
+        and not isinstance(row.get("threads"), bool)
+        and row.get("threads") == threads
+        and row.get("contention") == "sensitive"
+        and isinstance(row.get("stale_modules"), int)
+        and not isinstance(row.get("stale_modules"), bool)
+        and row["stale_modules"] == 1
+        and row.get("targets") == [module]
+        and row.get("resolved_roots") == [module]
+        and isinstance(row.get("max_concurrent_lean"), int)
+        and not isinstance(row.get("max_concurrent_lean"), bool)
+        and row["max_concurrent_lean"] == 1
+        and _usable_sample(row)
+        and row.get("sampling_unavailable") == 0
+        and _finite_positive(lean_peak)
+        and isinstance(module_peaks, dict)
+        and set(module_peaks) == {module}
+        and _finite_positive(own_peak)
+        and float(row["peak_rss_mib"]) >= float(lean_peak) >= float(own_peak)
+    )
+
+
 def _evidence_rows(
     worktree: Path,
     toolchain_digest: Optional[str],
     manifest_digest: Optional[str],
     input_identity: Optional[dict[str, Any]] = None,
+    threads: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Successful measured rows in the relevant repository evidence cohort.
 
@@ -1982,7 +2029,11 @@ def _evidence_rows(
         repository = input_identity.get("repository_identity")
         matching = []
         legacy_scopes: dict[str, Optional[str]] = {}
-        for row in measured:
+        for original in measured:
+            # Unknown additive fields are valid ledger compatibility, but an
+            # incoming spelling of our transient selector marker carries no
+            # authority. Qualification is recomputed from validated row data.
+            row = {key: value for key, value in original.items() if key != _LEGACY_OWN_SINGLETON}
             row_repository = row.get("repository_identity")
             if isinstance(row_repository, str):
                 if row_repository == repository:
@@ -2000,7 +2051,10 @@ def _evidence_rows(
                 and row.get("toolchain_digest") == toolchain_digest
                 and row.get("manifest_digest") == manifest_digest
             ):
-                matching.append(row)
+                selected = dict(row)
+                if _legacy_own_singleton_sample(row, threads):
+                    selected[_LEGACY_OWN_SINGLETON] = _LEGACY_OWN_SINGLETON_TOKEN
+                matching.append(selected)
         exact_context = sum(1 for row in matching if _exact_context_row(row, input_identity))
         detail = (
             f"{len(matching)} repository-scoped measurement(s); "
@@ -2019,6 +2073,7 @@ def _measured_rows(
     require_elaboration: bool = False,
     members: bool = False,
     input_identity: Optional[dict[str, Any]] = None,
+    threads: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Ledger rows that measured *this* worktree, targets, and pinned inputs.
 
@@ -2030,7 +2085,9 @@ def _measured_rows(
     A row that restored everything from the artifact cache measured a build
     that elaborated nothing; it cannot size one that will.
     """
-    rows, detail = _evidence_rows(worktree, toolchain_digest, manifest_digest, input_identity)
+    rows, detail = _evidence_rows(
+        worktree, toolchain_digest, manifest_digest, input_identity, threads,
+    )
     if not rows and detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
         return [], detail
     wanted = set(targets)
@@ -2136,7 +2193,9 @@ def module_cost_evidence(
                     fallback_build_peaks.setdefault(module, []).append(peak_gib)
                     fallback_build_origins.setdefault(module, []).append(row_time)
                     fallback_build_kinds.setdefault(module, []).append(
-                        "drifted single-module aggregate"
+                        "legacy own-singleton aggregate"
+                        if row.get(_LEGACY_OWN_SINGLETON) is _LEGACY_OWN_SINGLETON_TOKEN
+                        else "drifted single-module aggregate"
                         if len(rebuilt) == 1
                         and input_identity is not None
                         and _exact_context_row(row, input_identity)
@@ -2183,6 +2242,7 @@ def module_cost_evidence(
         "narrow-row bound": 1,
         "whole-build aggregate": 2,
         "drifted single-module aggregate": 3,
+        "legacy own-singleton aggregate": 4,
     }
     fallback_origin: dict[str, dict[str, Any]] = {}
     fallback_candidates: dict[str, list[dict[str, Any]]] = {}
@@ -2421,7 +2481,9 @@ def size_stale_set(
             peak_gib = float(origin["peak_gib"])
             reduced = (
                 len(names) == 1
-                and origin.get("kind") == "drifted single-module aggregate"
+                and origin.get("kind") in {
+                    "drifted single-module aggregate", "legacy own-singleton aggregate",
+                }
             )
             priced_fallbacks.append((
                 math.ceil(peak_gib) + (0 if reduced else margin),
@@ -2586,6 +2648,7 @@ def _target_keyed_estimate(
     stale_modules: Optional[int],
     input_identity: Optional[dict[str, Any]] = None,
     identity_detail: Optional[str] = None,
+    threads: Optional[int] = None,
 ) -> tuple[int, dict[str, Any]]:
     """The fallback when the probe could not name the stale set.
 
@@ -2599,7 +2662,7 @@ def _target_keyed_estimate(
     require_elaboration = stale_modules != 0
     rows, detail = _measured_rows(
         worktree, targets, *digests, settings, require_elaboration, members=True,
-        input_identity=input_identity,
+        input_identity=input_identity, threads=threads,
     )
     fallback_rows = list(rows)
     if input_identity is None and identity_detail is not None:
@@ -2614,7 +2677,7 @@ def _target_keyed_estimate(
             }
             fallback_rows, _fallback_detail = _measured_rows(
                 worktree, targets, *digests, settings, require_elaboration, members=True,
-                input_identity=fallback_identity,
+                input_identity=fallback_identity, threads=threads,
             )
         fallback_peak = max(
             (float(row["peak_rss_mib"]) for row in fallback_rows), default=0.0,
@@ -2680,6 +2743,7 @@ def classify_contention(
     stale: Optional[dict[str, Any]] = None,
     input_identity: Optional[dict[str, Any]] = None,
     identity_detail: Optional[str] = None,
+    threads: Optional[int] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Choose a contention class from measurement, defaulting to `sensitive`.
 
@@ -2717,7 +2781,7 @@ def classify_contention(
         # fallback is the only evidence there is.
         rows, rows_detail = _measured_rows(
             worktree, targets, *digests, settings, members=True,
-            input_identity=input_identity,
+            input_identity=input_identity, threads=threads,
         )
         evidence["measurements"] = rows_detail
         if not rows:
@@ -2737,7 +2801,7 @@ def classify_contention(
         evidence["reason"] = "nothing is stale; the build elaborates no module and takes no hold"
         evidence["measured_peak_gib"] = 0.0
         return "tolerant", evidence
-    rows, rows_detail = _evidence_rows(worktree, *digests, input_identity)
+    rows, rows_detail = _evidence_rows(worktree, *digests, input_identity, threads)
     evidence["measurements"] = rows_detail
     if not rows and rows_detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
         evidence["reason"] = rows_detail
@@ -2777,6 +2841,7 @@ def derive_memory_gib(
     stale: Optional[dict[str, Any]] = None,
     input_identity: Optional[dict[str, Any]] = None,
     identity_detail: Optional[str] = None,
+    threads: Optional[int] = None,
 ) -> tuple[int, dict[str, Any]]:
     """Propose a whole-GiB estimate from measurement, never below the floor.
 
@@ -2793,7 +2858,7 @@ def derive_memory_gib(
         count = stale["stale"] if stale is not None else stale_modules
         return _target_keyed_estimate(
             worktree, targets, settings, digests, default_gib, count, input_identity,
-            identity_detail,
+            identity_detail, threads,
         )
     if input_identity is None and identity_detail is not None:
         # Exact input collection may fail for a dirty dependency or incomplete
@@ -2826,7 +2891,7 @@ def derive_memory_gib(
             "keyed_on_elaboration": True,
             "measured_peak_gib": fallback["peak_gib"],
         }
-    rows, detail = _evidence_rows(worktree, *digests, input_identity)
+    rows, detail = _evidence_rows(worktree, *digests, input_identity, threads)
     if not rows and detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
         return max(floor, default_gib), {
             "kind": "profile default",
@@ -3135,7 +3200,7 @@ def run_lake_build(
     if not census and contention is None:
         contention, evidence = classify_contention(
             worktree, targets, real_lake, settings(), digests, stale(),
-            input_identity, identity_detail,
+            input_identity, identity_detail, threads,
         )
     elif not census:
         # The class is stated, but the probe still runs: it is what tells the
@@ -3150,7 +3215,7 @@ def run_lake_build(
     if memory_gib is None:
         memory_gib, estimate_evidence = derive_memory_gib(
             worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale,
-            probe_evidence, input_identity, identity_detail,
+            probe_evidence, input_identity, identity_detail, threads,
         )
     elif probe_evidence is not None:
         # An explicit estimate is honoured, but the reader is told what the
@@ -3158,7 +3223,7 @@ def run_lake_build(
         # be passed over by every smaller request on a busy host.
         derived, derived_evidence = derive_memory_gib(
             worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale,
-            probe_evidence, input_identity, identity_detail,
+            probe_evidence, input_identity, identity_detail, threads,
         )
         estimate_evidence = {
             "source": "explicit",

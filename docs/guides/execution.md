@@ -532,6 +532,16 @@ module expensive, but it cannot make a stale set `tolerant` or override a
 newer exact cohort. New exact reuse begins only with newly recorded applicable
 measurements.
 
+A legacy row can avoid the estimator's additional whole-GiB margin only for a
+single requested stale module when the selector revalidates its Git repository,
+toolchain and manifest and the row itself records the same thread count,
+sensitive execution, one target/root/rebuilt module, one concurrent Lean
+process, and a complete usable sample with no unavailable observations. The
+row's whole-process aggregate remains a fallback floor and receives the normal
+unmeasured admission charge. It does not become exact or make contention
+tolerant. Missing, partial, foreign, mixed-origin, or multi-module evidence
+keeps the conservative estimator margin.
+
 This is a same-host, same-user performance boundary. The guarded resolver
 checks one coherent Lean/Lake sysroot and the exact identity stores only a
 digest of its resolved paths; it assumes the host's managed toolchain store is

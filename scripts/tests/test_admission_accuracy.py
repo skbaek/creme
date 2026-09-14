@@ -562,6 +562,167 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
         self.assertEqual(estimate, 13)
         self.assertNotEqual(evidence["kind"], "measured")
 
+    def _complete_legacy_singleton(self, worktree: Path, peak: float = 9.0366) -> dict:
+        row = _row(
+            "2026-09-10T06:37:30.160402Z", ["A"], peak, lean_gib=8.3923,
+            module_peaks={"A": 8.3923}, targets=("A",), worktree=str(worktree),
+            seconds={"A": 47.0}, samples=93,
+        )
+        row.update({
+            "stale_modules": 1, "resolved_roots": ["A"],
+            "max_concurrent_lean": 1, "sampling_unavailable": 0,
+        })
+        return row
+
+    def test_live_selector_qualifies_complete_legacy_own_singleton_without_exact_fiction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, _isolated() as state:
+            repository = Path(tmp) / "repo"
+            subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
+            identity = self.identity(
+                repo=owned.repository_identity(repository), context="current-context", source="current",
+            )
+            legacy = self._complete_legacy_singleton(repository)
+            drifted = _row(
+                "2026-09-14T07:12:28.170407Z", ["A"], 9.0863, lean_gib=8.4406,
+                module_peaks={"A": 8.4406}, targets=("A",), worktree=str(repository),
+                seconds={"A": 47.0}, identity={**identity, "module_inputs": {"A": "old"}},
+                samples=93,
+            )
+            (state / "ledger.jsonl").write_text(
+                json.dumps(legacy) + "\n" + json.dumps(drifted) + "\n", encoding="utf-8",
+            )
+            selected, _detail = owned._evidence_rows(
+                repository, "tc", "mf", identity, threads=2,
+            )
+            estimate, evidence = owned.derive_memory_gib(
+                repository, ["A"], SETTINGS, ("tc", "mf"), 8,
+                stale=self.STALE, input_identity=identity, threads=2,
+            )
+            verdict, _classification = owned.classify_contention(
+                repository, ["A"], Path("/lake"), SETTINGS, ("tc", "mf"), self.STALE,
+                identity, threads=2,
+            )
+        self.assertEqual(len(selected), 2)
+        self.assertIs(
+            selected[0].get(owned._LEGACY_OWN_SINGLETON),
+            owned._LEGACY_OWN_SINGLETON_TOKEN,
+        )
+        self.assertNotEqual(selected[0].get("identity_status"), "exact")
+        self.assertEqual(estimate, 10)
+        candidates = owned.module_cost_evidence(selected, SETTINGS, identity)["fallback_candidates"]["A"]
+        self.assertIn("legacy own-singleton aggregate", {item["kind"] for item in candidates})
+        self.assertIn("drifted single-module aggregate", evidence["source"])
+        self.assertEqual(semaphore._charged_memory_gib(estimate), 13.0)
+        self.assertEqual(verdict, "sensitive")
+
+    def test_legacy_singleton_reduced_margin_requires_every_recorded_execution_fact(self) -> None:
+        mutations = {
+            "wrong threads": lambda row: row.update(threads=1),
+            "boolean threads": lambda row: row.update(threads=True),
+            "float threads": lambda row: row.update(threads=2.0),
+            "partial identity": lambda row: row.update(input_context="partial"),
+            "incomplete samples": lambda row: row.update(sampling_unavailable=1),
+            "zero samples": lambda row: row.update(sampling_samples=0),
+            "missing module peak": lambda row: row.pop("module_peak_mib"),
+            "wrong target": lambda row: row.update(targets=["Other"]),
+            "wrong root": lambda row: row.update(resolved_roots=["Other"]),
+            "multi stale": lambda row: row.update(stale_modules=2),
+            "concurrent sample": lambda row: row.update(max_concurrent_lean=2),
+            "tolerant execution": lambda row: row.update(contention="tolerant"),
+            "boolean stale count": lambda row: row.update(stale_modules=True),
+            "boolean concurrency": lambda row: row.update(max_concurrent_lean=True),
+            "impossible lean peak": lambda row: row.update(peak_lean_rss_mib=10_000_000),
+            "lean below direct peak": lambda row: row.update(peak_lean_rss_mib=1),
+            "forged typed marker": lambda row: row.update(
+                identity_status="exact",
+                repository_identity=owned.repository_identity(Path(row["worktree"])),
+                input_context="incompatible", module_inputs={"A": "old"},
+                **{owned._LEGACY_OWN_SINGLETON: True},
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp) / "repo"
+            subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
+            identity = self.identity(
+                repo=owned.repository_identity(repository), context="current-context", source="current",
+            )
+            for label, mutate in mutations.items():
+                with self.subTest(label=label), _isolated() as state:
+                    legacy = self._complete_legacy_singleton(repository)
+                    mutate(legacy)
+                    broad_modules = ["A"] + [f"Side{index}" for index in range(40)]
+                    broad = _row(
+                        "2026-09-09T00:00:00Z", broad_modules, 2.0, lean_gib=1.5,
+                        worktree=str(repository), seconds={"A": 47.0}, samples=10,
+                    )
+                    (state / "ledger.jsonl").write_text(
+                        json.dumps(broad) + "\n" + json.dumps(legacy) + "\n", encoding="utf-8",
+                    )
+                    estimate, evidence = owned.derive_memory_gib(
+                        repository, ["A"], SETTINGS, ("tc", "mf"), 8,
+                        stale=self.STALE, input_identity=identity, threads=2,
+                    )
+                    self.assertNotEqual(estimate, 10)
+                    self.assertGreaterEqual(estimate, 8)
+                    self.assertNotIn("legacy own-singleton aggregate", evidence["source"])
+
+    def test_foreign_repository_and_pins_do_not_enter_legacy_singleton_cohort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, _isolated() as state:
+            repository = Path(tmp) / "repo"
+            foreign = Path(tmp) / "foreign"
+            subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
+            subprocess.run(["git", "init", str(foreign)], check=True, capture_output=True, text=True)
+            identity = self.identity(repo=owned.repository_identity(repository))
+            foreign_row = self._complete_legacy_singleton(foreign)
+            wrong_pin = self._complete_legacy_singleton(repository)
+            wrong_pin["time"] = "2026-09-11T00:00:00Z"
+            wrong_pin["manifest_digest"] = "other"
+            (state / "ledger.jsonl").write_text(
+                json.dumps(foreign_row) + "\n" + json.dumps(wrong_pin) + "\n", encoding="utf-8",
+            )
+            selected, _detail = owned._evidence_rows(
+                repository, "tc", "mf", identity, threads=2,
+            )
+        self.assertEqual(selected, [])
+
+    def test_less_specific_legacy_origin_retains_margin_in_a_mixed_cohort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, _isolated() as state:
+            repository = Path(tmp) / "repo"
+            subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
+            identity = self.identity(repo=owned.repository_identity(repository))
+            qualified = self._complete_legacy_singleton(repository, peak=9.03)
+            partial = self._complete_legacy_singleton(repository, peak=9.01)
+            partial["time"] = "2026-09-11T00:00:00Z"
+            partial["sampling_unavailable"] = 1
+            (state / "ledger.jsonl").write_text(
+                json.dumps(qualified) + "\n" + json.dumps(partial) + "\n", encoding="utf-8",
+            )
+            estimate, evidence = owned.derive_memory_gib(
+                repository, ["A"], SETTINGS, ("tc", "mf"), 8,
+                stale=self.STALE, input_identity=identity, threads=2,
+            )
+        self.assertEqual(estimate, 11)
+        self.assertIn("whole-build aggregate", evidence["source"])
+
+    def test_legacy_singleton_reduced_margin_never_applies_to_multi_module_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, _isolated() as state:
+            repository = Path(tmp) / "repo"
+            subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
+            identity = self.identity(repo=owned.repository_identity(repository))
+            legacy = self._complete_legacy_singleton(repository)
+            (state / "ledger.jsonl").write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+            stale = {
+                "roots": ["A", "B"], "package_roots": ["A", "B"], "resolution": "fixture",
+                "stale": 2, "detail": "fixture", "stale_set": ["A", "B"],
+                "graph": {"A": set(), "B": set()},
+            }
+            estimate, evidence = owned.derive_memory_gib(
+                repository, ["A", "B"], SETTINGS, ("tc", "mf"), 8,
+                stale=stale, input_identity=identity, threads=2,
+            )
+        self.assertEqual(estimate, 11)
+        self.assertIn("legacy own-singleton aggregate", evidence["source"])
+
     def test_identity_unavailable_in_a_new_linked_worktree_keeps_same_repo_floor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, _isolated() as state:
             repository = Path(tmp) / "repo"

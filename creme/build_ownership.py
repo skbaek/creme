@@ -2091,6 +2091,7 @@ def module_cost_evidence(
     fallback_origins: dict[str, list[str]] = {}
     fallback_kinds: dict[str, list[str]] = {}
     fallback_build_origins: dict[str, list[str]] = {}
+    fallback_build_kinds: dict[str, list[str]] = {}
     exact_seconds: dict[str, float] = {}
     fallback_seconds: dict[str, float] = {}
     overheads: list[float] = []
@@ -2134,6 +2135,17 @@ def module_cost_evidence(
                 if len(rebuilt) == 1 or not _finite_positive(value):
                     fallback_build_peaks.setdefault(module, []).append(peak_gib)
                     fallback_build_origins.setdefault(module, []).append(row_time)
+                    fallback_build_kinds.setdefault(module, []).append(
+                        "drifted single-module aggregate"
+                        if len(rebuilt) == 1
+                        and input_identity is not None
+                        and _exact_context_row(row, input_identity)
+                        and isinstance(input_identity.get("module_inputs", {}).get(module), str)
+                        and bool(input_identity["module_inputs"][module])
+                        and isinstance(row.get("module_inputs", {}).get(module), str)
+                        and bool(row["module_inputs"][module])
+                        else "whole-build aggregate"
+                    )
             if _finite_positive(value):
                 fallback_peaks.setdefault(module, []).append(float(value) / 1024.0)
                 fallback_origins.setdefault(module, []).append(row_time)
@@ -2166,8 +2178,14 @@ def module_cost_evidence(
     # Which row and which kind of evidence set each module's fallback floor:
     # the sampled maximum across both fallback lists.  Ties prefer the more
     # specific kind, then the earliest sampled row.
-    specificity = {"module peak": 0, "narrow-row bound": 1, "whole-build aggregate": 2}
+    specificity = {
+        "module peak": 0,
+        "narrow-row bound": 1,
+        "whole-build aggregate": 2,
+        "drifted single-module aggregate": 3,
+    }
     fallback_origin: dict[str, dict[str, Any]] = {}
+    fallback_candidates: dict[str, list[dict[str, Any]]] = {}
     for module in set(fallback_peaks) | set(fallback_build_peaks):
         if module in peaks:
             continue
@@ -2178,12 +2196,17 @@ def module_cost_evidence(
                 fallback_origins.get(module, [])[-sample:],
             ),
             *(
-                (value, "whole-build aggregate", time)
-                for value, time in zip(
+                (value, kind, time)
+                for value, kind, time in zip(
                     fallback_build_peaks.get(module, [])[-sample:],
+                    fallback_build_kinds.get(module, [])[-sample:],
                     fallback_build_origins.get(module, [])[-sample:],
                 )
             ),
+        ]
+        fallback_candidates[module] = [
+            {"peak_gib": gib, "kind": kind, "row_time": time}
+            for gib, kind, time in triples
         ]
         best: Optional[tuple[float, str, str]] = None
         for gib, kind, time in triples:
@@ -2209,6 +2232,7 @@ def module_cost_evidence(
             if module not in peaks
         },
         "fallback_origin": fallback_origin,
+        "fallback_candidates": fallback_candidates,
         "seconds": {
             module: exact_seconds.get(module, fallback)
             for module, fallback in fallback_seconds.items()
@@ -2311,6 +2335,7 @@ def _fallback_clause(
     fallback: dict[str, float],
     fallback_build: dict[str, float],
     fallback_floor: float,
+    term_origin: Optional[dict[str, Any]] = None,
 ) -> str:
     """Name the fallback module, peak, and row a fallback-driven ask comes from.
 
@@ -2320,6 +2345,11 @@ def _fallback_clause(
     """
     if not (fallback or fallback_build):
         return ""
+    if term_origin is not None:
+        return (
+            f"; fallback prices {term_origin['module']} at {term_origin['peak_gib']:.2f} GiB "
+            f"from row {term_origin['row_time']} ({term_origin['kind']})"
+        )
     combined = {
         name: max(fallback.get(name, 0.0), fallback_build.get(name, 0.0))
         for name in set(fallback) | set(fallback_build)
@@ -2376,7 +2406,33 @@ def size_stale_set(
     }
     fallback_floor = max([*fallback.values(), *fallback_build.values()], default=0.0)
     has_fallback = bool(fallback or fallback_build)
-    fallback_term = math.ceil(fallback_floor) + margin if has_fallback else 0
+    # A drifted single-module aggregate measures the named module's complete
+    # prior process tree without sibling breadth. It remains unmeasured on the
+    # current inputs and therefore keeps the default 1.25x admission charge,
+    # but does not also take the estimator's whole-GiB margin. Less specific
+    # fallback evidence retains that margin.
+    # The reduced estimator margin is intentionally confined to one requested
+    # stale module. Every candidate is priced before selecting the winner, so
+    # a slightly lower, less-specific floor cannot lose its retained margin to
+    # a higher raw drifted aggregate.
+    priced_fallbacks: list[tuple[int, float, dict[str, Any]]] = []
+    for module in set(fallback) | set(fallback_build):
+        for origin in evidence.get("fallback_candidates", {}).get(module, []):
+            peak_gib = float(origin["peak_gib"])
+            reduced = (
+                len(names) == 1
+                and origin.get("kind") == "drifted single-module aggregate"
+            )
+            priced_fallbacks.append((
+                math.ceil(peak_gib) + (0 if reduced else margin),
+                peak_gib,
+                {"module": module, **origin},
+            ))
+    fallback_term, _term_peak, fallback_term_origin = max(
+        priced_fallbacks,
+        key=lambda item: (item[0], item[1], item[2]["module"]),
+        default=(0, 0.0, None),
+    )
     heavy = sorted(
         ((name, evidence["seconds"][name]) for name in unmeasured
          if evidence["seconds"].get(name, 0.0) >= heavy_seconds),
@@ -2409,12 +2465,13 @@ def size_stale_set(
         result.update({
             "kind": "measured",
             "peak_gib": round(peak, 2),
-            "estimate_gib": max(floor, math.ceil(peak) + margin),
+            "estimate_gib": max(floor, math.ceil(peak)),
             "width": width,
             "source": (
                 f"measured stale set: {len(names)} module(s) all measured; Lake overhead "
                 f"{evidence['overhead_gib']:.2f} GiB + {width} concurrent lean peak(s) "
-                f"{[round(value, 2) for value in top]} GiB = {peak:.2f} GiB, plus {margin} GiB"
+                f"{[round(value, 2) for value in top]} GiB = {peak:.2f} GiB, charged with "
+                "the measured admission margin"
             ),
         })
         return result
@@ -2429,7 +2486,7 @@ def size_stale_set(
         )
         estimate = max(base, fallback_term)
         clause = (
-            _fallback_clause(evidence, fallback, fallback_build, fallback_floor)
+            _fallback_clause(evidence, fallback, fallback_build, fallback_floor, fallback_term_origin)
             if has_fallback and fallback_term > base else ""
         )
         result.update({
@@ -2451,7 +2508,7 @@ def size_stale_set(
         )
         estimate = max(base, fallback_term)
         clause = (
-            _fallback_clause(evidence, fallback, fallback_build, fallback_floor)
+            _fallback_clause(evidence, fallback, fallback_build, fallback_floor, fallback_term_origin)
             if has_fallback and fallback_term > base else ""
         )
         result.update({
@@ -2474,22 +2531,28 @@ def size_stale_set(
         tightest = min(covering, key=lambda row: float(row["peak_rss_mib"]))
         cover_peak = float(tightest["peak_rss_mib"]) / 1024.0
         peak = max(cover_peak, measured_peak, fallback_floor)
+        base = max(
+            floor,
+            math.ceil(cover_peak) + margin,
+            math.ceil(measured_peak) + margin if measured else 0,
+        )
+        estimate = max(base, fallback_term)
         clause = (
-            _fallback_clause(evidence, fallback, fallback_build, fallback_floor)
-            if has_fallback and fallback_floor > cover_peak
-            and fallback_floor > measured_peak else ""
+            _fallback_clause(evidence, fallback, fallback_build, fallback_floor, fallback_term_origin)
+            if has_fallback and fallback_term > base else ""
         )
         result.update({
             "kind": "broader rebuild",
             "peak_gib": round(peak, 2),
-            "estimate_gib": max(floor, math.ceil(peak) + margin),
+            "estimate_gib": estimate,
             "covering_rows": len(covering),
             "covering_time": str(tightest.get("time")),
             "source": (
                 f"broader rebuild: {len(unmeasured)} of {len(names)} stale module(s) unmeasured; "
                 f"the tightest of {len(covering)} successful rebuild(s) of at least {len(names)} "
                 f"modules that included them ({len(tightest.get('modules_rebuilt') or [])} modules "
-                f"at {str(tightest.get('time'))}) peaked at {peak:.2f} GiB, plus {margin} GiB"
+                f"at {str(tightest.get('time'))}) peaked at {peak:.2f} GiB; non-fallback "
+                f"evidence retains the {margin} GiB estimator margin"
             ) + clause,
         })
         return result
@@ -2498,7 +2561,7 @@ def size_stale_set(
     )
     estimate = max(base, fallback_term)
     clause = (
-        _fallback_clause(evidence, fallback, fallback_build, fallback_floor)
+        _fallback_clause(evidence, fallback, fallback_build, fallback_floor, fallback_term_origin)
         if has_fallback and fallback_term > base else ""
     )
     result.update({
@@ -2747,7 +2810,12 @@ def derive_memory_gib(
         fallback = size_stale_set(
             list(stale_set), stale.get("graph"), rows, settings, default_gib, fallback_identity,
         )
-        estimate = max(floor, default_gib, int(fallback["estimate_gib"]))
+        fallback_peak = float(fallback["fallback_peak_gib"] or fallback["peak_gib"])
+        estimate = max(
+            floor, default_gib, int(fallback["estimate_gib"]),
+            math.ceil(fallback_peak) + int(settings["estimate_margin_gib"])
+            if fallback_peak else 0,
+        )
         return estimate, {
             "kind": "profile default",
             "source": (

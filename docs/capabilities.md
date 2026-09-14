@@ -148,7 +148,10 @@ Adaptive acquisition samples aggregate headroom while holding the same mutex
 that protects the hold transition, then chooses soft, hard, or refusal. The
 portable safety floor reserves the greater of 25% physical memory or 2 GiB
 (capped at half of very small hosts) for the desktop, clients, and estimation
-error. Each declared peak is charged a 25% margin. The host profile's
+error. Exact measured-stale-set estimates are charged the greater of 1 GiB or
+30%; default, fallback, and explicit estimates keep the 25% margin rounded up.
+The estimator does not add a second margin to an exact measured estimate. The
+host profile's
 `heavy_workers` remains an upper bound, while simultaneous charged peaks must
 also fit the remaining budget. A `sensitive` or `exclusive` request is hard
 even if concurrent execution would be semantically valid.
@@ -160,6 +163,10 @@ session blocks adaptive heavy work and makes existing agent holders yield on
 their next renewal. Explicit soft/hard acquisition passes through the same
 live check and is not an escape hatch.
 
+Only a charged peak plus reserve above physical memory is permanently
+impossible. Other headroom shortfalls remain transient. Historical tranquil
+headroom is displayed as context and never treated as a future capacity bound.
+
 Renewal re-samples headroom. Below 30% with multiple soft holders—or whenever
 the recorded worker count/peak reservations already exceed the current safe
 budget—every non-priority holder is told to yield. The oldest live coherent
@@ -170,10 +177,19 @@ requires agents to renew between heavy units, classify indivisible spikes as
 sensitive before launch, checkpoint, and wind down on `YIELD_HEAVY` or
 `DRAIN_HEAVY`.
 
-Admission metadata is encoded additively in the existing private note field so
+Admission metadata, including the exact charge selected at admission, is
+encoded additively in the existing private note field so
 live schema-v1 holds and pre-update launchers remain structurally compatible.
-Legacy holds receive the current profile's default peak estimate. Status hides
+Renewal, conversion, and aggregate-budget checks reuse that persisted charge.
+Legacy holds without it receive the more conservative of the current measured
+and default peak charges. Malformed additive fields retain any valid encoded
+estimate and recompute that conservative charge. Status hides
 the encoding and reports the decoded estimate and contention class.
+Because an older reader does not recognize the new charge field, deployment
+requires a quiescent admission boundary: no live goal holds or queued old
+admission loops, and every subsequent admission command must use the updated
+Creme runtime. The master lease heartbeat is separate from goal admission and
+continues under its existing authenticated acquisition.
 
 ### Waiting
 

@@ -100,7 +100,26 @@ class StaleSetSizingTest(unittest.TestCase):
         self.assertEqual(sizing["kind"], "measured")
         self.assertAlmostEqual(sizing["overhead_gib"], 0.6, places=2)
         self.assertAlmostEqual(sizing["peak_gib"], 2.1, places=2)
-        self.assertEqual(sizing["estimate_gib"], 4)      # ceil(2.1) + 1
+        self.assertEqual(sizing["estimate_gib"], 3)      # ceil(2.1); charge adds the margin
+
+    def test_measured_estimate_flows_to_admission_with_one_margin(self) -> None:
+        rows = [_row("2026-09-04T00:00:00Z", ["A"], 8.4, lean_gib=7.8)]
+        sizing = owned.size_stale_set(["A"], {"A": set()}, rows, SETTINGS, 8)
+        self.assertEqual(sizing["estimate_gib"], 9)
+        source = f"derived: {sizing['source']}"
+        policy = {
+            "task_memory_gib": 2, "heavy_workers": 2, "light_workers": 4,
+            "physical_memory_gib": 24.0, "profile_status": "VALID",
+        }
+        with _isolated(), patch("creme.semaphore.get_adapter", return_value=ProcessAdapter(
+            free_percent=75, total_gib=24,
+        )), patch("creme.semaphore._runtime_admission_policy", return_value=policy):
+            ok, detail = semaphore.adaptive_acquire(
+                "measured", "measured build", memory_gib=sizing["estimate_gib"],
+                estimate_source=source,
+            )
+            self.assertTrue(ok, detail)
+            self.assertIn("charged=11.7 GiB", detail)
 
     def test_the_spelling_of_a_target_list_is_not_evidence(self) -> None:
         """B11 F1: one broad rebuild pinned every later `-- Blanc` at 12 GiB."""
@@ -112,7 +131,7 @@ class StaleSetSizingTest(unittest.TestCase):
         ]
         sizing = owned.size_stale_set(["Pkg"], {"Pkg": set()}, rows, SETTINGS, 8)
         self.assertEqual(sizing["kind"], "measured")
-        self.assertEqual(sizing["estimate_gib"], 4)
+        self.assertEqual(sizing["estimate_gib"], 3)
         with _isolated() as root:
             (root / "ledger.jsonl").write_text(
                 "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
@@ -136,7 +155,7 @@ class StaleSetSizingTest(unittest.TestCase):
         independent = owned.size_stale_set(["A", "B"], {"A": set(), "B": set()}, rows, SETTINGS, 8)
         self.assertEqual(independent["width"], 2)
         self.assertAlmostEqual(independent["peak_gib"], 3.6, places=2)
-        self.assertEqual(independent["estimate_gib"], 5)
+        self.assertEqual(independent["estimate_gib"], 4)
 
     def test_the_width_is_the_largest_antichain_of_the_import_order(self) -> None:
         graph = {"Top": {"Mid"}, "Mid": {"Leaf"}, "Leaf": set(), "Side": set()}
@@ -271,7 +290,7 @@ class StaleSetSizingTest(unittest.TestCase):
                 Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8, 1,
                 {"roots": ["T"], "stale": 1, "stale_set": ["A"], "graph": {"A": set()}},
             )
-        self.assertEqual(estimate, 4)
+        self.assertEqual(estimate, 3)
         self.assertEqual(evidence["kind"], "measured")
         self.assertTrue(evidence["source"].startswith("measured stale set"))
 
@@ -356,7 +375,7 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
             module_peaks={"A": 1.5}, worktree="/old-worktree", identity=identity, samples=3,
         )
         estimate, evidence, verdict, _classification = self.derive([row], identity)
-        self.assertEqual(estimate, 3)
+        self.assertEqual(estimate, 2)
         self.assertEqual(evidence["kind"], "measured")
         self.assertEqual(verdict, "tolerant")
 
@@ -371,7 +390,7 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
             module_peaks={"A": 1.5}, worktree="/new-worktree", identity=current, samples=3,
         )
         estimate, evidence, verdict, _classification = self.derive([old, new], current)
-        self.assertEqual(estimate, 3)
+        self.assertEqual(estimate, 2)
         self.assertEqual(evidence["kind"], "measured")
         self.assertEqual(verdict, "tolerant")
 
@@ -385,7 +404,7 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                 estimate, evidence, verdict, _classification = self.derive(
                     [old], self.identity(source=changed),
                 )
-                self.assertEqual(estimate, 13)  # old peak remains a lower bound, never exact
+                self.assertEqual(estimate, 13)  # the lower module peak retains its margin
                 self.assertNotEqual(evidence["kind"], "measured")
                 self.assertEqual(verdict, "sensitive")
 
@@ -463,7 +482,7 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
         )
         # The old whole-build peak (not just its 6.74 GiB lean subprocess) is
         # a conservative lower bound until a current exact row arrives.
-        self.assertEqual(estimate, 9)
+        self.assertEqual(estimate, 8)
         self.assertEqual(evidence["kind"], "narrow default")
         self.assertEqual(verdict, "sensitive")
 
@@ -841,7 +860,7 @@ class B11ReplayTest(unittest.TestCase):
             self.assertEqual(old, 12, moment)
             self.assertFalse(self.fits(old, available), moment)
             self.assertEqual(new["kind"], "measured", (moment, new["source"]))
-            self.assertEqual(new["estimate_gib"], 4, moment)
+            self.assertEqual(new["estimate_gib"], 3, moment)
             self.assertTrue(self.fits(new["estimate_gib"], available), moment)
 
     def test_the_two_target_list_inherits_its_members_measurements(self) -> None:
@@ -853,7 +872,7 @@ class B11ReplayTest(unittest.TestCase):
         self.assertFalse(self.fits(old, 14.4))
         self.assertEqual(new["kind"], "measured")
         self.assertEqual(new["width"], 1)            # Backing is in Message's closure
-        self.assertEqual(new["estimate_gib"], 4)
+        self.assertEqual(new["estimate_gib"], 3)
         self.assertTrue(self.fits(new["estimate_gib"], 14.4))
 
     def test_two_modules_known_only_from_a_broad_rebuild_take_the_narrow_default(self) -> None:
@@ -905,7 +924,7 @@ class B11ReplayTest(unittest.TestCase):
         new = self.new_estimate(stale, moment)
         self.assertEqual(new["kind"], "measured")
         self.assertEqual(new["width"], 2)
-        self.assertEqual(new["estimate_gib"], 5)
+        self.assertEqual(new["estimate_gib"], 4)
         self.assertTrue(self.fits(new["estimate_gib"], 17.5))
         actual = next(row for row in self.rows if row["time"].startswith("2026-09-04T03:55:19"))
         self.assertLessEqual(float(actual["peak_rss_mib"]) / 1024.0, new["estimate_gib"])

@@ -248,6 +248,119 @@ class SemaphoreTest(unittest.TestCase):
         )
         self.assertEqual((note, memory_gib, contention), ("proof", 2, "tolerant"))
 
+    def test_measured_charge_survives_persistence_renewal_and_conversion(self):
+        source = "derived: measured stale set: 1 module(s) all measured"
+        ok, detail = semaphore.adaptive_acquire(
+            "goal", "measured proof", memory_gib=9, estimate_source=source,
+        )
+        self.assertTrue(ok, detail)
+        hold = semaphore.snapshot()["soft"][0]
+        note, memory_gib, contention, charged = semaphore._decode_admission_metadata(
+            hold["note"], 2,
+        )
+        self.assertEqual((note, memory_gib, contention), ("measured proof", 9, "tolerant"))
+        self.assertAlmostEqual(charged, 11.7)
+        self.assertAlmostEqual(semaphore._hold_reservation(hold, 2), 11.7)
+
+        renewed, renew_detail = semaphore.renew("goal")
+        self.assertTrue(renewed, renew_detail)
+        self.assertAlmostEqual(
+            semaphore._hold_reservation(semaphore.snapshot()["soft"][0], 2), 11.7,
+        )
+
+        converted, convert_detail = semaphore.acquire(
+            "hard", "goal", "measured exclusive", memory_gib=9,
+        )
+        self.assertTrue(converted, convert_detail)
+        hard = semaphore.snapshot()["hard"]
+        self.assertAlmostEqual(semaphore._hold_reservation(hard, 2), 11.7)
+
+    def test_conversion_decision_and_hold_agree_at_the_four_gib_boundary(self):
+        source = "derived: measured stale set: 1 module(s) all measured"
+        ok, detail = semaphore.adaptive_acquire(
+            "goal", "measured proof", memory_gib=4, estimate_source=source,
+        )
+        self.assertTrue(ok, detail)
+        converted, convert_detail = semaphore.acquire(
+            "hard", "goal", "exclusive continuation", memory_gib=4,
+        )
+        self.assertTrue(converted, convert_detail)
+        self.assertIn("charged=5.2 GiB", convert_detail)
+        self.assertEqual(semaphore._hold_reservation(semaphore.snapshot()["hard"], 2), 5.2)
+
+    def test_resized_conversion_rechecks_capacity_and_preserves_the_soft_hold(self):
+        ok, detail = semaphore.adaptive_acquire("goal", "small", memory_gib=2)
+        self.assertTrue(ok, detail)
+        converted, convert_detail = semaphore.acquire(
+            "hard", "goal", "much larger", memory_gib=100,
+        )
+        self.assertFalse(converted, convert_detail)
+        self.assertIn("NEVER_FITS", convert_detail)
+        state = semaphore.snapshot()
+        self.assertIsNone(state["hard"])
+        self.assertEqual([(hold["label"], semaphore._hold_reservation(hold, 2))
+                          for hold in state["soft"]], [("goal", 3)])
+
+    def test_largest_fitting_estimate_executes_the_charge_boundary(self):
+        for kind, estimate, charge in (
+            ("measured", 7, 9.1),
+            ("measured", 13, 16.9),
+            ("measured", 14, 18.2),
+        ):
+            with self.subTest(kind=kind, estimate=estimate):
+                self.assertEqual(semaphore._charged_memory_gib(estimate, kind), charge)
+                self.assertEqual(semaphore._largest_fitting_estimate_gib(charge, kind), estimate)
+                self.assertEqual(
+                    semaphore._largest_fitting_estimate_gib(charge - 0.001, kind),
+                    estimate - 1,
+                )
+
+    def test_legacy_admission_note_recharges_with_the_conservative_tier(self):
+        hold = semaphore._hold(
+            "legacy", "legacy proof", 600, memory_gib=9, contention="tolerant",
+        )
+        self.assertEqual(semaphore._hold_reservation(hold, 2), 12)
+        boundary = semaphore._hold(
+            "legacy-four", "legacy proof", 600, memory_gib=4, contention="tolerant",
+        )
+        self.assertEqual(semaphore._hold_reservation(boundary, 2), 5.2)
+
+    def test_malformed_charge_or_extra_metadata_keeps_the_known_estimate(self):
+        for metadata in (
+            {"charged_gib": 1, "contention": "tolerant", "memory_gib": 10},
+            {"contention": "tolerant", "memory_gib": 10, "unexpected": True},
+            {"contention": "future", "memory_gib": 10},
+        ):
+            with self.subTest(metadata=metadata):
+                hold = semaphore._hold("g", "plain", 600)
+                hold["note"] = (
+                    semaphore.ADMISSION_NOTE_PREFIX
+                    + json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+                    + " proof"
+                )
+                note, memory, contention, charged = semaphore._decode_admission_metadata(
+                    hold["note"], 2,
+                )
+                expected_contention = "legacy" if metadata["contention"] == "future" else "tolerant"
+                self.assertEqual((note, memory, contention, charged), ("proof", 10, expected_contention, None))
+                self.assertEqual(semaphore._hold_reservation(hold, 2), 13)
+
+    def test_legacy_same_size_conversion_preserves_conservative_effective_charge(self):
+        ok, detail = semaphore.adaptive_acquire("goal", "legacy", memory_gib=4)
+        self.assertTrue(ok, detail)
+        path = Path(self.tmp.name) / "state.json"
+        state = json.loads(path.read_text())
+        state["soft"][0]["note"] = semaphore._encode_admission_note(
+            "legacy", 4, "tolerant",
+        )
+        path.write_text(json.dumps(state))
+        converted, convert_detail = semaphore.acquire(
+            "hard", "goal", "legacy conversion", memory_gib=4,
+        )
+        self.assertTrue(converted, convert_detail)
+        self.assertIn("charged=5.2 GiB", convert_detail)
+        self.assertEqual(semaphore._hold_reservation(semaphore.snapshot()["hard"], 2), 5.2)
+
     def test_contention_sensitive_work_chooses_hard(self):
         ok, detail = semaphore.adaptive_acquire(
             "goal", "cold rebuild", memory_gib=4, contention="sensitive"
@@ -748,6 +861,31 @@ class QueueTest(unittest.TestCase):
         self.assertEqual([hold["label"] for hold in state["soft"]], [])
         self.assertEqual(state["hard"]["label"], "holder")
 
+    def test_queued_measured_charge_is_persisted_when_admitted(self):
+        semaphore.adaptive_acquire(
+            "holder", "blocking", memory_gib=4, contention="exclusive",
+            adapter=self.adapter, policy=self.policy,
+        )
+        result: list[tuple[bool, str]] = []
+
+        def wait() -> None:
+            result.append(semaphore.adaptive_acquire(
+                "measured", "queued measured", memory_gib=9,
+                estimate_source="derived: measured stale set: one",
+                adapter=self.adapter, policy=self.policy,
+                wait_seconds=5, poll_seconds=0.02,
+            ))
+
+        thread = threading.Thread(target=wait)
+        thread.start()
+        time.sleep(0.1)
+        semaphore.adaptive_release("holder")
+        thread.join(timeout=10)
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0][0], result[0][1])
+        hold = semaphore.snapshot()["soft"][0]
+        self.assertAlmostEqual(semaphore._hold_reservation(hold, 2), 11.7)
+
     # -- required controls -----------------------------------------------
     def test_a_waiter_whose_process_is_gone_never_blocks_the_queue(self):
         dead = subprocess.Popen([os.sys.executable, "-c", "pass"])
@@ -790,7 +928,7 @@ class QueueTest(unittest.TestCase):
         ok, detail = self.wait_acquire("enormous", seconds=30, memory_gib=30)
         self.assertFalse(ok)
         self.assertIn("NEVER_FITS", detail)
-        self.assertIn("largest fitting estimate is 14 GiB", detail)
+        self.assertIn("largest fitting estimate is 19 GiB", detail)
         self.assertLess(time.monotonic() - started, 5)
 
     def test_a_ten_minute_wait_adds_two_log_rows(self):
@@ -1001,7 +1139,7 @@ class QueueVisibilityTest(QueueTest):
     def test_an_admitted_waiter_names_the_older_waiters_it_passed(self):
         self.adapter.total_gib = 24
         self.policy = {**self.policy, "physical_memory_gib": 24.0}
-        self.seed_waiter("large", pid=os.getpid(), memory_gib=15, age=600.0)
+        self.seed_waiter("large", pid=os.getpid(), memory_gib=13, age=600.0)
         ok, detail = self.wait_acquire("small", seconds=3, memory_gib=2)
         self.assertTrue(ok, detail)
         self.assertIn("passed 1 older waiter(s): large(LIGHT_ONLY)", detail)
@@ -2522,9 +2660,7 @@ class MasterLeaseTest(unittest.TestCase):
 
 
 class NeverFitsAdmissionTest(unittest.TestCase):
-    """Asks no host state can satisfy fail fast instead of starving on waitable
-    LIGHT_ONLY. Regression test for the 24GB-host starvation: estimate 13 needs
-    ~22.3 GiB free, but the host's tranquil maximum is ~19.4."""
+    """Only a physically impossible ask fails fast; live shortages can recover."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -2552,7 +2688,7 @@ class NeverFitsAdmissionTest(unittest.TestCase):
 
     def test_impossible_ask_reports_never_fits(self):
         semaphore.status_text()
-        ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=13)
+        ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=15)
 
         self.assertFalse(ok, detail)
         self.assertIn("NEVER_FITS", detail)
@@ -2560,16 +2696,16 @@ class NeverFitsAdmissionTest(unittest.TestCase):
 
     def test_never_fits_names_largest_fitting_estimate(self):
         semaphore.status_text()
-        ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=13)
+        ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=15)
 
         self.assertFalse(ok, detail)
-        self.assertIn("10 GiB", detail)
+        self.assertIn("14 GiB", detail)
 
     def test_never_fits_is_not_waitable(self):
         semaphore.status_text()
         sample = self.adapter.memory_headroom()
         decision = semaphore._admission_decision(
-            {"hard": None, "soft": []}, "adaptive", "goal", 13, "tolerant",
+            {"hard": None, "soft": []}, "adaptive", "goal", 15, "tolerant",
             self.adapter, self.policy, sample, tranquil_max_gib=19.44,
         )
 
@@ -2586,6 +2722,14 @@ class NeverFitsAdmissionTest(unittest.TestCase):
             "tranquil_max_at": 1.0,
         }), encoding="utf-8")
         ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=13)
+
+        self.assertFalse(ok, detail)
+        self.assertIn("LIGHT_ONLY", detail)
+        self.assertNotIn("NEVER_FITS", detail)
+
+    def test_fresh_tranquil_max_is_advisory_for_a_physically_feasible_ask(self):
+        semaphore.status_text()
+        ok, detail = semaphore.adaptive_acquire("goal", "vault build", memory_gib=13)
 
         self.assertFalse(ok, detail)
         self.assertIn("LIGHT_ONLY", detail)

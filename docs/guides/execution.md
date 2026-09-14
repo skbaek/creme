@@ -114,7 +114,9 @@ remain available for compatibility.
 request under the same mutex and returns when it is admitted, when `SECS`
 elapses (`WAIT_TIMEOUT`, nonzero exit, no hold), or immediately on a verdict
 waiting cannot change — a manual human hold, the drain floor, or an estimate
-whose charged peak exceeds the whole heavy-work budget. Among the waiters that
+whose charged peak plus the reserve exceeds physical memory. A live headroom
+shortfall remains waitable; the largest tranquil observation is useful history,
+not a bound on future availability. Among the waiters that
 currently fit, the oldest goes first; a large request refused for headroom
 never blocks a smaller one behind it, and a waiter whose process dies is
 dropped. Waiting can only postpone a request. It never admits one past a
@@ -125,8 +127,9 @@ floor, and it never changes a verdict you would have received without it.
 Arrival order decides between the requests that fit *at that pass*. Fit is:
 
 ```
-charged  = ceil(1.25 x estimate)            # the peak multiplier
-reserve  = max(2 GiB, 25% of physical RAM)  # the host usability reserve
+charged  = max(estimate + 1, 1.30 x estimate) # exact measured stale set
+         = ceil(1.25 x estimate)              # default/fallback/explicit
+reserve  = max(2 GiB, 25% of physical RAM)    # the host usability reserve
 it fits when   available >= charged + reserve
 ```
 
@@ -397,13 +400,15 @@ from the name of the target list. The probe resolves the targets to their
 roots, names every module in the stale closure, and the ledger supplies each
 module's own measured `lean` peak — recorded per module on every build row
 from now on, and read from an older narrow row's largest `lean` process
-before that — on the same worktree, toolchain, and Lake manifest digests. A
+before that — on the same repository, configuration/execution context, and
+exact module input identity. A
 broad row without per-module peaks measures no single module: its peak is its
 breadth. The build's peak is then the Lake overhead plus the peaks that can
 elaborate at the same time, which the import order decides (two modules in
 one chain never overlap). `tolerant` needs a small stale set, every module in
-it measured, and that modelled peak below the threshold; the estimate is the
-same model plus the margin. So `-- Blanc` with one stale root module is
+it measured, and that modelled peak below the threshold. An exact measured
+estimate is the whole-GiB ceiling of that model; admission adds the measured
+margin once. So `-- Blanc` with one stale root module is
 priced from that module, whatever a 376-module rebuild of `-- Blanc` peaked
 at an hour earlier, and a two-target list inherits its members' rows.
 
@@ -421,6 +426,13 @@ when you know something the ledger cannot — a cold worktree, a rebuild you
 expect to be broad, a command that will spawn several workers. The JSON
 records both the class you asked for and the class the evidence supports, and
 the estimate's `source` names which rule sized it.
+
+A prior single-module aggregate in the same repository and execution context
+may remain a floor after that module's source identity changes when that module
+is the sole stale request. It stays fallback evidence, keeps `sensitive`, and receives the default admission
+charge; it is never relabelled exact. Its whole-GiB estimate is the ceiling of
+the prior aggregate, without also adding an estimator margin. Other fallback
+and blind-default paths retain their existing estimator margin and charge.
 
 A probe that reports every selected artifact current means the build
 elaborates nothing, and the wrapper then **takes no hold**: the row says

@@ -194,11 +194,61 @@ class SiblingPollutionTest(unittest.TestCase):
         )
         sizing = owned.size_stale_set(["A"], {"A": set()}, [row], SETTINGS, 8, _current(["A"]))
         self.assertEqual(sizing["kind"], "narrow default")
-        self.assertEqual(sizing["estimate_gib"], 9)
+        self.assertEqual(sizing["estimate_gib"], 8)
         self.assertEqual(sizing["fallback_build_modules"], ["A"])
         self.assertIn("A", sizing["source"])
         self.assertIn("7.32", sizing["source"])
-        self.assertIn("whole-build aggregate", sizing["source"])
+        self.assertIn("drifted single-module aggregate", sizing["source"])
+
+    def test_actual_vault_fallback_remains_unmeasured_but_drops_the_duplicate_margin(self) -> None:
+        module = "Blanc.ProxyPairOssifiableArtifacts"
+        old = _row(
+            "2026-09-14T07:12:28.170407Z", [module], 9304.4 / 1024.0,
+            lean_gib=8643.2 / 1024.0, module_peaks={module: 8643.2 / 1024.0},
+            seconds={module: 46.962}, identity=_identity([module], "56e6081c"), samples=3,
+        )
+        sizing = owned.size_stale_set(
+            [module], {module: set()}, [old], SETTINGS, 8,
+            _identity([module], "ef603cf5"),
+        )
+        self.assertEqual(sizing["kind"], "heavy module")
+        self.assertEqual(sizing["unmeasured"], [module])
+        self.assertEqual(sizing["estimate_gib"], 10)
+        self.assertEqual(owned.semaphore._charged_memory_gib(10, "default"), 13)
+        self.assertIn("drifted single-module aggregate", sizing["source"])
+
+    def test_multi_module_stale_set_keeps_the_estimator_margin(self) -> None:
+        old = _row(
+            "2026-09-14T07:12:28Z", ["A"], 7.32, lean_gib=6.74,
+            module_peaks={"A": 6.74}, seconds={"A": 30.0},
+            identity=_identity(["A"], "old"), samples=3,
+        )
+        sizing = owned.size_stale_set(
+            ["A", "B"], {"A": set(), "B": set()}, [old], SETTINGS, 8,
+            {**_identity(["A", "B"], "new")},
+        )
+        self.assertEqual(sizing["estimate_gib"], 9)
+        self.assertEqual(sizing["unmeasured"], ["A", "B"])
+
+    def test_lower_nonqualifying_floor_can_win_after_its_retained_margin(self) -> None:
+        single = _row(
+            "2026-09-14T07:12:28Z", ["A"], 7.32, lean_gib=6.74,
+            module_peaks={"A": 6.74}, seconds={"A": 30.0},
+            identity=_identity(["A"], "old-single"), samples=3,
+        )
+        multi = _row(
+            "2026-09-14T07:13:28Z", ["A", "B"], 8.0, lean_gib=7.1,
+            module_peaks={"A": 7.1, "B": 1.0}, seconds={"A": 30.0, "B": 1.0},
+            identity=_identity(["A", "B"], "old-multi"), samples=3,
+        )
+        sizing = owned.size_stale_set(
+            ["A"], {"A": set()}, [single, multi], SETTINGS, 8,
+            _identity(["A", "B"], "new"),
+        )
+        self.assertEqual(sizing["fallback_peak_gib"], 7.32)
+        self.assertEqual(sizing["estimate_gib"], 9)
+        self.assertIn("7.10 GiB", sizing["source"])
+        self.assertIn("module peak", sizing["source"])
 
     def test_narrow_row_without_recorded_peaks_keeps_the_aggregate_floor(self) -> None:
         # No per-module peak anywhere: there is nothing more specific, so the

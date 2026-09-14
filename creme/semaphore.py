@@ -544,19 +544,27 @@ def _ordered_waiters(waiters: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(waiters, key=lambda entry: (float(entry["enqueued_at"]), str(entry["id"])))
 
 
-def _encode_admission_note(note: str, memory_gib: int, contention: str) -> str:
+def _encode_admission_note(
+    note: str,
+    memory_gib: int,
+    contention: str,
+    charged_gib: Optional[float] = None,
+) -> str:
+    payload: dict[str, Any] = {"contention": contention, "memory_gib": memory_gib}
+    if charged_gib is not None:
+        payload["charged_gib"] = charged_gib
     metadata = json.dumps(
-        {"contention": contention, "memory_gib": memory_gib},
+        payload,
         sort_keys=True,
         separators=(",", ":"),
     )
     return f"{ADMISSION_NOTE_PREFIX}{metadata} {note}"
 
 
-def _decode_admission_note(
+def _decode_admission_metadata(
     note: str,
     default_memory_gib: int,
-) -> tuple[str, int, str]:
+) -> tuple[str, int, str, Optional[float]]:
     """Read additive admission metadata while preserving schema-v1 state.
 
     Holds are shared with sessions that may still be running the pre-admission
@@ -564,26 +572,53 @@ def _decode_admission_note(
     those sessions fail-closed and avoids an in-place state-schema cutover.
     """
     if not note.startswith(ADMISSION_NOTE_PREFIX):
-        return note, default_memory_gib, "legacy"
+        return note, default_memory_gib, "legacy", None
     encoded, separator, user_note = note[len(ADMISSION_NOTE_PREFIX):].partition(" ")
     if not separator:
-        return note, default_memory_gib, "legacy"
+        return note, default_memory_gib, "legacy", None
     try:
         metadata = json.loads(encoded)
     except json.JSONDecodeError:
-        return note, default_memory_gib, "legacy"
-    if not isinstance(metadata, dict) or set(metadata) != {"contention", "memory_gib"}:
-        return note, default_memory_gib, "legacy"
+        return note, default_memory_gib, "legacy", None
+    if not isinstance(metadata, dict):
+        return note, default_memory_gib, "legacy", None
     memory_gib = metadata.get("memory_gib")
     contention = metadata.get("contention")
+    charged_gib = metadata.get("charged_gib")
     if (
         not isinstance(memory_gib, int)
         or isinstance(memory_gib, bool)
         or memory_gib < 1
-        or contention not in ADMISSION_CONTENTION
     ):
-        return note, default_memory_gib, "legacy"
-    return user_note, memory_gib, str(contention)
+        return note, default_memory_gib, "legacy", None
+    valid_contention = contention in ADMISSION_CONTENTION
+    decoded_contention = str(contention) if valid_contention else "legacy"
+    valid_charge = (
+        not isinstance(charged_gib, bool)
+        and isinstance(charged_gib, (int, float))
+        and math.isfinite(float(charged_gib))
+        and float(charged_gib) >= min(
+            _charged_memory_gib(memory_gib, "measured"),
+            _charged_memory_gib(memory_gib, "default"),
+        )
+    )
+    # Malformed or future metadata must not erase the valid encoded estimate.
+    # Keep that estimate and conservatively recompute its reservation below.
+    if not valid_charge:
+        charged_gib = None
+    return user_note, memory_gib, decoded_contention, (
+        float(charged_gib) if charged_gib is not None else None
+    )
+
+
+def _decode_admission_note(
+    note: str,
+    default_memory_gib: int,
+) -> tuple[str, int, str]:
+    user_note, memory_gib, contention, _charged_gib = _decode_admission_metadata(
+        note, default_memory_gib,
+    )
+    return user_note, memory_gib, contention
 
 
 def _runtime_admission_policy(adapter: Adapter) -> dict[str, Any]:
@@ -642,17 +677,19 @@ def _estimate_kind(estimate_source: Optional[str]) -> str:
 
 def _charged_memory_gib(memory_gib: int, kind: str = "default") -> float:
     if kind == "measured":
-        return max(memory_gib + MEASURED_MARGIN_ADD_GIB,
-                   memory_gib * MEASURED_MARGIN_MULTIPLIER)
+        return round(max(memory_gib + MEASURED_MARGIN_ADD_GIB,
+                         memory_gib * MEASURED_MARGIN_MULTIPLIER), 2)
     return max(1, math.ceil(memory_gib * ADMISSION_PEAK_MULTIPLIER))
 
 
 def _largest_fitting_estimate_gib(chargeable_gib: float, kind: str = "default") -> int:
-    """Invert the tier charge: the largest estimate whose charge fits."""
-    if kind == "measured":
-        return max(0, int(min(chargeable_gib - MEASURED_MARGIN_ADD_GIB,
-                             chargeable_gib / MEASURED_MARGIN_MULTIPLIER)))
-    return max(0, int(chargeable_gib / ADMISSION_PEAK_MULTIPLIER))
+    """Find the largest integer estimate using the executed charge function."""
+    if not math.isfinite(chargeable_gib) or chargeable_gib < 0:
+        return 0
+    for estimate in range(math.floor(chargeable_gib), -1, -1):
+        if _charged_memory_gib(estimate, kind) <= chargeable_gib:
+            return estimate
+    return 0
 
 
 def _headroom_values(
@@ -729,55 +766,41 @@ def _tranquil_fit(
     total_gib: Optional[float],
     baseline_fresh: bool = True,
 ) -> tuple[str, str]:
-    """Judge an ask against the calmest host state ever seen.
+    """Judge live fit and physical impossibility without freezing past headroom.
 
     Returns a verdict and a note.  ``NEVER_FITS`` fires only on evidence no
-    wait can change: a fresh baseline the need exceeds (with live headroom
-    confirming the shortfall), or — when headroom itself is unavailable — a
-    host-absolute bound the need exceeds.  Every other shortfall is ``WAIT``:
-    the live reading decides, and the note says which evidence was missing.
+    wait can change: the charged peak plus the usability reserve exceeds
+    physical memory. A tranquil maximum is a past observation, so it can
+    explain a wait but cannot prove that future headroom is impossible.
     """
     charged = _charged_memory_gib(memory_gib, kind)
     needed = charged + reserve_gib
-    confirmed = (
-        baseline_fresh
-        and isinstance(tranquil_max_gib, (int, float))
-        and not isinstance(tranquil_max_gib, bool)
-    )
+    physically_impossible = total_gib is not None and needed > total_gib
+    if physically_impossible:
+        return (
+            "NEVER_FITS",
+            f"the {total_gib:.0f} GiB host cannot provide the {needed:.1f} GiB total "
+            "need while preserving the reserve",
+        )
     if available_gib is not None:
         if available_gib >= needed:
             return "USABLE_NOW", ""
-        if confirmed and needed > tranquil_max_gib - reserve_gib:
-            return (
-                "NEVER_FITS",
-                f"the host's calmest observed {tranquil_max_gib:.1f} GiB free leaves "
-                f"{tranquil_max_gib - reserve_gib:.1f} GiB usable after the reserve",
-            )
         if tranquil_max_gib is not None and not baseline_fresh:
             return (
                 "WAIT",
                 "the tranquil baseline is stale, so fit is judged against live "
                 "headroom only",
             )
+        if isinstance(tranquil_max_gib, (int, float)) and not isinstance(tranquil_max_gib, bool):
+            return (
+                "WAIT",
+                f"the historical tranquil maximum was {tranquil_max_gib:.1f} GiB free; "
+                "it is advisory rather than a future upper bound",
+            )
         return (
             "WAIT",
             "no smooth baseline seen yet (no constrained moment recorded); "
             "fit judged against live headroom only",
-        )
-    bound = (
-        tranquil_max_gib - reserve_gib
-        if confirmed
-        else (total_gib - reserve_gib if total_gib is not None else None)
-    )
-    if bound is not None and needed > bound:
-        source = (
-            f"the host's calmest observed {tranquil_max_gib:.1f} GiB free"
-            if confirmed
-            else f"the {total_gib:.0f} GiB host"
-        )
-        return (
-            "NEVER_FITS",
-            f"{source} leaves {bound:.1f} GiB usable after the reserve",
         )
     return (
         "WAIT",
@@ -852,9 +875,16 @@ def fit_line(fit: dict[str, Any]) -> str:
     )
 
 
-def _hold_reservation(hold: dict[str, Any], default_memory_gib: int) -> int:
-    _, memory_gib, _ = _decode_admission_note(hold["note"], default_memory_gib)
-    return _charged_memory_gib(memory_gib)
+def _hold_reservation(hold: dict[str, Any], default_memory_gib: int) -> float:
+    _, memory_gib, _, charged_gib = _decode_admission_metadata(
+        hold["note"], default_memory_gib,
+    )
+    if charged_gib is not None:
+        return charged_gib
+    return max(
+        _charged_memory_gib(memory_gib, "measured"),
+        _charged_memory_gib(memory_gib, "default"),
+    )
 
 
 class Decision(NamedTuple):
@@ -913,7 +943,16 @@ def _admission_decision(
             "DEFER_FOR_HARD", f"soft holds block hard acquisition: {labels}", waitable=True
         )
 
-    converting = requested_kind == "hard" and bool(matching_soft)
+    prior_memory = None
+    if requested_kind == "hard" and matching_soft:
+        _, prior_memory, _, _ = _decode_admission_metadata(
+            matching_soft[0]["note"], int(policy["task_memory_gib"]),
+        )
+    converting = (
+        requested_kind == "hard"
+        and bool(matching_soft)
+        and prior_memory == memory_gib
+    )
     # A queue pass evaluates every waiter against one sample so arrival order
     # is decided from a single view of the host, not a drifting one.
     if sample is None:
@@ -925,6 +964,10 @@ def _admission_decision(
     reserve_gib = _reserve_gib(total_gib)
     kind = _estimate_kind(estimate_source)
     charged_gib = _charged_memory_gib(memory_gib, kind)
+    if converting:
+        charged_gib = _hold_reservation(
+            matching_soft[0], int(policy["task_memory_gib"]),
+        )
     requires_hard = requested_kind == "hard" or contention != "tolerant"
     reasons = []
 
@@ -945,22 +988,15 @@ def _admission_decision(
             tranquil_max_at is None
             or _now() - tranquil_max_at <= TRANQUIL_BASELINE_WINDOW_SECONDS
         )
-        confirmed = (
-            baseline_fresh
-            and isinstance(tranquil_max_gib, (int, float))
-            and not isinstance(tranquil_max_gib, bool)
-        )
         gate, note = _tranquil_fit(
             available_gib, memory_gib, kind, tranquil_max_gib,
             reserve_gib, total_gib, baseline_fresh,
         )
         if gate == "NEVER_FITS":
-            # No host state satisfies the ask: the calmest observation already
-            # falls short, or the host-absolute bound does.  Waiting cannot
-            # change that, but a narrower ask can, so the refusal names one.
-            if confirmed:
-                chargeable = tranquil_max_gib - reserve_gib
-            elif total_gib is not None:
+            # No host state satisfies the ask: the charged peak and reserve
+            # exceed physical memory. Waiting cannot change that, but a
+            # narrower ask can, so the refusal names one.
+            if total_gib is not None:
                 chargeable = total_gib - reserve_gib
             else:
                 chargeable = 0.0
@@ -992,11 +1028,9 @@ def _admission_decision(
             for item in other_soft
             if not item.get("manual")
         )
-        # Parallel peaks share the same evidence as the gate: the calmest
-        # observed usable memory when confirmed, else the host-absolute bound.
-        if confirmed:
-            reservation_budget = max(0.0, tranquil_max_gib - reserve_gib)
-        elif total_gib is not None:
+        # Simultaneous charged peaks are bounded by physical memory. A past
+        # tranquil observation is not a capacity limit.
+        if total_gib is not None:
             reservation_budget = max(0.0, float(total_gib) - reserve_gib)
         else:
             reservation_budget = 0.0
@@ -1070,6 +1104,7 @@ def _hold(
     *,
     memory_gib: Optional[int] = None,
     contention: str = "tolerant",
+    charged_gib: Optional[float] = None,
 ) -> dict[str, Any]:
     now = _now()
     return {
@@ -1079,7 +1114,7 @@ def _hold(
         "note": (
             note
             if manual or memory_gib is None
-            else _encode_admission_note(note, memory_gib, contention)
+            else _encode_admission_note(note, memory_gib, contention, charged_gib)
         ),
         "manual": manual,
         "acquired_at": now,
@@ -1697,6 +1732,19 @@ def _admit(
         if not admitted or selected_kind is None:
             _log(f"{requested_kind}-acquire", label, "REFUSED", f"{decision}: {detail}")
             return False, f"{decision} — {detail}"
+        charged_gib = _charged_memory_gib(
+            requested_memory, _estimate_kind(estimate_source),
+        )
+        if requested_kind == "hard":
+            prior = next((item for item in state["soft"] if item["label"] == label), None)
+            if prior is not None:
+                _, prior_memory, _, _ = _decode_admission_metadata(
+                    prior["note"], int(selected_policy["task_memory_gib"]),
+                )
+                if prior_memory == requested_memory:
+                    charged_gib = _hold_reservation(
+                        prior, int(selected_policy["task_memory_gib"]),
+                    )
         if selected_kind == "soft":
             state["soft"].append(
                 _hold(
@@ -1705,6 +1753,7 @@ def _admit(
                     lease,
                     memory_gib=requested_memory,
                     contention=contention,
+                    charged_gib=charged_gib,
                 )
             )
         else:
@@ -1715,6 +1764,7 @@ def _admit(
                 lease,
                 memory_gib=requested_memory,
                 contention=contention,
+                charged_gib=charged_gib,
             )
         _save(path, state)
     _log(f"{requested_kind}-acquire", label, "OK", f"{decision}: {detail}")
@@ -2049,12 +2099,18 @@ def _waiting_admit(
                         state["soft"].append(_hold(
                             label, note, lease,
                             memory_gib=requested_memory, contention=contention,
+                            charged_gib=_charged_memory_gib(
+                                requested_memory, _estimate_kind(estimate_source),
+                            ),
                         ))
                     else:
                         state["soft"] = []
                         state["hard"] = _hold(
                             label, note, lease,
                             memory_gib=requested_memory, contention=contention,
+                            charged_gib=_charged_memory_gib(
+                                requested_memory, _estimate_kind(estimate_source),
+                            ),
                         )
                     _drop_waiter(root, waiter_id)
                     _save(path, state)

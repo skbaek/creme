@@ -567,9 +567,10 @@ def _decode_admission_metadata(
 ) -> tuple[str, int, str, Optional[float]]:
     """Read additive admission metadata while preserving schema-v1 state.
 
-    Holds are shared with sessions that may still be running the pre-admission
-    launcher. Encoding the reservation in the existing free-form note keeps
-    those sessions fail-closed and avoids an in-place state-schema cutover.
+    Encoding the reservation in the existing free-form note avoids an in-place
+    state-schema cutover. Pre-update readers reject the new metadata shape and
+    can fall back to a smaller profile estimate, so deployment requires the
+    documented quiescent admission boundary.
     """
     if not note.startswith(ADMISSION_NOTE_PREFIX):
         return note, default_memory_gib, "legacy", None

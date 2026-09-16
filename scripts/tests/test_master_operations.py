@@ -651,7 +651,61 @@ class MasterOperationsTest(unittest.TestCase):
         self.assertEqual(len(view.events), 1)
         self.assertEqual(view.events[0]["payload"]["model"], "synthetic-model")
         self.assertEqual(lease.acquire_count, 1)
-        self.assertEqual(lease.heartbeat_count, 2)
+        self.assertEqual(lease.heartbeat_count, 1)
+
+    def test_resumed_start_keeps_the_acquisition_heartbeat_without_starting_another(self):
+        root = self.initialize()
+        lease = LeaseHarness()
+        first = master_operations.start_master(
+            root,
+            client="codex",
+            model="synthetic-model",
+            effort="high",
+            note="first start",
+            acquire=lease.acquire,
+            renew=lease.renew,
+            release=lease.release,
+            heartbeat=lease.heartbeat,
+            lease_snapshot=lease.snapshot,
+        )
+        self.assertEqual(first["mode"], "acquired")
+        self.assertEqual(lease.heartbeat_count, 1)
+        second = master_operations.start_master(
+            root,
+            client="codex",
+            model="synthetic-model",
+            effort="high",
+            note="authenticated re-entry",
+            acquire=lease.acquire,
+            renew=lease.renew,
+            release=lease.release,
+            heartbeat=lease.heartbeat,
+            lease_snapshot=lease.snapshot,
+        )
+        self.assertEqual(second["status"], "master")
+        self.assertEqual(second["mode"], "resumed")
+        self.assertEqual(lease.heartbeat_count, 1)
+
+        lapsed = LeaseHarness(
+            lease={"client": "claude", "lease_id": "e" * 32},
+            state="lapsed",
+            can_renew=False,
+        )
+        taken = master_operations.start_master(
+            root,
+            client="codex",
+            model="synthetic-model",
+            effort="high",
+            note="take over now",
+            take_over=True,
+            acquire=lapsed.acquire,
+            renew=lapsed.renew,
+            release=lapsed.release,
+            heartbeat=lapsed.heartbeat,
+            lease_snapshot=lapsed.snapshot,
+        )
+        self.assertEqual(taken["mode"], "taken-over")
+        self.assertEqual(lapsed.heartbeat_count, 1)
 
     def test_start_returns_safe_reader_and_explicit_takeover_required_results(self):
         root = self.initialize()

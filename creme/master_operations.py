@@ -823,14 +823,19 @@ def start_master(
                 except Exception:
                     pass
         raise
-    try:
-        heartbeat_ok, heartbeat_detail = heartbeat(1500)
-    except Exception as exc:
-        heartbeat_ok, heartbeat_detail = False, f"heartbeat start failed: {exc}"
-    if not heartbeat_ok:
-        raise MasterOperationError(
-            f"master event is durable but heartbeat is unavailable; retry start: {heartbeat_detail}"
-        )
+    # Authenticated re-entry keeps the existing acquisition, whose heartbeat is
+    # already live for that lease id; starting another would double-renew it
+    # (master.md Session start: no second detached heartbeat on re-entry).
+    # Only a call that minted a new acquisition starts its heartbeat.
+    if acquired_now:
+        try:
+            heartbeat_ok, heartbeat_detail = heartbeat(1500)
+        except Exception as exc:
+            heartbeat_ok, heartbeat_detail = False, f"heartbeat start failed: {exc}"
+        if not heartbeat_ok:
+            raise MasterOperationError(
+                f"master event is durable but heartbeat is unavailable; retry start: {heartbeat_detail}"
+            )
     digest = digest_record(
         root,
         live_reconciliation=reconciliation,

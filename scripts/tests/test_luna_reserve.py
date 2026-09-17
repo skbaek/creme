@@ -304,6 +304,7 @@ class SessionPolicyTest(unittest.TestCase):
         session = self.session()
         session.thread_id, session.active_turn = "t", "u"
         base = session.thread_parameters()
+        pins = {"approvalPolicy": "never", "approvalsReviewer": "user"}
         attempts = [
             ("thread/start", {**base, "model": "gpt-5.6-luna"}),
             ("thread/start", {key: value for key, value in base.items() if key != "model"}),
@@ -328,9 +329,9 @@ class SessionPolicyTest(unittest.TestCase):
                                "approvalsReviewer": "guardian_subagent"}),
             ("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve", "effort": "max"}),
             ("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve", "serviceTierForTurn": "priority"}),
-            ("turn/start", {"threadId": "t", "input": [], "model": "gpt-5.6-luna"}),
-            ("turn/start", {"threadId": "t", "input": []}),
-            ("thread/resume", {"threadId": "t", "model": "gpt-6-astra"}),
+            ("turn/start", {"threadId": "t", "input": [], "model": "gpt-5.6-luna", **pins}),
+            ("turn/start", {"threadId": "t", "input": [], **pins}),
+            ("thread/resume", {"threadId": "t", "model": "gpt-6-astra", **pins}),
             ("turn/steer", {"threadId": "t", "expectedTurnId": "u", "input": [], "model": "gpt-5.6-luna"}),
             ("config/value/write", {"keyPath": "model", "value": "x"}),
             ("plugin/install", {}),

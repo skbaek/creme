@@ -49,8 +49,11 @@ Rules:
      `LIGHT_ONLY`, `DEFER_HEAVY`, `DEFER_FOR_HARD`, `NEVER_FITS`, `WAIT_TIMEOUT`,
      or any refusal, start no further Lean action and report `BLOCKED` with that
      line. Do not retry in a loop.
-   - Do not run semaphore, reclaim, or wind-down commands; the broker winds
-     the session down when it ends.
+   - Do not run, attempt, or report semaphore, reclaim, or wind-down
+     commands. The wind-down duty `AGENTS.md` gives a task that opened a Lean
+     MCP server belongs to the broker in this session: it runs
+     `reclaim --wind-down {goal}` itself after the session ends. Never state
+     the result of a command you did not run.
 5. No network installs or downloads (`pip`, `npm`, `brew`, `curl`, `git
    clone`, `lake update`, and similar). Do not start other agents or model
    clients, test suites that elaborate Lean, or long-running services.

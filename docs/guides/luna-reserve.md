@@ -28,10 +28,11 @@ Luna is a fast, economical model for simpler work. Good fits:
 - mechanical edits whose correct result is easy to check;
 - first-pass checks whose findings the master then confirms.
 
-Poor fits: Lean proof or elaboration work, architecture or proof strategy,
-anything whose correctness the master cannot cheaply confirm, and anything
-that needs network access, builds, or the semaphore. Lean MCP access is out
-of scope for version 1 (see [Lean work (planned)](#lean-work-planned)).
+Poor fits: hard proof strategy, architecture, anything whose correctness the
+master cannot cheaply confirm, and anything that needs network access.
+Mechanical Lean work (a named edit, a diagnostics sweep, a narrow build) is a
+fit only in a Lean-mode session (see [Lean work](#lean-work)); every other
+session forbids Lean, builds, and the semaphore.
 
 ## Commands
 
@@ -183,13 +184,15 @@ states that the thread is a worker under the current master, and it sets the
 pseudo-subagent rules (no push, merge, or history rewrite; no writes under a
 goal store's `master/`; no Lean elaboration or builds; no network installs or
 other model clients; stay in the target; a bounded final-message format).
+A Lean-mode session gets `templates/luna-reserve/lean-preamble.md` instead
+(see [Lean work](#lean-work)).
 
 What loads is recorded per run: `thread/start` reports the instruction
 sources (on the first host, only the launch root's `AGENTS.md`), and
 `preflight.json` lists the effective configuration layers, the stubbed MCP
 servers, and every skill with its scope, path, and enabled state (Creme's
-repository skills stay enabled; they are Lean skills the contract forbids
-using in version 1).
+repository skills stay enabled; they are Lean skills that only a Lean-mode
+session may use).
 
 ## Writing a pseudo-subagent brief
 
@@ -244,7 +247,7 @@ task, steer it, give follow-up orders, interrupt or stop it, answer its
 approval requests, and read its transcript on demand.
 
 ```sh
-python3 -m creme luna-reserve start --brief FILE|- --target DIR [--write] \
+python3 -m creme luna-reserve start --brief FILE|- --target DIR [--write | --lean GOAL] \
     [--effort low|medium|high] [--detail silent|summary|live] [--timeout-seconds N]
 python3 -m creme luna-reserve send SESSION (--text TEXT | --brief FILE|-)
 python3 -m creme luna-reserve steer SESSION (--text TEXT | --brief FILE|-)
@@ -256,7 +259,7 @@ python3 -m creme luna-reserve approve SESSION APPROVAL accept|decline|cancel
 python3 -m creme luna-reserve detail SESSION silent|summary|live
 python3 -m creme luna-reserve list [--limit N]
 python3 -m creme luna-reserve stop SESSION
-python3 -m creme luna-reserve resume THREAD_ID [--target DIR] [--write] [--effort E]
+python3 -m creme luna-reserve resume THREAD_ID [--target DIR] [--write | --lean GOAL] [--effort E]
 python3 -m creme luna-reserve shutdown
 ```
 
@@ -380,25 +383,131 @@ Codex and Muse masters use the same commands through their shell. The run
 directory of a session is never a substitute for verification: its final
 message is a worker summary.
 
-## Lean work (planned)
+## Lean work
 
-Version 1 forbids Lean. A Lean-capable pseudo-subagent is a separate,
-master-scoped extension, not a flag:
+`start --lean GOAL` (and `resume --lean GOAL`; `run` has no Lean mode) opens a
+Lean pseudo-subagent: an ordinary brokered write session with the tooling and
+host discipline of any other Lean agent on the host. It is opt-in and changes
+nothing for other sessions. No billing guard changes: `gpt-reserve` only,
+reviewer `user`, never `auto_review`, live and rollout attribution, and the
+tripwire all apply unchanged.
 
-- **Selective isolation.** Keep the version 1 disables (plugins, apps, other
-  MCP servers, computer use, fast tier, native sub-agents, automatic review),
-  but keep the project trust that Creme's project layer needs, and keep the
-  user's own Lean relay permission profile and execpolicy rules (host
-  guidance names them) instead of the version 1 write profile.
-- **Guarded Lean server.** Replace the disabled stub for Creme's project
-  `lean-lsp-mcp` with Creme's guarded launcher, started from cwd `~/creme` as
-  the project layer defines it. No other MCP server returns.
-- **Approvals.** MCP and sandbox approvals go to the broker's `approve` call,
-  answered by the master; never `auto_review`.
-- **Memory.** Each Lean pseudo-subagent is a language-server worker and counts
-  against the host's one-language-server-worker memory rule; the master
-  schedules it like any other Lean worker.
-- **Builds.** Only through `~/creme/scripts/creme lake-build GOAL -- TARGETS`
-  under semaphore admission; never bare `lake build`.
-- **Stop.** `python3 -m creme reclaim --wind-down GOAL` runs at stop, and the
-  run is not reported idle until wind-down reports `OK`.
+### What the broker enforces
+
+- **Target.** `--target` must be exactly `<repo>/.worktrees/GOAL` for the Jaune
+  or Blanc repository the Creme host profile resolves (a plain directory with
+  a `.git` file, not a symlink). The goal label therefore names the worktree
+  that `creme lake-build GOAL` and `reclaim --wind-down GOAL` scope on.
+  Anything else is refused before any process starts.
+- **One MCP server.** Every MCP server stays a disabled stub except
+  `lean-lsp-mcp`. Its definition comes from the launch root's tracked
+  `.codex/config.toml`, which must equal the file at Git `HEAD` and keep its
+  pins (the guarded `/usr/bin/python3 -m creme lean-mcp -- uvx
+  lean-lsp-mcp==PIN` launcher, `LEAN_MCP_DISABLED_TOOLS` covering `lean_build`
+  and `lean_profile_proof`, `LEAN_LSP_MAX_OPEN_FILES=2`,
+  `default_tools_approval_mode = "writes"`, and only the reviewed
+  `lean_verify` approval exception). The session launches that definition as
+  one `-c` override with `disabled_tools` added for the five open-world search
+  tools (`lean_leansearch`, `lean_loogle`, `lean_leanfinder`,
+  `lean_state_search`, `lean_hammer_premise`): Codex does not sandbox MCP
+  servers, so those tools would reach the network. A nested override is not
+  possible, because a project-only server then has no transport at launch.
+  Before the thread starts, the effective definition must equal the launched
+  one exactly (drift is a refusal). Before the first turn,
+  `mcpServer/startupStatus/updated` must show `lean-lsp-mcp` ready and no
+  other server starting, and `mcpServerStatus/list` must show it connected
+  without a search, build, or profiler tool while every other server is
+  disabled. `preflight.json` keeps the definition; `session.json` keeps the
+  startup statuses and the tool list. During turns, a tool call on another
+  server, a forbidden tool, or a plugin tool is an isolation failure, as in
+  version 1.
+- **Host discipline.** The broker holds at most one Lean session at a time,
+  including one that is still stopping. Before starting, it refuses when
+  memory headroom is unavailable, below the semaphore's 20% drain floor
+  (`DRAIN_HEAVY`/`LIGHT_ONLY`), or below the host-guidance floor of 30%; when
+  another label holds the hard semaphore or a manual hold is active; and when
+  a `lean` or `lake` process already runs with its working directory inside
+  the target. It takes no hold itself: builds are admitted by the wrapper.
+- **Wind-down.** Every end of a Lean session (`stop`, idle close, `shutdown`,
+  a tripwire stop, a refusal or failure after the app-server opened, a lost
+  app-server, and crash-recovery reconciliation by a successor broker) closes
+  the app-server first, waits for in-target `lean`/`lake` processes to exit,
+  runs `python3 -m creme reclaim --wind-down GOAL`, and scans the target again.
+  The verdict is `OK` only when wind-down reports structured `OK` and no
+  in-target `lean`/`lake` process remains; it is recorded under
+  `session.json` `lean.wind_down` and `wind-down.json`, and printed as
+  `wind_down=OK`. A session whose wind-down is not `OK` ends in state
+  `unclean` (exit `11`), never `stopped`. The residual scan exists because the
+  broker is not a client process: reclaim alone would call the app-server's
+  language servers foreign and report `OK` while they ran. While a successor
+  broker's reconciliation runs, a Lean session is refused.
+
+### Sandbox, approvals, and network
+
+The thread runs under the same write profile as any write session: it extends
+`:read-only`, grants write access to the target worktree only, and has no
+network and no temporary directories. Nothing else is writable from the
+sandbox, deliberately: the build ledger, guard launchers, semaphore state,
+and Lake cache stay out of the model's reach. Two facts were measured on the
+first host with zero model tokens (`codex sandbox` and a thread-only
+`thread/start`):
+
+- The Lean MCP server runs outside the sandbox (Codex starts MCP servers
+  itself), so the language server works under this profile.
+- `creme lake-build` cannot run inside it: the owned-build priority launcher's
+  `os.nice(10)` is denied and the wrapper exits `64` before any work, and even
+  its `--probe` needs to append to the build ledger. The session therefore
+  requests escalation for each `creme lake-build` command, and the master
+  answers it with `approve`.
+
+A typical edit, diagnostics, and narrow-build cycle raises **one** approval:
+the escalated `creme lake-build` command (offered `accept|cancel`). File edits
+inside the worktree and `lean_diagnostic_messages`, `lean_goal`, and the other
+read-only-marked tools raise none. `lean_verify` is pre-approved by the
+tracked definition. Any other MCP tool approval arrives as an
+`mcpServer/elicitation/request` and is queued like a command approval (the
+answer is `accept`, `decline`, or `cancel`; a form that requires content is
+offered only `decline` or `cancel`); requests from any other server, URL
+elicitations, and device verifications are declined by policy.
+
+Answer a build approval only when the command is exactly
+`~/creme/scripts/creme lake-build GOAL -- <narrow targets>` with no
+`--memory-gib`, `--contention`, or `--wait`, its working directory is the
+target worktree, and the host has room; `decline` or `cancel` anything else.
+The approved command runs outside the sandbox and takes its own semaphore
+admission.
+
+### Briefing a Lean pseudo-subagent
+
+Use it for mechanical Lean work whose result the master can check cheaply: a
+named lemma or example to add, a rename across one module, diagnostics over a
+list of files, a narrow build, a local search. Do not use it for hard proof
+strategy, a proof whose shape is open, a broad rebuild, or anything that needs
+the search tools. Brief it as any other pseudo-subagent, and also:
+
+- name the files, the exact edit or goal, and the narrow build target;
+- say whether to build at all, and name the module target;
+- ask for the diagnostics counts and the wrapper's final status line;
+- keep one objective per turn and use `send` for the next step.
+
+The Lean contract (`templates/luna-reserve/lean-preamble.md`) already carries
+the `AGENTS.md` Lean rules: the edit, `lean_diagnostic_messages`, `lean_goal`
+loop; builds only through `creme lake-build GOAL -- <narrow targets>` with no
+memory or contention flags and with an escalation request; never bare `lake
+build`, `lean_build`, or `lean_profile_proof`; refresh the language server
+after a rebuild; stop on `YIELD_HEAVY`, `DRAIN_HEAVY`, or any refusal; no
+push, merge, or history rewrite; and no semaphore, reclaim, or wind-down
+commands, because the broker owns wind-down.
+
+### Verifying Lean results
+
+The final message is a claim. The master checks the worktree diff itself
+(`git -C TARGET diff`), and the build verdict from the wrapper's own records,
+not from the transcript: the build ledger row for the goal
+(`.creme/lean-build-ownership/ledger.jsonl`, with `exit`, `modules_rebuilt`,
+and peaks), the semaphore log's acquire and release rows, and a fresh
+`creme lake-build GOAL --probe -- TARGET` reporting `FRESH`. After `stop`,
+check `wind_down=OK` and that no `lean`/`lake` process runs in the target. On
+the first live proof the model appended an unrequested blank line while
+reporting "exactly" the requested lines, and reported a failed wind-down it
+had never run; both were caught only by these checks.

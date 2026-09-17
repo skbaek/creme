@@ -289,8 +289,11 @@ sessions: `start`, `send`, `wait`, `events`, `approve`, `stop`, `resume`);
 never call Codex directly for this. A run must never draw on the regular
 Codex bucket or paid credits: on exit `12` (attribution failure) stop using
 Luna reserve and tell the user.
-A result is a worker summary, not evidence. Read
-`docs/guides/luna-reserve.md` before the first use in a session.
+A result is a worker summary, not evidence. Lean work only in a Lean-mode
+session (`start --lean GOAL` on the goal's own Jaune/Blanc worktree): one at a
+time, builds through `creme lake-build` approved by the master, wind-down
+`OK` before it counts as stopped. Read `docs/guides/luna-reserve.md` before
+the first use in a session.
 
 ## Git and completion
 

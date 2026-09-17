@@ -96,6 +96,12 @@ inspectable evidence take precedence over brevity.
    Blanc repository. Generic-shaped definitions, lemmas, tactics, and instances
    go through Blanc's common-library-first and discoverability workflow.
 
+Muse sessions only (other clients ignore this): the file-read tool admits
+sibling paths, but the edit/create tools admit only this workspace. For
+sibling edits use `scripts/muse-edit-file` (exact-once match, atomic write,
+review diff; see `--help`), passing multiline find/replace via
+`--find-file`/`--replace-file`.
+
 ## Lean proof work
 
 Use the `lean-inspector` skill for proof-state analysis and `lean-prover` when

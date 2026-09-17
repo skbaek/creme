@@ -41,6 +41,26 @@ through whatever mechanism the repository provides. Read the owning
 repository's `scripts/GATES.md` for which label its runner derives and which
 mechanism it offers; the guide does not restate a repository's catalogue.
 
+### Liveness: bounded waits and heartbeats
+
+A worker that waits silently is indistinguishable from a dead one, and several
+sessions have burned hours on waits whose completion predicate never fired.
+Every brief that involves a wait longer than a single command therefore states
+all three:
+
+- **Foreground by default.** Long gates and builds run attached with a long
+  yield, never detached behind `sleep N; check`. A detached wait whose wake
+  condition is "the report changed" or "the process is gone" has repeatedly
+  missed the event it waited for.
+- **Bounded polls with a re-dispatch exit.** Any unavoidable poll names its
+  interval (at most 10 minutes), its round cap (at most 6), and what happens
+  at the cap: commit the checkpoint, write a state brief, and report back for
+  re-dispatch — never extend the wait in place.
+- **Heartbeat without moving HEAD.** While a gate runs, the worker refreshes
+  an uncommitted `STATE-BRIEF.md` at the worktree root at least every 30
+  minutes, so a live master can tell stuck from slow by file mtime. Commits
+  happen only at phase boundaries; nothing commits mid-verification.
+
 ## Sizing a worker
 
 Choose each worker's model and effort for the **hardest non-delegable judgment**

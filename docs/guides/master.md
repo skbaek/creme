@@ -362,6 +362,14 @@ those files and lose only the work since the last checkpoint. It never writes
 under `master/`. It reports twice: in files — commits on its branch, a state
 brief, a report, evidence — and in its return value to the master.
 
+The master watches liveness while a worker runs a long wait: session-log
+mtime, heartbeat `STATE-BRIEF.md` mtime, and worktree artifacts, at least
+every half hour. A worker silent past its brief's poll cap gets one status
+pulse; an unanswered pulse plus frozen artifacts is a stand-down, followed by
+a respawn whose brief carries a narrower scope and the bounded-wait clauses
+from [the briefs guide](briefs.md#liveness-bounded-waits-and-heartbeats).
+Never let a second hour of silence pass hoping the wait resolves.
+
 The master accepts a worker's result only on evidence: the catalogue's
 verdict on the exact candidate commit, the diff, and the report's
 condition-to-evidence table. A worker's summary that it is done is not

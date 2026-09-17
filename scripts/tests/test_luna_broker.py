@@ -109,9 +109,9 @@ class BrokerHarness(unittest.TestCase):
         for line in lines:
             self.assertLessEqual(len(line), MAX_WIDTH, line)
 
-    def start(self, write=False, detail="silent", brief="Say OK.", expect=0):
+    def start(self, write=False, detail="silent", brief="Say OK.", expect=0, timeout=60):
         code, lines, reply = B.cmd_start(ROOT, self.environ, brief, str(self.target), write, "low", detail,
-                                         L.Policy().__dict__, [], 60)
+                                         L.Policy().__dict__, [], timeout)
         self.assertEqual(code, expect, lines)
         self.assertBounded(lines)
         return reply.get("session"), lines
@@ -332,6 +332,24 @@ class BrokerSessionTest(BrokerHarness):
         self.simple("send", bystander, expect=L.EXIT_PREFLIGHT_REFUSED, text="more")
         self.assertEqual(len(self.entries("request", "turn/start")), turn_starts)
 
+    def test_tripwire_recorded_by_another_run_stops_open_sessions(self):
+        session, _ = self.start()
+        self.wait(session)
+        L.record_tripwire(self.state, "one-shot-run", "other-thread", ["recorded elsewhere"])
+        self.until(lambda: (self.record(session) or {}).get("state") == "stopped", timeout=15)
+        self.assertIn("stop: tripwire", self.record(session)["note"])
+        self.assertTrue(any("billing-alarm" in line for line in self.events(session)))
+
+    def test_turn_timeout_interrupts_and_is_a_codex_failure(self):
+        self.scenario["hang"] = True
+        self.write_scenario()
+        session, _ = self.start(timeout=1)
+        record, _ = self.wait(session, expect=L.EXIT_CODEX_FAILED)
+        self.assertTrue(record["turns"][-1]["timed_out"])
+        self.assertEqual(record["turns"][-1]["verdict"], "CODEX_FAILED")
+        self.assertEqual(len(self.entries("request", "turn/interrupt")), 1)
+        self.assertFalse((self.state / L.TRIPWIRE_NAME).exists())
+
     def test_app_server_crash_mid_turn_is_an_attribution_failure(self):
         self.scenario["turns"] = [{"crash": True}]
         self.write_scenario()
@@ -458,6 +476,25 @@ class BrokerProcessTest(BrokerHarness):
         orphan = self.record(session)["turns"][0]
         self.assertEqual(orphan["verdict"], "AUDITED_AFTER_LOSS")
         self.assertEqual(orphan["rollout_audit"], "PASS")
+
+    def test_a_broker_on_other_code_is_not_driven(self):
+        first = B.ensure_broker(ROOT, self.environ)
+        original = B.code_digest
+        try:
+            B.code_digest = lambda root: "0000000000000000"
+            reply = B.ensure_broker(ROOT, self.environ)
+        finally:
+            B.code_digest = original
+        self.assertNotEqual(reply["pid"], first["pid"])
+        self.assertTrue(any("running other code" in note for note in reply["notes"]), reply["notes"])
+        session, _ = self.start()
+        self.wait(session)
+        B.code_digest = lambda root: "0000000000000000"
+        try:
+            with self.assertRaises(B.BrokerError):
+                B.ensure_broker(ROOT, self.environ)
+        finally:
+            B.code_digest = original
 
     def test_broker_exits_after_idle_period_without_live_sessions(self):
         self.environ[B.IDLE_ENV] = "1"

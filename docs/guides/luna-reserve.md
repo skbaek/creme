@@ -269,7 +269,9 @@ python3 -m creme luna-reserve shutdown
   admitted.
 - `wait` blocks until the session is idle, needs attention (an approval), or
   has ended, then prints a few lines: state, last turn status and verdict,
-  tokens, pending approvals, and the first lines of the final message. Its
+  thread token totals (cumulative for the thread, not per turn), pending
+  approvals with the decisions the server offers, and the first lines of the
+  final message. Its
   exit code is `0` (turn passed), `10` (refused), `11` (Codex failure or lost
   session), `12` (attribution failure), `20` (approval pending), `21`
   (interrupted), or `124` (timeout).
@@ -341,7 +343,10 @@ The broker is a long-lived process started on first use by `start` or
   `turns/<n>/` with `brief.md`, `preflight.json`, `postflight.json`,
   `audit.json`, `items.json`, and `last-message.md`.
 
-A client uses a broker only when a ping returns the recorded pid and instance.
+A client uses a broker only when a ping returns the recorded pid and instance,
+and `start` or `resume` also requires that the broker runs the client's own
+checkout and code digest; an idle broker on other code is replaced, and one
+holding open sessions is refused.
 Otherwise it replaces the broker: it signals a recorded pid only if that
 process's command line carries the recorded instance token, removes a stale
 socket, and starts a new broker. The broker exits on `shutdown`, and after ten

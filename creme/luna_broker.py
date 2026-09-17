@@ -142,6 +142,20 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def code_digest(module_root: Path) -> str:
+    """Digest of the modules a broker runs, so a client never drives a broker on other code."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    for relative in ("creme/luna_broker.py", "creme/luna_reserve.py", "creme/codex_app_server.py",
+                     "templates/luna-reserve/preamble.md"):
+        try:
+            digest.update((module_root / relative).read_bytes())
+        except OSError:
+            digest.update(b"missing:" + relative.encode())
+    return digest.hexdigest()[:16]
+
+
 def peer_uid(connection: socket.socket) -> Optional[int]:
     """The connecting process's uid, or None when the platform cannot say."""
     try:
@@ -792,6 +806,7 @@ class Broker:
         self.stopping = threading.Event()
         self.last_request = time.monotonic()
         self.listener: Optional[socket.socket] = None
+        self.code = code_digest(module_root)
 
     # -- lifecycle ------------------------------------------------------
     def serve(self) -> int:
@@ -815,7 +830,7 @@ class Broker:
         self.listener = listener
         write_private_json(info_path(self.state), {
             "pid": os.getpid(), "instance": self.instance, "socket": str(path), "started": _now_iso(),
-            "uid": os.getuid(), "module_root": str(self.module_root),
+            "uid": os.getuid(), "module_root": str(self.module_root), "code": self.code,
         })
         signal.signal(signal.SIGTERM, lambda *_: self.stopping.set())
         try:
@@ -944,7 +959,8 @@ class Broker:
             with self.lock:
                 live = sorted(sid for sid, session in self.sessions.items() if session.is_open())
             return {"ok": True, "code": 0, "instance": self.instance, "pid": os.getpid(), "uid": os.getuid(),
-                    "live": live, "tripped": self.tripped}
+                    "live": live, "tripped": self.tripped, "module_root": str(self.module_root),
+                    "code_digest": self.code}
         if op in ("start", "resume"):
             return self.open_session(request, op)
         if op == "shutdown":
@@ -1214,9 +1230,20 @@ def ensure_broker(module_root: Path, environ: dict, start_timeout: float = 20.0)
     with os.fdopen(descriptor, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         reply = probe_broker(state)
+        notes: list[str] = []
         if reply is not None:
-            return reply
-        notes = replace_stale_broker(state, read_json(info_path(state)))
+            if reply.get("module_root") == str(module_root) and reply.get("code_digest") == code_digest(module_root):
+                return reply
+            if reply.get("live"):
+                raise BrokerError(
+                    f"the running broker (pid {reply.get('pid')}) runs other code ({reply.get('module_root')}) and "
+                    f"holds open sessions; stop them or run shutdown first")
+            call(state, "shutdown", timeout=STOP_WAIT_SECONDS)
+            deadline = time.monotonic() + 10
+            while _pid_alive(reply.get("pid")) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            notes.append(f"replaced idle broker pid {reply.get('pid')} running other code")
+        notes += replace_stale_broker(state, read_json(info_path(state)))
         instance = secrets.token_hex(8)
         env = dict(environ)
         env["PYTHONPATH"] = str(module_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")

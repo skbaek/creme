@@ -77,6 +77,9 @@ _SESSION_ID = re.compile(r"^lr-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
 _APPROVAL_ID = re.compile(r"^a[0-9]{1,6}$")
 
 
+_SPAWNED: list[subprocess.Popen] = []
+
+
 class BrokerError(RuntimeError):
     """A broker or client condition with a user-facing reason."""
 
@@ -226,6 +229,7 @@ class BrokerSession:
         self.seq = 0
         self.closed = False
         self.guard_tripped = False
+        self.interrupted_turn: Optional[str] = None
         self.alarmed = False
         self.timed_out = False
         self.turn_deadline: Optional[float] = None
@@ -420,6 +424,14 @@ class BrokerSession:
             self.emit("live", "steer", f"turn {number} steered: {one_line(text, 100)}")
             return L.EXIT_OK, {"verdict": "STEERED", "turn": number}
 
+    def request_interrupt(self) -> None:
+        """Interrupt the active turn once; repeated requests for the same turn are not resent."""
+        turn = self.guard.active_turn if self.guard is not None else None
+        if not turn or self.interrupted_turn == turn:
+            return
+        self.interrupted_turn = turn
+        self.guard.turn_interrupt()
+
     def interrupt(self) -> tuple[int, dict]:
         with self.lock:
             self.last_activity = time.monotonic()
@@ -427,7 +439,7 @@ class BrokerSession:
                 return L.EXIT_PREFLIGHT_REFUSED, {"verdict": "REFUSED", "refusals": [
                     f"session is {self.state}; no active turn to interrupt"]}
             try:
-                self.guard.turn_interrupt()
+                self.request_interrupt()
             except (AppServerError, PinViolation) as exc:
                 return L.EXIT_CODEX_FAILED, {"verdict": "CODEX_FAILED", "errors": [str(exc)]}
             self.emit("live", "interrupt", f"interrupt requested for turn {len(self.record['turns'])}")
@@ -597,7 +609,7 @@ class BrokerSession:
             self.timed_out = True
             self.emit("attention", "timeout", "turn timed out; interrupting")
             try:
-                self.guard.turn_interrupt()
+                self.request_interrupt()
             except (AppServerError, PinViolation) as exc:
                 self.emit("attention", "error", f"interrupt failed: {exc}")
         if self.state == "idle" and not self.pending and now - self.last_activity > broker.session_idle_seconds:
@@ -624,11 +636,10 @@ class BrokerSession:
 
     def on_guard_failure(self, failures: list[str]) -> None:
         self.guard_tripped = True
-        if self.guard.active_turn:
-            try:
-                self.guard.turn_interrupt()
-            except (AppServerError, PinViolation):
-                pass
+        try:
+            self.request_interrupt()
+        except (AppServerError, PinViolation):
+            pass
         self.broker.trip_all(self, failures)
 
     def on_lost(self) -> None:
@@ -673,7 +684,7 @@ class BrokerSession:
             active = self.guard is not None and self.guard.active_turn
             if active:
                 try:
-                    self.guard.turn_interrupt()
+                    self.request_interrupt()
                 except (AppServerError, PinViolation):
                     pass
         if active and threading.current_thread() is not self.pump_thread:
@@ -1147,7 +1158,13 @@ def _pid_alive(pid: Any) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    try:
+        completed = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                                   check=False)
+    except OSError:
+        return True
+    status = completed.stdout.strip()
+    return bool(status) and not status.startswith("Z")  # an exited, unreaped child is not alive
 
 
 def replace_stale_broker(state: Path, info: Optional[dict]) -> list[str]:
@@ -1204,6 +1221,7 @@ def ensure_broker(module_root: Path, environ: dict, start_timeout: float = 20.0)
             )
         finally:
             os.close(log)
+        _SPAWNED.append(process)  # keep the handle so a long-lived caller can reap it
         deadline = time.monotonic() + start_timeout
         while time.monotonic() < deadline:
             reply = probe_broker(state)

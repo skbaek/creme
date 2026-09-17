@@ -34,6 +34,7 @@ from .codex_app_server import (
     AppServerProcess,
     GuardedSession,
     PinViolation,
+    decline_server_requests,
     foreign_skill_paths,
     isolation_arguments,
     isolation_failures,
@@ -167,9 +168,11 @@ def launch_root(module_root: Path) -> Path:
 
 def open_server(binary: Path, env: dict, effort: str, servers: dict,
                 transcript: Any = None, stderr: Any = None,
-                skill_paths: tuple[str, ...] = ()) -> tuple[AppServerProcess, dict]:
+                skill_paths: tuple[str, ...] = (), approval_policy: str = "never",
+                server_request_handler: Any = None) -> tuple[AppServerProcess, dict]:
     process = AppServerProcess(
-        binary, isolation_arguments(RESERVE_MODEL, effort, servers, skill_paths), env, transcript, stderr=stderr,
+        binary, isolation_arguments(RESERVE_MODEL, effort, servers, skill_paths, approval_policy), env, transcript,
+        server_request_handler=server_request_handler or decline_server_requests, stderr=stderr,
     )
     try:
         initialized = process.start("creme-luna-reserve")
@@ -609,6 +612,231 @@ def _digest(path: Path) -> Optional[str]:
         return None
 
 
+def early_refusals(state: Path, effort: str, overrides: Iterable[str] = (),
+                   brief: Optional[str] = None) -> list[str]:
+    """Refusals that need no Codex process: overrides, tripwire, effort, brief."""
+    overrides = list(overrides)
+    if overrides:
+        return [f"override refused: {', '.join(overrides)}; the model is pinned to {RESERVE_MODEL}"]
+    if tripwire_path(state).exists():
+        return [
+            f"an earlier attribution failure is recorded at {tripwire_path(state)}; "
+            "only the user may clear it after reviewing that run"
+        ]
+    if effort not in ALLOWED_EFFORTS:
+        return [f"effort must be one of {', '.join(ALLOWED_EFFORTS)}"]
+    if brief is not None:
+        if not brief.strip():
+            return ["the brief is empty"]
+        if len(brief.encode("utf-8")) > MAX_BRIEF_BYTES:
+            return [f"the brief exceeds {MAX_BRIEF_BYTES} bytes"]
+    return []
+
+
+def approval_policy_for(write: bool, broker: bool) -> str:
+    """Read-only work never asks; a broker write session routes approvals to the master."""
+    return "on-request" if (write and broker) else "never"
+
+
+def attribution_for(decision: dict, jitter: int):
+    """The live attribution predicate for one admission read."""
+    reserve = Bucket.from_dict(decision["reserve"])
+    regular = Bucket.from_dict(decision["regular"])
+
+    def attribution(snapshot: dict) -> tuple[bool, str]:
+        return snapshot_matches_reserve(snapshot, reserve, regular, jitter)
+
+    return attribution
+
+
+class ReserveServer:
+    """One isolated, admitted ``codex app-server`` with its preflight proof.
+
+    ``prepare`` runs the probe server, admission, target refusals, and the
+    isolation proof, and records ``preflight.json`` in ``run_dir``. The
+    one-shot ``run`` and every broker session start and resume threads only
+    through a prepared server.
+    """
+
+    def __init__(self, module_root: Path, root: Path, run_dir: Path, workdir: Path, write: bool,
+                 effort: str, policy: Policy, environ: dict, approval_policy: str = "never") -> None:
+        self.module_root = module_root
+        self.root = root
+        self.run_dir = run_dir
+        self.workdir = workdir
+        self.write = write
+        self.effort = effort
+        self.policy = policy
+        self.environ = environ
+        self.approval_policy = approval_policy
+        self.process: Optional[AppServerProcess] = None
+        self.before_read: dict = {}
+        self.before: dict = {}
+        self.first: dict = {}
+        self.early: dict = {}
+        self.servers: dict = {}
+        self.skill_paths: tuple[str, ...] = ()
+        self.scrubbed: list[str] = []
+        self.transcript: Any = None
+        self.stderr: Any = None
+        self.codex_home: Optional[Path] = None
+
+    # -- stage 1: probe (no run directory yet) --------------------------
+    def probe(self) -> list[str]:
+        try:
+            binary = resolve_binary(self.environ)
+        except LunaReserveError as exc:
+            return [str(exc)]
+        self.binary = binary
+        self.env, self.scrubbed = child_environment(self.environ)
+        if not self.workdir.is_dir():
+            return [f"target directory does not exist: {self.workdir}"]
+        # A first isolated server names the user's MCP servers and foreign
+        # skills so the run server can disable each one; it also gives an
+        # early admission verdict.
+        try:
+            probe, initialized = open_server(binary, self.env, self.effort, {},
+                                             approval_policy=self.approval_policy)
+            try:
+                self.first = zero_token_read(probe, initialized, self.root)
+                first_skills = probe.request("skills/list", {"cwds": [str(self.root)], "forceReload": True})
+            finally:
+                probe.close()
+        except (AppServerError, PinViolation) as exc:
+            return [str(exc)]
+        self.early = admission(self.first, self.policy, self.effort)
+        refusals = self.early["refusals"] + target_refusals(
+            self.workdir, self.write, self.first.get("codex_home"), self.root,
+        )
+        self.servers = mcp_servers(self.first)
+        self.skill_paths = foreign_skill_paths(first_skills, self.root)
+        try:
+            # Validate the isolation arguments before anything is recorded, so
+            # an unrepresentable server name or skill path is a refusal.
+            isolation_arguments(RESERVE_MODEL, self.effort, self.servers, self.skill_paths, self.approval_policy)
+        except PinViolation as exc:
+            refusals.append(str(exc))
+        self.codex_home = Path(self.first.get("codex_home") or Path.home() / ".codex")
+        return refusals
+
+    # -- stage 2: the run server and its isolation proof ----------------
+    def open(self, server_request_handler: Any = None) -> list[str]:
+        """Launch the run server in ``run_dir``; raises AppServerError/PinViolation."""
+        self.transcript = (self.run_dir / "transcript.jsonl").open("a", encoding="utf-8")
+        self.stderr = (self.run_dir / "app-server.stderr").open("a", encoding="utf-8")
+        self.process, initialized = open_server(
+            self.binary, self.env, self.effort, self.servers, self.transcript, self.stderr, self.skill_paths,
+            approval_policy=self.approval_policy, server_request_handler=server_request_handler,
+        )
+        process = self.process
+        self.before_read = zero_token_read(process, initialized, self.root)
+        features = read_all_features(process)
+        skills = process.request("skills/list", {"cwds": [str(self.root)], "forceReload": True})
+        self.before = admission(self.before_read, self.policy, self.effort)
+        isolation = isolation_failures(self.before_read["config"], features, RESERVE_MODEL, self.root, skills,
+                                       self.approval_policy)
+        config = self.before_read["config"] or {}
+        _write_json(self.run_dir / "preflight.json", {
+            "read": {key: value for key, value in self.before_read.items() if key != "config"},
+            "admission": self.before,
+            "isolation": {
+                "arguments": isolation_arguments(RESERVE_MODEL, self.effort, self.servers, self.skill_paths,
+                                                 self.approval_policy),
+                "failures": isolation,
+                "enabled_features": sorted(item.get("name") for item in features if item.get("enabled")),
+                "config_layers": [layer.get("name") for layer in config.get("layers") or []],
+                "mcp_servers": {
+                    name: {"enabled": (server or {}).get("enabled"), "command": (server or {}).get("command")}
+                    for name, server in ((config.get("config") or {}).get("mcp_servers") or {}).items()
+                },
+                "skills": [
+                    {"name": skill.get("name"), "scope": skill.get("scope"), "enabled": skill.get("enabled"),
+                     "plugin": skill.get("pluginId"), "path": skill.get("path")}
+                    for entry in (skills or {}).get("data") or [] for skill in entry.get("skills") or []
+                ],
+            },
+        })
+        return self.before["refusals"] + isolation + target_refusals(
+            self.workdir, self.write, self.before_read.get("codex_home"), self.root,
+        )
+
+    def session(self, developer_instructions_text: str) -> GuardedSession:
+        return GuardedSession(
+            self.process, RESERVE_MODEL, attribution_for(self.before, self.policy.jitter_seconds), self.root,
+            "workspace-write" if self.write else "read-only", self.effort,
+            writable_roots=(self.workdir,) if self.write else (),
+            developer_instructions=developer_instructions_text,
+            approval_policy=self.approval_policy,
+        )
+
+    def admission_read(self) -> dict:
+        """A fresh zero-token read on this server, judged by the same admission."""
+        read = zero_token_read(self.process, {"codexHome": self.before_read.get("codex_home")}, self.root)
+        return admission(read, self.policy, self.effort)
+
+    def postflight(self, reference: dict) -> tuple[dict, dict, list[str]]:
+        """Bucket read after work; any regular or credit movement is a failure."""
+        limits = self.process.request("account/rateLimits/read", None)
+        after = admission({**self.before_read, "limits": limits}, self.policy)
+        return limits, after, regular_delta_failures(reference, after)
+
+    def close(self) -> None:
+        if self.process is not None:
+            self.process.close()
+        for handle in (self.transcript, self.stderr):
+            if handle is not None and not handle.closed:
+                handle.close()
+
+
+def rollout_records(path: Optional[Path], wait_seconds: float) -> Optional[list[dict]]:
+    """Load a rollout, waiting briefly for it to appear and for a partial line to finish."""
+    if path is None:
+        return None
+    deadline = time.monotonic() + wait_seconds
+    while not path.is_file() and time.monotonic() < deadline:
+        time.sleep(0.25)
+    if not path.is_file():
+        return None
+    for attempt in range(3):
+        try:
+            return load_rollout(path)
+        except LunaReserveError:
+            if attempt == 2:
+                raise
+            time.sleep(0.5)
+    return None
+
+
+def audit_turn(records: Optional[list[dict]], start: int, reference: dict, jitter: int,
+               turn_status: Optional[str], token_usage: Any, thread_id: Optional[str]) -> tuple[Optional[dict], list[str]]:
+    """Audit the rollout records a turn produced (from ``start``) against its reference read."""
+    if records is None:
+        return None, ["no rollout found for the turn"]
+    audit = audit_records(
+        records[start:], Bucket.from_dict(reference["reserve"]), Bucket.from_dict(reference["regular"]), jitter,
+    )
+    if token_usage is None and turn_status != "completed":
+        audit["failures"] = [
+            failure for failure in audit["failures"] if failure != "rollout has no token snapshot to attribute"
+        ]
+        audit["verdict"] = "PASS" if not audit["failures"] else "FAIL"
+    audit["rollout_start"] = start
+    failures = list(audit["failures"])
+    if audit["thread_ids"] and thread_id and thread_id not in audit["thread_ids"]:
+        failures.append("rollout session id does not match the thread")
+    return audit, failures
+
+
+def record_tripwire(state: Path, run_id: str, thread_id: Optional[str], failures: list[str]) -> None:
+    state.mkdir(parents=True, exist_ok=True)
+    path = tripwire_path(state)
+    if path.exists():
+        return
+    path.write_text(json.dumps({
+        "run_id": run_id, "thread_id": thread_id, "failures": failures,
+    }, indent=2) + "\n", encoding="utf-8")
+
+
 def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
         rollout_wait_seconds: float = 10.0, settle_seconds: float = 2.0,
         root: Optional[Path] = None) -> tuple[int, dict]:
@@ -635,125 +863,41 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
             _write_json(run_dir / "verdict.json", summary)
         return EXIT_PREFLIGHT_REFUSED, summary
 
-    if request.overrides:
-        return refuse([f"override refused: {', '.join(request.overrides)}; the model is pinned to {RESERVE_MODEL}"])
-    if tripwire_path(state).exists():
-        return refuse([
-            f"an earlier attribution failure is recorded at {tripwire_path(state)}; "
-            "only the user may clear it after reviewing that run"
-        ])
-    if request.effort not in ALLOWED_EFFORTS:
-        return refuse([f"effort must be one of {', '.join(ALLOWED_EFFORTS)}"])
-    if not request.brief.strip():
-        return refuse(["the brief is empty"])
-    if len(request.brief.encode("utf-8")) > MAX_BRIEF_BYTES:
-        return refuse([f"the brief exceeds {MAX_BRIEF_BYTES} bytes"])
-    try:
-        binary = resolve_binary(environ)
-    except LunaReserveError as exc:
-        return refuse([str(exc)])
-    env, scrubbed = child_environment(environ)
-    summary["scrubbed_environment"] = scrubbed
-    request.workdir = request.workdir.expanduser().resolve()
-    summary["target"] = str(request.workdir)
-    if not request.workdir.is_dir():
-        return refuse([f"target directory does not exist: {request.workdir}"])
-
-    # A first isolated server names the user's MCP servers and foreign skills
-    # so the run server can disable each one; it also gives an early admission
-    # verdict.
-    try:
-        probe, initialized = open_server(binary, env, request.effort, {})
-        try:
-            first = zero_token_read(probe, initialized, root)
-            first_skills = probe.request("skills/list", {"cwds": [str(root)], "forceReload": True})
-        finally:
-            probe.close()
-    except (AppServerError, PinViolation) as exc:
-        return refuse([str(exc)])
-    early = admission(first, request.policy, request.effort)
-    refusals = early["refusals"] + target_refusals(request.workdir, request.write, first.get("codex_home"), root)
-    servers = mcp_servers(first)
-    skill_paths = foreign_skill_paths(first_skills, root)
-    try:
-        # Validate the isolation arguments before anything is recorded, so an
-        # unrepresentable server name or skill path is a refusal, not a failure.
-        isolation_arguments(RESERVE_MODEL, request.effort, servers, skill_paths)
-    except PinViolation as exc:
-        refusals.append(str(exc))
+    refusals = early_refusals(state, request.effort, request.overrides, request.brief)
     if refusals:
-        return refuse(refusals, {"reserve_before": early.get("reserve")})
+        return refuse(refusals)
+    request.workdir = request.workdir.expanduser().resolve()
+    server = ReserveServer(module_root, root, run_dir, request.workdir, request.write, request.effort,
+                           request.policy, environ, approval_policy_for(request.write, broker=False))
+    refusals = server.probe()
+    summary["scrubbed_environment"] = server.scrubbed
+    summary["target"] = str(request.workdir)
+    if refusals:
+        return refuse(refusals, {"reserve_before": server.early.get("reserve")} if server.early else None)
 
     run_dir.mkdir(parents=True, exist_ok=False)
     summary["run_dir"] = str(run_dir)
-    codex_home = Path(first.get("codex_home") or Path.home() / ".codex")
-    user_config = codex_home / "config.toml"
+    user_config = server.codex_home / "config.toml"
     config_digest_before = _digest(user_config)
     attribution_failures: list[str] = []
     codex_errors: list[str] = []
     outcome = None
     session: Optional[GuardedSession] = None
-    before: dict = {}
     after: Optional[dict] = None
-    transcript = (run_dir / "transcript.jsonl").open("w", encoding="utf-8")
-    server_stderr = (run_dir / "app-server.stderr").open("w", encoding="utf-8")
-    process: Optional[AppServerProcess] = None
     try:
-        process, initialized = open_server(
-            binary, env, request.effort, servers, transcript, server_stderr, skill_paths,
-        )
-        before_read = zero_token_read(process, initialized, root)
-        features = read_all_features(process)
-        skills = process.request("skills/list", {"cwds": [str(root)], "forceReload": True})
-        before = admission(before_read, request.policy, request.effort)
-        isolation = isolation_failures(before_read["config"], features, RESERVE_MODEL, root, skills)
-        _write_json(run_dir / "preflight.json", {
-            "read": {key: value for key, value in before_read.items() if key != "config"},
-            "admission": before,
-            "isolation": {
-                "arguments": isolation_arguments(RESERVE_MODEL, request.effort, servers, skill_paths),
-                "failures": isolation,
-                "enabled_features": sorted(item.get("name") for item in features if item.get("enabled")),
-                "config_layers": [layer.get("name") for layer in (before_read["config"] or {}).get("layers") or []],
-                "mcp_servers": {
-                    name: {"enabled": (server or {}).get("enabled"), "command": (server or {}).get("command")}
-                    for name, server in (((before_read["config"] or {}).get("config") or {}).get("mcp_servers") or {}).items()
-                },
-                "skills": [
-                    {"name": skill.get("name"), "scope": skill.get("scope"), "enabled": skill.get("enabled"),
-                     "plugin": skill.get("pluginId"), "path": skill.get("path")}
-                    for entry in (skills or {}).get("data") or [] for skill in entry.get("skills") or []
-                ],
-            },
-        })
-        refusals = before["refusals"] + isolation + target_refusals(
-            request.workdir, request.write, before_read.get("codex_home"), root,
-        )
+        refusals = server.open()
         if refusals:
-            process.close()
-            transcript.close()
-            server_stderr.close()
-            return refuse(refusals, {"reserve_before": before.get("reserve")})
+            server.close()
+            return refuse(refusals, {"reserve_before": server.before.get("reserve")})
         if request.preflight_only:
-            summary.update({"verdict": "PREFLIGHT_OK", "exit_code": EXIT_OK, "reserve_before": before.get("reserve")})
+            summary.update({"verdict": "PREFLIGHT_OK", "exit_code": EXIT_OK,
+                            "reserve_before": server.before.get("reserve")})
             _write_json(run_dir / "verdict.json", summary)
             return EXIT_OK, summary
-        reserve = Bucket.from_dict(before["reserve"])
-        regular = Bucket.from_dict(before["regular"])
-        jitter = request.policy.jitter_seconds
-
-        def attribution(snapshot: dict) -> tuple[bool, str]:
-            return snapshot_matches_reserve(snapshot, reserve, regular, jitter)
-
         instructions = developer_instructions(module_root, request, root)
         (run_dir / "developer-instructions.md").write_text(instructions, encoding="utf-8")
         (run_dir / "brief.md").write_text(request.brief, encoding="utf-8")
-        session = GuardedSession(
-            process, RESERVE_MODEL, attribution, root,
-            "workspace-write" if request.write else "read-only", request.effort,
-            writable_roots=(request.workdir,) if request.write else (),
-            developer_instructions=instructions,
-        )
+        session = server.session(instructions)
         session.start_thread(settle_seconds)
         summary["thread_id"] = session.thread_id
         summary["rollout"] = session.rollout_path
@@ -764,13 +908,12 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
             outcome = session.run_turn(request.brief.strip(), request.timeout_seconds)
             attribution_failures.extend(outcome.guard_failures)
             codex_errors.extend(outcome.errors)
-        after_limits = process.request("account/rateLimits/read", None)
-        after = admission({**before_read, "limits": after_limits}, request.policy)
+        after_limits, after, delta = server.postflight(server.before)
         _write_json(run_dir / "postflight.json", {"limits": after_limits, "admission": after})
-        attribution_failures.extend(regular_delta_failures(before, after))
+        attribution_failures.extend(delta)
         if session.thread_id:
             try:
-                items = process.request("thread/items/list", {"threadId": session.thread_id, "limit": 200})
+                items = server.process.request("thread/items/list", {"threadId": session.thread_id, "limit": 200})
                 _write_json(run_dir / "items.json", items)
             except AppServerError as exc:
                 codex_errors.append(f"transcript read failed: {exc}")
@@ -781,35 +924,19 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
         if outcome is None and session is not None and session.active_turn:
             attribution_failures.append("the server failed during a turn; attribution cannot be shown")
     finally:
-        if process is not None:
-            process.close()
-        for handle in (transcript, server_stderr):
-            if not handle.closed:
-                handle.close()
+        server.close()
 
+    before = server.before
     audit: Optional[dict] = None
     if outcome is not None:
         rollout = Path(session.rollout_path) if session and session.rollout_path else None
-        deadline = time.monotonic() + rollout_wait_seconds
-        while rollout is not None and not rollout.is_file() and time.monotonic() < deadline:
-            time.sleep(0.25)
-        if rollout is None or not rollout.is_file():
-            attribution_failures.append("no rollout found for the turn")
-        else:
-            audit = audit_records(
-                load_rollout(rollout), Bucket.from_dict(before["reserve"]),
-                Bucket.from_dict(before["regular"]), request.policy.jitter_seconds,
-            )
-            if outcome.token_usage is None and outcome.status != "completed":
-                audit["failures"] = [
-                    failure for failure in audit["failures"]
-                    if failure != "rollout has no token snapshot to attribute"
-                ]
-                audit["verdict"] = "PASS" if not audit["failures"] else "FAIL"
+        audit, failures = audit_turn(
+            rollout_records(rollout, rollout_wait_seconds), 0, before, request.policy.jitter_seconds,
+            outcome.status, outcome.token_usage, session.thread_id if session else None,
+        )
+        if audit is not None:
             _write_json(run_dir / "audit.json", audit)
-            attribution_failures.extend(audit["failures"])
-            if audit["thread_ids"] and session and session.thread_id not in audit["thread_ids"]:
-                attribution_failures.append("rollout session id does not match the thread")
+        attribution_failures.extend(failures)
 
     warnings: list[str] = list(before.get("warnings") or [])
     if _digest(user_config) != config_digest_before:
@@ -821,6 +948,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
         summary["last_message_lines"] = len(lines)
         summary["last_message_format_ok"] = bool(lines) and lines[0].startswith("STATUS:") and \
             len(lines) <= FINAL_MESSAGE_MAX_LINES
+    process = server.process
     summary.update({
         "turn_status": outcome.status if outcome else None,
         "timed_out": outcome.timed_out if outcome else False,
@@ -842,10 +970,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
             "attribution_failures": attribution_failures,
             "message": STOP_MESSAGE,
         })
-        state.mkdir(parents=True, exist_ok=True)
-        tripwire_path(state).write_text(json.dumps({
-            "run_id": run_id, "thread_id": summary.get("thread_id"), "failures": attribution_failures,
-        }, indent=2) + "\n", encoding="utf-8")
+        record_tripwire(state, run_id, summary.get("thread_id"), attribution_failures)
         code = EXIT_ATTRIBUTION_FAILED
     elif outcome is None or outcome.status != "completed" or codex_errors:
         summary.update({"verdict": "CODEX_FAILED", "exit_code": EXIT_CODEX_FAILED})

@@ -338,6 +338,8 @@ class SessionPolicyTest(unittest.TestCase):
             ("command/exec", {}),
         ]
         for method, params in attempts:
+            # Only a steer needs an active turn; a turn/start case must fail on its own pin.
+            session.active_turn = "u" if method == "turn/steer" else None
             with self.subTest(method=method, params=params):
                 with self.assertRaises(PinViolation):
                     session.check_params(method, params)

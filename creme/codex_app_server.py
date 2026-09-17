@@ -14,10 +14,10 @@ checked. The first guard failure interrupts the active turn. Read-only
 methods pass through an explicit allowlist; everything else is refused.
 
 The module names no model itself. Its caller supplies the pinned slug and the
-attribution predicate. A later long-lived broker can hold one session per
-thread and map send/steer/interrupt/tail/read/approve/stop onto
-``turn_start``, ``turn_steer``, ``turn_interrupt``, the transcript,
-``request("thread/items/list")``, the server-request handler, and ``close``.
+attribution predicate. The one-shot run follows a turn with ``run_turn``; the
+long-lived broker (``creme.luna_broker``) drives the same session with
+``begin_turn``, ``turn_steer``, ``turn_interrupt``, ``resume_thread``, and
+deferred server-request replies (``AppServerProcess.respond``).
 """
 
 from __future__ import annotations
@@ -49,6 +49,10 @@ DISABLED_FEATURES = (
 PERMITTED_SERVICE_TIERS = (None, "default")
 PERMITTED_SANDBOXES = ("read-only", "workspace-write")
 PERMITTED_EFFORTS = ("low", "medium", "high")
+# ``never`` is the read-only policy. ``on-request`` is permitted only for a
+# write session, whose approval requests the master answers one by one; the
+# reviewer stays ``user`` either way.
+PERMITTED_APPROVAL_POLICIES = ("never", "on-request")
 _MCP_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Read-only methods a session may pass through unchanged.
@@ -71,7 +75,8 @@ WRITE_PROFILE = "creme_pseudo_subagent_write"
 
 
 def isolation_arguments(pinned_model: str, effort: str, mcp_servers: dict,
-                        foreign_skill_paths: tuple[str, ...] = ()) -> list[str]:
+                        foreign_skill_paths: tuple[str, ...] = (),
+                        approval_policy: str = "never") -> list[str]:
     """Launch arguments that keep user plugins, MCP servers, and tiers out.
 
     ``mcp_servers`` maps every server name visible from the thread's working
@@ -89,6 +94,8 @@ def isolation_arguments(pinned_model: str, effort: str, mcp_servers: dict,
     """
     if effort not in PERMITTED_EFFORTS:
         raise PinViolation(f"effort {effort!r} is not permitted")
+    if approval_policy not in PERMITTED_APPROVAL_POLICIES:
+        raise PinViolation(f"approval policy {approval_policy!r} is not permitted")
     arguments: list[str] = []
     for feature in DISABLED_FEATURES:
         arguments += ["--disable", feature]
@@ -100,7 +107,7 @@ def isolation_arguments(pinned_model: str, effort: str, mcp_servers: dict,
         'web_search="disabled"',
         "notify=[]",
         "include_apps_instructions=false",
-        'approval_policy="never"',
+        f'approval_policy="{approval_policy}"',
         'approvals_reviewer="user"',
         "skills.bundled.enabled=false",
     ]
@@ -135,10 +142,17 @@ def _redact(value: Any) -> Any:
     return value
 
 
-ServerRequestHandler = Callable[[str, Any], dict]
+# A handler returns the reply to send at once, or ``None`` to defer the reply
+# until ``AppServerProcess.respond`` is called with the request id.
+ServerRequestHandler = Callable[[str, Any, Any], Optional[dict]]
+
+APPROVAL_METHODS = frozenset({
+    "item/commandExecution/requestApproval", "item/fileChange/requestApproval",
+    "applyPatchApproval", "execCommandApproval",
+})
 
 
-def decline_server_requests(method: str, params: Any) -> dict:
+def decline_server_requests(method: str, params: Any, request_id: Any = None) -> dict:
     """Default handler: decline approvals, refuse everything else."""
     if method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
         return {"result": {"decision": "decline"}}
@@ -246,11 +260,12 @@ class AppServerProcess:
                 self._record("in", message)
                 if "method" in message and "id" in message:
                     self.server_requests.append({"method": message["method"], "params": _redact(message.get("params"))})
-                    reply = self.server_request_handler(message["method"], message.get("params"))
-                    try:
-                        self._send({"id": message["id"], **reply})
-                    except AppServerError:
-                        pass
+                    reply = self.server_request_handler(message["method"], message.get("params"), message["id"])
+                    if reply is not None:
+                        try:
+                            self._send({"id": message["id"], **reply})
+                        except AppServerError:
+                            pass
                 elif "id" in message:
                     with self._condition:
                         self._responses[message["id"]] = message
@@ -264,6 +279,17 @@ class AppServerProcess:
             with self._condition:
                 self._condition.notify_all()
 
+    def respond(self, request_id: Any, reply: dict) -> None:
+        """Send a deferred reply to a server request."""
+        self._send({"id": request_id, **reply})
+
+    @property
+    def pid(self) -> Optional[int]:
+        return self._process.pid if self._process is not None else None
+
+    def alive(self) -> bool:
+        return self._process is not None and not self._closed and self._process.poll() is None
+
     def notify(self, method: str, params: Any) -> None:
         message: dict = {"method": method}
         if params is not None:
@@ -271,8 +297,9 @@ class AppServerProcess:
         self._send(message)
 
     def request(self, method: str, params: Any, timeout: float = 60.0) -> Any:
-        self._next_id += 1
-        identifier = self._next_id
+        with self._condition:
+            self._next_id += 1
+            identifier = self._next_id
         self._send({"id": identifier, "method": method, "params": params})
         deadline = time.monotonic() + timeout
         with self._condition:
@@ -308,7 +335,8 @@ def read_all_features(process: AppServerProcess) -> list[dict]:
 
 
 def isolation_failures(config_read: dict, features: list[dict], pinned_model: str,
-                       launch_root: Path, skills: Optional[dict] = None) -> list[str]:
+                       launch_root: Path, skills: Optional[dict] = None,
+                       approval_policy: str = "never") -> list[str]:
     """Verify the launched server really runs with the isolation applied."""
     failures: list[str] = []
     config = (config_read or {}).get("config") or {}
@@ -328,7 +356,7 @@ def isolation_failures(config_read: dict, features: list[dict], pinned_model: st
         failures.append("web search is not disabled")
     if config.get("notify"):
         failures.append("a notify program is configured")
-    if config.get("approval_policy") != "never":
+    if config.get("approval_policy") != approval_policy:
         failures.append(f"effective approval policy is {config.get('approval_policy')!r}")
     if config.get("approvals_reviewer") != "user":
         failures.append(f"effective approvals reviewer is {config.get('approvals_reviewer')!r}")
@@ -414,7 +442,8 @@ class GuardedSession:
     def __init__(self, process: AppServerProcess, pinned_model: str, attribution: Attribution,
                  cwd: Path, sandbox: str, effort: str,
                  writable_roots: tuple[Path, ...] = (),
-                 developer_instructions: Optional[str] = None) -> None:
+                 developer_instructions: Optional[str] = None,
+                 approval_policy: str = "never") -> None:
         if sandbox not in PERMITTED_SANDBOXES:
             raise PinViolation(f"sandbox {sandbox!r} is not permitted")
         if effort not in PERMITTED_EFFORTS:
@@ -430,6 +459,11 @@ class GuardedSession:
             raise PinViolation("write mode needs an explicit writable root")
         if sandbox == "read-only" and self.writable_roots:
             raise PinViolation("read-only mode takes no writable root")
+        if approval_policy not in PERMITTED_APPROVAL_POLICIES:
+            raise PinViolation(f"approval policy {approval_policy!r} is not permitted")
+        if approval_policy != "never" and sandbox != "workspace-write":
+            raise PinViolation("only a write session may route approval requests to the master")
+        self.approval_policy = approval_policy
         self.developer_instructions = developer_instructions
         self.thread_id: Optional[str] = None
         self.rollout_path: Optional[str] = None
@@ -468,10 +502,23 @@ class GuardedSession:
                 raise PinViolation(f"{method} must pin model {self.pinned_model}, not {params.get('model')!r}")
             if params.get("approvalsReviewer") != "user":
                 raise PinViolation(f"{method} must pin approvals reviewer user, never auto_review")
-            if params.get("approvalPolicy") != "never":
-                raise PinViolation(f"{method} must pin approval policy never")
+            if params.get("approvalPolicy") != self.approval_policy:
+                raise PinViolation(f"{method} must pin approval policy {self.approval_policy}")
         if method == "thread/start" and params.get("allowProviderModelFallback") is not False:
             raise PinViolation("thread/start must refuse provider model fallback")
+        # Follow-up work stays on this session's own thread and active turn, and
+        # stops once any guard failure is recorded.
+        if method in ("thread/resume", "turn/start", "turn/steer", "turn/interrupt"):
+            if not self.thread_id or params.get("threadId") != self.thread_id:
+                raise PinViolation(f"{method} names thread {params.get('threadId')!r}, not the session's thread")
+        if method in ("thread/resume", "turn/start", "turn/steer") and self.guard_failures:
+            raise PinViolation(f"{method} refused: guard failures are recorded on this session")
+        if method == "turn/start" and self.active_turn:
+            raise PinViolation("turn/start refused: a turn is already active; steer it instead")
+        if method == "turn/steer" and (not self.active_turn or params.get("expectedTurnId") != self.active_turn):
+            raise PinViolation("turn/steer must name the session's active turn")
+        if method == "turn/start" and params.get("effort") != self.effort:
+            raise PinViolation(f"turn/start effort must be the session's {self.effort}")
         if params.get("serviceTier") not in PERMITTED_SERVICE_TIERS:
             raise PinViolation(f"{method} service tier {params.get('serviceTier')!r} is not permitted")
         if "effort" in params and params["effort"] not in PERMITTED_EFFORTS:
@@ -508,7 +555,7 @@ class GuardedSession:
         params: dict = {
             "model": self.pinned_model,
             "cwd": str(self.cwd),
-            "approvalPolicy": "never",
+            "approvalPolicy": self.approval_policy,
             "approvalsReviewer": "user",
             "serviceTier": "default",
             "ephemeral": False,
@@ -520,6 +567,13 @@ class GuardedSession:
             params["sandbox"] = self.sandbox
         if self.developer_instructions is not None:
             params["developerInstructions"] = self.developer_instructions
+        return params
+
+    def resume_parameters(self) -> dict:
+        params = {key: value for key, value in self.thread_parameters().items()
+                  if key not in ("ephemeral", "allowProviderModelFallback")}
+        params["threadId"] = self.thread_id
+        params["excludeTurns"] = True
         return params
 
     def check_thread_response(self, result: dict) -> list[str]:
@@ -535,7 +589,7 @@ class GuardedSession:
             failures.append("a permission profile overrides the read-only sandbox")
         if self.sandbox == "workspace-write" and (profile or {}).get("id") != WRITE_PROFILE:
             failures.append(f"write permission profile is not active: {profile!r}")
-        if (result or {}).get("approvalPolicy") != "never":
+        if (result or {}).get("approvalPolicy") != self.approval_policy:
             failures.append(f"approval policy is {(result or {}).get('approvalPolicy')!r}")
         if (result or {}).get("approvalsReviewer") != "user":
             failures.append(f"approvals reviewer is {(result or {}).get('approvalsReviewer')!r}")
@@ -576,6 +630,24 @@ class GuardedSession:
                 self.observe(message)
         return result
 
+    def resume_thread(self, thread_id: str, settle_seconds: float = 2.0) -> dict:
+        """Attach this session to an existing thread under the same pins."""
+        self.thread_id = thread_id
+        result = self.request("thread/resume", self.resume_parameters())
+        thread = (result or {}).get("thread") or {}
+        self.instruction_sources = (result or {}).get("instructionSources")
+        self.rollout_path = thread.get("path")
+        failures = self.check_thread_response(result)
+        if thread.get("id") != thread_id:
+            failures.append(f"thread/resume returned thread {thread.get('id')!r}, not {thread_id}")
+        self.guard_failures.extend(failures)
+        deadline = time.monotonic() + settle_seconds
+        while time.monotonic() < deadline:
+            message = self.process.next_notification(deadline - time.monotonic())
+            if message is not None:
+                self.observe(message)
+        return result
+
     def turn_start(self, text: str) -> str:
         if self.guard_failures:
             raise PinViolation("guard failures are recorded; no further turns may start")
@@ -585,7 +657,7 @@ class GuardedSession:
             "model": self.pinned_model,
             "effort": self.effort,
             "serviceTier": "default",
-            "approvalPolicy": "never",
+            "approvalPolicy": self.approval_policy,
             "approvalsReviewer": "user",
         })
         self.active_turn = ((result or {}).get("turn") or {}).get("id")
@@ -662,11 +734,30 @@ class GuardedSession:
                 outcome.guard_failures.extend(failures)
         return failures
 
-    def run_turn(self, text: str, timeout_seconds: float) -> TurnOutcome:
-        """Start one turn and follow it to completion under the live guard."""
+    def begin_turn(self, text: str) -> TurnOutcome:
+        """Start one turn; its notifications must then reach ``observe``."""
         outcome = TurnOutcome(thread_id=str(self.thread_id), turn_id=None)
         self._outcome = outcome
-        outcome.turn_id = self.turn_start(text)
+        try:
+            outcome.turn_id = self.turn_start(text)
+        except BaseException:
+            self._outcome = None
+            raise
+        return outcome
+
+    def finish_turn(self) -> Optional[TurnOutcome]:
+        outcome = self._outcome
+        self.active_turn = None
+        self._outcome = None
+        return outcome
+
+    @property
+    def outcome(self) -> Optional[TurnOutcome]:
+        return self._outcome
+
+    def run_turn(self, text: str, timeout_seconds: float) -> TurnOutcome:
+        """Start one turn and follow it to completion under the live guard."""
+        outcome = self.begin_turn(text)
         deadline = time.monotonic() + timeout_seconds
         interrupt_deadline: Optional[float] = None
         while outcome.status is None:
@@ -688,8 +779,7 @@ class GuardedSession:
             if failures and interrupt_deadline is None and outcome.status is None:
                 outcome.interrupted_by_guard = True
                 interrupt_deadline = self._interrupt(time.monotonic())
-        self.active_turn = None
-        self._outcome = None
+        self.finish_turn()
         return outcome
 
     def _interrupt(self, now: float) -> float:

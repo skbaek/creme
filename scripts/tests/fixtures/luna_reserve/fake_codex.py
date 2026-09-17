@@ -39,6 +39,8 @@ def launch_config(scenario: dict, argv: list) -> dict:
     config = json.loads(json.dumps(scenario["config"]))
     features = {name: True for name in scenario.get("enabled_features", [])}
     stubbed = set()
+    bundled = True
+    disabled_skills = set()
     index = 0
     while index < len(argv):
         flag = argv[index]
@@ -56,13 +58,30 @@ def launch_config(scenario: dict, argv: list) -> dict:
                 config[key] = raw.strip('"')
             elif key == "notify":
                 config[key] = []
+            elif key in ("approval_policy", "approvals_reviewer"):
+                config[key] = raw.strip('"')
+            elif key == "skills.bundled.enabled":
+                bundled = raw != "false"
+            elif key == "skills.config":
+                disabled_skills.update(part.split('"')[1] for part in raw.split("path=")[1:])
         index += 2 if flag in ("--disable", "-c") else 1
     for name in scenario.get("sticky_features", []):
         features[name] = True
     for name in scenario.get("unstubbable_mcp", []):
         config.setdefault("mcp_servers", {})[name] = {"command": "/bin/sh", "enabled": True}
     config.update(scenario.get("config_after_launch", {}))
-    return {"config": config, "features": features}
+    skills = []
+    for entry in scenario.get("skills", []):
+        kept = []
+        for skill in entry.get("skills", []):
+            if skill.get("scope") == "system" and not bundled:
+                continue
+            skill = dict(skill)
+            if skill.get("path") in disabled_skills and skill.get("path") not in scenario.get("sticky_skills", []):
+                skill["enabled"] = False
+            kept.append(skill)
+        skills.append({**entry, "skills": kept})
+    return {"config": config, "features": features, "skills": skills}
 
 
 def serve(scenario: dict, log: Path, argv: list) -> int:
@@ -103,12 +122,13 @@ def serve(scenario: dict, log: Path, argv: list) -> int:
                 {"name": name, "enabled": enabled} for name, enabled in effective["features"].items()
             ], "nextCursor": None}})
         elif method == "skills/list":
-            emit({"id": ident, "result": {"data": scenario.get("skills", [])}})
+            emit({"id": ident, "result": {"data": effective["skills"]}})
         elif method == "thread/start":
             response = {
                 "thread": {"id": thread_id, "path": str(rollout), "ephemeral": False},
                 "model": params.get("model"), "modelProvider": "openai", "serviceTier": None,
                 "approvalPolicy": params.get("approvalPolicy"), "instructionSources": ["/fake/AGENTS.md"],
+                "approvalsReviewer": params.get("approvalsReviewer"),
                 "sandbox": {"type": "readOnly", "networkAccess": False}, "activePermissionProfile": None,
             }
             if params.get("config"):

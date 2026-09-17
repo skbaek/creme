@@ -43,7 +43,7 @@ DISABLED_FEATURES = (
     "computer_use", "browser_use", "browser_use_external",
     "browser_use_full_cdp_access", "in_app_browser", "image_generation",
     "fast_mode", "guardian_approval", "hooks", "goals", "memories",
-    "standalone_web_search",
+    "standalone_web_search", "remote_control", "js_repl",
 )
 
 PERMITTED_SERVICE_TIERS = (None, "default")
@@ -70,7 +70,8 @@ class PinViolation(RuntimeError):
 WRITE_PROFILE = "creme_pseudo_subagent_write"
 
 
-def isolation_arguments(pinned_model: str, effort: str, mcp_servers: dict) -> list[str]:
+def isolation_arguments(pinned_model: str, effort: str, mcp_servers: dict,
+                        foreign_skill_paths: tuple[str, ...] = ()) -> list[str]:
     """Launch arguments that keep user plugins, MCP servers, and tiers out.
 
     ``mcp_servers`` maps every server name visible from the thread's working
@@ -79,6 +80,12 @@ def isolation_arguments(pinned_model: str, effort: str, mcp_servers: dict) -> li
     layer, because the launch-time configuration would then hold a server with
     no transport; each server is therefore replaced by a disabled stub whose
     transport cannot run anything.
+
+    Bundled system skills are switched off, and every other skill that does
+    not come from the launch root (``foreign_skill_paths``, such as user
+    skills under ``CODEX_HOME``) is disabled by path. Approval requests are
+    pinned to the client route: never ``auto_review``, whose reviewer model
+    and billing bucket are unverified.
     """
     if effort not in PERMITTED_EFFORTS:
         raise PinViolation(f"effort {effort!r} is not permitted")
@@ -93,7 +100,17 @@ def isolation_arguments(pinned_model: str, effort: str, mcp_servers: dict) -> li
         'web_search="disabled"',
         "notify=[]",
         "include_apps_instructions=false",
+        'approval_policy="never"',
+        'approvals_reviewer="user"',
+        "skills.bundled.enabled=false",
     ]
+    if foreign_skill_paths:
+        entries = []
+        for path in sorted(set(foreign_skill_paths)):
+            if not path.startswith("/") or any(ch in path for ch in '"\\\n\r\t'):
+                raise PinViolation(f"cannot disable skill with unsafe path {path!r}")
+            entries.append(f'{{path="{path}",enabled=false}}')
+        overrides.append("skills.config=[" + ",".join(entries) + "]")
     for name in sorted(mcp_servers):
         if not _MCP_NAME.match(name):
             raise PinViolation(f"cannot disable MCP server with unsafe name {name!r}")
@@ -311,6 +328,10 @@ def isolation_failures(config_read: dict, features: list[dict], pinned_model: st
         failures.append("web search is not disabled")
     if config.get("notify"):
         failures.append("a notify program is configured")
+    if config.get("approval_policy") != "never":
+        failures.append(f"effective approval policy is {config.get('approval_policy')!r}")
+    if config.get("approvals_reviewer") != "user":
+        failures.append(f"effective approvals reviewer is {config.get('approvals_reviewer')!r}")
     for name, server in (config.get("mcp_servers") or {}).items():
         if not isinstance(server, dict) or server.get("enabled") is not False:
             failures.append(f"MCP server {name!r} is not disabled")
@@ -327,8 +348,14 @@ def isolation_failures(config_read: dict, features: list[dict], pinned_model: st
             failures.append(f"a foreign project configuration layer applies: {json.dumps(name)[:200]}")
     for entry in (skills or {}).get("data") or []:
         for skill in (entry or {}).get("skills") or []:
-            if skill.get("enabled") and skill.get("pluginId"):
+            if not skill.get("enabled"):
+                continue
+            if skill.get("pluginId"):
                 failures.append(f"plugin skill {skill.get('name')!r} is still enabled")
+            elif skill.get("scope") != "repo" or not _under(skill.get("path"), launch_root):
+                failures.append(
+                    f"skill {skill.get('name')!r} ({skill.get('scope')}) is enabled outside the launch root"
+                )
     enabled = {item.get("name") for item in features if item.get("enabled")}
     for feature in DISABLED_FEATURES:
         if feature in enabled:
@@ -336,6 +363,28 @@ def isolation_failures(config_read: dict, features: list[dict], pinned_model: st
     if not features:
         failures.append("feature list is empty; isolation cannot be shown")
     return failures
+
+
+def _under(path: Any, root: Path) -> bool:
+    return isinstance(path, str) and Path(path).is_absolute() and (
+        Path(path) == root or root in Path(path).parents
+    )
+
+
+def foreign_skill_paths(skills: Optional[dict], launch_root: Path) -> tuple[str, ...]:
+    """Paths of enabled non-plugin skills that do not come from the launch root."""
+    paths = []
+    for entry in (skills or {}).get("data") or []:
+        for skill in (entry or {}).get("skills") or []:
+            path = skill.get("path")
+            if skill.get("pluginId") or not isinstance(path, str):
+                continue
+            if skill.get("scope") == "repo" and _under(path, launch_root):
+                continue
+            if skill.get("scope") == "system":
+                continue  # removed by skills.bundled.enabled=false
+            paths.append(path)
+    return tuple(sorted(set(paths)))
 
 
 # ---------------------------------------------------------------------------
@@ -392,12 +441,13 @@ class GuardedSession:
     # -- request policy -------------------------------------------------
     _ALLOWED_KEYS = {
         "thread/start": {"model", "cwd", "sandbox", "approvalPolicy", "approvalsReviewer",
-                         "serviceTier", "ephemeral", "developerInstructions", "config"},
+                         "serviceTier", "ephemeral", "developerInstructions", "config",
+                         "allowProviderModelFallback"},
         "thread/resume": {"threadId", "model", "cwd", "sandbox", "approvalPolicy",
                           "approvalsReviewer", "serviceTier", "excludeTurns", "config",
                           "developerInstructions"},
         "turn/start": {"threadId", "input", "model", "effort", "serviceTier", "cwd",
-                       "clientUserMessageId", "outputSchema"},
+                       "approvalPolicy", "approvalsReviewer", "clientUserMessageId", "outputSchema"},
         "turn/steer": {"threadId", "expectedTurnId", "input", "clientUserMessageId"},
         "turn/interrupt": {"threadId", "turnId"},
     }
@@ -415,6 +465,13 @@ class GuardedSession:
             raise PinViolation(f"{method} model {params['model']!r} is not {self.pinned_model}")
         if method in ("thread/start", "thread/resume", "turn/start") and params.get("model") != self.pinned_model:
             raise PinViolation(f"{method} must pin model {self.pinned_model}")
+        if method in ("thread/start", "thread/resume", "turn/start"):
+            if params.get("approvalsReviewer") != "user":
+                raise PinViolation(f"{method} must pin approvals reviewer user, never auto_review")
+            if params.get("approvalPolicy") != "never":
+                raise PinViolation(f"{method} must pin approval policy never")
+        if method == "thread/start" and params.get("allowProviderModelFallback") is not False:
+            raise PinViolation("thread/start must refuse provider model fallback")
         if params.get("serviceTier") not in PERMITTED_SERVICE_TIERS:
             raise PinViolation(f"{method} service tier {params.get('serviceTier')!r} is not permitted")
         if "effort" in params and params["effort"] not in PERMITTED_EFFORTS:
@@ -459,6 +516,7 @@ class GuardedSession:
             "approvalsReviewer": "user",
             "serviceTier": "default",
             "ephemeral": False,
+            "allowProviderModelFallback": False,
         }
         if self.sandbox == "workspace-write":
             params["config"] = self.thread_config()
@@ -483,6 +541,8 @@ class GuardedSession:
             failures.append(f"write permission profile is not active: {profile!r}")
         if (result or {}).get("approvalPolicy") != "never":
             failures.append(f"approval policy is {(result or {}).get('approvalPolicy')!r}")
+        if (result or {}).get("approvalsReviewer") != "user":
+            failures.append(f"approvals reviewer is {(result or {}).get('approvalsReviewer')!r}")
         sandbox = (result or {}).get("sandbox") or {}
         expected = {"read-only": "readOnly", "workspace-write": "workspaceWrite"}[self.sandbox]
         if sandbox.get("type") != expected:
@@ -529,6 +589,8 @@ class GuardedSession:
             "model": self.pinned_model,
             "effort": self.effort,
             "serviceTier": "default",
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
         })
         self.active_turn = ((result or {}).get("turn") or {}).get("id")
         return self.active_turn
@@ -568,6 +630,11 @@ class GuardedSession:
                 failures.append(f"thread settings changed model to {settings.get('model')!r}")
             if settings.get("serviceTier") not in PERMITTED_SERVICE_TIERS:
                 failures.append(f"thread settings changed service tier to {settings.get('serviceTier')!r}")
+            if "approvalsReviewer" in settings and settings.get("approvalsReviewer") != "user":
+                failures.append(f"thread settings changed approvals reviewer to {settings.get('approvalsReviewer')!r}")
+        elif method == "remoteControl/status/changed":
+            if params.get("status") != "disabled":
+                failures.append(f"remote control is {params.get('status')!r}; another client could drive the thread")
         elif method in ("item/started", "item/completed"):
             item = params.get("item") or {}
             kind = item.get("type")

@@ -170,6 +170,18 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(decision["reserve"]["limit_id"], "base_model_inference")
         self.assertEqual(decision["regular"]["limit_id"], "codex")
 
+    def test_missing_or_malformed_reserve_usage_counts_as_exhausted(self):
+        for value in (None, "1", True):
+            with self.subTest(value=value):
+                table = limits()
+                if value is None:
+                    del table["rateLimitsByLimitId"]["base_model_inference"]["primary"]["usedPercent"]
+                else:
+                    table["rateLimitsByLimitId"]["base_model_inference"]["primary"]["usedPercent"] = value
+                decision = L.admission(read(table), L.Policy(), now=NOW)
+                self.assertFalse(decision["admitted"])
+                self.assertTrue(any("reached" in reason for reason in decision["refusals"]))
+
     def test_reserve_is_found_by_limit_name_not_id(self):
         value = limits()
         value["rateLimitsByLimitId"]["renamed"] = value["rateLimitsByLimitId"].pop("base_model_inference")
@@ -303,6 +315,17 @@ class SessionPolicyTest(unittest.TestCase):
             ("thread/start", {**base, "sandbox": "danger-full-access"}),
             ("thread/start", {**base, "approvalPolicy": "on-request"}),
             ("thread/start", {**base, "developerInstructions": "you are the master"}),
+            ("thread/start", {**base, "approvalsReviewer": "auto_review"}),
+            ("thread/start", {key: value for key, value in base.items() if key != "approvalsReviewer"}),
+            ("thread/start", {**base, "allowProviderModelFallback": True}),
+            ("thread/start", {key: value for key, value in base.items() if key != "allowProviderModelFallback"}),
+            ("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve", "approvalPolicy": "never",
+                            "approvalsReviewer": "auto_review"}),
+            ("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve", "approvalPolicy": "never"}),
+            ("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve", "approvalPolicy": "on-request",
+                            "approvalsReviewer": "user"}),
+            ("thread/resume", {"threadId": "t", "model": "gpt-reserve", "approvalPolicy": "never",
+                               "approvalsReviewer": "guardian_subagent"}),
             ("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve", "effort": "max"}),
             ("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve", "serviceTierForTurn": "priority"}),
             ("turn/start", {"threadId": "t", "input": [], "model": "gpt-5.6-luna"}),
@@ -324,6 +347,7 @@ class SessionPolicyTest(unittest.TestCase):
         good = {
             "thread": {"id": "t", "path": "/r.jsonl", "ephemeral": False}, "model": "gpt-reserve",
             "serviceTier": None, "modelProvider": "openai", "approvalPolicy": "never",
+            "approvalsReviewer": "user",
             "activePermissionProfile": {"id": "creme_pseudo_subagent_write", "extends": ":read-only"},
             "sandbox": {"type": "workspaceWrite", "writableRoots": ["/work/tree"], "networkAccess": False,
                         "excludeSlashTmp": True, "excludeTmpdirEnvVar": True},
@@ -335,6 +359,7 @@ class SessionPolicyTest(unittest.TestCase):
             {"sandbox": {**good["sandbox"], "networkAccess": True}},
             {"sandbox": {**good["sandbox"], "excludeSlashTmp": False}},
             {"thread": {"id": "t", "path": None}}, {"approvalPolicy": "on-request"},
+            {"approvalsReviewer": "auto_review"},
         ):
             with self.subTest(change=change):
                 self.assertTrue(session.check_thread_response({**good, **change}))
@@ -345,6 +370,8 @@ class SessionPolicyTest(unittest.TestCase):
             "limitId": "codex", "primary": {"usedPercent": 1, "windowDurationMins": 10080, "resetsAt": RESERVE_RESET},
             "secondary": None, "credits": None}}}
         self.assertEqual(session.observe(live_ok), [])
+        self.assertEqual(session.observe({"method": "remoteControl/status/changed",
+                                          "params": {"status": "disabled"}}), [])
         live_regular = json.loads(json.dumps(live_ok))
         live_regular["params"]["rateLimits"]["primary"]["resetsAt"] = REGULAR_RESET
         for message in (
@@ -355,6 +382,8 @@ class SessionPolicyTest(unittest.TestCase):
             {"method": "item/started", "params": {"item": {"type": "mcpToolCall"}}},
             {"method": "thread/settings/updated", "params": {"threadSettings": {"model": "gpt-6-astra"}}},
             {"method": "thread/settings/updated", "params": {"threadSettings": {"serviceTier": "priority"}}},
+            {"method": "thread/settings/updated", "params": {"threadSettings": {"approvalsReviewer": "auto_review"}}},
+            {"method": "remoteControl/status/changed", "params": {"status": "connected"}},
         ):
             with self.subTest(method=message["method"]):
                 self.assertTrue(session.observe(message))
@@ -365,7 +394,7 @@ class SessionPolicyTest(unittest.TestCase):
         root = Path("/launch/creme")
         config = {"config": {
             "model": "gpt-reserve", "review_model": "gpt-reserve", "service_tier": "default",
-            "web_search": "disabled", "notify": [],
+            "web_search": "disabled", "notify": [], "approval_policy": "never", "approvals_reviewer": "user",
             "mcp_servers": {"lean-lsp-mcp": {"command": "/usr/bin/false", "enabled": False}},
         }, "layers": [{"name": {"type": "sessionFlags"}},
                       {"name": {"type": "project", "dotCodexFolder": "/launch/creme/.codex"}},
@@ -384,6 +413,43 @@ class SessionPolicyTest(unittest.TestCase):
         self.assertTrue(any("multi_agent" in failure for failure in failures))
         plugin_skills = {"data": [{"skills": [{"name": "documents", "enabled": True, "pluginId": "p"}]}]}
         self.assertTrue(isolation_failures(config, features, "gpt-reserve", root, plugin_skills))
+        repo_skill = {"name": "lean-prover", "enabled": True, "scope": "repo",
+                      "path": "/launch/creme/.agents/skills/lean-prover/SKILL.md"}
+        self.assertEqual(isolation_failures(config, features, "gpt-reserve", root,
+                                            {"data": [{"skills": [repo_skill]}]}), [])
+        for foreign in ({"name": "hatch-pet", "enabled": True, "scope": "user", "path": "/h/.codex/skills/p/SKILL.md"},
+                        {"name": "imagegen", "enabled": True, "scope": "system", "path": "/h/.codex/skills/.system/i/SKILL.md"},
+                        {**repo_skill, "path": "/elsewhere/.agents/skills/x/SKILL.md"}):
+            with self.subTest(skill=foreign["name"]):
+                self.assertTrue(isolation_failures(config, features, "gpt-reserve", root,
+                                                   {"data": [{"skills": [foreign]}]}))
+        for key, value in (("approvals_reviewer", "auto_review"), ("approvals_reviewer", None),
+                           ("approval_policy", "on-request")):
+            with self.subTest(key=key, value=value):
+                changed = json.loads(json.dumps(config))
+                changed["config"][key] = value
+                self.assertTrue(any(key.split("_")[1] in failure
+                                    for failure in isolation_failures(changed, features, "gpt-reserve", root)))
+
+    def test_skill_and_reviewer_isolation_arguments(self):
+        from creme.codex_app_server import PinViolation, foreign_skill_paths, isolation_arguments
+
+        root = Path("/launch/creme")
+        listing = {"data": [{"skills": [
+            {"name": "lean-prover", "scope": "repo", "enabled": True, "path": "/launch/creme/.agents/skills/l/SKILL.md"},
+            {"name": "hatch-pet", "scope": "user", "enabled": True, "path": "/h/.codex/skills/hatch-pet/SKILL.md"},
+            {"name": "imagegen", "scope": "system", "enabled": True, "path": "/h/.codex/skills/.system/i/SKILL.md"},
+            {"name": "docs", "scope": "user", "enabled": True, "pluginId": "p", "path": "/p/SKILL.md"},
+        ]}]}
+        paths = foreign_skill_paths(listing, root)
+        self.assertEqual(paths, ("/h/.codex/skills/hatch-pet/SKILL.md",))
+        arguments = isolation_arguments("gpt-reserve", "low", {}, paths)
+        for expected in ('approvals_reviewer="user"', 'approval_policy="never"', "skills.bundled.enabled=false",
+                         'skills.config=[{path="/h/.codex/skills/hatch-pet/SKILL.md",enabled=false}]'):
+            self.assertIn(expected, arguments)
+        for unsafe in ('/h/"x"/SKILL.md', "relative/SKILL.md", "/h/a\\nb"):
+            with self.subTest(unsafe=unsafe), self.assertRaises(PinViolation):
+                isolation_arguments("gpt-reserve", "low", {}, (unsafe,))
 
 
 class FakeAppServerRunTest(unittest.TestCase):
@@ -428,6 +494,13 @@ class FakeAppServerRunTest(unittest.TestCase):
                        {"name": {"type": "project", "dotCodexFolder": str(self.root / ".codex")}},
                        {"name": {"type": "user", "file": "/fake/.codex/config.toml"}}],
             "records": rollout(snapshots=[snapshot(self.reserve_reset)]),
+            "skills": [{"cwd": str(self.root), "skills": [
+                {"name": "lean-prover", "scope": "repo", "enabled": True,
+                 "path": str(self.root / ".agents/skills/lean-prover/SKILL.md")},
+                {"name": "hatch-pet", "scope": "user", "enabled": True, "path": "/fake/.codex/skills/hatch-pet/SKILL.md"},
+                {"name": "imagegen", "scope": "system", "enabled": True,
+                 "path": "/fake/.codex/skills/.system/imagegen/SKILL.md"},
+            ]}],
             "turn_notifications": [self.live(self.reserve_reset),
                                    {"method": "thread/tokenUsage/updated", "params": {"tokenUsage": {"total": {
                                        "inputTokens": 10, "cachedInputTokens": 5, "outputTokens": 2}}}}],
@@ -471,6 +544,11 @@ class FakeAppServerRunTest(unittest.TestCase):
             self.assertIn(feature, run_argv)
         self.assertIn('mcp_servers.lean-lsp-mcp={command="/usr/bin/false",args=[],enabled=false}', run_argv)
         self.assertIn('mcp_servers.node_repl={command="/usr/bin/false",args=[],enabled=false}', run_argv)
+        self.assertIn('approvals_reviewer="user"', run_argv)
+        self.assertIn("skills.bundled.enabled=false", run_argv)
+        self.assertIn('skills.config=[{path="/fake/.codex/skills/hatch-pet/SKILL.md",enabled=false}]', run_argv)
+        self.assertEqual(self.entries("request", "thread/start")[0]["params"]["approvalsReviewer"], "user")
+        self.assertFalse(self.entries("request", "thread/start")[0]["params"]["allowProviderModelFallback"])
         self.assertEqual(launches[1]["env_keys"], [])
         (thread_start,) = self.entries("request", "thread/start")
         params = thread_start["params"]
@@ -483,6 +561,8 @@ class FakeAppServerRunTest(unittest.TestCase):
         (turn_start,) = self.entries("request", "turn/start")
         self.assertEqual(turn_start["params"]["model"], "gpt-reserve")
         self.assertEqual(turn_start["params"]["effort"], "low")
+        self.assertEqual(turn_start["params"]["approvalsReviewer"], "user")
+        self.assertEqual(turn_start["params"]["approvalPolicy"], "never")
         self.assertEqual(turn_start["params"]["input"], [{"type": "text", "text": "Say OK."}])
         run_dir = Path(summary["run_dir"])
         for name in ("verdict.json", "preflight.json", "postflight.json", "audit.json", "transcript.jsonl",
@@ -585,6 +665,9 @@ class FakeAppServerRunTest(unittest.TestCase):
             "sticky multi agent": {"sticky_features": ["multi_agent"]},
             "foreign project layer": {"layers": [{"name": {"type": "project", "dotCodexFolder": "/else/.codex"}}]},
             "plugin skill": {"skills": [{"cwd": "x", "skills": [{"name": "docs", "enabled": True, "pluginId": "p"}]}]},
+            "sticky user skill": {"sticky_skills": ["/fake/.codex/skills/hatch-pet/SKILL.md"]},
+            "auto review reviewer": {"config_after_launch": {"approvals_reviewer": "auto_review"}},
+            "unsafe mcp name": {"config": {"model": "x", "mcp_servers": {"bad name": {"command": "node"}}}},
         }
         for name, change in cases.items():
             with self.subTest(name):

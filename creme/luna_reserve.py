@@ -34,6 +34,7 @@ from .codex_app_server import (
     AppServerProcess,
     GuardedSession,
     PinViolation,
+    foreign_skill_paths,
     isolation_arguments,
     isolation_failures,
     read_all_features,
@@ -165,9 +166,10 @@ def launch_root(module_root: Path) -> Path:
 
 
 def open_server(binary: Path, env: dict, effort: str, servers: dict,
-                transcript: Any = None, stderr: Any = None) -> tuple[AppServerProcess, dict]:
+                transcript: Any = None, stderr: Any = None,
+                skill_paths: tuple[str, ...] = ()) -> tuple[AppServerProcess, dict]:
     process = AppServerProcess(
-        binary, isolation_arguments(RESERVE_MODEL, effort, servers), env, transcript, stderr=stderr,
+        binary, isolation_arguments(RESERVE_MODEL, effort, servers, skill_paths), env, transcript, stderr=stderr,
     )
     try:
         initialized = process.start("creme-luna-reserve")
@@ -227,9 +229,11 @@ class Bucket:
 
 def _bucket(limit_id: str, snapshot: dict) -> Bucket:
     primary = snapshot.get("primary") or {}
+    used = primary.get("usedPercent")
     return Bucket(
         limit_id=limit_id,
-        used_percent=float(primary.get("usedPercent", 100) or 0),
+        # A missing or malformed usage figure counts as exhausted (fail closed).
+        used_percent=float(used) if isinstance(used, (int, float)) and not isinstance(used, bool) else 100.0,
         window_minutes=primary.get("windowDurationMins"),
         resets_at=primary.get("resetsAt"),
         has_secondary=snapshot.get("secondary") is not None,
@@ -655,18 +659,28 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
     if not request.workdir.is_dir():
         return refuse([f"target directory does not exist: {request.workdir}"])
 
-    # A first isolated server names the user's MCP servers so the run server
-    # can disable each one; it also gives an early admission verdict.
+    # A first isolated server names the user's MCP servers and foreign skills
+    # so the run server can disable each one; it also gives an early admission
+    # verdict.
     try:
         probe, initialized = open_server(binary, env, request.effort, {})
         try:
             first = zero_token_read(probe, initialized, root)
+            first_skills = probe.request("skills/list", {"cwds": [str(root)], "forceReload": True})
         finally:
             probe.close()
     except (AppServerError, PinViolation) as exc:
         return refuse([str(exc)])
     early = admission(first, request.policy, request.effort)
     refusals = early["refusals"] + target_refusals(request.workdir, request.write, first.get("codex_home"), root)
+    servers = mcp_servers(first)
+    skill_paths = foreign_skill_paths(first_skills, root)
+    try:
+        # Validate the isolation arguments before anything is recorded, so an
+        # unrepresentable server name or skill path is a refusal, not a failure.
+        isolation_arguments(RESERVE_MODEL, request.effort, servers, skill_paths)
+    except PinViolation as exc:
+        refusals.append(str(exc))
     if refusals:
         return refuse(refusals, {"reserve_before": early.get("reserve")})
 
@@ -681,12 +695,13 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
     session: Optional[GuardedSession] = None
     before: dict = {}
     after: Optional[dict] = None
-    servers = mcp_servers(first)
     transcript = (run_dir / "transcript.jsonl").open("w", encoding="utf-8")
     server_stderr = (run_dir / "app-server.stderr").open("w", encoding="utf-8")
     process: Optional[AppServerProcess] = None
     try:
-        process, initialized = open_server(binary, env, request.effort, servers, transcript, server_stderr)
+        process, initialized = open_server(
+            binary, env, request.effort, servers, transcript, server_stderr, skill_paths,
+        )
         before_read = zero_token_read(process, initialized, root)
         features = read_all_features(process)
         skills = process.request("skills/list", {"cwds": [str(root)], "forceReload": True})
@@ -696,7 +711,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
             "read": {key: value for key, value in before_read.items() if key != "config"},
             "admission": before,
             "isolation": {
-                "arguments": isolation_arguments(RESERVE_MODEL, request.effort, servers),
+                "arguments": isolation_arguments(RESERVE_MODEL, request.effort, servers, skill_paths),
                 "failures": isolation,
                 "enabled_features": sorted(item.get("name") for item in features if item.get("enabled")),
                 "config_layers": [layer.get("name") for layer in (before_read["config"] or {}).get("layers") or []],
@@ -706,7 +721,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
                 },
                 "skills": [
                     {"name": skill.get("name"), "scope": skill.get("scope"), "enabled": skill.get("enabled"),
-                     "plugin": skill.get("pluginId")}
+                     "plugin": skill.get("pluginId"), "path": skill.get("path")}
                     for entry in (skills or {}).get("data") or [] for skill in entry.get("skills") or []
                 ],
             },
@@ -964,6 +979,13 @@ def format_run(summary: dict) -> str:
     lines = [f"verdict={summary.get('verdict')} exit={summary.get('exit_code')} run={summary.get('run_id')}"]
     if summary.get("verdict") == "REFUSED":
         lines.extend(f"refused: {reason}" for reason in summary.get("refusals") or [])
+        return "\n".join(lines)
+    if summary.get("verdict") == "PREFLIGHT_OK":
+        lines.append(
+            f"mode={summary.get('mode')} effort={summary.get('effort')} no thread started, no tokens spent "
+            f"reserve_used%={(summary.get('reserve_before') or {}).get('used_percent')}"
+        )
+        lines.append(f"run_dir={summary.get('run_dir')}")
         return "\n".join(lines)
     usage = summary.get("token_usage") or {}
     before = (summary.get("reserve_before") or {}).get("used_percent")

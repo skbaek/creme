@@ -39,7 +39,7 @@ session forbids Lean, builds, and the semaphore.
 ```sh
 python3 -m creme luna-reserve status [--json]
 python3 -m creme luna-reserve run --brief FILE|- --target DIR [--write] \
-    [--effort low|medium|high] [--timeout-seconds N] [--preflight-only] [--json]
+    [--effort low|medium|high|xhigh|max] [--timeout-seconds N] [--preflight-only] [--json]
 python3 -m creme luna-reserve audit ROLLOUT.jsonl|THREAD_ID [--json]
 ```
 
@@ -52,9 +52,15 @@ and regular buckets (usage, credits, reset time in local time and UTC) and
 whether a run would be admitted.
 
 `run` sends one brief as one turn on a new thread and follows it to completion.
-The default effort is `medium`: the reserve is a separate allowance, and a
-weaker answer costs the master more to verify than a slightly larger reserve
-charge. Use `low` for trivial mechanical briefs. `xhigh` and `max` are refused.
+Effort is `low`, `medium` (default), `high`, `xhigh`, or `max`: every level
+the `gpt-reserve` catalogue lists, and admission re-checks the live catalogue.
+Luna is a lightweight model, so effort is the main lever for harder work: a
+weaker answer costs the master more Claude tokens to verify than a larger
+reserve charge costs. Use `low` for trivial mechanical briefs, `medium` by
+default, and `high`, `xhigh`, or `max` for nontrivial reasoning such as Lean
+proof work. Higher effort spends more reserve and takes longer per turn, so
+raise `--timeout-seconds` (default 1800) for long `xhigh`/`max` turns; the
+broker interrupts a turn that outlives it.
 `--preflight-only` does everything up to thread creation, including the
 isolation proof, and then stops without spending tokens.
 
@@ -248,7 +254,7 @@ approval requests, and read its transcript on demand.
 
 ```sh
 python3 -m creme luna-reserve start --brief FILE|- --target DIR [--write | --lean GOAL] \
-    [--effort low|medium|high] [--detail silent|summary|live] [--timeout-seconds N]
+    [--effort low|medium|high|xhigh|max] [--detail silent|summary|live] [--timeout-seconds N]
 python3 -m creme luna-reserve send SESSION (--text TEXT | --brief FILE|-)
 python3 -m creme luna-reserve steer SESSION (--text TEXT | --brief FILE|-)
 python3 -m creme luna-reserve interrupt SESSION

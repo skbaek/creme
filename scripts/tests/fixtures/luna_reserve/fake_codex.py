@@ -155,7 +155,7 @@ def serve(scenario: dict, log: Path, argv: list) -> int:
             emit({"id": ident, "result": {"data": [
                 {"id": slug, "model": slug, "hidden": slug == "gpt-reserve",
                  "defaultServiceTier": scenario.get("default_service_tier"),
-                 "supportedReasoningEfforts": [{"reasoningEffort": e} for e in ("low", "medium", "high")]}
+                 "supportedReasoningEfforts": [{"reasoningEffort": e} for e in ("low", "medium", "high", "xhigh", "max")]}
                 for slug in scenario["models"]]}})
         elif method == "account/rateLimits/read":
             limits = scenario["limits_after"] if executed and "limits_after" in scenario else scenario["limits"]

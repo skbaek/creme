@@ -48,7 +48,7 @@ DISABLED_FEATURES = (
 
 PERMITTED_SERVICE_TIERS = (None, "default")
 PERMITTED_SANDBOXES = ("read-only", "workspace-write")
-PERMITTED_EFFORTS = ("low", "medium", "high")
+PERMITTED_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # ``never`` is the read-only policy. ``on-request`` is permitted only for a
 # write session, whose approval requests the master answers one by one; the
 # reviewer stays ``user`` either way.

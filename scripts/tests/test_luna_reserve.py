@@ -49,7 +49,7 @@ def read(limits_value=None, account="chatgpt", models=("gpt-reserve", "gpt-5.6-l
         "account": {"type": account, "plan": "pro"},
         "models": {"data": [
             {"id": slug, "model": slug,
-             "supportedReasoningEfforts": [{"reasoningEffort": e} for e in ("low", "medium", "high")]}
+             "supportedReasoningEfforts": [{"reasoningEffort": e} for e in ("low", "medium", "high", "xhigh", "max")]}
             for slug in models
         ]},
         "limits": limits() if limits_value is None else limits_value,
@@ -214,7 +214,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertRefused(self.decide(read(account="apiKey")), "not a ChatGPT login")
 
     def test_unsupported_effort_is_refused(self):
-        self.assertRefused(self.decide(read(), effort="max"), "not supported")
+        self.assertRefused(self.decide(read(), effort="ultra"), "not supported")
 
     def test_imminent_reserve_reset_is_refused(self):
         self.assertRefused(self.decide(read(limits(reserve_reset=NOW + 60))), "resets within 15 minutes")
@@ -275,14 +275,14 @@ class AdmissionTest(unittest.TestCase):
 
 
 class SessionPolicyTest(unittest.TestCase):
-    def session(self, sandbox="read-only", roots=()):
+    def session(self, sandbox="read-only", roots=(), effort="low"):
         from creme.codex_app_server import GuardedSession
 
         reserve, regular = buckets()
         return GuardedSession(
             process=None, pinned_model="gpt-reserve",
             attribution=lambda snap: L.snapshot_matches_reserve(snap, reserve, regular, 300),
-            cwd=Path("/launch/creme"), sandbox=sandbox, effort="low", writable_roots=roots,
+            cwd=Path("/launch/creme"), sandbox=sandbox, effort=effort, writable_roots=roots,
             developer_instructions="contract",
         )
 
@@ -327,7 +327,7 @@ class SessionPolicyTest(unittest.TestCase):
                             "approvalsReviewer": "user"}),
             ("thread/resume", {"threadId": "t", "model": "gpt-reserve", "approvalPolicy": "never",
                                "approvalsReviewer": "guardian_subagent"}),
-            ("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve", "effort": "max"}),
+            ("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve", "effort": "ultra", **pins}),
             ("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve", "serviceTierForTurn": "priority"}),
             ("turn/start", {"threadId": "t", "input": [], "model": "gpt-5.6-luna", **pins}),
             ("turn/start", {"threadId": "t", "input": [], **pins}),
@@ -344,6 +344,24 @@ class SessionPolicyTest(unittest.TestCase):
                 with self.assertRaises(PinViolation):
                     session.check_params(method, params)
         session.check_params("thread/items/list", {"threadId": "t"})
+
+    def test_every_catalogue_effort_is_permitted_and_others_are_pin_violations(self):
+        from creme.codex_app_server import PinViolation, isolation_arguments
+
+        pins = {"approvalPolicy": "never", "approvalsReviewer": "user"}
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            with self.subTest(effort=effort):
+                isolation_arguments("gpt-reserve", effort, {})
+                session = self.session(effort=effort)
+                session.thread_id, session.active_turn = "t", None
+                session.check_params("turn/start", {"threadId": "t", "input": [], "model": "gpt-reserve",
+                                                    "effort": effort, **pins})
+        for effort in ("ultra", "minimal", "none", ""):
+            with self.subTest(effort=effort):
+                with self.assertRaises(PinViolation):
+                    isolation_arguments("gpt-reserve", effort, {})
+                with self.assertRaises(PinViolation):
+                    self.session(effort=effort)
 
     def test_thread_response_checks(self):
         session = self.session("workspace-write", (Path("/work/tree"),))

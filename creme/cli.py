@@ -1423,7 +1423,7 @@ def parser() -> argparse.ArgumentParser:
     )
     luna_run.add_argument(
         "--effort", default=luna_reserve.DEFAULT_EFFORT,
-        help="reasoning effort: low, medium (default), or high",
+        help="reasoning effort: low, medium (default), high, xhigh, or max",
     )
     luna_run.add_argument(
         "--write", action="store_true",
@@ -1471,7 +1471,7 @@ def parser() -> argparse.ArgumentParser:
     open_arguments(luna_start)
     luna_start.add_argument("--brief", required=True, help="brief file, or - for stdin")
     luna_start.add_argument("--target", required=True, help="directory the brief is about")
-    luna_start.add_argument("--effort", default=luna_reserve.DEFAULT_EFFORT, help="low, medium (default), or high")
+    luna_start.add_argument("--effort", default=luna_reserve.DEFAULT_EFFORT, help="low, medium (default), high, xhigh, or max")
     luna_start.set_defaults(func=cmd_luna_reserve_start)
 
     luna_resume = luna_commands.add_parser("resume", help="attach a new brokered session to a recorded thread")

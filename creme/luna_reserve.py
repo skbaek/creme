@@ -33,6 +33,7 @@ from .codex_app_server import (
     AppServerError,
     AppServerProcess,
     GuardedSession,
+    PERMITTED_EFFORTS,
     PinViolation,
     decline_server_requests,
     foreign_skill_paths,
@@ -55,7 +56,6 @@ EXIT_CODEX_FAILED = 11
 EXIT_ATTRIBUTION_FAILED = 12
 
 DEFAULT_EFFORT = "medium"
-ALLOWED_EFFORTS = ("low", "medium", "high")
 DEFAULT_MIN_REMAINING_PERCENT = 10.0
 DEFAULT_JITTER_SECONDS = 300
 DEFAULT_DISCRIMINATION_SECONDS = 3600
@@ -625,8 +625,8 @@ def early_refusals(state: Path, effort: str, overrides: Iterable[str] = (),
             f"an earlier attribution failure is recorded at {tripwire_path(state)}; "
             "only the user may clear it after reviewing that run"
         ]
-    if effort not in ALLOWED_EFFORTS:
-        return [f"effort must be one of {', '.join(ALLOWED_EFFORTS)}"]
+    if effort not in PERMITTED_EFFORTS:
+        return [f"effort must be one of {', '.join(PERMITTED_EFFORTS)}"]
     if brief is not None:
         if not brief.strip():
             return ["the brief is empty"]

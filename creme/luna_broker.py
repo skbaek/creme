@@ -515,7 +515,7 @@ class BrokerSession:
             tokens = turn["tokens"]
             self.emit("attention", "turn", (
                 f"turn {number} {outcome.status} verdict={verdict} live={turn['live_snapshots']} "
-                f"tokens in={tokens['input']} out={tokens['output']}"
+                f"thread_tokens in={tokens['input']} out={tokens['output']}"
                 + (f" failures={one_line('; '.join(failures + errors), 160)}" if failures or errors else "")
             ))
             if outcome.final_message is not None:
@@ -536,13 +536,18 @@ class BrokerSession:
                 self.approval_counter += 1
                 key = f"a{self.approval_counter}"
                 summary = describe_approval(method, params)
-                self.pending[key] = {"request_id": request_id, "method": method}
+                offered = params.get("availableDecisions")
+                # Only plain decisions are answerable here; amendments and session-wide
+                # approvals are never offered to the master.
+                available = [item for item in DECISIONS if not isinstance(offered, list) or item in offered]
+                self.pending[key] = {"request_id": request_id, "method": method, "available": available}
                 self.record.setdefault("pending_approvals", []).append({
                     "id": key, "method": method, "summary": summary, "received": _now_iso(),
+                    "decisions": available,
                 })
                 self.persist()
             self.emit("attention", "approval",
-                      f"{key} {summary} -> approve {self.id} {key} accept|decline|cancel")
+                      f"{key} [{'|'.join(available)}] {summary} -> approve {self.id} {key} DECISION")
             return None
         reply = decline_server_requests(method, params, request_id)
         self.emit("attention", "server-request", f"{method} answered by policy: {json.dumps(reply)[:120]}")
@@ -554,9 +559,13 @@ class BrokerSession:
             if decision not in DECISIONS:
                 return EXIT_USAGE, {"verdict": "REFUSED", "refusals": [f"decision must be one of {DECISIONS}"]}
             with self.data_lock:
-                entry = self.pending.pop(key, None)
+                entry = self.pending.get(key)
                 if entry is None:
                     return EXIT_USAGE, {"verdict": "REFUSED", "refusals": [f"no pending approval {key}"]}
+                if decision not in entry.get("available", DECISIONS):
+                    return EXIT_USAGE, {"verdict": "REFUSED", "refusals": [
+                        f"{key} offers only {', '.join(entry.get('available') or [])}; {decision} is not offered"]}
+                self.pending.pop(key)
                 self.record["pending_approvals"] = [
                     item for item in self.record.get("pending_approvals") or [] if item.get("id") != key]
                 self.persist()
@@ -962,7 +971,7 @@ class Broker:
             with session.data_lock:
                 session.record["detail"] = level
                 session.persist()
-            code, result = 0, {"verdict": "DETAIL", "detail": level}
+            code, result = 0, {"verdict": "UPDATED", "detail": level}
         elif op == "items":
             limit = max(1, min(int(request.get("limit") or 10), 50))
             if not session.is_open():
@@ -1359,6 +1368,9 @@ def _verdict_code(record: dict) -> int:
         return L.EXIT_ATTRIBUTION_FAILED
     if state == "refused":
         return L.EXIT_PREFLIGHT_REFUSED
+    if state == "stopped":
+        return L.EXIT_OK if (record.get("stop_audit") or {}).get("verdict", "PASS") == "PASS" \
+            else L.EXIT_ATTRIBUTION_FAILED
     if record.get("pending_approvals"):
         return EXIT_ATTENTION
     turns = record.get("turns") or []
@@ -1379,10 +1391,13 @@ def session_lines(record: dict, excerpt_lines: int = 3) -> list[str]:
     lines = [
         f"session={record.get('id')} state={record.get('state')} thread={record.get('thread_id')} "
         f"turn={last.get('n')} status={last.get('status')} verdict={last.get('verdict')} "
-        f"tokens_in={tokens.get('input')} out={tokens.get('output')}"
+        f"thread_tokens in={tokens.get('input')} out={tokens.get('output')}"
     ]
+    if record.get("stop_audit"):
+        lines[0] += f" stop_audit={record['stop_audit'].get('verdict')}"
     for approval in record.get("pending_approvals") or []:
-        lines.append(one_line(f"approval {approval.get('id')}: {approval.get('summary')}"))
+        lines.append(one_line(f"approval {approval.get('id')} [{'|'.join(approval.get('decisions') or DECISIONS)}]: "
+                              f"{approval.get('summary')}"))
     for failure in (last.get("failures") or [])[:3] + (last.get("errors") or [])[:2]:
         lines.append(f"failure: {one_line(failure)}")
     if last.get("last_message"):

@@ -261,20 +261,28 @@ class BrokerSessionTest(BrokerHarness):
         thread.join(30)
         self.assertEqual(result.get("code"), 0, followed)
         self.assertTrue(followed[-1].endswith("ended: stopped"), followed)
+        self.assertEqual(B._verdict_code(self.record(session)), 0)
         self.assertTrue(any("turn 2 started" in line for line in followed), followed)
 
     def test_approval_is_queued_until_the_master_answers(self):
         self.scenario["turns"] = [{"approval": {"method": "item/commandExecution/requestApproval", "params": {
-            "itemId": "i1", "command": "git commit -m x", "cwd": str(self.target), "reason": "needs .git"}}}]
+            "itemId": "i1", "command": "git commit -m x", "cwd": str(self.target), "reason": "needs .git",
+            "availableDecisions": ["accept", {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["git"]}},
+                                   "cancel"]}}}]
         self.write_scenario()
         session, _ = self.start(write=True)
         record, lines = self.wait(session, expect=B.EXIT_ATTENTION)
         self.assertEqual(record["pending_approvals"][0]["id"], "a1")
         self.assertIn("git commit -m x", "\n".join(lines))
+        self.assertIn("[accept|cancel]", "\n".join(lines))
         time.sleep(0.5)
         self.assertEqual(self.entries("server-request-reply"), [], "an approval was answered without the master")
         self.assertEqual(self.record(session)["state"], "running")
         self.simple("approve", session, expect=B.EXIT_USAGE, approval="a9", decision="accept")
+        # A decision the server did not offer is refused without answering.
+        _, lines = self.simple("approve", session, expect=B.EXIT_USAGE, approval="a1", decision="decline")
+        self.assertIn("not offered", "\n".join(lines))
+        self.assertEqual(self.entries("server-request-reply"), [])
         reply, lines = self.simple("approve", session, approval="a1", decision="accept")
         self.assertIn("a1=accept", lines[0])
         record, lines = self.wait(session)

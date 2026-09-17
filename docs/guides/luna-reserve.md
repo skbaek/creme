@@ -42,6 +42,10 @@ python3 -m creme luna-reserve run --brief FILE|- --target DIR [--write] \
 python3 -m creme luna-reserve audit ROLLOUT.jsonl|THREAD_ID [--json]
 ```
 
+Brokered sessions (see [Broker](#broker)) add `start`, `send`, `steer`,
+`interrupt`, `wait`, `events`, `read`, `approve`, `detail`, `list`, `stop`,
+`resume`, and `shutdown`.
+
 `status` reads the bucket table without model tokens. It shows the reserve
 and regular buckets (usage, credits, reset time in local time and UTC) and
 whether a run would be admitted.
@@ -117,8 +121,14 @@ preflight refusal.
 **Pin.** `creme.codex_app_server.GuardedSession` builds every `thread/start`,
 `thread/resume`, `turn/start`, and `turn/steer` request from an allowlist of
 parameters. Each `thread/start`, `thread/resume`, and `turn/start` must carry
-model `gpt-reserve`, approval policy `never`, and approvals reviewer `user`;
-`thread/start` must also set `allowProviderModelFallback: false`. Any other
+model `gpt-reserve`, the session's approval policy (`never`, or `on-request`
+for a brokered write session), and approvals reviewer `user`;
+`thread/start` must also set `allowProviderModelFallback: false`. A follow-up
+`turn/start` must carry the session's effort and may not start while a turn is
+active; a `turn/steer` must name the session's active turn and carries no
+model, tier, or policy key; `turn/start`, `turn/steer`, `turn/interrupt`, and
+`thread/resume` must name the session's own thread; and once any guard failure
+is recorded, only `turn/interrupt` is still permitted. Any other
 model, service tier, profile, configuration, reviewer (`auto_review` or the
 legacy `guardian_subagent`), ephemeral thread, or method outside a read-only
 allowlist is refused before it is sent. The `thread/start` response must
@@ -128,9 +138,11 @@ path.
 
 Approval review stays on the client route because Codex's automatic review
 runs on its own reviewer model, whose billing bucket is unverified. With
-approval policy `never`, a sandboxed command that would need approval simply
-fails inside the turn; the default server-request handler also declines any
-approval request that does arrive.
+approval policy `never` (every `run`, and every read-only brokered session), a
+sandboxed command that would need approval simply fails inside the turn; the
+default server-request handler also declines any approval request that does
+arrive. A brokered write session uses `on-request` instead, and its approvals
+go to the master (see [Approvals](#approvals)).
 
 **Live guard.** Every `account/rateLimits/updated` notification is attributed
 as it arrives. The notification's `limitId` label is not reliable (reserve
@@ -197,7 +209,9 @@ From **Claude Code**, run the command through the shell. A run can exceed the
 client's 600-second foreground limit, so start anything that might take more
 than a few minutes as a background command and watch for completion (for
 example with the Monitor tool), then read the printed summary and, only if
-needed, `last-message.md`. `status` and `--preflight-only` are quick.
+needed, `last-message.md`. `status` and `--preflight-only` are quick. For
+anything that may need steering, follow-up, or approvals, use a brokered
+session instead (see the [Claude Code recipe](#claude-code-recipe)).
 
 From **Codex** or **Muse**, run the same command through the shell from the
 Creme checkout. A Codex session must not substitute its own model selector or
@@ -222,18 +236,144 @@ with `--allow-regular-available --effort low`, confirms exit `0`, a live and
 rollout attribution to the reserve, and unchanged regular usage before and
 after, and records the result. Only then may routine runs use that flag.
 
-## Broker (planned)
+## Broker
 
-Version 1 runs one turn per invocation. A later broker keeps
-`GuardedSession`s alive per thread behind one-shot CLI calls that any client
-can drive and watch (Claude Code through background commands and its Monitor
-tool): `start`, `send` (a new turn), `steer` (`turn/steer` on the active
-turn), `interrupt`, `tail` (the redacted transcript), `read`
-(`thread/items/list`), `approve` (queued server requests, answered by the
-master, never by automatic review), and `stop`. The session's request policy,
-live guard, transcript, and server-request handler are already shaped for
-that; every broker call must go through the same pins, preflight, and
-postflight audit, and an attribution failure trips the same tripwire.
+`run` is one turn per invocation. A brokered session keeps a guarded Codex
+thread alive between one-shot commands, so a master in any client can start a
+task, steer it, give follow-up orders, interrupt or stop it, answer its
+approval requests, and read its transcript on demand.
+
+```sh
+python3 -m creme luna-reserve start --brief FILE|- --target DIR [--write] \
+    [--effort low|medium|high] [--detail silent|summary|live] [--timeout-seconds N]
+python3 -m creme luna-reserve send SESSION (--text TEXT | --brief FILE|-)
+python3 -m creme luna-reserve steer SESSION (--text TEXT | --brief FILE|-)
+python3 -m creme luna-reserve interrupt SESSION
+python3 -m creme luna-reserve wait SESSION [--timeout SECONDS]
+python3 -m creme luna-reserve events SESSION [--follow] [--last N] [--since SEQ]
+python3 -m creme luna-reserve read SESSION [--lines N | --items N]
+python3 -m creme luna-reserve approve SESSION APPROVAL accept|decline|cancel
+python3 -m creme luna-reserve detail SESSION silent|summary|live
+python3 -m creme luna-reserve list [--limit N]
+python3 -m creme luna-reserve stop SESSION
+python3 -m creme luna-reserve resume THREAD_ID [--target DIR] [--write] [--effort E]
+python3 -m creme luna-reserve shutdown
+```
+
+- `start` prints a session id and returns as soon as the first turn is
+  accepted. Preflight, isolation proof, and admission run first, so a refusal
+  (exit `10`) still spends nothing.
+- `send` starts a new turn on an idle session and steers a running one;
+  `steer` only steers. Every new turn first makes its own zero-token
+  admission read and is refused (exit `10`) when the reserve is no longer
+  admitted.
+- `wait` blocks until the session is idle, needs attention (an approval), or
+  has ended, then prints a few lines: state, last turn status and verdict,
+  tokens, pending approvals, and the first lines of the final message. Its
+  exit code is `0` (turn passed), `10` (refused), `11` (Codex failure or lost
+  session), `12` (attribution failure), `20` (approval pending), `21`
+  (interrupted), or `124` (timeout).
+- `events` prints one line per event at the session's detail level; with
+  `--follow` it keeps printing and exits when the session ends.
+- `read` prints the latest final message (at most 60 lines), or the last N
+  thread items (at most 50). The full redacted transcript stays on disk.
+- `stop` interrupts a running turn, cancels pending approvals, re-audits the
+  whole rollout turn by turn, and closes the app server. Records are kept.
+- `resume` attaches a new session to a recorded thread, after a broker
+  restart, a stop, or a master succession. Target, mode, and effort default to
+  the thread's latest record. It runs a new preflight and `thread/resume`
+  under the same pins; send the follow-up with `send`.
+
+Every command prints a bounded result of a few lines; `--json` prints the full
+record instead.
+
+**Detail levels.** `silent` (the default) shows only attention events: a turn
+completed, failed, or was interrupted; an approval is needed; a billing alarm;
+a session refused, failed, or stopped. `summary` adds the final message's path
+and a one-line excerpt. `live` adds filtered progress: turn start, steer,
+command start and exit, file changes, and completed agent messages. Token
+deltas never appear. `detail` changes the level mid-run; `events` applies the
+level current when it prints.
+
+**Guards.** The broker adds no guard logic of its own. Each session runs
+through the same `ReserveServer` preflight (probe, admission, isolation
+proof) and `GuardedSession` pins as `run`, with one app server per session.
+Every `account/rateLimits/updated` is attributed live against the current
+turn's admission read; a mismatch, reroute, or other guard failure interrupts
+the turn at once, records the shared `ATTRIBUTION_FAILURE` tripwire, and
+stops every session in the broker. A tripwire recorded by any other run also
+stops every session within a second. The rollout audit runs on each turn's
+own slice of the rollout at turn end and again for every turn at `stop`;
+before `resume` continues a thread, any turn that ended with a crashed broker
+is audited first. A lost app server during a turn is an attribution failure,
+as in `run`.
+
+### Approvals
+
+A read-only session keeps the `run` policy (`never`; any approval request is
+declined). A write session uses approval policy `on-request` with reviewer
+`user`: work inside the target runs under the write profile without asking,
+and a command or patch that needs to leave the sandbox (for example a write
+under `.git`, or network access) is queued as an attention event with an id
+such as `a1` and a bounded description. The turn waits until the master
+answers with `approve SESSION a1 accept|decline|cancel`. Nothing is answered
+automatically. Session-wide and policy-amending decisions
+(`acceptForSession`, execpolicy or network rules) are not offered, because
+they would approve later commands the master has not seen or change standing
+configuration. Permission-profile grants and other server requests are
+refused as in `run`. `untrusted` was not chosen: it would ask for every
+ordinary command inside the target and spend the master's attention on
+routine work.
+
+### Process, socket, and records
+
+The broker is a long-lived process started on first use by `start` or
+`resume`. Its state lives under the Luna reserve state directory
+(`.creme/luna-reserve/`, or `CREME_LUNA_RESERVE_STATE`):
+
+- `broker/broker.sock`, mode `0600` in a `0700` directory; each connection's
+  peer uid is checked where the platform reports it (macOS
+  `LOCAL_PEERCRED`, Linux `SO_PEERCRED`), and a different uid is refused;
+- `broker/broker.json` (pid and a random instance token) and `broker.log`;
+- `sessions/<id>/`: `session.json` (the registry record: thread id, target,
+  mode, state, turns with verdicts, pending approvals, last event),
+  `events.jsonl`, `transcript.jsonl`, `preflight.json`, and
+  `turns/<n>/` with `brief.md`, `preflight.json`, `postflight.json`,
+  `audit.json`, `items.json`, and `last-message.md`.
+
+A client uses a broker only when a ping returns the recorded pid and instance.
+Otherwise it replaces the broker: it signals a recorded pid only if that
+process's command line carries the recorded instance token, removes a stale
+socket, and starts a new broker. The broker exits on `shutdown`, and after ten
+minutes with no open session; a session idle for thirty minutes is stopped
+(records kept, resumable). A new broker marks sessions of a dead broker
+`lost` and stops their app server only if it is orphaned and carries this
+capability's pinned launch arguments. It never signals or reuses any other
+`codex app-server`, including the ChatGPT desktop app's. Nothing a successor
+needs lives only in broker memory: `list`, `events`, `wait`, and `read` work
+from the records, and `resume` continues a thread.
+
+### Claude Code recipe
+
+1. `python3 -m creme luna-reserve start --brief brief.md --target DIR --effort low`
+   returns a session id in a second or so.
+2. For one completion notification, run `python3 -m creme luna-reserve wait
+   SESSION --timeout 3600` as a background command. For live progress, start
+   the Monitor tool on `python3 -m creme luna-reserve events SESSION --follow`
+   after `detail SESSION live`; each line is one notification, and the command
+   exits when the session ends.
+3. Redirect with `send SESSION --text "..."` (steers a running turn, or starts
+   the next turn), stop work with `interrupt SESSION`, and answer an approval
+   line with `approve SESSION a1 accept` or `decline`.
+4. Verify with the master's own commands (`git diff`, a test, a grep on the
+   target) rather than reading the transcript; read `read SESSION` only when
+   a command cannot settle the question.
+5. `stop SESSION` when done, then check that its line says
+   `stop_audit=PASS`.
+
+Codex and Muse masters use the same commands through their shell. The run
+directory of a session is never a substitute for verification: its final
+message is a worker summary.
 
 ## Lean work (planned)
 

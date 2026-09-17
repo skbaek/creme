@@ -26,7 +26,7 @@ from .host_wrappers import (
 )
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import idle_workers
-from . import luna_reserve
+from . import luna_broker, luna_reserve
 from . import master_migrate
 from . import master_operations
 from . import master_reconcile
@@ -225,6 +225,117 @@ def cmd_luna_reserve_audit(arguments: argparse.Namespace) -> int:
     if code == luna_reserve.EXIT_ATTRIBUTION_FAILED:
         print(luna_reserve.STOP_MESSAGE, file=sys.stderr)
     return code
+
+
+def _read_brief(value: str) -> tuple[Optional[str], Optional[str]]:
+    if value == "-":
+        return sys.stdin.read(), None
+    try:
+        return Path(value).expanduser().read_text(encoding="utf-8"), None
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, f"cannot read brief: {exc}"
+
+
+def _luna_print(arguments: argparse.Namespace, code: int, lines: list[str], record: dict) -> int:
+    if getattr(arguments, "json", False):
+        _json({"exit_code": code, **(record or {})})
+    else:
+        for line in lines:
+            print(line)
+    if code == luna_reserve.EXIT_ATTRIBUTION_FAILED:
+        print(luna_reserve.STOP_MESSAGE, file=sys.stderr)
+    return code
+
+
+def _luna_refused(arguments: argparse.Namespace, reason: str) -> int:
+    return _luna_print(arguments, luna_reserve.EXIT_PREFLIGHT_REFUSED,
+                       [f"verdict=REFUSED exit={luna_reserve.EXIT_PREFLIGHT_REFUSED}", f"refused: {reason}"], {})
+
+
+def cmd_luna_reserve_start(arguments: argparse.Namespace) -> int:
+    brief, error = _read_brief(arguments.brief)
+    if error:
+        return _luna_refused(arguments, error)
+    code, lines, record = luna_broker.cmd_start(
+        ROOT, dict(os.environ), brief, arguments.target, arguments.write, arguments.effort, arguments.detail,
+        _luna_policy(arguments).__dict__, list(arguments.overrides or []), arguments.timeout_seconds,
+    )
+    return _luna_print(arguments, code, lines, record)
+
+
+def cmd_luna_reserve_resume(arguments: argparse.Namespace) -> int:
+    code, lines, record = luna_broker.cmd_resume(
+        ROOT, dict(os.environ), arguments.thread, arguments.target, arguments.write, arguments.effort,
+        arguments.detail, _luna_policy(arguments).__dict__, list(arguments.overrides or []),
+        arguments.timeout_seconds,
+    )
+    return _luna_print(arguments, code, lines, record)
+
+
+def cmd_luna_reserve_send(arguments: argparse.Namespace) -> int:
+    if arguments.text is not None:
+        text = arguments.text
+    else:
+        text, error = _read_brief(arguments.brief or "-")
+        if error:
+            return _luna_refused(arguments, error)
+    steer = arguments.luna_action == "steer"
+    code, lines, record = luna_broker.cmd_simple(ROOT, dict(os.environ), "send", arguments.session,
+                                                  text=text, steer=steer)
+    return _luna_print(arguments, code, lines, record)
+
+
+def cmd_luna_reserve_session_op(arguments: argparse.Namespace) -> int:
+    extra = {}
+    if arguments.luna_action == "approve":
+        extra = {"approval": arguments.approval, "decision": arguments.decision}
+    code, lines, record = luna_broker.cmd_simple(ROOT, dict(os.environ), arguments.luna_action,
+                                                  arguments.session, **extra)
+    return _luna_print(arguments, code, lines, record)
+
+
+def cmd_luna_reserve_detail(arguments: argparse.Namespace) -> int:
+    code, lines, record = luna_broker.cmd_detail(ROOT, dict(os.environ), arguments.session, arguments.level)
+    return _luna_print(arguments, code, lines, record)
+
+
+def cmd_luna_reserve_wait(arguments: argparse.Namespace) -> int:
+    code, lines, record = luna_broker.cmd_wait(ROOT, dict(os.environ), arguments.session, arguments.timeout)
+    return _luna_print(arguments, code, lines, record)
+
+
+def cmd_luna_reserve_events(arguments: argparse.Namespace) -> int:
+    def emit(line: str) -> None:
+        print(line, flush=True)
+
+    return luna_broker.cmd_events(ROOT, dict(os.environ), arguments.session, arguments.follow, arguments.last,
+                                  arguments.since, emit, timeout=arguments.timeout)
+
+
+def cmd_luna_reserve_read(arguments: argparse.Namespace) -> int:
+    code, lines, record = luna_broker.cmd_read(ROOT, dict(os.environ), arguments.session, arguments.items,
+                                               arguments.lines)
+    return _luna_print(arguments, code, lines, record)
+
+
+def cmd_luna_reserve_list(arguments: argparse.Namespace) -> int:
+    code, lines, record = luna_broker.cmd_list(ROOT, dict(os.environ), arguments.limit)
+    return _luna_print(arguments, code, lines, record)
+
+
+def cmd_luna_reserve_shutdown(arguments: argparse.Namespace) -> int:
+    code, lines, record = luna_broker.cmd_shutdown(ROOT, dict(os.environ))
+    return _luna_print(arguments, code, lines, record)
+
+
+def cmd_luna_reserve_broker_serve(arguments: argparse.Namespace) -> int:
+    return luna_broker.serve_main(ROOT, arguments.instance)
+
+
+def _add_luna_refused_overrides(item: argparse.ArgumentParser) -> None:
+    for flag in luna_reserve.FORBIDDEN_OVERRIDE_FLAGS:
+        item.add_argument(flag, dest="overrides", nargs="?", action=_RefusedOverride, help=argparse.SUPPRESS)
+    item.set_defaults(overrides=[], collects_extra_overrides=True)
 
 
 class _RefusedOverride(argparse.Action):
@@ -1328,15 +1439,98 @@ def parser() -> argparse.ArgumentParser:
         "--allow-regular-available", action="store_true",
         help="admit a run while the regular bucket is available (post-reset verification only)",
     )
-    for flag in luna_reserve.FORBIDDEN_OVERRIDE_FLAGS:
-        luna_run.add_argument(
-            flag, dest="overrides", nargs="?", action=_RefusedOverride, help=argparse.SUPPRESS,
-        )
-    luna_run.set_defaults(func=cmd_luna_reserve_run, overrides=[], collects_extra_overrides=True)
+    _add_luna_refused_overrides(luna_run)
+    luna_run.set_defaults(func=cmd_luna_reserve_run)
     luna_audit = luna_commands.add_parser("audit", help="re-audit a rollout path or thread id")
     _add_luna_policy_arguments(luna_audit)
     luna_audit.add_argument("target", help="rollout .jsonl path or Codex thread id")
     luna_audit.set_defaults(func=cmd_luna_reserve_audit)
+
+    # Broker sessions: every command prints a few lines; see docs/guides/luna-reserve.md.
+    def session_parser(name: str, help_text: str) -> argparse.ArgumentParser:
+        item = luna_commands.add_parser(name, help=help_text)
+        item.add_argument("--json", action="store_true", help="print the full JSON record")
+        return item
+
+    def open_arguments(item: argparse.ArgumentParser) -> None:
+        _add_luna_policy_arguments(item)
+        item.add_argument("--write", action="store_true",
+                          help="allow edits confined to --target; approvals are routed to the master")
+        item.add_argument("--detail", default=luna_broker.DEFAULT_DETAIL, choices=luna_broker.DETAIL_LEVELS)
+        item.add_argument("--timeout-seconds", type=_positive, default=luna_reserve.DEFAULT_TIMEOUT_SECONDS,
+                          help="per-turn timeout; the broker interrupts a longer turn")
+        item.add_argument("--allow-regular-available", action="store_true",
+                          help="admit while the regular bucket is available (post-reset verification only)")
+        _add_luna_refused_overrides(item)
+
+    luna_start = luna_commands.add_parser("start", help="start a brokered session and its first turn; returns at once")
+    open_arguments(luna_start)
+    luna_start.add_argument("--brief", required=True, help="brief file, or - for stdin")
+    luna_start.add_argument("--target", required=True, help="directory the brief is about")
+    luna_start.add_argument("--effort", default=luna_reserve.DEFAULT_EFFORT, help="low, medium (default), or high")
+    luna_start.set_defaults(func=cmd_luna_reserve_start)
+
+    luna_resume = luna_commands.add_parser("resume", help="attach a new brokered session to a recorded thread")
+    open_arguments(luna_resume)
+    luna_resume.add_argument("thread", help="Codex thread id")
+    luna_resume.add_argument("--target", help="defaults to the thread's recorded target")
+    luna_resume.add_argument("--effort", help="defaults to the thread's recorded effort")
+    luna_resume.set_defaults(func=cmd_luna_reserve_resume)
+
+    for name, help_text in (("send", "new turn when idle, steer when a turn is running"),
+                            ("steer", "steer the running turn only")):
+        item = session_parser(name, help_text)
+        item.add_argument("session")
+        item.add_argument("--text", help="message text (else --brief FILE, or stdin)")
+        item.add_argument("--brief", help="message file, or - for stdin")
+        item.set_defaults(func=cmd_luna_reserve_send)
+
+    for name, help_text in (("interrupt", "interrupt the running turn"),
+                            ("stop", "interrupt if needed, audit, close; records are kept")):
+        item = session_parser(name, help_text)
+        item.add_argument("session")
+        item.set_defaults(func=cmd_luna_reserve_session_op)
+
+    luna_approve = session_parser("approve", "answer a queued approval request")
+    luna_approve.add_argument("session")
+    luna_approve.add_argument("approval", help="approval id such as a1")
+    luna_approve.add_argument("decision", choices=luna_broker.DECISIONS)
+    luna_approve.set_defaults(func=cmd_luna_reserve_session_op)
+
+    luna_detail = session_parser("detail", "change the session's event detail level")
+    luna_detail.add_argument("session")
+    luna_detail.add_argument("level", choices=luna_broker.DETAIL_LEVELS)
+    luna_detail.set_defaults(func=cmd_luna_reserve_detail)
+
+    luna_wait = session_parser("wait", "block until the session is idle, needs attention, or ends")
+    luna_wait.add_argument("session")
+    luna_wait.add_argument("--timeout", type=_positive, default=540)
+    luna_wait.set_defaults(func=cmd_luna_reserve_wait)
+
+    luna_events = luna_commands.add_parser("events", help="the session's event feed at its detail level")
+    luna_events.add_argument("session")
+    luna_events.add_argument("--follow", action="store_true", help="keep printing until the session ends")
+    luna_events.add_argument("--last", type=_positive, default=20)
+    luna_events.add_argument("--since", type=int, default=0, help="only events after this sequence number")
+    luna_events.add_argument("--timeout", type=_positive, default=None)
+    luna_events.set_defaults(func=cmd_luna_reserve_events)
+
+    luna_read = session_parser("read", "the latest final message, or the last N thread items")
+    luna_read.add_argument("session")
+    luna_read.add_argument("--items", type=int, default=0, help="show the last N items (at most 50)")
+    luna_read.add_argument("--lines", type=_positive, default=20, help="final-message lines (at most 60)")
+    luna_read.set_defaults(func=cmd_luna_reserve_read)
+
+    luna_list = session_parser("list", "recorded sessions and the broker")
+    luna_list.add_argument("--limit", type=_positive, default=10)
+    luna_list.set_defaults(func=cmd_luna_reserve_list)
+
+    luna_shutdown = session_parser("shutdown", "stop every session and the broker")
+    luna_shutdown.set_defaults(func=cmd_luna_reserve_shutdown)
+
+    luna_serve = luna_commands.add_parser("broker-serve", help="internal: run the broker (started by clients)")
+    luna_serve.add_argument("--instance", required=True)
+    luna_serve.set_defaults(func=cmd_luna_reserve_broker_serve)
     return root
 
 

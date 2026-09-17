@@ -84,15 +84,58 @@ def launch_config(scenario: dict, argv: list) -> dict:
     return {"config": config, "features": features, "skills": skills}
 
 
+def thread_response(scenario: dict, params: dict, thread_id: str, rollout: Path) -> dict:
+    response = {
+        "thread": {"id": thread_id, "path": str(rollout), "ephemeral": False},
+        "model": params.get("model"), "modelProvider": "openai", "serviceTier": None,
+        "approvalPolicy": params.get("approvalPolicy"), "instructionSources": ["/fake/AGENTS.md"],
+        "approvalsReviewer": params.get("approvalsReviewer"),
+        "sandbox": {"type": "readOnly", "networkAccess": False}, "activePermissionProfile": None,
+    }
+    if params.get("config"):
+        profile = params["config"]["default_permissions"]
+        roots = list(params["config"]["permissions"][profile]["filesystem"])
+        response["sandbox"] = {"type": "workspaceWrite", "writableRoots": roots, "networkAccess": False,
+                               "excludeSlashTmp": True, "excludeTmpdirEnvVar": True}
+        response["activePermissionProfile"] = {"id": profile, "extends": ":read-only"}
+    response.update(scenario.get("thread_response", {}))
+    return response
+
+
 def serve(scenario: dict, log: Path, argv: list) -> int:
+    """Answer one client. A turn may stay pending until a steer, an interrupt, or an approval reply.
+
+    ``scenario["turns"]`` optionally overrides, per turn number (1-based list), the keys
+    ``turn_notifications``, ``hang``, ``final_message``, ``turn_status``, ``records``,
+    ``approval`` (a server request to send), ``complete_on_steer``, and ``crash``.
+    """
     state = Path(scenario["state"])
     effective = launch_config(scenario, argv)
     thread_id = scenario.get("thread_id", "01a0aef3-327d-72e3-bfd5-1fca3c552bd0")
-    rollout = Path(scenario["codex_home"]) / "sessions/2026/09/17" / f"rollout-2026-09-17T10-00-00-{thread_id}.jsonl"
-    turn_id = "turn-1"
+    turn_number = 0
+    pending = None  # {"id", "turn", "final"}
+
+    def rollout_for(identifier: str) -> Path:
+        return Path(scenario["codex_home"]) / "sessions/2026/09/17" / f"rollout-2026-09-17T10-00-00-{identifier}.jsonl"
+
+    def complete(turn: dict, status: str, final: str) -> None:
+        items = [] if status == "interrupted" else [{"type": "agentMessage", "phase": "final_answer", "text": final}]
+        for note in turn.get("completion_notifications", []):
+            emit(note)
+        emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {
+            "id": turn["id"], "status": status, "items": items}}})
+
     for line in sys.stdin:
         message = json.loads(line)
         if "id" not in message:
+            continue
+        if "method" not in message:
+            append(log, {"kind": "server-request-reply", "id": message["id"],
+                         "result": message.get("result"), "error": message.get("error")})
+            if pending is not None and pending.get("approval_id") == message["id"]:
+                decision = (message.get("result") or {}).get("decision")
+                turn, pending = pending, None
+                complete(turn, "completed", f"{turn['final']} APPROVAL={decision}")
             continue
         method, params, ident = message.get("method"), message.get("params"), message["id"]
         append(log, {"kind": "request", "method": method, "params": params})
@@ -123,46 +166,65 @@ def serve(scenario: dict, log: Path, argv: list) -> int:
             ], "nextCursor": None}})
         elif method == "skills/list":
             emit({"id": ident, "result": {"data": effective["skills"]}})
-        elif method == "thread/start":
-            response = {
-                "thread": {"id": thread_id, "path": str(rollout), "ephemeral": False},
-                "model": params.get("model"), "modelProvider": "openai", "serviceTier": None,
-                "approvalPolicy": params.get("approvalPolicy"), "instructionSources": ["/fake/AGENTS.md"],
-                "approvalsReviewer": params.get("approvalsReviewer"),
-                "sandbox": {"type": "readOnly", "networkAccess": False}, "activePermissionProfile": None,
-            }
-            if params.get("config"):
-                profile = params["config"]["default_permissions"]
-                roots = list(params["config"]["permissions"][profile]["filesystem"])
-                response["sandbox"] = {"type": "workspaceWrite", "writableRoots": roots, "networkAccess": False,
-                                       "excludeSlashTmp": True, "excludeTmpdirEnvVar": True}
-                response["activePermissionProfile"] = {"id": profile, "extends": ":read-only"}
-            response.update(scenario.get("thread_response", {}))
-            emit({"id": ident, "result": response})
+        elif method in ("thread/start", "thread/resume"):
+            if method == "thread/resume":
+                thread_id = params.get("threadId")
+                if scenario.get("resume_error"):
+                    emit({"id": ident, "error": {"code": -32600, "message": "no such thread"}})
+                    continue
+            emit({"id": ident, "result": thread_response(scenario, params, thread_id, rollout_for(thread_id))})
             for note in scenario.get("thread_notifications", []):
                 emit(note)
         elif method == "turn/start":
+            turn_number += 1
             state.write_text("executed", encoding="utf-8")
+            overrides = (scenario.get("turns") or [])
+            spec = {**scenario, **(overrides[turn_number - 1] if turn_number <= len(overrides) else {})}
+            turn_id = f"turn-{turn_number}"
             emit({"id": ident, "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
-            if scenario.get("records") is not None:
+            if spec.get("crash"):
+                return 3
+            rollout = rollout_for(thread_id)
+            if spec.get("records") is not None:
                 rollout.parent.mkdir(parents=True, exist_ok=True)
-                with rollout.open("w", encoding="utf-8") as handle:
-                    for record in scenario["records"]:
-                        handle.write(json.dumps(record) + "\n")
-            for note in scenario.get("turn_notifications", []):
+                fresh = not rollout.exists()
+                with rollout.open("a", encoding="utf-8") as handle:
+                    for record in spec["records"]:
+                        if fresh or record.get("type") != "session_meta":
+                            handle.write(json.dumps(record) + "\n")
+            emit({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": turn_id}}})
+            for note in spec.get("turn_notifications", []):
                 emit(note)
-            if not scenario.get("hang"):
-                emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {
-                    "id": turn_id, "status": scenario.get("turn_status", "completed"),
-                    "items": [{"type": "agentMessage", "phase": "final_answer",
-                               "text": scenario.get("final_message", "STATUS: DONE\nSUMMARY:\n- ok")}],
-                }}})
+            final = spec.get("final_message", "STATUS: DONE\nSUMMARY:\n- ok")
+            turn = {"id": turn_id, "final": final, "complete_on_steer": spec.get("complete_on_steer"),
+                    "completion_notifications": spec.get("completion_notifications", [])}
+            if spec.get("approval"):
+                request = dict(spec["approval"])
+                turn["approval_id"] = request.get("id", "srv-1")
+                emit({"id": turn["approval_id"], "method": request["method"],
+                      "params": {"threadId": thread_id, "turnId": turn_id, **request.get("params", {})}})
+                pending = turn
+            elif spec.get("hang") or spec.get("complete_on_steer"):
+                pending = turn
+            else:
+                complete(turn, spec.get("turn_status", "completed"), final)
+        elif method == "turn/steer":
+            if pending is None or params.get("expectedTurnId") != pending["id"]:
+                emit({"id": ident, "error": {"code": -32600, "message": "no active turn"}})
+                continue
+            emit({"id": ident, "result": {"turnId": pending["id"]}})
+            if pending.get("complete_on_steer"):
+                turn, pending = pending, None
+                text = " ".join(part.get("text", "") for part in params.get("input") or [])
+                complete(turn, "completed", f"{turn['final']} STEERED: {text}")
         elif method == "turn/interrupt":
             emit({"id": ident, "result": {}})
-            emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {
-                "id": turn_id, "status": "interrupted", "items": []}}})
+            turn = pending or {"id": params.get("turnId"), "final": ""}
+            pending = None
+            complete(turn, "interrupted", "")
         elif method == "thread/items/list":
-            emit({"id": ident, "result": {"data": [], "nextCursor": None}})
+            emit({"id": ident, "result": {"data": [
+                {"turnId": "turn-1", "item": {"type": "agentMessage", "text": "STATUS: DONE"}}], "nextCursor": None}})
         else:
             emit({"id": ident, "error": {"code": -32601, "message": f"fake does not implement {method}"}})
     return 0

@@ -557,7 +557,7 @@ class FakeAppServerRunTest(unittest.TestCase):
         self.assertEqual(params["cwd"], str(self.root))
         self.assertEqual(params["sandbox"], "read-only")
         self.assertFalse(params["ephemeral"])
-        self.assertIn("You are not the master", params["developerInstructions"])
+        self.assertIn("You are a worker under the current Creme master session", params["developerInstructions"])
         self.assertIn(str(self.target), params["developerInstructions"])
         (turn_start,) = self.entries("request", "turn/start")
         self.assertEqual(turn_start["params"]["model"], "gpt-reserve")

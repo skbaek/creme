@@ -274,6 +274,16 @@ learned on this particular machine. It does not change Jaune or Blanc pass
 criteria. If it marks a raw command unsafe, use its local safe wrapper while
 preserving the gate's authoritative final command and verdict.
 
+## Luna reserve pseudo-subagents
+
+Only when the user instructs it, a master may hand a bounded, easily checked
+task to Codex Luna reserve (`gpt-reserve`) through
+`python3 -m creme luna-reserve {status,run,audit}`; never call Codex directly
+for this. A run must never draw on the regular Codex bucket or paid credits:
+on exit `12` (attribution failure) stop using Luna reserve and tell the user.
+A result is a worker summary, not evidence. Read
+`docs/guides/luna-reserve.md` before the first use in a session.
+
 ## Git and completion
 
 Preserve unrelated work. Inspect the complete diff and status, stage explicit

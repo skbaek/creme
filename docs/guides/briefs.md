@@ -109,6 +109,18 @@ Model diversity is a separate reason to choose a model. An independent review
 of work produced by one model is more useful from another, and the audit and
 reviewer roles should be dispatched accordingly.
 
+**Luna reserve is an external token-saving tier, not a rung on this ladder.**
+When the user instructs it, a master may dispatch a bounded task whose result
+it can cheaply verify (an inventory, a log or diff summary, a mechanical edit,
+a first-pass check) to Codex Luna reserve as a pseudo-subagent through
+`python3 -m creme luna-reserve run`, saving its own and its workers' tokens.
+It never replaces a worker for Lean proof or elaboration, architecture, or a
+non-delegable judgment, and it is never a fallback when a client is busy or
+out of quota. Its brief states the question, the target directory, read-only
+or write mode, and the evidence to quote; the master verifies the answer
+before relying on it. The guarded path, the attribution guard, and the stop
+rule are in the [Luna reserve guide](luna-reserve.md).
+
 ## The six-selector model
 
 Codex, Claude Code, and Muse currently expose six user-visible selector positions.

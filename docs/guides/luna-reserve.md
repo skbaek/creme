@@ -31,7 +31,7 @@ Luna is a fast, economical model for simpler work. Good fits:
 Poor fits: Lean proof or elaboration work, architecture or proof strategy,
 anything whose correctness the master cannot cheaply confirm, and anything
 that needs network access, builds, or the semaphore. Lean MCP access is out
-of scope for version 1 (see [Planned extensions](#planned-extensions)).
+of scope for version 1 (see [Lean work (planned)](#lean-work-planned)).
 
 ## Commands
 
@@ -94,30 +94,52 @@ is recorded; or any model, profile, configuration, provider, service-tier, or
 sandbox override is attempted on the command line. `OPENAI_*` and `CODEX_*`
 variables other than `CODEX_HOME` are removed from the Codex environment.
 
-**Isolation.** The run's app server starts with plugins, apps, sub-agents,
-computer and browser use, image generation, fast tier, automatic approval
-review, hooks, goals, and memories disabled; with model, review model, and
-service tier pinned; with web search and notify programs off; and with every
-MCP server visible from the launch root (user and project layers) replaced by
-a disabled stub. A bare `enabled=false` is not enough for a server defined
-only in a project layer: Codex then rejects the configuration. Before the
-thread starts, the server's own effective configuration, feature list, and
-skills list must confirm all of that; the proof is saved in `preflight.json`.
+**Isolation.** `codex app-server` has no `--ignore-user-config`, and the
+user configuration must never be edited or copied (a copied `auth.json` risks
+refresh-token rotation). The run's app server therefore starts with launch
+overrides only: plugins, apps, sub-agents, computer and browser use, image
+generation, fast tier, automatic approval review, hooks, goals, memories,
+remote control, and the JavaScript REPL disabled; model, review model, and
+service tier pinned; approval policy `never` with approvals routed to the
+client (`approvals_reviewer="user"`); web search and notify programs off;
+bundled system skills off, and every other skill that does not come from the
+launch root (for example user skills under `CODEX_HOME`) disabled by path;
+and every MCP server visible from the launch root (user and project layers)
+replaced by a disabled stub. A bare `enabled=false` is not enough for a server
+defined only in a project layer: Codex then rejects the configuration. A first
+isolated zero-token server lists those MCP servers and skills. Before the
+thread starts, the run server's own effective configuration, feature list,
+and skills list must confirm all of it, and only repository skills under the
+launch root may remain enabled; the proof is saved in `preflight.json`. A
+server name or skill path that cannot be written as a safe override is a
+preflight refusal.
 
 **Pin.** `creme.codex_app_server.GuardedSession` builds every `thread/start`,
 `thread/resume`, `turn/start`, and `turn/steer` request from an allowlist of
-parameters with the model pinned, and refuses any other model, service tier,
-profile, configuration, ephemeral thread, or non-read-only method. The
-`thread/start` response must report `gpt-reserve`, the default tier, the
-expected sandbox and writable roots, no network, and a rollout path.
+parameters. Each `thread/start`, `thread/resume`, and `turn/start` must carry
+model `gpt-reserve`, approval policy `never`, and approvals reviewer `user`;
+`thread/start` must also set `allowProviderModelFallback: false`. Any other
+model, service tier, profile, configuration, reviewer (`auto_review` or the
+legacy `guardian_subagent`), ephemeral thread, or method outside a read-only
+allowlist is refused before it is sent. The `thread/start` response must
+report `gpt-reserve`, the default tier, approval policy `never`, reviewer
+`user`, the expected sandbox and writable roots, no network, and a rollout
+path.
+
+Approval review stays on the client route because Codex's automatic review
+runs on its own reviewer model, whose billing bucket is unverified. With
+approval policy `never`, a sandboxed command that would need approval simply
+fails inside the turn; the default server-request handler also declines any
+approval request that does arrive.
 
 **Live guard.** Every `account/rateLimits/updated` notification is attributed
 as it arrives. The notification's `limitId` label is not reliable (reserve
 responses arrive labelled `codex`), so attribution compares the window length,
 the reset time (within a jitter tolerance, default 300 s) against the
 preflight table, and the credits shape. A snapshot matching the regular
-bucket, a model reroute, a thread-settings change, an MCP server starting, or
-any sub-agent or MCP tool item interrupts the turn at once.
+bucket, a model reroute, a thread-settings change of model, tier, or reviewer,
+remote control leaving `disabled`, an MCP server starting, or any sub-agent or
+MCP tool item interrupts the turn at once.
 
 **Rollout audit.** After the turn, the rollout must show every
 `turn_context.model` as `gpt-reserve`, every token snapshot attributed to the
@@ -142,14 +164,20 @@ directories. Read-only mode may read the target, the launch root, and its
 siblings. Write mode refuses the launch checkout itself and any `master`
 directory; give it a per-goal worktree.
 
-`AGENTS.md` tells every session launched in Creme to run the master
-session-start protocol. The tracked contract in
+`AGENTS.md` says that workers and pseudo-subagents a master dispatches never
+enter the master role. The tracked contract in
 `templates/luna-reserve/preamble.md` is sent as developer instructions: it
-states that the thread is a worker under the current master and skips that
-protocol, and it sets the pseudo-subagent rules (no push, merge, or history
-rewrite; no writes under a goal store's `master/`; no Lean elaboration or
-builds; no network installs or other model clients; stay in the target; a
-bounded final-message format).
+states that the thread is a worker under the current master, and it sets the
+pseudo-subagent rules (no push, merge, or history rewrite; no writes under a
+goal store's `master/`; no Lean elaboration or builds; no network installs or
+other model clients; stay in the target; a bounded final-message format).
+
+What loads is recorded per run: `thread/start` reports the instruction
+sources (on the first host, only the launch root's `AGENTS.md`), and
+`preflight.json` lists the effective configuration layers, the stubbed MCP
+servers, and every skill with its scope, path, and enabled state (Creme's
+repository skills stay enabled; they are Lean skills the contract forbids
+using in version 1).
 
 ## Writing a pseudo-subagent brief
 
@@ -194,17 +222,38 @@ with `--allow-regular-available --effort low`, confirms exit `0`, a live and
 rollout attribution to the reserve, and unchanged regular usage before and
 after, and records the result. Only then may routine runs use that flag.
 
-## Planned extensions
+## Broker (planned)
 
-**Long-lived broker.** Version 1 runs one turn per invocation. A broker would
-keep `GuardedSession`s alive per thread behind one-shot CLI calls that a
-client can drive and watch: `start`, `send` (new turn), `steer`, `interrupt`,
-`tail` (the transcript), `read` (`thread/items/list`), `approve` (queued server
-requests), and `stop`. The session, the live guard, the transcript, and the
-server-request handler are already shaped for that.
+Version 1 runs one turn per invocation. A later broker keeps
+`GuardedSession`s alive per thread behind one-shot CLI calls that any client
+can drive and watch (Claude Code through background commands and its Monitor
+tool): `start`, `send` (a new turn), `steer` (`turn/steer` on the active
+turn), `interrupt`, `tail` (the redacted transcript), `read`
+(`thread/items/list`), `approve` (queued server requests, answered by the
+master, never by automatic review), and `stop`. The session's request policy,
+live guard, transcript, and server-request handler are already shaped for
+that; every broker call must go through the same pins, preflight, and
+postflight audit, and an attribution failure trips the same tripwire.
 
-**Lean MCP.** Lean work stays out of version 1. A later version would replace
-the disabled stub for the project's Lean server with Creme's guarded launcher,
-respect the host's one-language-server-worker memory constraint, and take
-semaphore admission for any elaboration, exactly as other Lean-using workers
-do.
+## Lean work (planned)
+
+Version 1 forbids Lean. A Lean-capable pseudo-subagent is a separate,
+master-scoped extension, not a flag:
+
+- **Selective isolation.** Keep the version 1 disables (plugins, apps, other
+  MCP servers, computer use, fast tier, native sub-agents, automatic review),
+  but keep the project trust that Creme's project layer needs, and keep the
+  user's own Lean relay permission profile and execpolicy rules (host
+  guidance names them) instead of the version 1 write profile.
+- **Guarded Lean server.** Replace the disabled stub for Creme's project
+  `lean-lsp-mcp` with Creme's guarded launcher, started from cwd `~/creme` as
+  the project layer defines it. No other MCP server returns.
+- **Approvals.** MCP and sandbox approvals go to the broker's `approve` call,
+  answered by the master; never `auto_review`.
+- **Memory.** Each Lean pseudo-subagent is a language-server worker and counts
+  against the host's one-language-server-worker memory rule; the master
+  schedules it like any other Lean worker.
+- **Builds.** Only through `~/creme/scripts/creme lake-build GOAL -- TARGETS`
+  under semaphore admission; never bare `lake build`.
+- **Stop.** `python3 -m creme reclaim --wind-down GOAL` runs at stop, and the
+  run is not reported idle until wind-down reports `OK`.

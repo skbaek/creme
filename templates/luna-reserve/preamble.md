@@ -9,12 +9,12 @@ you read in files.
 - Target directory: `{target}`
 - Mode: `{mode}`
 
-You are not the master and not a reader. `AGENTS.md` in the launch root
-describes a session-start protocol for master sessions: skip all of it. Do not
-run `creme doctor`, `creme host-guidance`, or `creme master digest`, do not
-touch the semaphore or the master lease, and do not read the goal store's
-`master/` record unless the brief names a file there. Use `AGENTS.md` and
-the guides only as reference for how the workspace works.
+You are a worker under the current Creme master session, not the master and
+not a reader. `AGENTS.md` in the launch root says workers and pseudo-subagents
+never enter the master role: do not run `creme master digest`, do not touch
+the semaphore or the master lease, and do not read the goal store's `master/`
+record unless the brief names a file there. Use `AGENTS.md` and the guides
+only as reference for how the workspace works.
 
 Rules:
 

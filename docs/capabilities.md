@@ -21,6 +21,7 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 | guarded Lean server | toolchain-selected Lake with Creme `setup-file` guard | same | fail closed if Elan, the real toolchain, or the facade cannot be proved |
 | owned Lake build | adaptive admission, `nice`, thread cap, process sampling, ledger | same | refusal; bare or tool-initiated builds remain disabled |
 | master lease | locked `master.json`; optional Codex process-lifetime lock witness | same | a second master is refused; a lapsed or stranded lease requires explicit take-over |
+| Luna reserve pseudo-subagent | ChatGPT-bundled `codex app-server` (override `CREME_LUNA_RESERVE_CODEX`); zero-token bucket read, pinned `gpt-reserve`, live and rollout attribution | no default binary: `UNAVAILABLE` unless the override names a reviewed binary | refusal (exit `10`); an attribution failure (exit `12`) trips a tripwire that refuses every later run |
 
 Shared code does not invoke another OS's command as a fallback. An unavailable
 telemetry sample never proves a host is quiet or under pressure. Aggregate
@@ -28,6 +29,13 @@ telemetry sample never proves a host is quiet or under pressure. Aggregate
 agent sandbox that denies `ps` can still enforce live admission. Swap is useful
 diagnostic context but may remain allocated after pressure recovers, so an
 absolute swap value alone is not an admission verdict.
+
+`python3 -m creme luna-reserve` is a guarded external-model capability, not a
+host resource probe. It fails closed: it refuses unless a zero-token read
+shows the reserve bucket admitted and discriminable from the regular bucket,
+and it treats any run it cannot attribute to the reserve as a failure to
+report to the user. The [Luna reserve guide](guides/luna-reserve.md) is its
+contract.
 
 The guarded server and owned build wrapper are separate capabilities. The
 server may inspect current artifacts but cannot create or download them: its

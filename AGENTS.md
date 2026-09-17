@@ -39,22 +39,29 @@ of choosing the convenient source.
 ## The master role
 
 One session at a time is the user's representative for all Jaune/Blanc work
-on this host and holds the master lease. Every session launched with Creme as
-its project resolves the configured goal store, verifies its `master/` runtime
-directory is ignored and untracked, reads `python3 -m creme master digest
---focused --human` and the required full intent/decision records (see the
-master guide), and then tries to take
-the lease at start, before anything else:
+on this host and holds the master lease. A session launched with Creme as its
+project does not enter the role on its own: it runs no master start-up reads
+and takes no lease until the user explicitly directs it to start as master.
+Until then it is an ordinary session with a reader's limits: it may read,
+analyse, converse, and do what the user asks, but it never writes under
+`master/`, merges or pushes a default branch, spawns workers, or takes heavy
+goal holds. If a request needs one of those, it says so and asks whether to
+enter as master instead of entering unasked. Workers and pseudo-subagents a
+master dispatches never enter the role.
+
+On that direction the session resolves the configured goal store, verifies its
+`master/` runtime directory is ignored and untracked, reads `python3 -m creme
+master digest --focused --human` and the required full intent/decision records
+(see the master guide), and then tries to take the lease:
 `~/creme/.semaphore/semaphore master-acquire --client codex --note "..."`
 (substitute the actual client label).
-An `OK` acquisition makes it the master, and it says so in its first reply.
+An `OK` acquisition makes it the master, and it says so in its reply.
 An explicit `already held by this session` success is authenticated re-entry:
 keep the existing acquisition identity, renew through `master-renew`, reconcile
 active work, and do not start a second heartbeat or append another acquisition
-event. A refusal for a live lease makes it a reader, which says so in its first
-reply, naming the holder, and may read, analyse, and converse but never writes
-under `master/`, merges, pushes, spawns workers, or takes heavy goal holds; a
-refusal for a lapsed or stranded lease is answered with `--take-over`. Read
+event. A refusal for a live lease makes it a reader, which says so in its
+reply, naming the holder, and keeps the limits above; a refusal for a lapsed or
+stranded lease is answered with `--take-over`. Read
 `docs/guides/master.md` for the protocol, `docs/guides/goal.md` for what a
 goal document must carry, and `docs/guides/briefs.md` for what a worker brief
 states and how its model and effort are chosen. The master owns goals, briefs,

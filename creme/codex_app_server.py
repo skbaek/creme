@@ -76,7 +76,8 @@ WRITE_PROFILE = "creme_pseudo_subagent_write"
 
 def isolation_arguments(pinned_model: str, effort: str, mcp_servers: dict,
                         foreign_skill_paths: tuple[str, ...] = (),
-                        approval_policy: str = "never") -> list[str]:
+                        approval_policy: str = "never",
+                        kept_mcp_servers: Optional[dict] = None) -> list[str]:
     """Launch arguments that keep user plugins, MCP servers, and tiers out.
 
     ``mcp_servers`` maps every server name visible from the thread's working
@@ -91,6 +92,10 @@ def isolation_arguments(pinned_model: str, effort: str, mcp_servers: dict,
     skills under ``CODEX_HOME``) is disabled by path. Approval requests are
     pinned to the client route: never ``auto_review``, whose reviewer model
     and billing bucket are unverified.
+
+    ``kept_mcp_servers`` (Lean mode only) maps a server name to the complete
+    ``-c`` override that defines it; that server is launched from the override
+    instead of being stubbed. Every other server is still stubbed.
     """
     if effort not in PERMITTED_EFFORTS:
         raise PinViolation(f"effort {effort!r} is not permitted")
@@ -118,9 +123,15 @@ def isolation_arguments(pinned_model: str, effort: str, mcp_servers: dict,
                 raise PinViolation(f"cannot disable skill with unsafe path {path!r}")
             entries.append(f'{{path="{path}",enabled=false}}')
         overrides.append("skills.config=[" + ",".join(entries) + "]")
-    for name in sorted(mcp_servers):
+    kept = kept_mcp_servers or {}
+    for name in sorted(set(mcp_servers) | set(kept)):
         if not _MCP_NAME.match(name):
             raise PinViolation(f"cannot disable MCP server with unsafe name {name!r}")
+        if name in kept:
+            if not isinstance(kept[name], str) or not kept[name].startswith(f"mcp_servers.{name}={{"):
+                raise PinViolation(f"kept MCP server {name!r} needs a complete definition override")
+            overrides.append(kept[name])
+            continue
         server = mcp_servers[name] if isinstance(mcp_servers[name], dict) else {}
         if server.get("url"):
             overrides.append(f'mcp_servers.{name}={{url="http://127.0.0.1:9/",enabled=false}}')
@@ -336,7 +347,8 @@ def read_all_features(process: AppServerProcess) -> list[dict]:
 
 def isolation_failures(config_read: dict, features: list[dict], pinned_model: str,
                        launch_root: Path, skills: Optional[dict] = None,
-                       approval_policy: str = "never") -> list[str]:
+                       approval_policy: str = "never",
+                       kept_mcp_servers: tuple[str, ...] = ()) -> list[str]:
     """Verify the launched server really runs with the isolation applied."""
     failures: list[str] = []
     config = (config_read or {}).get("config") or {}
@@ -361,11 +373,19 @@ def isolation_failures(config_read: dict, features: list[dict], pinned_model: st
     if config.get("approvals_reviewer") != "user":
         failures.append(f"effective approvals reviewer is {config.get('approvals_reviewer')!r}")
     for name, server in (config.get("mcp_servers") or {}).items():
+        if name in kept_mcp_servers:
+            continue
         if not isinstance(server, dict) or server.get("enabled") is not False:
             failures.append(f"MCP server {name!r} is not disabled")
     for name, server in (config.get("mcp_servers") or {}).items():
+        if name in kept_mcp_servers:
+            continue
         if isinstance(server, dict) and server.get("command") not in (None, "/usr/bin/false"):
             failures.append(f"MCP server {name!r} keeps a runnable command")
+    for name in kept_mcp_servers:
+        server = (config.get("mcp_servers") or {}).get(name)
+        if not isinstance(server, dict) or server.get("enabled") is False:
+            failures.append(f"kept MCP server {name!r} is not enabled")
     allowed_project = str(launch_root / ".codex")
     for layer in (config_read or {}).get("layers") or []:
         name = (layer or {}).get("name") or {}
@@ -443,7 +463,9 @@ class GuardedSession:
                  cwd: Path, sandbox: str, effort: str,
                  writable_roots: tuple[Path, ...] = (),
                  developer_instructions: Optional[str] = None,
-                 approval_policy: str = "never") -> None:
+                 approval_policy: str = "never",
+                 mcp_servers: tuple[str, ...] = (),
+                 forbidden_mcp_tools: tuple[str, ...] = ()) -> None:
         if sandbox not in PERMITTED_SANDBOXES:
             raise PinViolation(f"sandbox {sandbox!r} is not permitted")
         if effort not in PERMITTED_EFFORTS:
@@ -464,6 +486,13 @@ class GuardedSession:
         if approval_policy != "never" and sandbox != "workspace-write":
             raise PinViolation("only a write session may route approval requests to the master")
         self.approval_policy = approval_policy
+        if mcp_servers and sandbox != "workspace-write":
+            raise PinViolation("only a write (Lean) session may keep an MCP server")
+        # Lean mode keeps exactly these servers; their startup and tool calls are
+        # expected. Everything else stays an isolation failure.
+        self.mcp_servers = tuple(mcp_servers)
+        self.forbidden_mcp_tools = frozenset(forbidden_mcp_tools)
+        self.mcp_startup: dict[str, str] = {}
         self.developer_instructions = developer_instructions
         self.thread_id: Optional[str] = None
         self.rollout_path: Optional[str] = None
@@ -691,7 +720,10 @@ class GuardedSession:
         elif method == "model/rerouted":
             failures.append(f"model rerouted from {params.get('fromModel')!r} to {params.get('toModel')!r}")
         elif method == "mcpServer/startupStatus/updated":
-            failures.append(f"MCP server {params.get('name')!r} started despite isolation")
+            if params.get("name") in self.mcp_servers:
+                self.mcp_startup[str(params.get("name"))] = str(params.get("status"))
+            else:
+                failures.append(f"MCP server {params.get('name')!r} started despite isolation")
         elif method == "thread/settings/updated":
             settings = params.get("threadSettings") or {}
             if "model" in settings and settings.get("model") != self.pinned_model:
@@ -708,8 +740,12 @@ class GuardedSession:
             kind = item.get("type")
             if kind in ("collabAgentToolCall", "subAgentActivity"):
                 failures.append(f"sub-agent activity ({kind}) despite isolation")
+            elif kind == "mcpToolCall" and item.get("server") in self.mcp_servers and not item.get("pluginId") \
+                    and item.get("tool") not in self.forbidden_mcp_tools:
+                pass  # the one kept Lean server, on a permitted tool
             elif kind in ("mcpToolCall", "dynamicToolCall", "imageGeneration"):
-                failures.append(f"isolated tool surface used ({kind})")
+                detail = f" {item.get('server')}.{item.get('tool')}" if kind == "mcpToolCall" else ""
+                failures.append(f"isolated tool surface used ({kind}{detail})")
             if outcome is not None and method == "item/completed" and kind == "agentMessage":
                 if item.get("phase") in (None, "final_answer"):
                     outcome.final_message = item.get("text")

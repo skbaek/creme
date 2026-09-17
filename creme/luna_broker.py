@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import luna_lean
 from . import luna_reserve as L
 from .codex_app_server import APPROVAL_METHODS, AppServerError, PinViolation, decline_server_requests
 
@@ -52,7 +53,8 @@ DEFAULT_DETAIL = "silent"
 _EVENT_RANK = {"attention": 0, "summary": 1, "live": 2}
 _DETAIL_RANK = {"silent": 0, "summary": 1, "live": 2}
 
-TERMINAL_STATES = ("stopped", "refused", "failed", "tripped", "lost")
+# ``unclean``: a Lean session whose wind-down did not report OK when it stopped.
+TERMINAL_STATES = ("stopped", "refused", "failed", "tripped", "lost", "unclean")
 OPEN_STATES = ("starting", "idle", "running", "stopping")
 DECISIONS = ("accept", "decline", "cancel")
 
@@ -148,7 +150,8 @@ def code_digest(module_root: Path) -> str:
 
     digest = hashlib.sha256()
     for relative in ("creme/luna_broker.py", "creme/luna_reserve.py", "creme/codex_app_server.py",
-                     "templates/luna-reserve/preamble.md"):
+                     "creme/luna_lean.py", "templates/luna-reserve/preamble.md",
+                     "templates/luna-reserve/lean-preamble.md"):
         try:
             digest.update((module_root / relative).read_bytes())
         except OSError:
@@ -289,9 +292,11 @@ class BrokerSession:
         record = self.record
         workdir = Path(record["target"])
         policy = L.Policy(**record["policy"])
+        lean = luna_lean.LeanMode(record["lean"]["goal"], workdir, tracked=broker.tracked_definition) \
+            if record.get("lean") else None
         server = L.ReserveServer(
             broker.module_root, broker.root, self.dir, workdir, record["mode"] == "write", record["effort"],
-            policy, broker.environ, record["approval_policy"],
+            policy, broker.environ, record["approval_policy"], lean=lean,
         )
         refusals = server.probe()
         if refusals:
@@ -304,14 +309,14 @@ class BrokerSession:
             refusals = server.open(self.on_server_request)
             record["app_server_pid"] = server.process.pid if server.process else None
             if refusals:
-                self.closed = True
-                server.close()
-                self.set_state("refused", "; ".join(refusals)[:400])
-                self.emit("attention", "refused", "; ".join(refusals))
-                return L.EXIT_PREFLIGHT_REFUSED, {"verdict": "REFUSED", "refusals": refusals}
-            instructions = L.developer_instructions(
-                broker.module_root, L.RunRequest(brief="", workdir=server.workdir, write=server.write), broker.root,
-            )
+                return self._refuse_open(server, refusals)
+            if lean is not None:
+                instructions = luna_lean.developer_instructions(broker.module_root, broker.root, lean)
+            else:
+                instructions = L.developer_instructions(
+                    broker.module_root, L.RunRequest(brief="", workdir=server.workdir, write=server.write),
+                    broker.root,
+                )
             (self.dir / "developer-instructions.md").write_text(instructions, encoding="utf-8")
             self.guard = server.session(instructions)
             if resume_thread:
@@ -333,6 +338,10 @@ class BrokerSession:
                 self.guard_tripped = True
                 broker.trip_all(self, failures)
                 return L.EXIT_ATTRIBUTION_FAILED, {"verdict": "ATTRIBUTION_FAILED", "failures": failures}
+            if lean is not None:
+                refusals = self._verify_lean_server()
+                if refusals:
+                    return self._refuse_open(server, refusals)
         except PinViolation as exc:
             self.guard_tripped = True
             broker.trip_all(self, [f"pin violation: {exc}"])
@@ -340,6 +349,7 @@ class BrokerSession:
         except AppServerError as exc:
             self.closed = True
             server.close()
+            self.lean_wind_down("open failed")
             self.set_state("failed", str(exc)[:400])
             self.emit("attention", "failed", f"codex app-server failed while opening: {exc}")
             return L.EXIT_CODEX_FAILED, {"verdict": "CODEX_FAILED", "errors": [str(exc)]}
@@ -351,6 +361,50 @@ class BrokerSession:
         if brief:
             return self.begin_turn(brief, reference=server.before)
         return L.EXIT_OK, {"verdict": "OPEN"}
+
+    def _refuse_open(self, server: L.ReserveServer, refusals: list[str]) -> tuple[int, dict]:
+        self.closed = True
+        server.close()
+        self.lean_wind_down("refused at open")
+        self.set_state("refused", "; ".join(refusals)[:400])
+        self.emit("attention", "refused", "; ".join(refusals))
+        return L.EXIT_PREFLIGHT_REFUSED, {"verdict": "REFUSED", "refusals": refusals}
+
+    def _verify_lean_server(self) -> list[str]:
+        """Before any turn: the one kept Lean server is ready, offers no forbidden tool, and nothing else started."""
+        deadline = time.monotonic() + self.broker.mcp_ready_seconds
+        name = luna_lean.LEAN_MCP_SERVER
+        while self.guard.mcp_startup.get(name) not in ("ready", "failed", "cancelled") \
+                and time.monotonic() < deadline and not self.guard.guard_failures:
+            message = self.server.process.next_notification(min(1.0, max(0.0, deadline - time.monotonic())))
+            if message is not None and message.get("method") != "creme/transport/closed":
+                self.guard.observe(message)
+            elif message is not None:
+                break
+        refusals = list(self.guard.guard_failures)
+        status = self.guard.mcp_startup.get(name)
+        if status != "ready":
+            refusals.append(f"{name} did not become ready (startup status {status!r})")
+        others = sorted(set(self.guard.mcp_startup) - {name})
+        if others:
+            refusals.append(f"other MCP servers reported startup: {others}")
+        try:
+            listing = self.guard.request("mcpServerStatus/list", {"threadId": self.guard.thread_id}, timeout=30)
+        except AppServerError as exc:
+            listing = None
+            refusals.append(f"MCP status could not be read: {exc}")
+        if listing is not None:
+            refusals += luna_lean.tool_failures(listing)
+            entries = [entry for entry in (listing or {}).get("data") or [] if isinstance(entry, dict)]
+            with self.data_lock:
+                self.record["lean"]["mcp"] = {
+                    "startup": dict(self.guard.mcp_startup),
+                    "servers": {entry.get("name"): entry.get("runtimeStatus") for entry in entries},
+                    "tools": sorted(next((entry.get("tools") or {} for entry in entries
+                                          if entry.get("name") == name), {}).keys()),
+                }
+                self.persist()
+        return refusals
 
     def _rollout_length(self, rollout: Optional[str]) -> int:
         if not rollout or not Path(rollout).is_file():
@@ -545,7 +599,9 @@ class BrokerSession:
     def on_server_request(self, method: str, params: Any, request_id: Any) -> Optional[dict]:
         """Reader-thread handler: queue approvals for the master; never answer them here."""
         params = params if isinstance(params, dict) else {}
-        if method in APPROVAL_METHODS and self.record.get("approval_policy") == "on-request":
+        elicitation = method == "mcpServer/elicitation/request" and self.record.get("lean") \
+            and params.get("serverName") == luna_lean.LEAN_MCP_SERVER and params.get("mode") == "form"
+        if (method in APPROVAL_METHODS and self.record.get("approval_policy") == "on-request") or elicitation:
             with self.data_lock:
                 self.approval_counter += 1
                 key = f"a{self.approval_counter}"
@@ -554,6 +610,9 @@ class BrokerSession:
                 # Only plain decisions are answerable here; amendments and session-wide
                 # approvals are never offered to the master.
                 available = [item for item in DECISIONS if not isinstance(offered, list) or item in offered]
+                if elicitation and ((params.get("requestedSchema") or {}).get("required")):
+                    # An accept would have to invent form content; only decline or cancel are offered.
+                    available = ["decline", "cancel"]
                 self.pending[key] = {"request_id": request_id, "method": method, "available": available}
                 self.record.setdefault("pending_approvals", []).append({
                     "id": key, "method": method, "summary": summary, "received": _now_iso(),
@@ -563,7 +622,10 @@ class BrokerSession:
             self.emit("attention", "approval",
                       f"{key} [{'|'.join(available)}] {summary} -> approve {self.id} {key} DECISION")
             return None
-        reply = decline_server_requests(method, params, request_id)
+        if method == "mcpServer/elicitation/request":
+            reply = {"result": {"action": "decline", "content": None}}
+        else:
+            reply = decline_server_requests(method, params, request_id)
         self.emit("attention", "server-request", f"{method} answered by policy: {json.dumps(reply)[:120]}")
         return reply
 
@@ -585,6 +647,8 @@ class BrokerSession:
                 self.persist()
             if entry["method"] in ("applyPatchApproval", "execCommandApproval"):
                 result = {"decision": {"accept": "approved", "decline": "denied", "cancel": "abort"}[decision]}
+            elif entry["method"] == "mcpServer/elicitation/request":
+                result = {"action": decision, "content": {} if decision == "accept" else None}
             else:
                 result = {"decision": decision}
             try:
@@ -679,11 +743,13 @@ class BrokerSession:
             self.guard_tripped = True
             self.closed = True
             self.server.close()
+            self.lean_wind_down("app-server lost")
             self.set_state("tripped", failures[0])
             self.broker.trip_all(self, failures)
         else:
             self.closed = True
             self.server.close()
+            self.lean_wind_down("app-server lost")
             self.set_state("failed", "codex app-server exited")
             self.emit("attention", "failed", "codex app-server exited; resume the thread in a new session")
 
@@ -699,8 +765,10 @@ class BrokerSession:
                 self.record["pending_approvals"] = []
                 self.persist()
             for key, entry in pending:
+                cancel = {"action": "cancel", "content": None} \
+                    if entry["method"] == "mcpServer/elicitation/request" else {"decision": "cancel"}
                 try:
-                    self.server.process.respond(entry["request_id"], {"result": {"decision": "cancel"}})
+                    self.server.process.respond(entry["request_id"], {"result": cancel})
                 except AppServerError:
                     pass
                 self.emit("live", "approval", f"{key} cancelled by stop")
@@ -723,20 +791,53 @@ class BrokerSession:
             self.server.close()
             if self.pump_thread is not None and threading.current_thread() is not self.pump_thread:
                 self.pump_thread.join(5)
+            # Lean mode: the app-server (and the MCP tree under it) is closed first,
+            # then the goal-scoped wind-down runs and its verdict is recorded.
+            wind_down = self.lean_wind_down(f"stop: {reason}")
             failed = stop_audit["verdict"] != "PASS"
-            final = "tripped" if (self.guard_tripped or failed) else "stopped"
+            unclean = wind_down is not None and wind_down.get("verdict") != "OK"
+            final = "tripped" if (self.guard_tripped or failed) else "unclean" if unclean else "stopped"
             with self.data_lock:
                 self.record["stop_audit"] = {"verdict": stop_audit["verdict"],
                                              "failures": stop_audit["failures"][:10]}
                 self.record["state"] = final
                 self.record["note"] = f"stop: {reason}"
                 self.persist()
-            self.emit("attention", "stopped", f"{final} ({reason}) stop_audit={stop_audit['verdict']}")
+            self.emit("attention", "stopped", f"{final} ({reason}) stop_audit={stop_audit['verdict']}"
+                      + (f" wind_down={wind_down.get('verdict')}" if wind_down is not None else ""))
         if failed:
             self.guard_tripped = True
             self.broker.trip_all(self, stop_audit["failures"])
-        code = L.EXIT_ATTRIBUTION_FAILED if final == "tripped" else L.EXIT_OK
-        return code, {"verdict": final.upper(), "state": final, "stop_audit": stop_audit["verdict"]}
+        code = L.EXIT_ATTRIBUTION_FAILED if final == "tripped" else L.EXIT_CODEX_FAILED if final == "unclean" \
+            else L.EXIT_OK
+        result = {"verdict": final.upper(), "state": final, "stop_audit": stop_audit["verdict"]}
+        if wind_down is not None:
+            result["wind_down"] = wind_down.get("verdict")
+        return code, result
+
+    def lean_wind_down(self, reason: str) -> Optional[dict]:
+        """Run and record the goal-scoped wind-down of a Lean session; ``None`` outside Lean mode."""
+        lean = self.record.get("lean")
+        if not lean:
+            return None
+        try:
+            result = self.broker.wind_down_function(lean["goal"], Path(self.record["target"]))
+        except Exception as exc:  # a wind-down that cannot run is not OK
+            result = {"verdict": "NOT_OK", "status": "ERROR", "detail": f"wind-down raised: {exc!r}", "residual": []}
+        entry = {
+            "verdict": result.get("verdict"), "status": result.get("status"),
+            "detail": one_line(result.get("detail") or "", 300), "residual": (result.get("residual") or [])[:10],
+            "reason": reason, "at": _now_iso(), "exit": result.get("exit"),
+        }
+        with self.data_lock:
+            lean["wind_down"] = entry
+            if self.dir.is_dir():
+                L._write_json(self.dir / "wind-down.json", result)
+            self.persist()
+        self.emit("attention", "wind-down",
+                  f"goal {lean['goal']} wind_down={entry['verdict']} status={entry['status']} "
+                  f"residual={len(entry['residual'])} ({reason})")
+        return entry
 
     def stop_audit(self) -> dict:
         """Re-audit every turn's slice of the rollout against its own reference read."""
@@ -768,7 +869,9 @@ class BrokerSession:
 
 
 def describe_approval(method: str, params: dict) -> str:
-    if method == "item/commandExecution/requestApproval":
+    if method == "mcpServer/elicitation/request":
+        text = f"MCP {params.get('serverName')} asks: {params.get('message')}"
+    elif method == "item/commandExecution/requestApproval":
         text = f"command `{params.get('command')}` in {params.get('cwd')}"
     elif method == "item/fileChange/requestApproval":
         text = f"file change {params.get('itemId')} grantRoot={params.get('grantRoot')}"
@@ -807,6 +910,16 @@ class Broker:
         self.last_request = time.monotonic()
         self.listener: Optional[socket.socket] = None
         self.code = code_digest(module_root)
+        # Lean-mode host hooks; tests replace them with fakes.
+        self.lean_repositories: Callable[[], tuple[Path, ...]] = \
+            lambda: luna_lean.repositories(L.launch_root(self.module_root))
+        self.host_probe: Callable[[str], tuple[list[str], dict]] = luna_lean.host_observation
+        self.residual_scan: Callable[[Path], list] = luna_lean.residual_processes
+        self.wind_down_function: Callable[[str, Path], dict] = lambda goal, target: luna_lean.run_wind_down(
+            self.module_root, self.environ, goal, target, self.residual_scan)
+        self.tracked_definition: Callable[[Path], dict] = luna_lean.tracked_definition
+        self.mcp_ready_seconds = luna_lean.MCP_READY_SECONDS
+        self.reconciling: set[str] = set()
 
     # -- lifecycle ------------------------------------------------------
     def serve(self) -> int:
@@ -863,13 +976,39 @@ class Broker:
 
     def reconcile_registry(self) -> None:
         """Mark sessions of a dead broker lost, and stop their orphaned app-servers."""
+        pending = []
         for record in all_records(self.state):
             if record.get("state") not in OPEN_STATES or record.get("broker_instance") == self.instance:
                 continue
             reaped = reap_orphan_app_server(record.get("app_server_pid"))
             record["state"] = "lost"
             record["note"] = "broker exited while the session was open" + ("; orphaned app-server stopped" if reaped else "")
+            if record.get("lean"):
+                record["lean"]["wind_down"] = {"verdict": "PENDING", "reason": "crash recovery", "at": _now_iso()}
+                pending.append(record)
+                self.reconciling.add(record["lean"]["goal"])
             write_private_json(sessions_dir(self.state) / record["id"] / "session.json", record)
+        if pending:
+            # A wind-down can take longer than a client waits for the broker to
+            # answer, so it runs beside the listener; a Lean session for the same
+            # goal is refused until it has finished.
+            threading.Thread(target=self._reconcile_lean, args=(pending,), daemon=True).start()
+
+    def _reconcile_lean(self, records: list[dict]) -> None:
+        for record in records:
+            goal = record["lean"]["goal"]
+            try:
+                result = self.wind_down_function(goal, Path(record["target"]))
+            except Exception as exc:
+                result = {"verdict": "NOT_OK", "status": "ERROR", "detail": f"wind-down raised: {exc!r}"}
+            record["lean"]["wind_down"] = {
+                "verdict": result.get("verdict"), "status": result.get("status"),
+                "detail": one_line(result.get("detail") or "", 300), "residual": (result.get("residual") or [])[:10],
+                "reason": "crash recovery", "at": _now_iso(), "exit": result.get("exit"),
+            }
+            write_private_json(sessions_dir(self.state) / record["id"] / "session.json", record)
+            with self.lock:
+                self.reconciling.discard(goal)
 
     def stop_all(self, reason: str) -> None:
         with self.lock:
@@ -1016,6 +1155,7 @@ class Broker:
         prior: Optional[dict] = None
         target = request.get("target")
         write = bool(request.get("write"))
+        lean_goal = request.get("lean")
         if op == "resume":
             resume_thread = str(request.get("thread") or "")
             if not L._THREAD_ID.match(resume_thread):
@@ -1029,8 +1169,17 @@ class Broker:
             if target is None and prior is not None:
                 target, write = prior.get("target"), prior.get("mode") == "write"
                 effort = request.get("effort") or prior.get("effort") or effort
+                if lean_goal is None and prior.get("lean"):
+                    lean_goal = prior["lean"].get("goal")
             if target is None:
                 refusals.append("no session record names this thread; pass --target (and --write if needed)")
+        if lean_goal is not None:
+            write = True
+            if target is not None:
+                try:
+                    refusals += luna_lean.target_refusals(str(lean_goal), Path(str(target)), self.lean_repositories())
+                except luna_lean.LeanModeError as exc:
+                    refusals.append(str(exc))
         if refusals:
             return {"ok": False, "code": L.EXIT_PREFLIGHT_REFUSED, "verdict": "REFUSED", "refusals": refusals}
         policy = dict(request.get("policy") or {})
@@ -1048,6 +1197,9 @@ class Broker:
                 request.get("turn_timeout_seconds") or L.DEFAULT_TIMEOUT_SECONDS),
             "launch_root": str(self.root), "model": L.RESERVE_MODEL,
         }
+        if lean_goal is not None:
+            record["lean"] = {"goal": str(lean_goal), "mcp_server": luna_lean.LEAN_MCP_SERVER,
+                              "disabled_tools": list(luna_lean.OPEN_WORLD_TOOLS)}
         session = BrokerSession(self, session_id, record)
         if op == "resume":
             record["rollout"] = (prior or {}).get("rollout")
@@ -1057,6 +1209,13 @@ class Broker:
                 return {"ok": False, "code": L.EXIT_ATTRIBUTION_FAILED, "verdict": "ATTRIBUTION_FAILED",
                         "failures": orphan_failures, "message": L.STOP_MESSAGE}
         with self.lock:
+            if lean_goal is not None:
+                refusals = self.lean_admission(str(lean_goal), Path(record["target"]), record)
+                if refusals:
+                    return {"ok": False, "code": L.EXIT_PREFLIGHT_REFUSED, "verdict": "REFUSED",
+                            "refusals": refusals}
+            # Registered under the same lock as the Lean check, so two concurrent
+            # starts cannot both pass the one-Lean-session rule.
             self.sessions[session_id] = session
         code, result = session.open(brief, resume_thread)
         if code == L.EXIT_PREFLIGHT_REFUSED and not session.dir.is_dir():
@@ -1065,7 +1224,25 @@ class Broker:
             return {"ok": False, "code": code, **result}
         return {"ok": code == 0, "code": code, "session": session_id, "state": session.state,
                 "thread": record.get("thread_id"), "mode": record["mode"], "effort": effort, "detail": detail,
-                "resumed_from": record.get("resumed_from"), **result}
+                "resumed_from": record.get("resumed_from"), "lean": (record.get("lean") or {}).get("goal"),
+                **result}
+
+    def lean_admission(self, goal: str, target: Path, record: dict) -> list[str]:
+        """Called with the broker lock held: one Lean session at a time, host admits, target is quiet."""
+        live = [session.id for session in self.sessions.values()
+                if session.record.get("lean") and session.state not in TERMINAL_STATES]
+        if live:
+            return [f"a Lean session is already live in this broker ({', '.join(live)}); "
+                    "one Lean session at a time"]
+        if self.reconciling:
+            return [f"crash-recovery wind-down is still running for {sorted(self.reconciling)}"]
+        refusals, observed = self.host_probe(goal)
+        residual = self.residual_scan(target)
+        if residual:
+            refusals.append(f"{len(residual)} Lean/Lake process(es) already run in {target}; wind down first")
+        record["lean"]["host_admission"] = {"observed": observed, "refusals": refusals,
+                                            "residual": residual[:10], "at": _now_iso()}
+        return refusals
 
     def audit_orphans(self, thread_id: str, new_session: str) -> list[str]:
         """Audit turns of this thread that ended with their broker, before any new work on it."""
@@ -1326,30 +1503,44 @@ def _broker_call(module_root: Path, environ: dict, op: str, autostart: bool, **a
         return {"ok": False, "code": L.EXIT_CODEX_FAILED, "error": f"broker unavailable: {exc}"}
 
 
+def _lean_client_refusals(module_root: Path, lean: Optional[str], target: Optional[str]) -> list[str]:
+    """Zero-process target check, repeated authoritatively by the broker."""
+    if lean is None or target is None:
+        return []
+    try:
+        return luna_lean.target_refusals(lean, Path(target), luna_lean.repositories(L.launch_root(module_root)))
+    except luna_lean.LeanModeError as exc:
+        return [str(exc)]
+
+
 def cmd_start(module_root: Path, environ: dict, brief: str, target: str, write: bool, effort: str,
-              detail: str, policy: dict, overrides: list[str], turn_timeout_seconds: int) -> tuple[int, list[str], dict]:
+              detail: str, policy: dict, overrides: list[str], turn_timeout_seconds: int,
+              lean: Optional[str] = None) -> tuple[int, list[str], dict]:
     state = L.state_root(module_root, environ)
-    refusals = L.early_refusals(state, effort, overrides, brief)
+    refusals = L.early_refusals(state, effort, overrides, brief) or _lean_client_refusals(module_root, lean, target)
     if refusals:
         reply = {"ok": False, "code": L.EXIT_PREFLIGHT_REFUSED, "verdict": "REFUSED", "refusals": refusals}
         return reply["code"], _refusal_lines(reply), reply
-    reply = _broker_call(module_root, environ, "start", True, brief=brief, target=target, write=write,
-                         effort=effort, detail=detail, policy=policy, overrides=overrides,
-                         turn_timeout_seconds=turn_timeout_seconds)
+    arguments = {"lean": lean} if lean is not None else {}
+    reply = _broker_call(module_root, environ, "start", True, brief=brief, target=target,
+                         write=write or lean is not None, effort=effort, detail=detail, policy=policy,
+                         overrides=overrides, turn_timeout_seconds=turn_timeout_seconds, **arguments)
     return _open_output(reply)
 
 
 def cmd_resume(module_root: Path, environ: dict, thread: str, target: Optional[str], write: bool,
                effort: Optional[str], detail: str, policy: dict, overrides: list[str],
-               turn_timeout_seconds: int) -> tuple[int, list[str], dict]:
+               turn_timeout_seconds: int, lean: Optional[str] = None) -> tuple[int, list[str], dict]:
     state = L.state_root(module_root, environ)
-    refusals = L.early_refusals(state, effort or L.DEFAULT_EFFORT, overrides)
+    refusals = L.early_refusals(state, effort or L.DEFAULT_EFFORT, overrides) or \
+        _lean_client_refusals(module_root, lean, target)
     if refusals:
         reply = {"ok": False, "code": L.EXIT_PREFLIGHT_REFUSED, "verdict": "REFUSED", "refusals": refusals}
         return reply["code"], _refusal_lines(reply), reply
-    reply = _broker_call(module_root, environ, "resume", True, thread=thread, target=target, write=write,
-                         effort=effort, detail=detail, policy=policy, overrides=overrides,
-                         turn_timeout_seconds=turn_timeout_seconds)
+    arguments = {"lean": lean} if lean is not None else {}
+    reply = _broker_call(module_root, environ, "resume", True, thread=thread, target=target,
+                         write=write or lean is not None, effort=effort, detail=detail, policy=policy,
+                         overrides=overrides, turn_timeout_seconds=turn_timeout_seconds, **arguments)
     return _open_output(reply)
 
 
@@ -1360,6 +1551,7 @@ def _open_output(reply: dict) -> tuple[int, list[str], dict]:
     lines = [
         f"session={reply['session']} state={reply.get('state')} thread={reply.get('thread')} "
         f"mode={reply.get('mode')} effort={reply.get('effort')} detail={reply.get('detail')}"
+        + (f" lean={reply['lean']}" if reply.get("lean") else "")
         + (f" resumed_from={reply['resumed_from']}" if reply.get("resumed_from") else "")
     ]
     if code == 0:
@@ -1383,6 +1575,8 @@ def cmd_simple(module_root: Path, environ: dict, op: str, session: str, **argume
         head += f" detail={reply['detail']}"
     if reply.get("stop_audit"):
         head += f" stop_audit={reply['stop_audit']}"
+    if reply.get("wind_down"):
+        head += f" wind_down={reply['wind_down']}"
     lines = [head]
     if code != 0:
         lines.extend(_refusal_lines(reply)[1:])
@@ -1395,6 +1589,8 @@ def _verdict_code(record: dict) -> int:
         return L.EXIT_ATTRIBUTION_FAILED
     if state == "refused":
         return L.EXIT_PREFLIGHT_REFUSED
+    if state == "unclean":
+        return L.EXIT_CODEX_FAILED
     if state == "stopped":
         return L.EXIT_OK if (record.get("stop_audit") or {}).get("verdict", "PASS") == "PASS" \
             else L.EXIT_ATTRIBUTION_FAILED
@@ -1422,6 +1618,12 @@ def session_lines(record: dict, excerpt_lines: int = 3) -> list[str]:
     ]
     if record.get("stop_audit"):
         lines[0] += f" stop_audit={record['stop_audit'].get('verdict')}"
+    wind_down = (record.get("lean") or {}).get("wind_down")
+    if wind_down:
+        lines[0] += f" wind_down={wind_down.get('verdict')}"
+        if wind_down.get("verdict") != "OK":
+            lines.append(one_line(f"wind-down {wind_down.get('status')}: {wind_down.get('detail')} "
+                                  f"residual={len(wind_down.get('residual') or [])}"))
     for approval in record.get("pending_approvals") or []:
         lines.append(one_line(f"approval {approval.get('id')} [{'|'.join(approval.get('decisions') or DECISIONS)}]: "
                               f"{approval.get('summary')}"))

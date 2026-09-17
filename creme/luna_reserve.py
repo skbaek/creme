@@ -169,9 +169,11 @@ def launch_root(module_root: Path) -> Path:
 def open_server(binary: Path, env: dict, effort: str, servers: dict,
                 transcript: Any = None, stderr: Any = None,
                 skill_paths: tuple[str, ...] = (), approval_policy: str = "never",
-                server_request_handler: Any = None) -> tuple[AppServerProcess, dict]:
+                server_request_handler: Any = None,
+                kept_mcp_servers: Optional[dict] = None) -> tuple[AppServerProcess, dict]:
     process = AppServerProcess(
-        binary, isolation_arguments(RESERVE_MODEL, effort, servers, skill_paths, approval_policy), env, transcript,
+        binary, isolation_arguments(RESERVE_MODEL, effort, servers, skill_paths, approval_policy, kept_mcp_servers),
+        env, transcript,
         server_request_handler=server_request_handler or decline_server_requests, stderr=stderr,
     )
     try:
@@ -659,7 +661,8 @@ class ReserveServer:
     """
 
     def __init__(self, module_root: Path, root: Path, run_dir: Path, workdir: Path, write: bool,
-                 effort: str, policy: Policy, environ: dict, approval_policy: str = "never") -> None:
+                 effort: str, policy: Policy, environ: dict, approval_policy: str = "never",
+                 lean: Any = None) -> None:
         self.module_root = module_root
         self.root = root
         self.run_dir = run_dir
@@ -680,6 +683,18 @@ class ReserveServer:
         self.transcript: Any = None
         self.stderr: Any = None
         self.codex_home: Optional[Path] = None
+        # A ``luna_lean.LeanMode`` keeps the tracked lean-lsp-mcp server running;
+        # ``None`` is the unchanged non-Lean isolation.
+        self.lean = lean
+        if lean is not None and not (write and approval_policy == "on-request"):
+            raise PinViolation("Lean mode needs a brokered write session")
+
+    def kept_mcp_servers(self) -> Optional[dict]:
+        if self.lean is None:
+            return None
+        from .luna_lean import LEAN_MCP_SERVER, launch_override
+
+        return {LEAN_MCP_SERVER: launch_override(self.lean.definition)}
 
     # -- stage 1: probe (no run directory yet) --------------------------
     def probe(self) -> list[str]:
@@ -710,10 +725,21 @@ class ReserveServer:
         )
         self.servers = mcp_servers(self.first)
         self.skill_paths = foreign_skill_paths(first_skills, self.root)
+        if self.lean is not None:
+            from . import luna_lean
+
+            if luna_lean.LEAN_MCP_SERVER not in self.servers:
+                refusals.append(f"the launch root defines no {luna_lean.LEAN_MCP_SERVER} server for Lean mode")
+            try:
+                self.lean.definition = luna_lean.launch_definition(self.lean.tracked(self.root))
+            except luna_lean.LeanModeError as exc:
+                refusals.append(str(exc))
+                return refusals
         try:
             # Validate the isolation arguments before anything is recorded, so
             # an unrepresentable server name or skill path is a refusal.
-            isolation_arguments(RESERVE_MODEL, self.effort, self.servers, self.skill_paths, self.approval_policy)
+            isolation_arguments(RESERVE_MODEL, self.effort, self.servers, self.skill_paths, self.approval_policy,
+                                self.kept_mcp_servers())
         except PinViolation as exc:
             refusals.append(str(exc))
         self.codex_home = Path(self.first.get("codex_home") or Path.home() / ".codex")
@@ -727,21 +753,29 @@ class ReserveServer:
         self.process, initialized = open_server(
             self.binary, self.env, self.effort, self.servers, self.transcript, self.stderr, self.skill_paths,
             approval_policy=self.approval_policy, server_request_handler=server_request_handler,
+            kept_mcp_servers=self.kept_mcp_servers(),
         )
         process = self.process
         self.before_read = zero_token_read(process, initialized, self.root)
         features = read_all_features(process)
         skills = process.request("skills/list", {"cwds": [str(self.root)], "forceReload": True})
         self.before = admission(self.before_read, self.policy, self.effort)
+        kept = tuple(self.kept_mcp_servers() or ())
         isolation = isolation_failures(self.before_read["config"], features, RESERVE_MODEL, self.root, skills,
-                                       self.approval_policy)
+                                       self.approval_policy, kept)
+        lean_record = None
+        if self.lean is not None:
+            from . import luna_lean
+
+            isolation += luna_lean.definition_failures(self.before_read["config"], self.lean.definition)
+            lean_record = {**self.lean.summary(), "definition": self.lean.definition}
         config = self.before_read["config"] or {}
         _write_json(self.run_dir / "preflight.json", {
             "read": {key: value for key, value in self.before_read.items() if key != "config"},
             "admission": self.before,
             "isolation": {
                 "arguments": isolation_arguments(RESERVE_MODEL, self.effort, self.servers, self.skill_paths,
-                                                 self.approval_policy),
+                                                 self.approval_policy, self.kept_mcp_servers()),
                 "failures": isolation,
                 "enabled_features": sorted(item.get("name") for item in features if item.get("enabled")),
                 "config_layers": [layer.get("name") for layer in config.get("layers") or []],
@@ -755,18 +789,27 @@ class ReserveServer:
                     for entry in (skills or {}).get("data") or [] for skill in entry.get("skills") or []
                 ],
             },
+            **({"lean": lean_record} if lean_record is not None else {}),
         })
         return self.before["refusals"] + isolation + target_refusals(
             self.workdir, self.write, self.before_read.get("codex_home"), self.root,
         )
 
     def session(self, developer_instructions_text: str) -> GuardedSession:
+        lean_servers: tuple[str, ...] = ()
+        forbidden: tuple[str, ...] = ()
+        if self.lean is not None:
+            from . import luna_lean
+
+            lean_servers = (luna_lean.LEAN_MCP_SERVER,)
+            forbidden = luna_lean.OPEN_WORLD_TOOLS + luna_lean.FORBIDDEN_TOOLS
         return GuardedSession(
             self.process, RESERVE_MODEL, attribution_for(self.before, self.policy.jitter_seconds), self.root,
             "workspace-write" if self.write else "read-only", self.effort,
             writable_roots=(self.workdir,) if self.write else (),
             developer_instructions=developer_instructions_text,
             approval_policy=self.approval_policy,
+            mcp_servers=lean_servers, forbidden_mcp_tools=forbidden,
         )
 
     def admission_read(self) -> dict:

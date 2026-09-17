@@ -51,7 +51,11 @@ def launch_config(scenario: dict, argv: list) -> dict:
             key, _, raw = value.partition("=")
             if key.startswith("mcp_servers."):
                 name = key.split(".", 1)[1]
-                if "enabled=false" in raw:
+                if name in scenario.get("kept_mcp", {}) and "enabled=false" not in raw:
+                    # A kept (Lean) server is launched from a full definition; the
+                    # scenario states what the running server reports for it.
+                    config.setdefault("mcp_servers", {})[name] = scenario["kept_mcp"][name]
+                elif "enabled=false" in raw:
                     stubbed.add(name)
                     config.setdefault("mcp_servers", {})[name] = {"command": "/usr/bin/false", "enabled": False}
             elif key in ("model", "review_model", "service_tier", "model_reasoning_effort", "web_search"):
@@ -133,7 +137,8 @@ def serve(scenario: dict, log: Path, argv: list) -> int:
             append(log, {"kind": "server-request-reply", "id": message["id"],
                          "result": message.get("result"), "error": message.get("error")})
             if pending is not None and pending.get("approval_id") == message["id"]:
-                decision = (message.get("result") or {}).get("decision")
+                result = message.get("result") or {}
+                decision = result.get("decision", result.get("action"))
                 turn, pending = pending, None
                 complete(turn, "completed", f"{turn['final']} APPROVAL={decision}")
             continue
@@ -222,6 +227,8 @@ def serve(scenario: dict, log: Path, argv: list) -> int:
             turn = pending or {"id": params.get("turnId"), "final": ""}
             pending = None
             complete(turn, "interrupted", "")
+        elif method == "mcpServerStatus/list" and "mcp_status" in scenario:
+            emit({"id": ident, "result": scenario["mcp_status"]})
         elif method == "thread/items/list":
             emit({"id": ident, "result": {"data": [
                 {"turnId": "turn-1", "item": {"type": "agentMessage", "text": "STATUS: DONE"}}], "nextCursor": None}})

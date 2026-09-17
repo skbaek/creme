@@ -259,6 +259,7 @@ def cmd_luna_reserve_start(arguments: argparse.Namespace) -> int:
     code, lines, record = luna_broker.cmd_start(
         ROOT, dict(os.environ), brief, arguments.target, arguments.write, arguments.effort, arguments.detail,
         _luna_policy(arguments).__dict__, list(arguments.overrides or []), arguments.timeout_seconds,
+        lean=arguments.lean,
     )
     return _luna_print(arguments, code, lines, record)
 
@@ -267,7 +268,7 @@ def cmd_luna_reserve_resume(arguments: argparse.Namespace) -> int:
     code, lines, record = luna_broker.cmd_resume(
         ROOT, dict(os.environ), arguments.thread, arguments.target, arguments.write, arguments.effort,
         arguments.detail, _luna_policy(arguments).__dict__, list(arguments.overrides or []),
-        arguments.timeout_seconds,
+        arguments.timeout_seconds, lean=arguments.lean,
     )
     return _luna_print(arguments, code, lines, record)
 
@@ -1456,6 +1457,9 @@ def parser() -> argparse.ArgumentParser:
         _add_luna_policy_arguments(item)
         item.add_argument("--write", action="store_true",
                           help="allow edits confined to --target; approvals are routed to the master")
+        item.add_argument("--lean", metavar="GOAL",
+                          help="Lean mode (implies --write): --target must be the Jaune or Blanc .worktrees/GOAL; "
+                               "keeps only the tracked lean-lsp-mcp and winds GOAL down at every stop")
         item.add_argument("--detail", default=luna_broker.DEFAULT_DETAIL, choices=luna_broker.DETAIL_LEVELS)
         item.add_argument("--timeout-seconds", type=_positive, default=luna_reserve.DEFAULT_TIMEOUT_SECONDS,
                           help="per-turn timeout; the broker interrupts a longer turn")

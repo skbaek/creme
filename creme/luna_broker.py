@@ -602,6 +602,10 @@ class BrokerSession:
         elicitation = method == "mcpServer/elicitation/request" and self.record.get("lean") \
             and params.get("serverName") == luna_lean.LEAN_MCP_SERVER and params.get("mode") == "form"
         if (method in APPROVAL_METHODS and self.record.get("approval_policy") == "on-request") or elicitation:
+            if self.record.get("lean") and method in luna_lean.COMMAND_APPROVAL_METHODS:
+                reason = luna_lean.forbidden_command(params.get("command"))
+                if reason is not None:
+                    return self.refuse_approval(method, params, request_id, reason)
             with self.data_lock:
                 self.approval_counter += 1
                 key = f"a{self.approval_counter}"
@@ -628,6 +632,26 @@ class BrokerSession:
             reply = decline_server_requests(method, params, request_id)
         self.emit("attention", "server-request", f"{method} answered by policy: {json.dumps(reply)[:120]}")
         return reply
+
+    def refuse_approval(self, method: str, params: dict, request_id: Any, reason: str) -> dict:
+        """Decline a command a Lean session may never run, without asking the master.
+
+        The refusal takes the next approval id, so a successor reading the
+        records sees both that it happened and where it sits among the
+        approvals the master did answer.
+        """
+        with self.data_lock:
+            self.approval_counter += 1
+            key = f"a{self.approval_counter}"
+            summary = describe_approval(method, params)
+            self.record.setdefault("refused_approvals", []).append({
+                "id": key, "method": method, "summary": summary, "reason": reason,
+                "refused": _now_iso(), "by": "broker-lean-guard",
+            })
+            self.persist()
+        self.emit("attention", "approval-refused",
+                  f"{key} declined by the broker, not offered to the master: {summary} -- {reason}")
+        return decline_server_requests(method, params, request_id)
 
     def approve(self, key: str, decision: str) -> tuple[int, dict]:
         with self.lock:
@@ -1192,7 +1216,8 @@ class Broker:
             "target": str(Path(str(target)).expanduser().resolve()), "mode": "write" if write else "read-only",
             "effort": effort, "detail": detail, "approval_policy": L.approval_policy_for(write, broker=True),
             "policy": {**L.Policy().__dict__, **policy}, "broker_instance": self.instance,
-            "turns": [], "pending_approvals": [], "last_event": None, "last_attention_seq": 0,
+            "turns": [], "pending_approvals": [], "refused_approvals": [],
+            "last_event": None, "last_attention_seq": 0,
             "resumed_from": (prior or {}).get("id"), "turn_timeout_seconds": int(
                 request.get("turn_timeout_seconds") or L.DEFAULT_TIMEOUT_SECONDS),
             "launch_root": str(self.root), "model": L.RESERVE_MODEL,
@@ -1627,6 +1652,9 @@ def session_lines(record: dict, excerpt_lines: int = 3) -> list[str]:
     for approval in record.get("pending_approvals") or []:
         lines.append(one_line(f"approval {approval.get('id')} [{'|'.join(approval.get('decisions') or DECISIONS)}]: "
                               f"{approval.get('summary')}"))
+    for refusal in (record.get("refused_approvals") or [])[-1:]:
+        lines.append(one_line(f"refused {refusal.get('id')} by the broker: {refusal.get('summary')} "
+                              f"-- {refusal.get('reason')}"))
     for failure in (last.get("failures") or [])[:3] + (last.get("errors") or [])[:2]:
         lines.append(f"failure: {one_line(failure)}")
     if last.get("last_message"):

@@ -483,6 +483,23 @@ target worktree, and the host has room; `decline` or `cancel` anything else.
 The approved command runs outside the sandbox and takes its own semaphore
 admission.
 
+The broker declines one class of command itself, without spending the master's
+attention on it: in a Lean session, a command-execution approval whose tokens
+name the semaphore launcher or the generated `codex-reclaim-lean` delegate
+(matched on the basename, so any path spelling counts), carry `--wind-down`, or
+put `reclaim` or `semaphore` after a `creme` invocation. A nested
+`sh -c`/`bash -lc` script is read as tokens too. The preamble already forbids
+these because the broker owns wind-down, so a request for one is the model
+ignoring its contract, not a decision. The refusal takes the next approval id,
+is recorded under `session.json` `refused_approvals`, and is printed as an
+attention event (`approval-refused`) in `events` and as a `refused a1 by the
+broker:` line in the session record. Nothing else changes: `creme lake-build`
+still escalates to the master, and a non-Lean session's approvals are
+untouched. The rule is deliberately blunt and fail-closed; a command that
+reaches the same effect without those tokens (for example a Python `-c`
+snippet importing `creme.reclaim`) still gets through to the master, who
+declines it as before.
+
 ### Briefing a Lean pseudo-subagent
 
 Use it for mechanical Lean work whose result the master can check cheaply: a

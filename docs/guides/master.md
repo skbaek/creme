@@ -151,10 +151,20 @@ A worker return should state what changed since its last checkpoint, the
 condition/evidence result, unresolved issues and next step. The durable report
 supplies the complete evidence rather than being copied into each message.
 
-## Session start: master or reader
+## Master entry: master or reader
 
-Every session launched with Creme as its project runs this at start, before
-anything else and whether or not the user mentions the role:
+A session launched with Creme as its project does not enter the role on its
+own. Unconditional start-up reads and a lease attempt cost every session
+tokens, and most sessions never need the role. A session therefore runs this
+protocol only when the user explicitly directs it to start as master. Until
+then it is an ordinary session with a reader's limits: it may read anything,
+run light analysis, converse, and do what the user asks, but it must not write
+under `master/`, merge or push a default branch, spawn workers, or take goal
+holds for heavy work. If a request needs one of those, it says so and asks
+whether to enter as master; it never enters unasked. Workers, including
+pseudo-subagents a master dispatches, never run this protocol.
+
+On the user's direction to start as master, the session runs:
 
 1. `python3 -m creme doctor` and `python3 -m creme host-guidance`. Doctor
    resolves the configured goal store and verifies that its `master/`
@@ -176,18 +186,17 @@ anything else and whether or not the user mentions the role:
      (`master-renew --heartbeat 1500 --detach`; verify its renewal in the log,
      since some managed tool sandboxes also reap detached children), append a `master` event
      naming the client, model, and effort, rewrite the board's lease line,
-     and say in the first reply that this session is the master.
+     and say in the reply to the direction that this session is the master.
    - `OK` with `master lease already held by this session`: this is an
      authenticated re-entry into the existing acquisition. Run the canonical
      `master-renew`, reconcile the board with active work, and continue with the
      recorded acquisition identity. Do not start a second detached heartbeat or
      append another acquisition event.
    - `REFUSED` because the lease is **live**: this session is a **reader**.
-     Say so in the first reply, naming the client and process that hold the
-     lease, so the user never mistakes a reader for the master. A reader may
-     read anything, run light analysis, and converse. It must not write under `master/`, merge, push,
-     spawn workers, or take goal holds for heavy work. If the user wants this
-     session to be the master, they end the other one first.
+     Say so in the reply, naming the client and process that hold the
+     lease, so the user never mistakes a reader for the master. A reader keeps
+     the limits above. If the user wants this session to be the master, they
+     end the other one first.
    - `REFUSED` because the lease is **lapsed** or **stranded**: run the same
      command with `--take-over`. The previous master is gone or has stopped
      renewing; the take-over is logged with its identity, and this session is
@@ -215,8 +224,9 @@ observed.
 
 The user's rule is therefore simple: at most one session does agentic work at
 a time. To replace the master, wind it down or close its tab, then open a new
-session from `~/creme` with whichever client. Auditor sessions are launched
-from outside `~/creme` and never run this protocol.
+session from `~/creme` with whichever client and direct it to start as master.
+Auditor sessions are launched from outside `~/creme` and never run this
+protocol.
 
 The launch shape is client-specific — `claude` or `muse` from `~/creme`, or the Codex
 project whose primary folder is Creme — and is documented in

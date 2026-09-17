@@ -825,7 +825,7 @@ def start_master(
         raise
     # Authenticated re-entry keeps the existing acquisition, whose heartbeat is
     # already live for that lease id; starting another would double-renew it
-    # (master.md Session start: no second detached heartbeat on re-entry).
+    # (master.md Master entry: no second detached heartbeat on re-entry).
     # Only a call that minted a new acquisition starts its heartbeat.
     if acquired_now:
         try:

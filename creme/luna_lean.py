@@ -29,11 +29,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Optional
 
 LEAN_MCP_SERVER = "lean-lsp-mcp"
@@ -280,6 +281,94 @@ def tool_failures(status_list: dict) -> list[str]:
         if name != LEAN_MCP_SERVER and entry.get("runtimeStatus") not in ("disabled", None):
             failures.append(f"MCP server {name!r} is {entry.get('runtimeStatus')!r}, not disabled")
     return failures
+
+
+# ---------------------------------------------------------------------------
+# Forbidden commands
+
+
+# The broker owns wind-down for a Lean session (see ``run_wind_down``), and the
+# semaphore and Lean reclamation are the host's, not the pseudo-subagent's.
+# ``templates/luna-reserve/lean-preamble.md`` already forbids them in words; a
+# model that asks anyway must not cost the master a decision, so the broker
+# declines the escalation itself and records why.
+COMMAND_APPROVAL_METHODS = frozenset({
+    "item/commandExecution/requestApproval", "execCommandApproval",
+})
+# Executables, matched on the token's basename so any path spelling is caught.
+FORBIDDEN_BASENAMES = frozenset({"semaphore", "codex-reclaim-lean"})
+# Subcommands of the Creme CLI, matched only after a ``creme`` invocation, so
+# ``creme lake-build`` keeps its escalation path.
+FORBIDDEN_CREME_SUBCOMMANDS = frozenset({"reclaim", "semaphore"})
+WIND_DOWN_FLAG = "--wind-down"
+_CREME_MODULES = frozenset({"creme"} | {f"creme.{name}" for name in FORBIDDEN_CREME_SUBCOMMANDS})
+
+
+def _split(text: str) -> list[str]:
+    try:
+        pieces = shlex.split(text)
+    except ValueError:
+        pieces = text.split()
+    return pieces or [text]
+
+
+def command_tokens(value: Any, depth: int = 3) -> list[str]:
+    """Flatten an approval request's command into tokens.
+
+    ``item/commandExecution/requestApproval`` carries one string and
+    ``execCommandApproval`` an argv list, and either may wrap a script in
+    ``sh -c``. Each element is split with shell quoting, and any piece that
+    still holds whitespace is split again to a bounded depth, so a nested
+    ``bash -lc "... && semaphore ..."`` is read as tokens too.
+    """
+    if isinstance(value, list):
+        items = [str(item) for item in value]
+    elif isinstance(value, str):
+        items = [value]
+    else:
+        return []
+    tokens: list[str] = []
+    for text in items:
+        pieces = _split(text)
+        tokens.extend(pieces)
+        if depth <= 0:
+            continue
+        for piece in pieces:
+            if piece != text and any(character.isspace() for character in piece):
+                tokens.extend(command_tokens(piece, depth - 1))
+    return tokens
+
+
+def forbidden_command(value: Any) -> Optional[str]:
+    """Why a Lean pseudo-subagent may never run this command, or ``None``.
+
+    Fail-closed and deliberately blunt: any token that names the semaphore
+    launcher or the generated reclamation delegate, any ``--wind-down``
+    argument, and any ``reclaim``/``semaphore`` subcommand that follows a
+    ``creme`` invocation. The cost of a false positive is one declined
+    escalation with a printed reason; the cost of a miss is the failure this
+    guard exists to prevent.
+    """
+    tokens = [token.strip("'\"") for token in command_tokens(value)]
+    creme = False
+    for index, token in enumerate(tokens):
+        if token == WIND_DOWN_FLAG or token.startswith(WIND_DOWN_FLAG + "="):
+            return (f"{WIND_DOWN_FLAG} belongs to the broker, which runs "
+                    "reclaim --wind-down itself when this session ends")
+        name = PurePosixPath(token).name
+        if name in FORBIDDEN_BASENAMES:
+            return f"{name} is a semaphore or Lean reclamation command, which a Lean session never runs"
+        if name == "creme":
+            creme = True
+        elif token == "-m" and index + 1 < len(tokens):
+            module = tokens[index + 1]
+            if module in _CREME_MODULES:
+                creme = True
+            if module.startswith("creme.") and module.split(".", 1)[1] in FORBIDDEN_CREME_SUBCOMMANDS:
+                return f"{module} is a semaphore or Lean reclamation command, which a Lean session never runs"
+        elif creme and token in FORBIDDEN_CREME_SUBCOMMANDS:
+            return f"creme {token} is a semaphore or Lean reclamation command, which a Lean session never runs"
+    return None
 
 
 # ---------------------------------------------------------------------------

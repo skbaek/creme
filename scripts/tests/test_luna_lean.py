@@ -218,6 +218,45 @@ class LeanDefinitionTest(unittest.TestCase):
                            mcp_servers=("lean-lsp-mcp",))
 
 
+class LeanForbiddenCommandTest(unittest.TestCase):
+    """The matching rule: resolved basename, --wind-down, and creme subcommands."""
+
+    def test_semaphore_reclaim_and_wind_down_commands_are_named(self):
+        # The command observed on 2026-09-18, which the master had to decline by hand.
+        self.assertIn("codex-reclaim-lean", LL.forbidden_command(
+            "~/.codex/bin/codex-reclaim-lean --wind-down vault-pair-inhabitant-probe-v1"))
+        self.assertIn("semaphore", LL.forbidden_command(
+            ["~/creme/.semaphore/semaphore", "adaptive-acquire", "g", "--memory-gib", "8"]))
+        self.assertIn("creme reclaim", LL.forbidden_command(["python3", "-m", "creme", "reclaim", "--dry-run"]))
+        self.assertIn("semaphore", LL.forbidden_command(
+            ["/usr/bin/python3", "-m", "creme", "semaphore", "status"]))
+        self.assertIn("creme.reclaim", LL.forbidden_command(["python3", "-m", "creme.reclaim", "--wind-down"]))
+        self.assertIn("creme reclaim", LL.forbidden_command(["/Users/a/creme/scripts/creme", "reclaim"]))
+        # A bare --wind-down on any launcher is refused on the flag alone.
+        self.assertIn("--wind-down", LL.forbidden_command(["/opt/local/bin/helper", "--wind-down=g"]))
+
+    def test_a_nested_shell_script_is_read_as_tokens(self):
+        for command in (
+                'bash -lc "cd /Users/agent/creme && ~/creme/.semaphore/semaphore status"',
+                ["/bin/bash", "-lc", "cd /x && python3 -m creme reclaim --wind-down g"],
+                ["sh", "-c", 'printf x; /Users/agent/.codex/bin/codex-reclaim-lean --dry-run'],
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(LL.forbidden_command(command))
+
+    def test_the_build_escalation_and_ordinary_commands_are_not_matched(self):
+        for command in (
+                "~/creme/scripts/creme lake-build g -- Blanc.Basic",
+                ["/Users/agent/creme/scripts/creme", "lake-build", "g", "--probe", "--", "Blanc.Basic"],
+                ["bash", "-lc", "~/creme/scripts/creme lake-build g -- Blanc.Basic Blanc.Vault"],
+                ["git", "-C", "/x", "diff"],
+                "python3 -m creme build-ledger",
+                None,
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(LL.forbidden_command(command))
+
+
 class LeanHostAdmissionTest(unittest.TestCase):
     def sample(self, free=None, status="OK"):
         data = {"memory_free_percent": free} if free is not None else {}
@@ -488,6 +527,60 @@ class LeanBrokerSessionTest(LeanBrokerHarness):
         (answer,) = self.entries("server-request-reply")
         self.assertEqual(answer["result"], {"action": "accept", "content": {}})
 
+    def approval_scenario(self, command, cwd=None, reason="needs escalation"):
+        self.scenario["turns"] = [{"approval": {"method": "item/commandExecution/requestApproval", "params": {
+            "itemId": "i1", "command": command, "cwd": str(cwd or self.worktree), "reason": reason,
+            "availableDecisions": ["accept", "cancel"]}}}]
+        self.write_scenario()
+
+    def test_a_wind_down_request_is_declined_by_the_broker_and_recorded(self):
+        # Exactly the request a Lean session made on 2026-09-18.
+        self.approval_scenario("~/.codex/bin/codex-reclaim-lean --wind-down vault-pair-inhabitant-probe-v1",
+                               cwd=Path("/Users/agent/creme"), reason="the sandbox denies it")
+        reply = self.open()
+        self.assertEqual(reply["code"], 0, reply)
+        record = self.until(lambda: (self.record(reply["session"]) or {}).get("refused_approvals"))
+        self.assertEqual(record[0]["id"], "a1")
+        self.assertEqual(record[0]["by"], "broker-lean-guard")
+        self.assertIn("codex-reclaim-lean", record[0]["summary"])
+        self.assertIn("codex-reclaim-lean is a semaphore or Lean reclamation command", record[0]["reason"])
+        # It was never offered to the master, and the turn was answered at once.
+        self.assertEqual(self.record(reply["session"])["pending_approvals"], [])
+        (answer,) = self.until(lambda: self.entries("server-request-reply") or None)
+        self.assertEqual(answer["result"], {"decision": "decline"})
+        settled = self.settle(reply["session"])
+        self.assertEqual(settled["turns"][-1]["verdict"], "PASS")
+        # Visible in the event feed and in the printed session record.
+        events = self.events(reply["session"])
+        self.assertTrue(any("approval-refused" in line and "not offered to the master" in line for line in events),
+                        events)
+        lines = B.session_lines(settled)
+        self.assertTrue(any(line.startswith("refused a1 by the broker:") for line in lines), lines)
+        self.assertBounded(lines)
+
+    def test_a_semaphore_command_inside_a_shell_is_declined_too(self):
+        self.approval_scenario('bash -lc "cd /Users/agent/creme && ~/creme/.semaphore/semaphore status"')
+        reply = self.open()
+        refusals = self.until(lambda: (self.record(reply["session"]) or {}).get("refused_approvals"))
+        self.assertIn("semaphore is a semaphore or Lean reclamation command", refusals[0]["reason"])
+        self.assertEqual(self.record(reply["session"])["pending_approvals"], [])
+
+    def test_the_lake_build_escalation_still_goes_to_the_master(self):
+        self.approval_scenario("~/creme/scripts/creme lake-build lean-goal-v1 -- Blanc.Basic")
+        reply = self.open()
+        pending = self.until(lambda: (self.record(reply["session"]) or {}).get("pending_approvals"))
+        self.assertEqual(pending[0]["id"], "a1")
+        self.assertIn("lake-build", pending[0]["summary"])
+        self.assertEqual(self.record(reply["session"]).get("refused_approvals"), [])
+        time.sleep(0.3)
+        self.assertEqual(self.entries("server-request-reply"), [], "the build escalation was answered without "
+                                                                  "the master")
+        code, result = self.session(reply).approve("a1", "accept")
+        self.assertEqual(code, 0, result)
+        self.settle(reply["session"])
+        (answer,) = self.entries("server-request-reply")
+        self.assertEqual(answer["result"], {"decision": "accept"})
+
     def test_wind_down_that_is_not_ok_leaves_the_session_unclean(self):
         reply = self.open()
         self.settle(reply["session"])
@@ -586,6 +679,20 @@ class NonLeanSessionUnchangedTest(LeanBrokerHarness):
         self.assertNotIn("wind_down", result)
         self.assertEqual(self.wind_downs, [])
         self.assertEqual(self.host_calls, [])
+
+    def test_a_non_lean_session_still_offers_a_reclaim_command_to_the_master(self):
+        self.scenario["thread_notifications"] = []
+        self.scenario["turns"] = [{"approval": {"method": "item/commandExecution/requestApproval", "params": {
+            "itemId": "i1", "command": "~/.codex/bin/codex-reclaim-lean --wind-down some-goal-v1",
+            "cwd": str(self.target), "availableDecisions": ["accept", "cancel"]}}}]
+        self.write_scenario()
+        reply = self.open(lean=False, write=True, target=self.target)
+        self.assertEqual(reply["code"], 0, reply)
+        pending = self.until(lambda: (self.record(reply["session"]) or {}).get("pending_approvals"))
+        self.assertEqual(pending[0]["id"], "a1")
+        self.assertEqual(self.record(reply["session"]).get("refused_approvals"), [])
+        time.sleep(0.3)
+        self.assertEqual(self.entries("server-request-reply"), [])
 
     def test_mcp_startup_still_trips_a_non_lean_session(self):
         self.scenario["thread_notifications"] = [startup("lean-lsp-mcp", "ready")]

@@ -1,0 +1,185 @@
+#!/usr/bin/python3
+"""Exact-match file edit for Muse sessions (Muse-only; other clients ignore it).
+
+Muse's edit_file/write_file tools admit only paths under the Creme
+workspace, while the shell is unsandboxed on this host. This helper performs
+the same operation on any shell-writable path (sibling checkouts, the goal
+store, /tmp probes): exactly-one exact-match replacement with an atomic
+write, or creation of a new file. It prints a unified diff of every edit
+for review. Stdlib only, so it runs anywhere with no install step.
+"""
+
+import argparse
+import difflib
+import os
+import sys
+import tempfile
+
+DIFF_LINE_CAP = 300
+MATCH_LIST_CAP = 10
+
+EXIT_OK = 0
+EXIT_USAGE_IO = 1
+EXIT_MATCH = 2
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="muse-edit-file",
+        description="Apply one exact-match edit (mirrors edit_file) or "
+                    "create a file (mirrors write_file) at any "
+                    "shell-writable path. Exit 0 on success, 1 on "
+                    "usage/IO errors, 2 when the match count is not "
+                    "exactly one.",
+    )
+    parser.add_argument("path", help="Target file to edit or create.")
+    parser.add_argument("--find", default=None,
+                        help="Exact literal text to replace; must occur "
+                             "exactly once. No escape processing.")
+    parser.add_argument("--find-file", default=None, metavar="FILE",
+                        help="Read --find content from FILE (for multiline "
+                             "or shell-hostile text).")
+    parser.add_argument("--replace", default=None,
+                        help="Exact literal replacement text.")
+    parser.add_argument("--replace-file", default=None, metavar="FILE",
+                        help="Read --replace content from FILE.")
+    parser.add_argument("--create", action="store_true",
+                        help="Create PATH (which must not exist) with the "
+                             "replacement content instead of editing. Takes "
+                             "no --find/--find-file.")
+    return parser.parse_args(argv)
+
+
+def fail(message, code):
+    sys.stderr.write("muse-edit-file: %s\n" % message)
+    return code
+
+
+def load_input(direct, file_path, name):
+    """Return (text, None) or (None, error); exactly one source required."""
+    if (direct is None) == (file_path is None):
+        return None, "need exactly one of %s and %s-file" % (name, name)
+    if file_path is not None:
+        try:
+            with open(file_path, "r", encoding="utf-8") as handle:
+                return handle.read(), None
+        except OSError as exc:
+            return None, "cannot read %s %s: %s" % (name, file_path, exc)
+    return direct, None
+
+
+def match_line_numbers(content, find):
+    """1-based line numbers of each non-overlapping occurrence of find."""
+    numbers = []
+    start = 0
+    while True:
+        index = content.find(find, start)
+        if index < 0:
+            return numbers
+        numbers.append(content.count("\n", 0, index) + 1)
+        start = index + len(find)
+
+
+def atomic_write(path, data, mode):
+    """Write data to path atomically, preserving permission bits when given."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".muse-edit-", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(data)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def print_diff(path, old, new):
+    shown = 0
+    truncated = False
+    for line in difflib.unified_diff(
+            old.splitlines(), new.splitlines(),
+            fromfile="a/" + path, tofile="b/" + path, lineterm=""):
+        if shown >= DIFF_LINE_CAP:
+            truncated = True
+            break
+        print(line)
+        shown += 1
+    if truncated:
+        print("... [diff truncated to %d lines]" % DIFF_LINE_CAP)
+
+
+def run_create(path, replacement):
+    if os.path.lexists(path):
+        return fail("not creating %s: path already exists" % path,
+                    EXIT_USAGE_IO)
+    try:
+        atomic_write(path, replacement, None)
+    except OSError as exc:
+        return fail("cannot create %s: %s" % (path, exc), EXIT_USAGE_IO)
+    print("created %s (%d bytes)" % (path, len(replacement.encode("utf-8"))))
+    return EXIT_OK
+
+
+def run_edit(path, find, replacement):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            content = handle.read()
+    except FileNotFoundError:
+        return fail("no such file: %s (use --create to make it)" % path,
+                    EXIT_USAGE_IO)
+    except OSError as exc:
+        return fail("cannot read %s: %s" % (path, exc), EXIT_USAGE_IO)
+    except UnicodeDecodeError as exc:
+        return fail("%s is not valid UTF-8: %s" % (path, exc), EXIT_USAGE_IO)
+    if not find:
+        return fail("--find must be non-empty", EXIT_USAGE_IO)
+    count = content.count(find)
+    if count == 0:
+        return fail("%s: find text occurs 0 times, need exactly 1; file "
+                    "unchanged" % path, EXIT_MATCH)
+    if count > 1:
+        numbers = match_line_numbers(content, find)[:MATCH_LIST_CAP]
+        listed = ", ".join("line %d" % n for n in numbers)
+        if count > MATCH_LIST_CAP:
+            listed += ", and %d more" % (count - MATCH_LIST_CAP)
+        return fail("%s: find text occurs %d times (%s), need exactly 1; "
+                    "file unchanged" % (path, count, listed), EXIT_MATCH)
+    try:
+        mode = 0o777 & os.stat(path).st_mode
+    except OSError as exc:
+        return fail("cannot stat %s: %s" % (path, exc), EXIT_USAGE_IO)
+    try:
+        atomic_write(path, content.replace(find, replacement, 1), mode)
+    except OSError as exc:
+        return fail("cannot write %s: %s" % (path, exc), EXIT_USAGE_IO)
+    print_diff(path, content, content.replace(find, replacement, 1))
+    return EXIT_OK
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.create and (args.find is not None or args.find_file is not None):
+        return fail("--create takes no --find/--find-file", EXIT_USAGE_IO)
+    if args.create:
+        replacement, error = load_input(args.replace, args.replace_file,
+                                        "--replace")
+        if error is not None:
+            return fail(error, EXIT_USAGE_IO)
+        return run_create(args.path, replacement)
+    find, error = load_input(args.find, args.find_file, "--find")
+    if error is not None:
+        return fail(error, EXIT_USAGE_IO)
+    replacement, error = load_input(args.replace, args.replace_file,
+                                    "--replace")
+    if error is not None:
+        return fail(error, EXIT_USAGE_IO)
+    return run_edit(args.path, find, replacement)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

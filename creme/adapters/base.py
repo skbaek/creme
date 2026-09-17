@@ -47,6 +47,13 @@ class Adapter:
             f"unsupported operating system: {self.system}",
         )
 
+    def codex_binary(self) -> CapabilityResult:
+        """Default path of a reviewed Codex CLI bundled with a desktop client."""
+        return self.result(
+            "codex_binary", "UNAVAILABLE",
+            f"no bundled Codex binary location is defined for {self.system}",
+        )
+
     def platform_identity(self, machine: Optional[str] = None) -> CapabilityResult:
         return self.result(
             "platform_identity", "UNAVAILABLE",

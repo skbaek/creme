@@ -26,6 +26,7 @@ from .host_wrappers import (
 )
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import idle_workers
+from . import luna_reserve
 from . import master_migrate
 from . import master_operations
 from . import master_reconcile
@@ -158,6 +159,99 @@ def cmd_host_guidance(arguments: argparse.Namespace) -> int:
         "guidance": checked.content,
     })
     return 0 if checked.status in {"OK", "MISSING"} else 1
+
+
+def _luna_policy(arguments: argparse.Namespace) -> luna_reserve.Policy:
+    return luna_reserve.Policy(
+        min_remaining_percent=arguments.min_remaining_percent,
+        jitter_seconds=arguments.jitter_seconds,
+        discrimination_seconds=arguments.discrimination_seconds,
+        allow_regular_available=getattr(arguments, "allow_regular_available", False),
+    )
+
+
+def cmd_luna_reserve_status(arguments: argparse.Namespace) -> int:
+    code, report = luna_reserve.status(_luna_policy(arguments), module_root=ROOT)
+    if arguments.json:
+        _json(report)
+    else:
+        print(luna_reserve.format_status(report))
+    return code
+
+
+def cmd_luna_reserve_run(arguments: argparse.Namespace) -> int:
+    overrides = list(arguments.overrides or [])
+    if arguments.brief == "-":
+        brief = sys.stdin.read()
+    else:
+        try:
+            brief = Path(arguments.brief).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"verdict=REFUSED exit={luna_reserve.EXIT_PREFLIGHT_REFUSED}\nrefused: cannot read brief: {exc}")
+            return luna_reserve.EXIT_PREFLIGHT_REFUSED
+    request = luna_reserve.RunRequest(
+        brief=brief,
+        workdir=Path(arguments.target).expanduser(),
+        effort=arguments.effort,
+        write=arguments.write,
+        timeout_seconds=arguments.timeout_seconds,
+        policy=_luna_policy(arguments),
+        overrides=overrides,
+        preflight_only=arguments.preflight_only,
+    )
+    code, summary = luna_reserve.run(ROOT, request)
+    if arguments.json:
+        _json(summary)
+    else:
+        print(luna_reserve.format_run(summary))
+    if code == luna_reserve.EXIT_ATTRIBUTION_FAILED:
+        print(luna_reserve.STOP_MESSAGE, file=sys.stderr)
+    return code
+
+
+def cmd_luna_reserve_audit(arguments: argparse.Namespace) -> int:
+    code, result = luna_reserve.audit_target(ROOT, arguments.target, _luna_policy(arguments))
+    if arguments.json:
+        _json(result)
+    else:
+        print(
+            f"verdict={result.get('verdict')} turns={result.get('turns')} "
+            f"models={result.get('turn_models')} snapshots={result.get('attributed_snapshots')}/"
+            f"{result.get('token_snapshots')} rollout={result.get('rollout')}"
+        )
+        print(f"reference={result.get('reference_source')}")
+        for line in (result.get("failures") or []) + (result.get("refusals") or []):
+            print(f"  {line}")
+    if code == luna_reserve.EXIT_ATTRIBUTION_FAILED:
+        print(luna_reserve.STOP_MESSAGE, file=sys.stderr)
+    return code
+
+
+class _RefusedOverride(argparse.Action):
+    """Record a forbidden Codex override so the run refuses it loudly."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        recorded = list(getattr(namespace, self.dest, None) or [])
+        recorded.append(option_string if values is None else f"{option_string} {values}")
+        setattr(namespace, self.dest, recorded)
+
+
+def _add_luna_policy_arguments(item: argparse.ArgumentParser) -> None:
+    item.add_argument("--json", action="store_true", help="print the full JSON record")
+    item.add_argument(
+        "--min-remaining-percent", type=float,
+        default=luna_reserve.DEFAULT_MIN_REMAINING_PERCENT,
+        help="refuse below this remaining reserve share",
+    )
+    item.add_argument(
+        "--jitter-seconds", type=_positive, default=luna_reserve.DEFAULT_JITTER_SECONDS,
+        help="reset-time tolerance when attributing a token snapshot",
+    )
+    item.add_argument(
+        "--discrimination-seconds", type=_positive,
+        default=luna_reserve.DEFAULT_DISCRIMINATION_SECONDS,
+        help="minimum distance between reserve and regular reset times",
+    )
 
 
 def cmd_doctor(arguments: argparse.Namespace) -> int:
@@ -1196,9 +1290,61 @@ def parser() -> argparse.ArgumentParser:
         help="optional absolute UTC instant closing the window, for a fixed baseline",
     )
     build_ledger.set_defaults(func=cmd_build_ledger)
+
+    luna = commands.add_parser(
+        "luna-reserve",
+        help="guarded Codex Luna reserve (gpt-reserve) pseudo-subagent runs",
+    )
+    luna_commands = luna.add_subparsers(dest="luna_action", required=True)
+    luna_status = luna_commands.add_parser("status", help="zero-token reserve and regular bucket read")
+    _add_luna_policy_arguments(luna_status)
+    luna_status.set_defaults(func=cmd_luna_reserve_status)
+    luna_run = luna_commands.add_parser(
+        "run",
+        help="run one bounded brief on gpt-reserve with preflight and attribution audit",
+    )
+    _add_luna_policy_arguments(luna_run)
+    luna_run.add_argument("--brief", required=True, help="brief file, or - for stdin")
+    luna_run.add_argument(
+        "--target", required=True,
+        help="directory the brief is about; the only writable root in --write mode",
+    )
+    luna_run.add_argument(
+        "--effort", default=luna_reserve.DEFAULT_EFFORT,
+        help="reasoning effort: low, medium (default), or high",
+    )
+    luna_run.add_argument(
+        "--write", action="store_true",
+        help="allow edits confined to --target (default is read-only)",
+    )
+    luna_run.add_argument(
+        "--timeout-seconds", type=_positive, default=luna_reserve.DEFAULT_TIMEOUT_SECONDS,
+    )
+    luna_run.add_argument(
+        "--preflight-only", action="store_true",
+        help="launch the isolated server and verify admission and isolation, then stop (no thread, no tokens)",
+    )
+    luna_run.add_argument(
+        "--allow-regular-available", action="store_true",
+        help="admit a run while the regular bucket is available (post-reset verification only)",
+    )
+    for flag in luna_reserve.FORBIDDEN_OVERRIDE_FLAGS:
+        luna_run.add_argument(
+            flag, dest="overrides", nargs="?", action=_RefusedOverride, help=argparse.SUPPRESS,
+        )
+    luna_run.set_defaults(func=cmd_luna_reserve_run, overrides=[], collects_extra_overrides=True)
+    luna_audit = luna_commands.add_parser("audit", help="re-audit a rollout path or thread id")
+    _add_luna_policy_arguments(luna_audit)
+    luna_audit.add_argument("target", help="rollout .jsonl path or Codex thread id")
+    luna_audit.set_defaults(func=cmd_luna_reserve_audit)
     return root
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    arguments = parser().parse_args(argv)
+    built = parser()
+    arguments, extra = built.parse_known_args(argv)
+    if extra:
+        if not getattr(arguments, "collects_extra_overrides", False):
+            built.error("unrecognized arguments: " + " ".join(extra))
+        arguments.overrides = list(arguments.overrides or []) + extra
     return int(arguments.func(arguments))

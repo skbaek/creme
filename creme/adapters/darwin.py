@@ -30,6 +30,14 @@ class DarwinAdapter(NativeAdapter):
         re.IGNORECASE,
     )
 
+    codex_bundle_binary = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
+
+    def codex_binary(self) -> CapabilityResult:
+        path = self.codex_bundle_binary
+        if path.is_file() and os.access(path, os.X_OK):
+            return self.result("codex_binary", "OK", "ChatGPT desktop bundled Codex CLI", {"path": str(path)})
+        return self.result("codex_binary", "UNAVAILABLE", f"no executable Codex CLI at {path}")
+
     def platform_identity(self, machine: str | None = None) -> CapabilityResult:
         detected = (machine or platform.machine()).strip().lower()
         if detected in {"arm64", "aarch64"}:

@@ -461,11 +461,11 @@ class GuardedSession:
         unexpected = sorted(set(params) - allowed)
         if unexpected:
             raise PinViolation(f"{method} carries non-permitted parameters: {unexpected}")
-        if "model" in params and params["model"] != self.pinned_model:
-            raise PinViolation(f"{method} model {params['model']!r} is not {self.pinned_model}")
-        if method in ("thread/start", "thread/resume", "turn/start") and params.get("model") != self.pinned_model:
-            raise PinViolation(f"{method} must pin model {self.pinned_model}")
+        # Only these methods accept a model, approval policy, or reviewer key
+        # (see _ALLOWED_KEYS), and each must carry all three pinned values.
         if method in ("thread/start", "thread/resume", "turn/start"):
+            if params.get("model") != self.pinned_model:
+                raise PinViolation(f"{method} must pin model {self.pinned_model}, not {params.get('model')!r}")
             if params.get("approvalsReviewer") != "user":
                 raise PinViolation(f"{method} must pin approvals reviewer user, never auto_review")
             if params.get("approvalPolicy") != "never":
@@ -480,10 +480,6 @@ class GuardedSession:
             raise PinViolation(f"{method} sandbox {params['sandbox']!r} differs from the session")
         if "cwd" in params and str(params["cwd"]) != str(self.cwd):
             raise PinViolation(f"{method} cwd differs from the session")
-        if "approvalPolicy" in params and params["approvalPolicy"] != "never":
-            raise PinViolation(f"{method} approval policy must be never")
-        if "approvalsReviewer" in params and params["approvalsReviewer"] != "user":
-            raise PinViolation(f"{method} approvals reviewer must be user")
         if params.get("ephemeral"):
             raise PinViolation("an ephemeral thread leaves no rollout to audit")
         if "config" in params and params["config"] != self.thread_config():

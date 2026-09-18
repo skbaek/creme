@@ -68,10 +68,29 @@ point (7 of 7 runs); `medium` reached the correct verdict 2 of 2 at roughly half
 and then stopped instead of resolving it. No correctness gain was observed above
 `medium`, and the proposed designs grew more elaborate as effort rose. Run-to-run
 spread at a FIXED effort was 1.3–1.9x in tokens, so compare levels only with
-replicates. **Write mode and Lean mode are still uncalibrated — keep `high` there**;
+replicates. **Write mode and Lean mode have no controlled runs — keep `high` there**;
 every failure seen in real use so far happened while writing. Details and the
 pre-registered next experiments: the master record's
 `briefs/luna-effort-calibration-20260918.md`.
+
+**Field observations, second day of real use (2026-09-18; single runs, no
+replicates — a working default, not a measurement).** By mode:
+
+| Mode | Default | What was seen |
+|---|---|---|
+| read-only, existence or location only | `low` | right locations; ignored "quote verbatim"; one false `MISSING` for a `private` declaration |
+| read-only, anything the master will rely on | `medium` | no fabricated signature in about sixty citations; two lemmas placed in the wrong same-named directory |
+| write, document synthesis into a fixed template | `medium` | faithful and sourced; over-uses placeholders; did not notice a cross-source impossibility |
+| write, code whose result a command checks | `high` | followed a long exact specification and a self-check against a proved bound |
+| Lean | `high` | closed a new 92-line module (dependent record, inductive relation, four lemmas) and a change to a public inductive with its consumers, both from statements a frontier worker had already frozen; `xhigh` on a similar task showed no gain |
+
+Lean mode is therefore a fit for more than named edits: **a small unit whose
+statements are already frozen** is within reach, and that is the pattern to
+prefer — a frontier worker freezes the statements, Luna elaborates them, the
+master reads `git diff` at the build-approval prompt, before accepting the
+build that would certify the edit. Nothing here shows that Luna can find a
+proof whose shape is open. Try `xhigh` only after a `high` attempt has failed,
+and record whether it helped.
 
 **But effort is NOT the main lever, and the ladder below `high` is
 uncalibrated.** Across the first twelve real uses (2026-09-18) the efforts
@@ -248,6 +267,31 @@ The brief is the user message of the turn. Keep it short and falsifiable:
 
 Do not put secrets, the master record, or user-reserved decisions in a brief.
 Give a write-mode run the smallest target that contains the edit.
+
+Habits that paid for themselves in real use:
+
+- **Ask for facts, not verdicts.** Inventories came back accurate; the
+  concluding inference was the weakest part of each. Keep the conclusion for
+  the master or a frontier worker.
+- **Have it quote every definition it relies on, with `file:line`, and list
+  the ambiguities it resolved.** This once exposed an error in the master's
+  own brief in a single read, and it turns a wrong result into a diagnosable
+  one.
+- **Give it a self-check against something already proved or known** ("this
+  bound must hold on these cases; if it fails, your model is wrong"). A "none
+  found" is worth little without one.
+- **In every inventory, ask for each declaration's visibility and the path
+  exactly as the search printed it**, and give a pattern that admits a
+  visibility prefix, for example
+  `rg -n '^(private |protected )?(theorem|lemma|def|structure|inductive) NAME'`.
+  Both read-only runs of 2026-09-18 missed `private` declarations, and a
+  sibling keeps same-named files in two directories, so a wrong path fails
+  silently.
+- **Say which items are not open.** Told to mark unknowns, it marks too much.
+  Keep structural sanity checks explicit ("can this be proved in the file you
+  name? check the import direction").
+- **Correct or extend through `send` on the same session** rather than a new
+  brief: the thread keeps its context.
 
 ## Calling it
 

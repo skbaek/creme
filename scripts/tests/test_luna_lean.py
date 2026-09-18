@@ -326,6 +326,7 @@ class LeanPreambleTest(unittest.TestCase):
 class LeanBrokerHarness(BrokerHarness):
     def setUp(self):
         super().setUp()
+        self.environ.pop(B.MAX_LEAN_SESSIONS_ENV, None)
         self.goal = "lean-goal-v1"
         self.repository = self.base / "blanc"
         self.worktree = self.repository / ".worktrees" / self.goal
@@ -377,12 +378,18 @@ class LeanBrokerHarness(BrokerHarness):
         return {"verdict": self.wind_down_verdict, "status": "OK" if self.wind_down_verdict == "OK" else "REFUSED",
                 "detail": "fake wind-down", "residual": [], "exit": 0}
 
+    def worktree_for(self, goal):
+        worktree = self.repository / ".worktrees" / goal
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text("gitdir: /nonexistent\n", encoding="utf-8")
+        return worktree
+
     def open(self, brief="Run lean_diagnostic_messages on Blanc/Basic.lean.", target=None, op="start",
-             lean=True, write=False, **extra):
+             lean=True, write=False, goal=None, **extra):
         request = {"brief": brief, "target": str(target or self.worktree), "effort": "low", "detail": "live",
                    "write": write, **extra}
         if lean:
-            request["lean"] = self.goal
+            request["lean"] = goal or self.goal
         return self.broker.open_session(request, op)
 
     def session(self, reply) -> B.BrokerSession:
@@ -461,21 +468,85 @@ class LeanBrokerSessionTest(LeanBrokerHarness):
         self.assertEqual(len(self.entries("launch")), 1)  # only the zero-token probe server
         self.assertEqual(self.entries("request", "thread/start"), [])
 
-    def test_a_second_lean_session_is_refused_while_one_is_live(self):
+    def test_a_second_lean_session_on_a_different_goal_is_admitted(self):
         self.scenario["hang"] = True
         self.write_scenario()
         first = self.open()
         self.assertEqual(first["code"], 0, first)
-        launches = len(self.entries("launch"))
-        second = self.open()
-        self.assertEqual(second["code"], L.EXIT_PREFLIGHT_REFUSED, second)
-        self.assertTrue(any("one Lean session at a time" in item for item in second["refusals"]), second)
-        self.assertEqual(len(self.entries("launch")), launches)
+        other_goal = "lean-other-v1"
+        second = self.open(goal=other_goal, target=self.worktree_for(other_goal))
+        self.assertEqual(second["code"], 0, second)
+        self.assertEqual(self.host_calls, [self.goal, other_goal])
+        self.session(second).stop("requested")
         self.session(first).stop("requested")
-        self.scenario["hang"] = False
+
+    def test_a_third_lean_session_is_refused_while_two_are_live(self):
+        self.scenario["hang"] = True
         self.write_scenario()
-        third = self.open()
-        self.assertEqual(third["code"], 0, third)
+        first = self.open()
+        other_goal = "lean-other-v1"
+        second = self.open(goal=other_goal, target=self.worktree_for(other_goal))
+        self.assertEqual(first["code"], 0, first)
+        self.assertEqual(second["code"], 0, second)
+        third_goal = "lean-third-v1"
+        launches = len(self.entries("launch"))
+        third = self.open(goal=third_goal, target=self.worktree_for(third_goal))
+        self.assertEqual(third["code"], L.EXIT_PREFLIGHT_REFUSED, third)
+        self.assertTrue(any("at most 2 Lean sessions" in item for item in third["refusals"]), third)
+        self.assertEqual(len(self.entries("launch")), launches)
+        self.session(second).stop("requested")
+        self.session(first).stop("requested")
+
+    def test_a_second_lean_session_for_the_same_goal_is_refused_including_mutation(self):
+        self.scenario["hang"] = True
+        self.write_scenario()
+        first = self.open()
+        same = self.open()
+        self.assertEqual(same["code"], L.EXIT_PREFLIGHT_REFUSED, same)
+        self.assertTrue(any("same goal" in item or "goal worktree wind-down scopes overlap" in item
+                            for item in same["refusals"]), same)
+        mutation = self.worktree_for(f"{self.goal}-mutation")
+        mutation_session = self.open(target=mutation)
+        self.assertEqual(mutation_session["code"], L.EXIT_PREFLIGHT_REFUSED, mutation_session)
+        self.assertTrue(any("goal worktree wind-down scopes overlap" in item
+                            for item in mutation_session["refusals"]), mutation_session)
+        self.session(first).stop("requested")
+
+    def test_a_stopping_lean_session_still_counts_toward_the_cap(self):
+        self.scenario["hang"] = True
+        self.write_scenario()
+        first = self.open()
+        self.session(first).set_state("stopping")
+        other_goal = "lean-other-v1"
+        second = self.open(goal=other_goal, target=self.worktree_for(other_goal))
+        third_goal = "lean-third-v1"
+        third = self.open(goal=third_goal, target=self.worktree_for(third_goal))
+        self.assertEqual(second["code"], 0, second)
+        self.assertEqual(third["code"], L.EXIT_PREFLIGHT_REFUSED, third)
+        self.assertTrue(any("at most 2 Lean sessions" in item for item in third["refusals"]), third)
+        self.session(second).stop("requested")
+        self.session(first).stop("requested")
+
+    def test_lean_session_cap_environment_override(self):
+        self.broker.environ[B.MAX_LEAN_SESSIONS_ENV] = "1"
+        self.scenario["hang"] = True
+        self.write_scenario()
+        first = self.open()
+        other_goal = "lean-other-v1"
+        second = self.open(goal=other_goal, target=self.worktree_for(other_goal))
+        self.assertEqual(second["code"], L.EXIT_PREFLIGHT_REFUSED, second)
+        self.assertTrue(any("at most 1 Lean sessions" in item for item in second["refusals"]), second)
+        self.session(first).stop("requested")
+
+        for invalid in ("0", "5", "not-an-integer"):
+            with self.subTest(invalid=invalid):
+                self.broker.environ[B.MAX_LEAN_SESSIONS_ENV] = invalid
+                first = self.open()
+                invalid_goal = f"lean-invalid-{invalid.replace('-', '')}-v1"
+                second = self.open(goal=invalid_goal, target=self.worktree_for(invalid_goal))
+                self.assertEqual(second["code"], 0, second)
+                self.session(second).stop("requested")
+                self.session(first).stop("requested")
 
     def test_host_refusal_or_a_busy_worktree_starts_nothing(self):
         self.host_refusals = ["DRAIN_HEAVY/LIGHT_ONLY: available memory is 15% (<20%)"]

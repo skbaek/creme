@@ -64,6 +64,8 @@ IDLE_ENV = "CREME_LUNA_RESERVE_BROKER_IDLE_SECONDS"
 SESSION_IDLE_ENV = "CREME_LUNA_RESERVE_SESSION_IDLE_SECONDS"
 SETTLE_ENV = "CREME_LUNA_RESERVE_SETTLE_SECONDS"
 ROLLOUT_WAIT_ENV = "CREME_LUNA_RESERVE_ROLLOUT_WAIT_SECONDS"
+MAX_LEAN_SESSIONS = 2
+MAX_LEAN_SESSIONS_ENV = "CREME_LUNA_MAX_LEAN_SESSIONS"
 
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_SOCKET_PATH_BYTES = 100
@@ -80,6 +82,15 @@ _APPROVAL_ID = re.compile(r"^a[0-9]{1,6}$")
 
 
 _SPAWNED: list[subprocess.Popen] = []
+
+
+def _max_lean_sessions(environ: dict) -> int:
+    """Return the bounded Lean-session cap, failing safe on bad configuration."""
+    try:
+        value = int(environ.get(MAX_LEAN_SESSIONS_ENV, MAX_LEAN_SESSIONS))
+    except (TypeError, ValueError):
+        return MAX_LEAN_SESSIONS
+    return value if 1 <= value <= 4 else MAX_LEAN_SESSIONS
 
 
 class BrokerError(RuntimeError):
@@ -1239,8 +1250,8 @@ class Broker:
                 if refusals:
                     return {"ok": False, "code": L.EXIT_PREFLIGHT_REFUSED, "verdict": "REFUSED",
                             "refusals": refusals}
-            # Registered under the same lock as the Lean check, so two concurrent
-            # starts cannot both pass the one-Lean-session rule.
+            # Registered under the same lock as the Lean check, so concurrent
+            # starts cannot both pass the Lean-session cap.
             self.sessions[session_id] = session
         code, result = session.open(brief, resume_thread)
         if code == L.EXIT_PREFLIGHT_REFUSED and not session.dir.is_dir():
@@ -1253,12 +1264,22 @@ class Broker:
                 **result}
 
     def lean_admission(self, goal: str, target: Path, record: dict) -> list[str]:
-        """Called with the broker lock held: one Lean session at a time, host admits, target is quiet."""
+        """Called with the broker lock held: the Lean cap and goal rule, host admits, target is quiet."""
         live = [session.id for session in self.sessions.values()
                 if session.record.get("lean") and session.state not in TERMINAL_STATES]
-        if live:
-            return [f"a Lean session is already live in this broker ({', '.join(live)}); "
-                    "one Lean session at a time"]
+        limit = _max_lean_sessions(self.environ)
+        refusals: list[str] = []
+        if len(live) >= limit:
+            refusals.append(f"already {len(live)} Lean sessions are live in this broker ({', '.join(live)}); "
+                            f"at most {limit} Lean sessions may be live")
+        same_goal = [session.id for session in self.sessions.values()
+                     if (session.record.get("lean") or {}).get("goal") == goal
+                     and session.state not in TERMINAL_STATES]
+        if same_goal:
+            refusals.append(f"a Lean session for the same goal label {goal} is already live in this broker "
+                            f"({', '.join(same_goal)}); goal worktree wind-down scopes overlap")
+        if refusals:
+            return refusals
         if self.reconciling:
             return [f"crash-recovery wind-down is still running for {sorted(self.reconciling)}"]
         refusals, observed = self.host_probe(goal)

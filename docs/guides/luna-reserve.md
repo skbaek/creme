@@ -513,8 +513,14 @@ tripwire all apply unchanged.
   startup statuses and the tool list. During turns, a tool call on another
   server, a forbidden tool, or a plugin tool is an isolation failure, as in
   version 1.
-- **Host discipline.** The broker holds at most one Lean session at a time,
-  including one that is still stopping. Before starting, it refuses when
+- **Host discipline.** The broker holds at most `MAX_LEAN_SESSIONS` live Lean
+  sessions by default (2; `CREME_LUNA_MAX_LEAN_SESSIONS` may set 1--4, while
+  invalid values use the default), including one that is still stopping.
+  Live sessions must have distinct goal labels: a goal and its `-control`,
+  `-mutation`, or `-rehearsal` worktree share the scope of
+  `reclaim --wind-down GOAL`, so admitting both could reclaim the other
+  session's language server. The headroom floor and semaphore remain the
+  resource safeguards. Before starting, it refuses when
   memory headroom is unavailable, below the semaphore's 20% drain floor
   (`DRAIN_HEAVY`/`LIGHT_ONLY`), or below the host-guidance floor of 30%; when
   another label holds the hard semaphore or a manual hold is active; and when

@@ -95,6 +95,29 @@ proof with no template. For edits, try `xhigh` only after a `high` attempt has
 failed; for a mirrored proof, try `high` first too and record the difference,
 because only `xhigh` has been run.
 
+**Third day: whole units from frozen designs (2026-09-18/19; single runs).**
+One master session used Luna for most of a DRIP/vault wave: 13 sessions, about
+4,000 elaborated lines across ten Blanc modules, four control campaigns (34
+controls), and three Creme code changes. Every Lean run was at `high` and none
+needed a retry for depth. What was seen:
+
+| Mode | Default | What was seen |
+|---|---|---|
+| Lean, a whole unit from a frozen Claude design (statements AND transcribed proofs, donor lines named, fallbacks listed) | `high` | 11 multi-turn runs (613-line generic module; its DRIP instance; an 11-rung re-derivation keeping every statement byte-identical; 774-, 680-, 391- and 1035-line leaves). Zero statement drift across all of them (the master diffed every header against the design at each build approval); elaboration fallbacks rarely needed. A long session carried three dependent units over 8 turns without losing context. |
+| Lean, mutation controls in a `-mutation` worktree | `high` | 34 controls; every one applied, built, restored byte-identically and reported "at predicted site: yes/no" honestly. Quality is set by the MUTANT LIST: lists that name the site where the removed or falsified fact is CONSUMED bit there 29 of 29 times (15 + 6 + 8); a list whose edit breaks an earlier reference first fails only mechanically ("unknown identifier"/"invalid field") — 4 of 5 in one campaign — and one mutant hit a heartbeat timeout (inconclusive). |
+| Lean, a model-level inhabitant by mirroring a named theorem (statement given as meaning + spelling latitude) | `high` | exact first time; read the statement at the approval prompt |
+| read-only, an interface for several consumers | `medium` | facts and citations accurate; the proposed interface was unusable (hooks quantified over all states/messages, so unsatisfiable). A Lean-free Claude designer did this well; use Luna for the fact inventory only |
+| write, code + tests in Creme | `high` | clean when the brief enumerated the test cases; once returned without the required tests while reporting "added regression test" — check the test list, not the summary |
+
+The division of labour that paid most: **a Lean-free Claude designer freezes
+statements and transcribes proofs from named donors (satisfiability of every
+hook shown per consumer), Luna elaborates, the master checks headers at each
+build approval.** Two Lean sessions run concurrently (distinct goals); use
+`approve-builds` with `--header-base` to take the per-build round trips off the
+master. `max` has still not been run on real work: no unit with an open proof
+shape arose. Run it (against `high`, same brief) on the first such unit, and on
+any Luna proof failure retry at `xhigh` then `max` before re-routing.
+
 **But effort is NOT the main lever, and the ladder below `high` is
 uncalibrated.** Across the first twelve real uses (2026-09-18) the efforts
 actually run were one `low`, eight `high` and three `xhigh` — `medium` was never

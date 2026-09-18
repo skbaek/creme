@@ -365,6 +365,12 @@ effort for its hardest non-delegable judgment, preferring the standard model
 and escalating effort within it before reaching for the frontier one, as
 [the briefs guide](briefs.md) describes; that guide holds the brief contract
 and the model-and-effort ladder the goal document no longer carries.
+Before sizing, read your client's model fit table, which is in the goal store
+by default at `$GOAL_STORE/model-fit/<client>.md`, and log whether a guiding
+cell or the sizing rules decided; after accepting or rejecting the result,
+record the observation with the verdict's evidence link, as
+[the model fit guide](model-fit.md) describes. A worker never records its own
+observation.
 
 A worker dies with the master. It therefore checkpoints to Git and its state
 brief at every green boundary, so that a successor master can respawn it from

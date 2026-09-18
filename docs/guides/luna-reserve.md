@@ -90,8 +90,8 @@ statements are already frozen** is within reach, and that is the pattern to
 prefer — a frontier worker freezes the statements, Luna elaborates them, the
 master reads `git diff` at the build-approval prompt, before accepting the
 build that would certify the edit. A proof whose shape is given by a named
-proof to mirror is also within reach. Nothing here shows that Luna can find a
-proof with no template. For edits, try `xhigh` only after a `high` attempt has
+proof to mirror is also within reach. Finding a proof with no template has
+worked once since then, expensively (see "The first open-shape proof" below). For edits, try `xhigh` only after a `high` attempt has
 failed; for a mirrored proof, try `high` first too and record the difference,
 because only `xhigh` has been run.
 
@@ -114,9 +114,26 @@ statements and transcribes proofs from named donors (satisfiability of every
 hook shown per consumer), Luna elaborates, the master checks headers at each
 build approval.** Two Lean sessions run concurrently (distinct goals); use
 `approve-builds` with `--header-base` to take the per-build round trips off the
-master. `max` has still not been run on real work: no unit with an open proof
-shape arose. Run it (against `high`, same brief) on the first such unit, and on
-any Luna proof failure retry at `xhigh` then `max` before re-routing.
+master. On any Luna proof failure, retry the same thread at `xhigh` (`stop`,
+then `resume THREAD --effort xhigh`), then `max`, before re-routing.
+
+**The first open-shape proof (2026-09-19; one run, confounded).** A locator
+theorem whose brief named the lemma route but gave no proof to mirror cost
+52.6M thread tokens over three `high` turns (the hoists it needed plus the
+theorem), 2.7 times an eight-turn session that elaborated about 2,400 frozen
+lines. At `high` Luna reached the exact remaining goal and diagnosed the
+blocker correctly (a constructor it had written itself returned `Nonempty`,
+losing the call slot's identity), then stopped: it read "the target exactly as
+the brief states it" as freezing its own new declarations too. Resumed at
+`xhigh` with a scope clarification, it passed in one turn (about 2.3 times the
+tokens and 2.1 times the wall time of the `high` attempt). The clarification
+and the effort changed together, so this does not show that `xhigh` was needed;
+`max` was not reached. What it does show: finding a proof, not the size of the
+unit, is the expensive shape. Every Lean brief should also say which
+declarations are frozen (by name, or "everything present at commit X") and
+that declarations new in the unit may be reshaped. The master's review of the
+passing turn still found a 25-line inline copy of a `private` lemma, which the
+duplication gate does not catch, and a docstring on the wrong declaration.
 
 **But effort is NOT the main lever, and the ladder below `high` is
 uncalibrated.** Across the first twelve real uses (2026-09-18) the efforts

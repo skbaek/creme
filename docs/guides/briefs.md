@@ -134,9 +134,12 @@ When the user instructs it, a master may dispatch a bounded task whose result
 it can cheaply verify (an inventory, a log or diff summary, a mechanical edit,
 a first-pass check) to Codex Luna reserve as a pseudo-subagent through
 `python3 -m creme luna-reserve run`, saving its own and its workers' tokens.
-It never replaces a worker for Lean proof or elaboration, architecture, or a
-non-delegable judgment, and it is never a fallback when a client is busy or
-out of quota. Its brief states the question, the target directory, read-only
+In Lean mode it also elaborates a unit whose statements a Claude or frontier
+designer has frozen, and runs mutation-control campaigns, with the master
+checking headers at each build approval; the Luna reserve guide records which
+shapes have worked at which effort. It never replaces a worker for
+architecture, interface design, or a non-delegable judgment, and it is never a
+fallback when a client is busy or out of quota. Its brief states the question, the target directory, read-only
 or write mode, and the evidence to quote; the master verifies the answer
 before relying on it. The guarded path, the attribution guard, and the stop
 rule are in the [Luna reserve guide](luna-reserve.md).

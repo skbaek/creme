@@ -15,7 +15,9 @@ each fail-closed:
   running server's effective definition must equal that definition exactly.
 * **Host discipline.** A session starts only when memory headroom and the
   semaphore admit heavy work, and no Lean or Lake process already runs in the
-  target. The broker holds at most one Lean session at a time.
+  target. The broker holds at most two live Lean sessions by default
+  (`CREME_LUNA_MAX_LEAN_SESSIONS` accepts 1--4), with distinct goal labels
+  because wind-down also covers sanctioned goal worktree suffixes.
 * **Wind-down.** Every way a Lean session ends runs
   ``python3 -m creme reclaim --wind-down GOAL`` after its app-server has
   closed, then checks that no ``lean`` or ``lake`` process is left with a

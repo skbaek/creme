@@ -484,10 +484,12 @@ tripwire all apply unchanged.
 
 ### What the broker enforces
 
-- **Target.** `--target` must be exactly `<repo>/.worktrees/GOAL` for the Jaune
-  or Blanc repository the Creme host profile resolves (a plain directory with
-  a `.git` file, not a symlink). The goal label therefore names the worktree
-  that `creme lake-build GOAL` and `reclaim --wind-down GOAL` scope on.
+- **Target.** `--target` must be exactly `<repo>/.worktrees/GOAL` or
+  `<repo>/.worktrees/GOAL-<suffix>` where `<suffix>` is `control`, `mutation`,
+  or `rehearsal`, for the Jaune or Blanc repository the Creme host profile
+  resolves (a plain directory with a `.git` file, not a symlink). The goal
+  label therefore names the worktree that `creme lake-build GOAL` and
+  `reclaim --wind-down GOAL` scope on.
   Anything else is refused before any process starts.
 - **One MCP server.** Every MCP server stays a disabled stub except
   `lean-lsp-mcp`. Its definition comes from the launch root's tracked

@@ -3,7 +3,8 @@
 A Lean-mode session is an ordinary brokered write session with four additions,
 each fail-closed:
 
-* **Target.** The target is exactly ``<repo>/.worktrees/GOAL`` for the Jaune or
+* **Target.** The target is exactly ``<repo>/.worktrees/GOAL`` or
+  ``<repo>/.worktrees/GOAL-<suffix>`` for a sanctioned suffix, in the Jaune or
   Blanc repository the Creme host profile resolves, so the session's goal label
   names the worktree that ``creme lake-build`` and ``reclaim --wind-down``
   scope on.
@@ -36,6 +37,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Optional
+
+from .task_wind_down import SANCTIONED_SUFFIXES
 
 LEAN_MCP_SERVER = "lean-lsp-mcp"
 PROJECT_CONFIG_RELATIVE = Path(".codex/config.toml")
@@ -90,14 +93,16 @@ def repositories(creme_root: Path, adapter: Any = None) -> tuple[Path, ...]:
 
 
 def target_refusals(goal: str, target: Path, repository_roots: tuple[Path, ...]) -> list[str]:
-    """Refuse anything but exactly ``<jaune|blanc>/.worktrees/GOAL``."""
+    """Refuse anything but exactly ``<jaune|blanc>/.worktrees/GOAL`` or a sanctioned ``-suffix`` tree."""
     if not isinstance(goal, str) or GOAL_LABEL.fullmatch(goal) is None or goal in (".", ".."):
         return [f"Lean goal label {goal!r} is not a simple stable identifier"]
     raw = Path(target).expanduser()
-    allowed = [repository / ".worktrees" / goal for repository in repository_roots]
-    for candidate in allowed:
-        if raw.absolute() != candidate and raw.resolve() != candidate:
-            continue
+    names = (goal, *(f"{goal}-{suffix}" for suffix in SANCTIONED_SUFFIXES))
+    allowed = [repository / ".worktrees" / name for repository in repository_roots for name in names]
+    candidate = next((path for path in allowed if raw.absolute() == path), None)
+    if candidate is None:
+        candidate = next((path for path in allowed if raw.resolve() == path), None)
+    if candidate is not None:
         if candidate.is_symlink():
             return [f"Lean target {candidate} is a symlink"]
         if not candidate.is_dir() or not (candidate / ".git").is_file():
@@ -105,8 +110,8 @@ def target_refusals(goal: str, target: Path, repository_roots: tuple[Path, ...])
         if raw.resolve() != candidate.resolve() or candidate.resolve().parent != candidate.parent.resolve():
             return [f"Lean target {candidate} resolves outside its repository's .worktrees directory"]
         return []
-    names = " or ".join(str(path) for path in allowed) or "no configured repository"
-    return [f"Lean mode needs the goal's own worktree ({names}), not {raw}"]
+    candidates = " or ".join(str(path) for path in allowed) or "no configured repository"
+    return [f"Lean mode needs the goal's own worktree ({candidates}), or its sanctioned disposable tree, not {raw}"]
 
 
 # ---------------------------------------------------------------------------

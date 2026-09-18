@@ -79,9 +79,16 @@ class LeanTargetTest(unittest.TestCase):
 
     def test_only_the_goal_worktree_of_jaune_or_blanc_is_accepted(self):
         self.assertEqual(self.refusals("goal-v1", self.worktree), [])
+        for suffix in ("mutation", "control", "rehearsal"):
+            disposable = self.worktree_at(self.blanc, f"goal-v1-{suffix}")
+            with self.subTest(suffix=suffix):
+                self.assertEqual(self.refusals("goal-v1", disposable), [])
         jaune = self.worktree_at(self.jaune, "other-v1")
         self.assertEqual(self.refusals("other-v1", jaune), [])
         other = self.worktree_at(self.blanc, "other-v1")
+        unsanctioned = self.worktree_at(self.blanc, "goal-v1-other")
+        no_hyphen = self.worktree_at(self.blanc, "goal-v1mutation")
+        foreign = self.worktree_at(self.blanc, "OTHERGOAL-mutation")
         (self.worktree / "Blanc").mkdir()
         plain = self.blanc / ".worktrees" / "plain-v1"
         plain.mkdir()
@@ -95,11 +102,24 @@ class LeanTargetTest(unittest.TestCase):
             ("plain-v1", plain),                     # not a Git worktree
             ("goal-v1", third),                      # a repository the profile does not name
             ("link-v1", link),                       # a symlinked worktree
+            ("goal-v1", unsanctioned),               # unsanctioned suffix
+            ("goal-v1", no_hyphen),                  # no hyphen
+            ("goal-v1", foreign),                    # different goal
             ("../goal-v1", self.worktree),           # an unsafe label
             ("goal-v1", self.base / "missing"),
         ):
             with self.subTest(goal=goal, target=target):
                 self.assertTrue(self.refusals(goal, target))
+
+    def test_sanctioned_disposable_symlink_is_refused(self):
+        mutation = self.blanc / ".worktrees" / "goal-v1-mutation"
+        mutation.symlink_to(self.worktree)
+        self.assertTrue(self.refusals("goal-v1", mutation))
+
+    def test_sanctioned_disposable_directory_must_be_a_git_worktree(self):
+        mutation = self.blanc / ".worktrees" / "goal-v1-mutation"
+        mutation.mkdir()
+        self.assertTrue(self.refusals("goal-v1", mutation))
 
 
 class LeanDefinitionTest(unittest.TestCase):

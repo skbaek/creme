@@ -96,6 +96,15 @@ redone; `unknown` is every run whose master-verified verdict cannot be joined.
 Never infer a verdict from the worker's summary, from silence, or from a later
 merge whose record does not name the run.
 
+A run ended or truncated by something outside its work — a client capacity or
+usage limit, a user- or master-ordered wind-down or pause, a master error, a
+reassignment, or a scope cut by a user decision — says nothing about the
+option's quality: record it `unknown` with `verdict_source: none —
+interrupted: <cause> (<record>)`, unless the master's record judged the part it
+finished, in which case judge only that part and name the interruption in
+`notes`. `fail` is for work rejected or redone on its merits, and `partial`
+only when the missing part was the run's own shortfall.
+
 Cost fields are observables, never dollars. Tokens by category are not a
 price: categories are billed differently and differently by client. A
 weekly-limit or bucket delta may be quoted in `notes` only when the record

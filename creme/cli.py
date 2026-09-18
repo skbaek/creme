@@ -1157,7 +1157,7 @@ def cmd_model_fit_add(arguments: argparse.Namespace) -> int:
     try:
         if arguments.from_claude_transcript:
             path = Path(arguments.from_claude_transcript).expanduser()
-            extracted = model_fit.claude_transcript_usage(path)
+            extracted = model_fit.claude_transcript_usage(path, arguments.since, arguments.until)
             fields["source"] = str(path)
             fields["run"] = path.stem
         elif arguments.from_luna_session:
@@ -1528,6 +1528,8 @@ def parser() -> argparse.ArgumentParser:
     record.add_argument("--from-claude-transcript", metavar="JSONL")
     record.add_argument("--from-luna-session", metavar="DIR")
     record.add_argument("--from-codex-rollout", metavar="JSONL")
+    fit_add.add_argument("--since", metavar="ISO", help="Claude transcript: count only entries at or after this time")
+    fit_add.add_argument("--until", metavar="ISO", help="Claude transcript: count only entries at or before this time")
     for key in model_fit.FIELDS:
         fit_add.add_argument("--" + key.replace("_", "-"), dest=key)
     fit_add.set_defaults(func=cmd_model_fit_add)

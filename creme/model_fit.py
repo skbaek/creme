@@ -636,8 +636,14 @@ def _iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def claude_transcript_usage(path: Path) -> dict[str, Any]:
-    """Tokens, wall time, turns, and served model from a Claude subagent transcript."""
+def claude_transcript_usage(path: Path, since: Optional[str] = None, until: Optional[str] = None) -> dict[str, Any]:
+    """Tokens, wall time, turns, and served model from a Claude subagent transcript.
+
+    ``since``/``until`` (ISO timestamps) restrict it to one segment, e.g. the part
+    before a later continuation message that the master has not yet verified.
+    """
+    lower = _iso(since) if since else None
+    upper = _iso(until) if until else None
     seen: dict[str, dict[str, Any]] = {}
     models: dict[str, int] = {}
     first = last = None
@@ -647,6 +653,8 @@ def claude_transcript_usage(path: Path) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
         stamp = row.get("timestamp")
+        if stamp and ((lower and _iso(stamp) < lower) or (upper and _iso(stamp) > upper)):
+            continue
         if stamp:
             first = first or stamp
             last = stamp

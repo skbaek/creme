@@ -122,6 +122,9 @@ class ModelFitTest(unittest.TestCase):
         self.assertIn("wall_time: 600s", out)
         self.assertIn("turns: 2", out)
         self.assertEqual(self.errors(), [])
+        segment = model_fit.claude_transcript_usage(transcript, until="2026-09-18T10:01:00Z")
+        self.assertEqual(segment["turns"], "1")
+        self.assertEqual(segment["wall_time"], "6s")
 
     def test_luna_session_usage_subtracts_the_resumed_base(self):
         sessions = self.dir / "sessions"

@@ -28,6 +28,7 @@ from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import idle_workers
 from . import luna_broker, luna_reserve
 from . import master_migrate
+from . import model_fit
 from . import master_operations
 from . import master_reconcile
 from . import master_runtime
@@ -1101,6 +1102,101 @@ def cmd_build_ledger(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _model_fit_dir(arguments: argparse.Namespace) -> Path:
+    if arguments.dir:
+        return Path(arguments.dir).expanduser()
+    return model_fit.default_dir(ROOT)
+
+
+def cmd_model_fit_validate(arguments: argparse.Namespace) -> int:
+    try:
+        directory = _model_fit_dir(arguments)
+    except model_fit.ModelFitError as exc:
+        print(f"model-fit: {exc}", file=sys.stderr)
+        return 2
+    errors, counts = model_fit.validate_dir(directory)
+    for name, tally in counts.items():
+        print(f"{name}: {tally['observations']} observations "
+              f"({tally['verified']} verified, {tally['unknown']} verdict unknown)")
+    for error in errors:
+        print(f"ERROR {error}")
+    print(f"model-fit validate {directory}: {'FAIL' if errors else 'OK'}")
+    return 1 if errors else 0
+
+
+def cmd_model_fit_init(arguments: argparse.Namespace) -> int:
+    try:
+        directory = _model_fit_dir(arguments)
+    except model_fit.ModelFitError as exc:
+        print(f"model-fit: {exc}", file=sys.stderr)
+        return 2
+    for client in model_fit.CLIENTS.values():
+        path = directory / f"{client.name}.md"
+        if path.exists():
+            print(f"kept {path}")
+            continue
+        model_fit.write_atomic(path, model_fit.skeleton(client))
+        print(f"created {path}")
+    return 0
+
+
+def cmd_model_fit_summarize(arguments: argparse.Namespace) -> int:
+    failed = False
+    for name in arguments.files:
+        errors = model_fit.summarize_file(Path(name).expanduser())
+        for error in errors:
+            print(f"ERROR {error}")
+        failed = failed or bool(errors)
+        print(f"{name}: {'FAIL' if errors else 'summary regenerated'}")
+    return 1 if failed else 0
+
+
+def cmd_model_fit_add(arguments: argparse.Namespace) -> int:
+    fields: dict[str, str] = {}
+    extracted: dict[str, Any] = {}
+    try:
+        if arguments.from_claude_transcript:
+            path = Path(arguments.from_claude_transcript).expanduser()
+            extracted = model_fit.claude_transcript_usage(path, arguments.since, arguments.until)
+            fields["source"] = str(path)
+            fields["run"] = path.stem
+        elif arguments.from_luna_session:
+            path = Path(arguments.from_luna_session).expanduser()
+            extracted = model_fit.luna_session_usage(path)
+            fields["source"] = str(path)
+            fields["run"] = path.name
+        elif arguments.from_codex_rollout:
+            path = Path(arguments.from_codex_rollout).expanduser()
+            extracted = model_fit.codex_rollout_usage(path)
+            fields["source"] = str(path)
+            fields["run"] = path.stem
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"model-fit: cannot read run record: {exc}", file=sys.stderr)
+        return 2
+    for key in ("tokens", "wall_time", "turns", "date"):
+        if extracted.get(key):
+            fields[key] = str(extracted[key])
+    fields.setdefault("retries", "0")
+    fields.setdefault("rework", "none")
+    fields.setdefault("failure_modes", "none")
+    for key in model_fit.FIELDS:
+        value = getattr(arguments, key, None)
+        if value is not None:
+            fields[key] = value
+    if extracted.get("model"):
+        print(f"run record: served model {extracted['model']}")
+    errors, ident = model_fit.add_observation(Path(arguments.file).expanduser(), fields, arguments.dry_run)
+    for error in errors:
+        print(f"ERROR {error}")
+    if errors:
+        return 1
+    for key in model_fit.FIELDS:
+        if key in fields:
+            print(f"- {key}: {fields[key]}")
+    print(f"{'would add' if arguments.dry_run else 'added'} {ident} to {arguments.file}")
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="python3 -m creme")
     root.add_argument("--version", action="version", version=__version__)
@@ -1413,6 +1509,30 @@ def parser() -> argparse.ArgumentParser:
         help="optional absolute UTC instant closing the window, for a fixed baseline",
     )
     build_ledger.set_defaults(func=cmd_build_ledger)
+
+    fit = commands.add_parser("model-fit", help="per-client model/effort fit tables in the goal store")
+    fit_commands = fit.add_subparsers(dest="fit_action", required=True)
+    fit_validate = fit_commands.add_parser("validate", help="validate every client table in DIR")
+    fit_validate.add_argument("dir", nargs="?", help=f"default: the goal store's {model_fit.TABLE_DIR}/")
+    fit_validate.set_defaults(func=cmd_model_fit_validate)
+    fit_init = fit_commands.add_parser("init", help="create missing client table skeletons in DIR")
+    fit_init.add_argument("dir", nargs="?")
+    fit_init.set_defaults(func=cmd_model_fit_init)
+    fit_summarize = fit_commands.add_parser("summarize", help="regenerate the derived summary of FILE")
+    fit_summarize.add_argument("files", nargs="+")
+    fit_summarize.set_defaults(func=cmd_model_fit_summarize)
+    fit_add = fit_commands.add_parser("add", help="append one master-verified observation and regenerate")
+    fit_add.add_argument("file", help="the client table, e.g. $GOAL_STORE/model-fit/claude-code.md")
+    fit_add.add_argument("--dry-run", action="store_true")
+    record = fit_add.add_mutually_exclusive_group()
+    record.add_argument("--from-claude-transcript", metavar="JSONL")
+    record.add_argument("--from-luna-session", metavar="DIR")
+    record.add_argument("--from-codex-rollout", metavar="JSONL")
+    fit_add.add_argument("--since", metavar="ISO", help="Claude transcript: count only entries at or after this time")
+    fit_add.add_argument("--until", metavar="ISO", help="Claude transcript: count only entries at or before this time")
+    for key in model_fit.FIELDS:
+        fit_add.add_argument("--" + key.replace("_", "-"), dest=key)
+    fit_add.set_defaults(func=cmd_model_fit_add)
 
     luna = commands.add_parser(
         "luna-reserve",

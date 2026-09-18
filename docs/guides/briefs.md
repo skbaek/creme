@@ -67,6 +67,14 @@ Choose each worker's model and effort for the **hardest non-delegable judgment**
 in its brief, not for the total volume of mechanical work. Volume is what more
 workers are for; only judgment justifies a higher rung.
 
+**Consult the model fit tables first.** The tables are in the goal store by
+default, at `$GOAL_STORE/model-fit/<client>.md`; read your client's file before
+sizing a worker and record the observation after verifying its result. A cell
+with at least three master-verified runs for the brief's task type informs the
+choice; otherwise the rules below decide, and the dispatch log says which
+applied. The format, vocabulary, and recording command are in
+[the model fit guide](model-fit.md).
+
 Sizing is a dispatch decision made against the client's currently available
 offerings, not a property of the goal. Recheck the installed client's models
 and selectors at launch. A renamed or retired model may be replaced by its

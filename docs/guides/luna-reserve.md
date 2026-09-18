@@ -57,8 +57,21 @@ the `gpt-reserve` catalogue lists, and admission re-checks the live catalogue.
 **Erring high is cheap, and that part is now measured.** A read-only `xhigh`
 review consuming 4,721,198 input tokens moved the reserve bucket from 17% to
 19%; a 889,070-token `xhigh` probe did not move it at all. There is no economic
-reason to economize on effort, so default to `high` for anything substantive and
-`xhigh` for read-only review.
+reason to economize on effort, so reserve cost does not decide the level; wall time
+does, and so does over-elaboration.
+
+**Read-only design and review: `medium`** (controlled runs, 2026-09-18). On a
+design question with known ground truth, run at every level with a replicate and a
+target that could not leak the answer: every level found the deciding structural
+point (7 of 7 runs); `medium` reached the correct verdict 2 of 2 at roughly half of
+`high`'s tokens and wall time; `low` was right only 1 of 2 — it found the obstacle
+and then stopped instead of resolving it. No correctness gain was observed above
+`medium`, and the proposed designs grew more elaborate as effort rose. Run-to-run
+spread at a FIXED effort was 1.3–1.9x in tokens, so compare levels only with
+replicates. **Write mode and Lean mode are still uncalibrated — keep `high` there**;
+every failure seen in real use so far happened while writing. Details and the
+pre-registered next experiments: the master record's
+`briefs/luna-effort-calibration-20260918.md`.
 
 **But effort is NOT the main lever, and the ladder below `high` is
 uncalibrated.** Across the first twelve real uses (2026-09-18) the efforts

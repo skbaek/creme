@@ -82,15 +82,18 @@ replicates — a working default, not a measurement).** By mode:
 | read-only, anything the master will rely on | `medium` | no fabricated signature in about sixty citations; two lemmas placed in the wrong same-named directory |
 | write, document synthesis into a fixed template | `medium` | faithful and sourced; over-uses placeholders; did not notice a cross-source impossibility |
 | write, code whose result a command checks | `high` | followed a long exact specification and a self-check against a proved bound |
-| Lean | `high` | closed a new 92-line module (dependent record, inductive relation, four lemmas) and a change to a public inductive with its consumers, both from statements a frontier worker had already frozen; `xhigh` on a similar task showed no gain |
+| Lean, edits and small units from frozen statements | `high` | closed a new 92-line module (dependent record, inductive relation, four lemmas), a change to a public inductive with its consumers, and a three-lemma de-duplication across two modules; `xhigh` on a similar task showed no gain |
+| Lean, a proof by mirroring a named template | `xhigh` (only level tried) | proved a 200-line shared lemma whose statement was only sketched, by mirroring an existing proof that establishes the fact internally; about 50 minutes and four reserve points — the first run whose reserve cost was visible |
 
 Lean mode is therefore a fit for more than named edits: **a small unit whose
 statements are already frozen** is within reach, and that is the pattern to
 prefer — a frontier worker freezes the statements, Luna elaborates them, the
 master reads `git diff` at the build-approval prompt, before accepting the
-build that would certify the edit. Nothing here shows that Luna can find a
-proof whose shape is open. Try `xhigh` only after a `high` attempt has failed,
-and record whether it helped.
+build that would certify the edit. A proof whose shape is given by a named
+proof to mirror is also within reach. Nothing here shows that Luna can find a
+proof with no template. For edits, try `xhigh` only after a `high` attempt has
+failed; for a mirrored proof, try `high` first too and record the difference,
+because only `xhigh` has been run.
 
 **But effort is NOT the main lever, and the ladder below `high` is
 uncalibrated.** Across the first twelve real uses (2026-09-18) the efforts

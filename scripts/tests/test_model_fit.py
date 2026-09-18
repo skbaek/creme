@@ -141,6 +141,16 @@ class ModelFitTest(unittest.TestCase):
         usage = model_fit.luna_session_usage(sessions / "lr-b")
         self.assertEqual(usage["tokens"], "uncached_input=300 cache_read=300 cache_write=0 output=60 reasoning=30")
         self.assertEqual(usage["wall_time"], "300s")
+        run = self.dir / "20260918T040422Z-abc123"
+        run.mkdir()
+        (run / "verdict.json").write_text(json.dumps({"effort": "medium"}), encoding="utf-8")
+        (run / "audit.json").write_text(json.dumps({"token_usage": {
+            "input_tokens": 150, "cached_input_tokens": 100, "cache_write_input_tokens": 0,
+            "output_tokens": 7, "reasoning_output_tokens": 3}}), encoding="utf-8")
+        (run / "transcript.jsonl").write_text('{"t": 100.0}\n{"t": 190.5}\n', encoding="utf-8")
+        usage = model_fit.luna_session_usage(run)
+        self.assertEqual(usage["tokens"], "uncached_input=50 cache_read=100 cache_write=0 output=7 reasoning=3")
+        self.assertEqual((usage["wall_time"], usage["effort"], usage["date"]), ("90s", "medium", "2026-09-18"))
 
     # ------------------------------------------------------------ negative controls
 

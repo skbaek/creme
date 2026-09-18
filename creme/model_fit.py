@@ -696,8 +696,47 @@ def _luna_cumulative(session_dir: Path) -> Optional[dict[str, int]]:
     return None
 
 
+def luna_run_usage(run_dir: Path) -> dict[str, Any]:
+    """Tokens, wall time, and effort of one one-shot `luna-reserve run` record."""
+    verdict = json.loads((run_dir / "verdict.json").read_text(encoding="utf-8"))
+    usage = json.loads((run_dir / "audit.json").read_text(encoding="utf-8")).get("token_usage")
+    stamps: list[float] = []
+    transcript = run_dir / "transcript.jsonl"
+    if transcript.is_file():
+        for raw in transcript.read_text(encoding="utf-8").splitlines():
+            try:
+                stamp = json.loads(raw).get("t")
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if isinstance(stamp, (int, float)):
+                stamps.append(float(stamp))
+    if isinstance(usage, dict):
+        cached = int(usage.get("cached_input_tokens") or 0)
+        tokens = (f"uncached_input={int(usage.get('input_tokens') or 0) - cached} cache_read={cached} "
+                  f"cache_write={int(usage.get('cache_write_input_tokens') or 0)} "
+                  f"output={int(usage.get('output_tokens') or 0)} "
+                  f"reasoning={int(usage.get('reasoning_output_tokens') or 0)}")
+    else:
+        tokens = " ".join(f"{k}=n/a" for k in TOKEN_KEYS)
+    name = run_dir.name
+    date = f"{name[0:4]}-{name[4:6]}-{name[6:8]}" if re.match(r"^\d{8}T", name) else None
+    return {
+        "tokens": tokens,
+        "wall_time": f"{int(max(stamps) - min(stamps))}s" if stamps else "n/a",
+        "turns": "1",
+        "effort": verdict.get("effort"),
+        "date": date,
+        "resumed_from": None,
+    }
+
+
 def luna_session_usage(session_dir: Path) -> dict[str, Any]:
-    """Tokens (thread-cumulative minus any resumed base), wall time, turns of one Luna reserve session."""
+    """Tokens (thread-cumulative minus any resumed base), wall time, turns of one Luna reserve session.
+
+    A one-shot run directory (no session.json) is read by `luna_run_usage`.
+    """
+    if not (session_dir / "session.json").is_file() and (session_dir / "verdict.json").is_file():
+        return luna_run_usage(session_dir)
     session = json.loads((session_dir / "session.json").read_text(encoding="utf-8"))
     usage = _luna_cumulative(session_dir)
     base: dict[str, int] = {}
@@ -748,7 +787,9 @@ def codex_rollout_usage(path: Path) -> dict[str, Any]:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         if row.get("type") == "turn_context":
             model = payload.get("model") or model
-            effort = payload.get("effort") or payload.get("reasoning_effort") or effort
+            settings = (payload.get("collaboration_mode") or {}).get("settings") or {}
+            effort = (settings.get("reasoning_effort") or payload.get("effort")
+                      or payload.get("reasoning_effort") or effort)
             turns += 1
         if payload.get("type") == "token_count":
             info = payload.get("info")

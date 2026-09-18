@@ -80,6 +80,20 @@ EXIT_TIMEOUT = 124
 _SESSION_ID = re.compile(r"^lr-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
 _APPROVAL_ID = re.compile(r"^a[0-9]{1,6}$")
 
+# ``approve-builds`` deliberately recognizes only the command shape that the
+# broker's Lean build recipe emits.  The shell wrapper is part of the rule;
+# accepting a tokenized or differently quoted equivalent would make the rule
+# depend on a caller's shell rather than on the approval the master sees.
+_BUILD_COMMAND = re.compile(r"^/bin/zsh -lc '([^']*)'$")
+_MODULE_NAME = r"[A-Za-z0-9_.]+"
+_DECLARATION = re.compile(
+    rb"^(?:@\[[^\]\r\n]*\][ \t]*)?"
+    rb"(?:(?:private|protected|noncomputable)[ \t]+)*"
+    rb"(?:theorem|lemma|def|opaque|structure|class|abbrev|inductive|instance)"
+    rb"[ \t]+([^\s:({]+)", re.MULTILINE,
+)
+_APPROVAL_SUMMARY = re.compile(r"^command `([^`]*)` in (.*?)(?: reason: .*)?$")
+
 
 _SPAWNED: list[subprocess.Popen] = []
 
@@ -223,6 +237,149 @@ def read_events(state: Path, session_id: str, offset: int = 0) -> tuple[list[dic
         except ValueError:
             continue
     return events, offset + consumed
+
+
+def _declaration_headers(source: bytes) -> dict[str, bytes]:
+    """Extract conservative line-start declaration headers from UTF-8 bytes.
+
+    This is intentionally the small, documented shape used by the session
+    prototype: optional attributes/modifiers followed by a named theorem,
+    lemma, definition, structure, class, abbreviation, inductive, opaque, or
+    instance.  A definition ends immediately before ``:=``; a structure,
+    class, or inductive ends immediately before ``where``.  Unknown syntax is
+    not guessed, which keeps this check fail-closed for files it cannot read
+    while avoiding a pretend Lean parser.
+    """
+    found = list(_DECLARATION.finditer(source))
+    headers: dict[str, bytes] = {}
+    for index, match in enumerate(found):
+        end = found[index + 1].start() if index + 1 < len(found) else len(source)
+        body = source[match.start():end]
+        prefix = match.group(0)
+        marker: Optional[int] = None
+        if re.search(rb"\b(?:structure|class|inductive)\b", prefix):
+            where = re.search(rb"[ \t\r\n]+where\b", body)
+            marker = where.start() if where else None
+        else:
+            assignment = body.find(b":=")
+            marker = assignment if assignment >= 0 else None
+        headers[match.group(1).decode("utf-8", errors="replace")] = body[:marker] if marker is not None else body
+    return headers
+
+
+def _read_header_at_ref(target: Path, ref: str, filename: str) -> tuple[Optional[bytes], Optional[str]]:
+    """Read one tracked file, returning an explicit failure instead of guessing."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(target), "show", f"{ref}:{filename}"],
+            capture_output=True, check=False,
+        )
+    except OSError as exc:
+        return None, f"cannot read header file {filename!r} at {ref!r}: {exc}"
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        return None, f"cannot read header file {filename!r} at {ref!r}" + (f": {detail}" if detail else "")
+    return completed.stdout, None
+
+
+def header_rule_failures(target: Path, ref: Optional[str], filenames: list[str], allowed: set[str]) -> list[str]:
+    """Check tracked declaration headers, failing closed on path/read errors."""
+    if ref is None:
+        return []
+    if not filenames:
+        return ["--header-base requires at least one --header-file"]
+    failures: list[str] = []
+    root = target.resolve()
+    for filename in filenames:
+        relative = Path(filename)
+        if relative.is_absolute():
+            failures.append(f"header file {filename!r} is not relative to the session target")
+            continue
+        working = (root / relative).resolve()
+        try:
+            git_name = working.relative_to(root).as_posix()
+        except ValueError:
+            failures.append(f"header file {filename!r} is outside the session target")
+            continue
+        old, error = _read_header_at_ref(root, ref, git_name)
+        if error is not None:
+            failures.append(error)
+            continue
+        try:
+            current = working.read_bytes()
+        except OSError as exc:
+            failures.append(f"cannot read working-tree header file {filename!r}: {exc}")
+            continue
+        old_headers = _declaration_headers(old or b"")
+        current_headers = _declaration_headers(current)
+        for name, header in old_headers.items():
+            if name not in current_headers:
+                if name not in allowed:
+                    failures.append(f"header removed: {filename}:{name}")
+            elif current_headers[name] != header:
+                failures.append(f"header changed: {filename}:{name}")
+    return failures
+
+
+def _approval_command_and_cwd(approval: dict) -> tuple[Any, Any]:
+    """Return retained approval fields, with compatibility for old records."""
+    command, cwd = approval.get("command"), approval.get("cwd")
+    if command is None or cwd is None:
+        match = _APPROVAL_SUMMARY.match(str(approval.get("summary") or ""))
+        if match:
+            command, cwd = match.group(1), match.group(2)
+    return command, cwd
+
+
+def _presented_command(value: Any) -> Optional[str]:
+    """Render both approval protocol command shapes as the broker presents them."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        if len(value) == 3 and value[0] == "/bin/zsh" and value[1] == "-lc":
+            return f"/bin/zsh -lc '{value[2]}'"
+        return " ".join(str(part) for part in value)
+    return None
+
+
+def build_approval_failure(record: dict, approval: dict, header_base: Optional[str],
+                           header_files: list[str], allowed: set[str]) -> Optional[str]:
+    """Return the first failed opt-in build-approval rule, or ``None``."""
+    lean = record.get("lean") or {}
+    if not lean.get("goal"):
+        return "session is not a Lean session"
+    if record.get("state") != "running":
+        return "session has no current running turn"
+    method = approval.get("method")
+    if method not in luna_lean.COMMAND_APPROVAL_METHODS:
+        return "approval is not a command-execution request"
+    command_value, cwd = _approval_command_and_cwd(approval)
+    command = _presented_command(command_value)
+    goal = str(lean["goal"])
+    if command is None:
+        return "approval has no command"
+    wrapped = _BUILD_COMMAND.fullmatch(command)
+    if wrapped is None:
+        return "command is not the exact /bin/zsh -lc build form"
+    inner = wrapped.group(1)
+    pattern = re.compile(
+        rf"^~/creme/scripts/creme lake-build {re.escape(goal)}"
+        rf"(?: --wait ([0-9]+))? -- ({_MODULE_NAME}(?: {_MODULE_NAME})*)$"
+    )
+    parsed = pattern.fullmatch(inner)
+    if parsed is None:
+        return "command is not an allowed lake-build (goal, wait, or module rule failed)"
+    if parsed.group(1) is not None and not 1 <= int(parsed.group(1)) <= 900:
+        return "--wait must be an integer from 1 through 900"
+    if cwd is None:
+        return "approval has no working directory"
+    try:
+        if Path(str(cwd)).resolve() != Path(str(record.get("target"))).resolve():
+            return "working directory is not the session target"
+    except (OSError, RuntimeError):
+        return "working directory cannot be resolved"
+    failures = header_rule_failures(Path(str(record["target"])), header_base, header_files, allowed)
+    return failures[0] if failures else None
 
 
 def visible(event: dict, detail: str) -> bool:
@@ -503,6 +660,18 @@ class BrokerSession:
             self.emit("live", "steer", f"turn {number} steered: {one_line(text, 100)}")
             return L.EXIT_OK, {"verdict": "STEERED", "turn": number}
 
+    def send(self, text: str) -> tuple[int, dict]:
+        """Steer or start after one atomic state check.
+
+        A completion can change the state to idle after a caller has observed
+        running; keeping the choice under this lock makes that immediate
+        follow-up a new turn instead of a stale steer refusal.
+        """
+        with self.lock:
+            if self.state == "running" and self.guard is not None and self.guard.active_turn:
+                return self.steer(text)
+            return self.begin_turn(text)
+
     def request_interrupt(self) -> None:
         """Interrupt the active turn once; repeated requests for the same turn are not resent."""
         turn = self.guard.active_turn if self.guard is not None else None
@@ -629,10 +798,16 @@ class BrokerSession:
                     # An accept would have to invent form content; only decline or cancel are offered.
                     available = ["decline", "cancel"]
                 self.pending[key] = {"request_id": request_id, "method": method, "available": available}
-                self.record.setdefault("pending_approvals", []).append({
+                pending_record = {
                     "id": key, "method": method, "summary": summary, "received": _now_iso(),
                     "decisions": available,
-                })
+                }
+                if method in luna_lean.COMMAND_APPROVAL_METHODS:
+                    # Keep the fields needed by the opt-in approver.  The
+                    # summary remains the human-facing source of truth, but
+                    # these avoid reparsing a bounded one-line rendering.
+                    pending_record.update({"command": params.get("command"), "cwd": params.get("cwd")})
+                self.record.setdefault("pending_approvals", []).append(pending_record)
                 self.persist()
             self.emit("attention", "approval",
                       f"{key} [{'|'.join(available)}] {summary} -> approve {self.id} {key} DECISION")
@@ -1146,10 +1321,10 @@ class Broker:
         session = self.session(request.get("session"))
         if op == "send":
             text = str(request.get("text") or "")
-            if request.get("steer") or session.state == "running":
+            if request.get("steer"):
                 code, result = session.steer(text)
             else:
-                code, result = session.begin_turn(text)
+                code, result = session.send(text)
         elif op == "interrupt":
             code, result = session.interrupt()
         elif op == "approve":
@@ -1717,6 +1892,53 @@ def cmd_wait(module_root: Path, environ: dict, session: str, timeout: float,
         if now > deadline:
             return EXIT_TIMEOUT, session_lines(record) + [f"timeout after {timeout:g}s; still {current}"], record
         time.sleep(poll_seconds)
+
+
+def cmd_approve_builds(module_root: Path, environ: dict, session: str, header_base: Optional[str],
+                       header_files: list[str], allowed: list[str], timeout: float,
+                       poll_seconds: float = 0.5) -> tuple[int, list[str], dict]:
+    """Opt-in, fail-closed approval loop for the narrow Lean build rule."""
+    state = L.state_root(module_root, environ)
+    initial = load_record(state, session)
+    if initial is None:
+        return EXIT_USAGE, [f"no session {session}"], {}
+    if header_base is None and (header_files or allowed):
+        return EXIT_USAGE, ["--header-file/--allow-removed require --header-base"], initial
+    deadline = time.monotonic() + timeout
+    approved: list[str] = []
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            return EXIT_TIMEOUT, approved + [f"timeout after {timeout:g}s"], load_record(state, session) or initial
+        code, waited, record = cmd_wait(module_root, environ, session, remaining, poll_seconds=poll_seconds)
+        if code == EXIT_TIMEOUT:
+            return code, approved + waited, record
+        pending = list(record.get("pending_approvals") or [])
+        if not pending:
+            return code, approved + waited, record
+
+        failures = []
+        for approval in pending:
+            reason = build_approval_failure(record, approval, header_base, header_files, set(allowed))
+            if reason is not None:
+                failures.append((approval, reason))
+        if failures:
+            lines = list(approved)
+            for approval, reason in failures:
+                lines.append(one_line(f"approval {approval.get('id')}: {approval.get('summary')}"))
+                lines.append(f"rule failed: {reason}")
+            return EXIT_ATTENTION, lines, record
+
+        for approval in pending:
+            approve_code, lines, reply = cmd_simple(
+                module_root, environ, "approve", session,
+                approval=approval.get("id"), decision="accept",
+            )
+            if approve_code != L.EXIT_OK:
+                return approve_code, approved + lines, reply
+            approved.append(f"approved {approval.get('id')}: {approval.get('summary')}")
+        if time.monotonic() >= deadline:
+            return EXIT_TIMEOUT, approved + [f"timeout after {timeout:g}s"], record
 
 
 def cmd_events(module_root: Path, environ: dict, session: str, follow: bool, last: int, since: int,

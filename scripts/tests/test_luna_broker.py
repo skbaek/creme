@@ -514,6 +514,131 @@ class BrokerProcessTest(BrokerHarness):
         self.until(lambda: not B._pid_alive(pid), timeout=15)
 
 
+class SendAfterCompletionRaceTest(unittest.TestCase):
+    def test_send_after_completion_transition_starts_a_new_turn(self):
+        """The completion may win between a caller's observation and its send."""
+        broker = B.Broker.__new__(B.Broker)
+
+        class EndingSession:
+            id = "lr-test"
+            state = "running"
+
+            def send(self, text):
+                # Models end_turn acquiring the session lock before the send
+                # operation: the atomic session method must start turn 2.
+                self.state = "idle"
+                return 0, {"verdict": "STARTED", "turn": 2}
+
+            def steer(self, text):
+                raise AssertionError("the stale pre-check routed send to steer")
+
+        session = EndingSession()
+        broker.session = lambda _session_id: session
+        reply = broker.dispatch({"op": "send", "session": "lr-test", "text": "follow up"})
+        self.assertEqual(reply["code"], 0)
+        self.assertEqual(reply["verdict"], "STARTED")
+        self.assertEqual(reply["turn"], 2)
+
+
+class BuildApprovalRuleTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="luna-approval-")
+        self.addCleanup(self.tmp.cleanup)
+        self.target = Path(self.tmp.name) / "repo"
+        self.target.mkdir()
+        self.header_file = self.target / "Example.lean"
+        self.header_file.write_text(
+            "theorem keep : Nat := 1\n"
+            "theorem remove : Nat := 2\n",
+            encoding="utf-8",
+        )
+        self.git("init", "-q")
+        self.git("config", "user.email", "tests@example.invalid")
+        self.git("config", "user.name", "Luna tests")
+        self.git("add", "Example.lean")
+        self.git("commit", "-qm", "baseline")
+        self.record = {
+            "state": "running", "target": str(self.target), "lean": {"goal": "goal"},
+        }
+
+    def git(self, *arguments):
+        return subprocess.run(["git", "-C", str(self.target), *arguments], check=True,
+                              capture_output=True, text=True)
+
+    def approval(self, command=None, method="item/commandExecution/requestApproval", cwd=None):
+        if command is None:
+            command = "/bin/zsh -lc '~/creme/scripts/creme lake-build goal -- Module.Name'"
+        return {"method": method, "command": command, "cwd": str(self.target if cwd is None else cwd),
+                "summary": f"command `{command}` in {self.target if cwd is None else cwd}"}
+
+    def assertRejected(self, approval, text=None, record=None):
+        failure = B.build_approval_failure(record or self.record, approval, None, [], set())
+        self.assertIsNotNone(failure)
+        if text is not None:
+            self.assertIn(text, failure)
+
+    def test_exact_command_is_accepted_with_or_without_wait(self):
+        for command in (
+            "/bin/zsh -lc '~/creme/scripts/creme lake-build goal -- Module.Name'",
+            "/bin/zsh -lc '~/creme/scripts/creme lake-build goal --wait 900 -- Module.Name'",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(B.build_approval_failure(
+                    self.record, self.approval(command), None, [], set()))
+
+    def test_command_variants_are_refused(self):
+        commands = [
+            "~/creme/scripts/creme lake-build goal -- Module.Name | echo ok",
+            "~/creme/scripts/creme lake-build goal -- Module.Name && echo ok",
+            "~/creme/scripts/creme lake-build goal -- Module.Name; echo ok",
+            "~/creme/scripts/creme lake-build goal -- Module.Name > output",
+            "~/creme/scripts/creme lake-build goal --memory-gib 4 -- Module.Name",
+            "~/creme/scripts/creme lake-build goal --contention sensitive -- Module.Name",
+            "~/creme/scripts/creme lake-build goal --probe -- Module.Name",
+        ]
+        for inner in commands:
+            with self.subTest(inner=inner):
+                self.assertRejected(self.approval(f"/bin/zsh -lc '{inner}'"))
+
+    def test_wait_bounds_goal_and_cwd_are_enforced(self):
+        for wait in (0, 901):
+            with self.subTest(wait=wait):
+                self.assertRejected(self.approval(
+                    f"/bin/zsh -lc '~/creme/scripts/creme lake-build goal --wait {wait} -- Module.Name'",
+                ), "--wait")
+        self.assertRejected(self.approval(
+            "/bin/zsh -lc '~/creme/scripts/creme lake-build other-goal -- Module.Name'"), "allowed")
+        self.assertRejected(self.approval(cwd=self.target.parent), "working directory")
+
+    def test_session_and_approval_kind_are_enforced(self):
+        non_lean = {"state": "running", "target": str(self.target)}
+        self.assertRejected(self.approval(), "Lean", non_lean)
+        self.assertRejected(self.approval(method="item/fileChange/requestApproval"), "command-execution")
+        self.assertRejected(self.approval(), "running", {**self.record, "state": "idle"})
+
+    def test_header_drift_and_removal_rules_are_fail_closed(self):
+        self.header_file.write_text(
+            "theorem keep : Int := 1\n"
+            "theorem remove : Nat := 2\n",
+            encoding="utf-8",
+        )
+        failures = B.header_rule_failures(self.target, "HEAD", ["Example.lean"], set())
+        self.assertTrue(any("header changed" in failure for failure in failures), failures)
+
+        self.header_file.write_text("theorem keep : Nat := 1\n", encoding="utf-8")
+        failures = B.header_rule_failures(self.target, "HEAD", ["Example.lean"], set())
+        self.assertTrue(any("header removed" in failure for failure in failures), failures)
+        self.assertEqual(B.header_rule_failures(self.target, "HEAD", ["Example.lean"], {"remove"}), [])
+
+    def test_unreadable_ref_and_missing_header_file_are_refused(self):
+        missing = self.target / "Untracked.lean"
+        missing.write_text("theorem new : Nat := 1\n", encoding="utf-8")
+        failures = B.header_rule_failures(self.target, "HEAD", ["Untracked.lean"], set())
+        self.assertTrue(any("cannot read header file" in failure for failure in failures), failures)
+        failures = B.header_rule_failures(self.target, "HEAD", [], set())
+        self.assertIn("requires at least one", failures[0])
+
+
 class FollowUpPinTest(unittest.TestCase):
     def session(self, sandbox="read-only", roots=(), policy="never"):
         from creme.codex_app_server import GuardedSession

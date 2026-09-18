@@ -305,6 +305,17 @@ def cmd_luna_reserve_wait(arguments: argparse.Namespace) -> int:
     return _luna_print(arguments, code, lines, record)
 
 
+def cmd_luna_reserve_approve_builds(arguments: argparse.Namespace) -> int:
+    header_files = [filename for group in (arguments.header_file or []) for filename in group]
+    allowed = [name for group in (arguments.allow_removed or []) for name in group]
+    code, lines, record = luna_broker.cmd_approve_builds(
+        ROOT, dict(os.environ), arguments.session, arguments.header_base, header_files, allowed, arguments.timeout,
+    )
+    for line in lines:
+        print(line)
+    return code
+
+
 def cmd_luna_reserve_events(arguments: argparse.Namespace) -> int:
     def emit(line: str) -> None:
         print(line, flush=True)
@@ -1510,6 +1521,16 @@ def parser() -> argparse.ArgumentParser:
     luna_wait.add_argument("session")
     luna_wait.add_argument("--timeout", type=_positive, default=540)
     luna_wait.set_defaults(func=cmd_luna_reserve_wait)
+
+    luna_approve_builds = luna_commands.add_parser(
+        "approve-builds", help="opt-in: accept only the exact guarded Lean lake-build approvals",
+    )
+    luna_approve_builds.add_argument("session")
+    luna_approve_builds.add_argument("--header-base", metavar="REF")
+    luna_approve_builds.add_argument("--header-file", metavar="PATH", action="append", nargs="+")
+    luna_approve_builds.add_argument("--allow-removed", metavar="NAME", action="append", nargs="+")
+    luna_approve_builds.add_argument("--timeout", type=_positive, default=3600)
+    luna_approve_builds.set_defaults(func=cmd_luna_reserve_approve_builds)
 
     luna_events = luna_commands.add_parser("events", help="the session's event feed at its detail level")
     luna_events.add_argument("session")

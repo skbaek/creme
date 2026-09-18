@@ -346,6 +346,7 @@ python3 -m creme luna-reserve wait SESSION [--timeout SECONDS]
 python3 -m creme luna-reserve events SESSION [--follow] [--last N] [--since SEQ]
 python3 -m creme luna-reserve read SESSION [--lines N | --items N]
 python3 -m creme luna-reserve approve SESSION APPROVAL accept|decline|cancel
+python3 -m creme luna-reserve approve-builds SESSION [--header-base REF] [--header-file PATH ...] [--allow-removed NAME ...] [--timeout SECONDS]
 python3 -m creme luna-reserve detail SESSION silent|summary|live
 python3 -m creme luna-reserve list [--limit N]
 python3 -m creme luna-reserve stop SESSION
@@ -420,6 +421,15 @@ refused as in `run`. `untrusted` was not chosen: it would ask for every
 ordinary command inside the target and spend the master's attention on
 routine work.
 
+`approve-builds` is opt-in per call and accepts only a Lean session's command
+approval in its target, exactly `/bin/zsh -lc '<that>'` with `<that>` exactly
+`~/creme/scripts/creme lake-build GOAL [--wait N] -- M1 M2 ...`, N integer 1–900
+and each M a Lean module name `[A-Za-z0-9_.]+`. With `--header-base`, every
+declaration header from every `--header-file` at REF must be byte-identical in
+the worktree except `--allow-removed` names. `--wait N` is within this rule;
+with a second Lean lane, transient `DEFER_FOR_HARD` is normal. Anything else
+prints its id, summary, and failed rule, exits 20, and is not answered.
+
 ### Process, socket, and records
 
 The broker is a long-lived process started on first use by `start` or
@@ -463,6 +473,7 @@ from the records, and `resume` continues a thread.
 3. Redirect with `send SESSION --text "..."` (steers a running turn, or starts
    the next turn), stop work with `interrupt SESSION`, and answer an approval
    line with `approve SESSION a1 accept` or `decline`.
+   For the opt-in narrow rule, run `approve-builds SESSION` instead.
 4. Verify with the master's own commands (`git diff`, a test, a grep on the
    target) rather than reading the transcript; read `read SESSION` only when
    a command cannot settle the question.
@@ -569,9 +580,10 @@ offered only `decline` or `cancel`); requests from any other server, URL
 elicitations, and device verifications are declined by policy.
 
 Answer a build approval only when the command is exactly
-`~/creme/scripts/creme lake-build GOAL -- <narrow targets>` with no
-`--memory-gib`, `--contention`, or `--wait`, its working directory is the
-target worktree, and the host has room; `decline` or `cancel` anything else.
+`~/creme/scripts/creme lake-build GOAL [--wait N] -- <narrow targets>` with no
+`--memory-gib` or `--contention`, N an integer from 1 through 900, its working
+directory the target worktree, and the host with room; `decline` or `cancel`
+anything else.
 The approved command runs outside the sandbox and takes its own semaphore
 admission.
 

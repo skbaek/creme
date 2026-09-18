@@ -32,13 +32,21 @@ Rules:
      repeat. Inspect the exact goal before editing. Clean diagnostics on a file
      whose imports are current is loop evidence; it needs no build.
    - Build only with, from the target worktree:
-     `~/creme/scripts/creme lake-build {goal} -- <narrow module targets>`.
+     `~/creme/scripts/creme lake-build {goal} --wait 900 -- <narrow module targets>`.
+     Its underlying form is `~/creme/scripts/creme lake-build {goal} -- <narrow module targets>`.
      Name the edited module or the narrowest consumer that reaches it. Never
-     pass `--memory-gib`, `--contention`, or `--wait`, and never name a full
+     pass `--memory-gib` or `--contention`, and never name a full
      target (a bare `--`, `Blanc`, or `jaune`). The wrapper's priority launcher
      cannot run inside the sandbox, so request escalated permissions for this
      one command with a one-line justification; the master answers each
      request. Accept a decline without working around it.
+   - Request the build command ALONE, never chained with `;`, `|`, `&&`, or
+     redirection; use `--wait 900` on every build.
+   - End every opened namespace or section and run
+     `scripts/check-proof-duplication.sh` and `scripts/check-trust-surface.sh`
+     after a module-creating build.
+   - If `lean_verify` rejects (for example, a name containing `?`), use
+     `lean_run_code` with `#print axioms` instead.
    - Never run bare `lake build`, `lake env`, `lean`, or `elan`, and never call
      `lean_build` or `lean_profile_proof` (they are disabled). The Lean search
      tools are unavailable; use `lean_local_search`.

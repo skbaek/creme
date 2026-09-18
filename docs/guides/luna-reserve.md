@@ -54,13 +54,37 @@ whether a run would be admitted.
 `run` sends one brief as one turn on a new thread and follows it to completion.
 Effort is `low`, `medium` (default), `high`, `xhigh`, or `max`: every level
 the `gpt-reserve` catalogue lists, and admission re-checks the live catalogue.
-Luna is a lightweight model, so effort is the main lever for harder work: a
-weaker answer costs the master more Claude tokens to verify than a larger
-reserve charge costs. Use `low` for trivial mechanical briefs, `medium` by
-default, and `high`, `xhigh`, or `max` for nontrivial reasoning such as Lean
-proof work. Higher effort spends more reserve and takes longer per turn, so
-raise `--timeout-seconds` (default 1800) for long `xhigh`/`max` turns; the
-broker interrupts a turn that outlives it.
+**Erring high is cheap, and that part is now measured.** A read-only `xhigh`
+review consuming 4,721,198 input tokens moved the reserve bucket from 17% to
+19%; a 889,070-token `xhigh` probe did not move it at all. There is no economic
+reason to economize on effort, so default to `high` for anything substantive and
+`xhigh` for read-only review.
+
+**But effort is NOT the main lever, and the ladder below `high` is
+uncalibrated.** Across the first twelve real uses (2026-09-18) the efforts
+actually run were one `low`, eight `high` and three `xhigh` — `medium` was never
+exercised, and no task was ever run at two efforts, so nothing here is a
+controlled comparison. Two things the evidence does show:
+
+* `high` closed a genuinely nontrivial Lean task — 31 `#print axioms` entries
+  plus their imports, correct, with the audited count predicted in advance and a
+  non-standard axiom set flagged unprompted. So "use `xhigh`/`max` for Lean"
+  overstates what Lean work needs.
+* Raising effort did not prevent the failures that actually occurred. Both
+  `xhigh` read-only reviews were directionally right and quantitatively wrong —
+  one inflated a count, the other proposed an interface with roughly twice the
+  fields the proofs needed.
+
+Every failure observed so far has been a **scope or verification** failure, not
+a depth failure: a registration whose census was `0` and therefore checked
+nothing; audit entries printed but not pinned, because the author did not know a
+second list existed; a count measured against a stale commit. None of these
+reads as "did not think hard enough", and none would have been fixed by more
+effort. The levers that do work are a brief that names exactly what to check and
+in what form, and a master who verifies the result rather than quoting it.
+
+Higher effort takes longer per turn, so raise `--timeout-seconds` (default 1800)
+for long `xhigh`/`max` turns; the broker interrupts a turn that outlives it.
 `--preflight-only` does everything up to thread creation, including the
 isolation proof, and then stops without spending tokens.
 

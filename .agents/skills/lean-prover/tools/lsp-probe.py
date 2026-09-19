@@ -14,7 +14,7 @@ Lean publishes diagnostics PROGRESSIVELY.  Timing a partial result would make
 every downstream number wrong, so the finality rule is not guessed -- it is
 taken from the server's own source (``Lean/Server/FileWorker.lean``,
 ``FileWorker/RequestHandling.lean``, ``Data/Lsp/Ipc.lean``, toolchain
-``v4.32.1``).
+``v4.32.1``; source behavior revalidated against ``v4.34.0``).
 
 ADOPTED RULE -- ``textDocument/waitForDiagnostics``
     Immediately after ``didOpen``/``didChange`` at version ``V`` we send the

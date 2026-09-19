@@ -259,6 +259,19 @@ the acquiring process alive across the unit or use the wrapper, which does.
 justify moving light packets ahead of heavy ones, but only `adaptive-acquire`
 re-samples under the mutex and authorizes a heavy start.
 
+Pressure is not only the free percentage. On macOS nearly exhausted swap or a
+saturated compressor (`memory_pressure_cause`, see the capability contract)
+counts as below the drain floor even when the aggregate probe reads healthy,
+and refusals and `status` say `swap/compressor pressure` with the numbers.
+Separately, `status`, `renew`, and headroom refusals list every `lean --worker`
+or `lean --server` whose physical footprint (compressed pages included, not
+RSS) is 8 GiB or more as `HEAVY_LEAN_WORKER`, with its pid, owning goal (from
+its working directory, else its document URI), and whether a hold covers it;
+at most one `worker_pressure` row per five minutes goes to the semaphore log.
+This is a report only: nothing is signalled. A language server is never
+admitted by the semaphore, so a heavy worker named there is its owner's to
+checkpoint and wind down.
+
 Renewal is both a lease heartbeat and an in-session pressure check. Call it
 before the next elaboration/build unit and at least every five minutes during
 an interactive MCP session. Under moderate pressure—or when recorded worker

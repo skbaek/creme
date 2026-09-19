@@ -174,6 +174,14 @@ Rules that held across the day's 20-odd Lean and write runs:
   and fails the build.
 * **After a refused build the turn is over.** The preamble stops Lean work on a refusal; a steer arriving then
   does not resume it. Let the turn end and send the correction as a new turn (the session keeps its context).
+  That new turn must say explicitly that the master authorizes new build requests and why the refusal's cause is
+  gone: on 2026-09-19 a plain "retry the build" turn after a `WAIT_TIMEOUT` was itself refused as a forbidden
+  retry, and a turn authorizing exactly one new request worked (the preamble now says so too).
+* **Run tomllib gates master-side.** A Lean session's sandbox `python3` is the system 3.9, which has no
+  `tomllib`, so Blanc's `scripts/check-layering.py` and similar scripts fail there with `ModuleNotFoundError`.
+  Brief Luna not to run them and run them yourself after its turn. Also ask for a `docs/COMMON_API.md` entry that
+  LINKS the new module's path: an entry naming only the theorem leaves a SHARED module unreachable and fails
+  the layering registry check.
 * **Say what is frozen.** Name the frozen declarations (or "everything present at commit X") and say that
   declarations new in the unit may be reshaped; otherwise Luna may stop at a blocker in its own new code.
 * **Bite-check every control Luna writes.** Disable the code the control guards, run the self-test, confirm that

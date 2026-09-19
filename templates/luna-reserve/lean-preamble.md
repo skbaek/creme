@@ -56,7 +56,10 @@ Rules:
    - If the wrapper or the semaphore prints `YIELD_HEAVY`, `DRAIN_HEAVY`,
      `LIGHT_ONLY`, `DEFER_HEAVY`, `DEFER_FOR_HARD`, `NEVER_FITS`, `WAIT_TIMEOUT`,
      or any refusal, start no further Lean action and report `BLOCKED` with that
-     line. Do not retry in a loop.
+     line. Do not retry in a loop. The stop ends that turn only: a LATER turn
+     from the master that explicitly authorizes new build requests (for
+     example after the cause of the refusal is gone) permits them for that
+     turn, under the same rule.
    - Do not run, attempt, or report semaphore, reclaim, or wind-down
      commands. The wind-down duty `AGENTS.md` gives a task that opened a Lean
      MCP server belongs to the broker in this session: it runs

@@ -10,7 +10,11 @@ import re
 import subprocess
 
 from .base import Adapter, CapabilityResult
-from ..reclaim import is_lean_worker as _is_lean_worker, parse_cpu_seconds as _parse_cpu_seconds
+from ..reclaim import (
+    is_lean_worker as _is_lean_worker,
+    lean_executable as _lean_executable,
+    parse_cpu_seconds as _parse_cpu_seconds,
+)
 
 
 class NativeAdapter(Adapter):
@@ -92,8 +96,19 @@ class NativeAdapter(Adapter):
             for pid, (parent, cpu, rss, command) in sorted(table.items())
             if _is_lean_worker(command)
         ]
+        # Language servers ride along for footprint reporting only; idleness
+        # and reclamation stay defined over `lean --worker` alone.
+        servers = []
+        for pid, (parent, cpu, rss, command) in sorted(table.items()):
+            executable, arguments = _lean_executable(command)
+            if executable == "lean" and "--server" in arguments:
+                servers.append({
+                    "pid": pid, "ppid": parent, "rss_kib": rss,
+                    "cpu_seconds": cpu, "command": command,
+                    "ancestry": ancestry(pid),
+                })
         return self.result(
             "lean_workers", "OK",
             f"{len(workers)} Lean worker(s) sampled",
-            {"workers": workers},
+            {"workers": workers, "servers": servers},
         )

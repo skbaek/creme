@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Optional
+from urllib.parse import unquote
 
 from . import idle_workers
 from .adapters import Adapter, get_adapter
@@ -62,6 +63,13 @@ WAIT_POLL_SECONDS = 3.0
 WAITER_STALE_SECONDS = 15.0
 MAX_WAIT_SECONDS = MAX_LEASE_SECONDS
 IDLE_HOLD_SECONDS = 120
+# A Lean worker or server whose physical footprint reaches this is reported by
+# `status` and in refusals, whether or not a hold covers it.  Warm narrow
+# builds here peak at 2-3 GiB and idle workers hold about 3 GiB together; the
+# 2026-09-19 language-server worker reached 25 GiB while RSS showed 3.9 GiB.
+HEAVY_WORKER_GIB = 8.0
+# At most one `worker_pressure` log row per window while heavy workers persist.
+WORKER_PRESSURE_LOG_SECONDS = 300
 WAITER_KEYS = {
     "id", "label", "pid", "uid", "contention",
     "memory_gib", "estimate_source", "enqueued_at", "heartbeat_at",
@@ -716,6 +724,27 @@ def _headroom_values(
     return int(free), available_gib, total_gib
 
 
+def _pressure_cause(sample: Any) -> Optional[str]:
+    """Swap/compressor exhaustion the adapter measured, which the free percentage hides.
+
+    It is treated exactly like free memory below the drain floor: no new heavy
+    start, and `DRAIN_HEAVY` on renewal.  An adapter that cannot measure it
+    reports nothing, which leaves every earlier verdict unchanged.
+    """
+    if sample is None or sample.status != "OK" or not isinstance(sample.data, dict):
+        return None
+    cause = sample.data.get("memory_pressure_cause")
+    return cause if isinstance(cause, str) and cause else None
+
+
+def _drain_text(free_percent: Optional[int], cause: str) -> str:
+    shown = f"{free_percent}% free by the aggregate probe" if free_percent is not None else "aggregate free unknown"
+    return (
+        f"swap/compressor pressure: {cause} ({shown}, which counts compressed and "
+        f"swapped pages as free) — treated as below the {ADMISSION_DRAIN_PERCENT}% drain floor"
+    )
+
+
 def _observe_memory_tranquil(
     queue: dict[str, Any],
     sample: Any,
@@ -734,7 +763,7 @@ def _observe_memory_tranquil(
     only upward.  A stale baseline is evidence of nothing; the gate treats
     it as absent.
     """
-    if busy:
+    if busy or _pressure_cause(sample) is not None:
         return False
     free_percent, available_gib, total_gib = _headroom_values(sample, configured_total_gib)
     if (
@@ -976,7 +1005,18 @@ def _admission_decision(
         return _refuse(
             "LIGHT_ONLY",
             f"available memory is {free_percent}% (<{ADMISSION_DRAIN_PERCENT}%); "
-            "do not start heavy work; checkpoint or wind down heavy sessions and run light work",
+            "do not start heavy work; checkpoint or wind down heavy sessions and run light work"
+            + _heavy_worker_note(idle_report),
+            waitable=False,
+        )
+
+    pressure_cause = _pressure_cause(sample)
+    if not converting and pressure_cause is not None:
+        return _refuse(
+            "LIGHT_ONLY",
+            f"{_drain_text(free_percent, pressure_cause)}; do not start heavy work; "
+            "checkpoint or wind down heavy sessions and run light work"
+            + _heavy_worker_note(idle_report),
             waitable=False,
         )
 
@@ -1020,7 +1060,8 @@ def _admission_decision(
                 decision,
                 f"{available_gib:.1f} GiB is available but this task needs {charged_gib} GiB "
                 f"plus a {reserve_gib:.1f} GiB usability reserve; {action}"
-                + _reclaimable_note(idle_report),
+                + _reclaimable_note(idle_report)
+                + _heavy_worker_note(idle_report),
                 waitable=True,
             )
 
@@ -1377,11 +1418,165 @@ def _refresh_signals(
     worker_report["idle_workers"] = idle
     worker_report["idle_rss_gib"] = round(sum(worker["rss_gib"] for worker in idle), 2)
     worker_report["owners"] = sorted({worker["owner"] for worker in idle})
+    worker_report["heavy"] = (
+        _heavy_lean_processes(adapter, sample.data, worker_report, labels, holds, view)
+        if sample.status == "OK" and isinstance(sample.data, dict)
+        else []
+    )
+    _audit_worker_pressure(root, worker_report["heavy"], now)
     try:
         _save_queue(root, queue)
     except OSError:
         pass
     return {"holds": hold_signals, "lean_workers": worker_report}
+
+
+_FILE_URI = re.compile(r"file://(\S+)")
+
+
+def _goal_of_command(command: str) -> Optional[str]:
+    """The goal a Lean worker's document URI names, when its cwd names none."""
+    for match in _FILE_URI.finditer(command):
+        goal = idle_workers.goal_of_directory(unquote(match.group(1)))
+        if goal is not None:
+            return goal
+    return None
+
+
+def _heavy_lean_processes(
+    adapter: Adapter,
+    data: dict[str, Any],
+    worker_report: dict[str, Any],
+    labels: set[str],
+    holds: list[dict[str, Any]],
+    view: Optional[HostView],
+) -> list[dict[str, Any]]:
+    """Every `lean --worker`/`--server` at or above HEAVY_WORKER_GIB, by footprint.
+
+    Report only: nothing here signals a process.  Footprint counts the pages
+    the compressor holds, which RSS omits; when the adapter cannot sample it
+    the row says `basis rss` so the reader knows the size may be understated.
+    """
+    processes: list[tuple[str, dict[str, Any]]] = []
+    for kind, key in (("worker", "workers"), ("server", "servers")):
+        for row in data.get(key) or []:
+            if isinstance(row, dict) and "pid" in row and "rss_kib" in row:
+                processes.append((kind, row))
+    if not processes:
+        return []
+    pids = [int(row["pid"]) for _, row in processes]
+    footprints: dict[str, Any] = {}
+    sampled = adapter.process_footprints(pids)
+    if sampled.status == "OK" and isinstance(sampled.data, dict):
+        raw = sampled.data.get("footprints")
+        if isinstance(raw, dict):
+            footprints = raw
+    known = {int(worker["pid"]): worker for worker in worker_report.get("workers") or []}
+    heavy_rows = []
+    for kind, row in processes:
+        pid = int(row["pid"])
+        measured = footprints.get(str(pid))
+        if isinstance(measured, dict) and isinstance(measured.get("footprint_kib"), int):
+            size_kib, basis = int(measured["footprint_kib"]), "footprint"
+            compressed_kib = int(measured.get("compressed_kib") or 0)
+        else:
+            size_kib, basis, compressed_kib = int(row["rss_kib"]), "rss", None
+        size_gib = size_kib / (1024 ** 2)
+        if size_gib < HEAVY_WORKER_GIB:
+            continue
+        heavy_rows.append((kind, row, pid, size_gib, basis, compressed_kib))
+    if not heavy_rows:
+        return []
+    cwds = _worker_working_directories(adapter, [row for _, row, *_ in heavy_rows], view)
+    hold_pids = {int(hold["pid"]): hold["label"] for hold in holds}
+    client_pattern = getattr(adapter, "client_pattern", _NEVER_MATCHES)
+    report = []
+    for kind, row, pid, size_gib, basis, compressed_kib in heavy_rows:
+        cwd = cwds.get(pid)
+        goal = idle_workers.goal_of_directory(cwd) or _goal_of_command(str(row.get("command", "")))
+        owner = (
+            f"goal {goal}"
+            if goal is not None
+            else idle_workers.owner_label(row, hold_pids, client_pattern, cwd)
+        )
+        owner_goal = owner[len("goal "):] if owner.startswith("goal ") else None
+        prior = known.get(pid) or {}
+        report.append({
+            "pid": pid,
+            "kind": kind,
+            "size_gib": round(size_gib, 1),
+            "basis": basis,
+            "compressed_gib": (
+                round(compressed_kib / (1024 ** 2), 1) if compressed_kib is not None else None
+            ),
+            "rss_gib": round(int(row["rss_kib"]) / (1024 ** 2), 1),
+            "owner": owner,
+            "covered_by": owner_goal if owner_goal in labels else None,
+            "idle_seconds": prior.get("idle_seconds"),
+            "cpu_percent": prior.get("cpu_percent"),
+        })
+    return sorted(report, key=lambda item: (-item["size_gib"], item["pid"]))
+
+
+def _heavy_worker_text(item: dict[str, Any]) -> str:
+    size = f"{item['size_gib']} GiB {item['basis']}"
+    if item["basis"] == "footprint":
+        size += f" ({item['compressed_gib']} GiB compressed; RSS {item['rss_gib']} GiB)"
+    else:
+        size += " (footprint unavailable; may be understated)"
+    covered = (
+        f"covered by hold {item['covered_by']}"
+        if item.get("covered_by")
+        else "no hold covers it"
+    )
+    if item.get("idle_seconds") is not None:
+        activity = f"idle {int(item['idle_seconds'])}s"
+    elif item.get("cpu_percent") is not None:
+        activity = f"busy {item['cpu_percent']}% CPU"
+    else:
+        activity = "activity not yet measured"
+    return f"pid {item['pid']} lean --{item['kind']} {size}, owner {item['owner']}, {covered}, {activity}"
+
+
+def _heavy_worker_lines(report: Optional[dict[str, Any]]) -> list[str]:
+    heavy = (report or {}).get("heavy") or []
+    return [
+        f"HEAVY_LEAN_WORKER: {_heavy_worker_text(item)}; report only — its owner should "
+        "checkpoint and wind down (`python3 -m creme reclaim --wind-down GOAL`)"
+        for item in heavy
+    ]
+
+
+def _heavy_worker_note(report: Optional[dict[str, Any]]) -> str:
+    heavy = (report or {}).get("heavy") or []
+    if not heavy:
+        return ""
+    return (
+        f"; {len(heavy)} Lean process(es) at or above {HEAVY_WORKER_GIB:g} GiB: "
+        + "; ".join(_heavy_worker_text(item) for item in heavy)
+    )
+
+
+def _audit_worker_pressure(root: Path, heavy: list[dict[str, Any]], now: float) -> None:
+    """At most one `worker_pressure` row per window while heavy workers persist."""
+    if not heavy:
+        return
+    last = _last_log_rows(root, "worker_pressure").get("host")
+    if last is not None:
+        try:
+            logged = datetime.fromisoformat(str(last["time"]).replace("Z", "+00:00")).timestamp()
+        except (KeyError, ValueError):
+            logged = None
+        if logged is not None and 0 <= now - logged < WORKER_PRESSURE_LOG_SECONDS:
+            return
+    detail = (
+        f"WORKER_PRESSURE: {len(heavy)} Lean process(es) at or above {HEAVY_WORKER_GIB:g} GiB: "
+        + "; ".join(_heavy_worker_text(item) for item in heavy)
+    )
+    try:
+        _log_to(root, "worker_pressure", "host", "REFUSED", detail)
+    except OSError:
+        pass
 
 
 def _worker_working_directories(
@@ -1694,6 +1889,14 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
     idle_line = _idle_worker_line(worker_report)
     if idle_line:
         lines.append(idle_line)
+    pressure_cause = _pressure_cause(sample)
+    if pressure_cause is not None:
+        free_percent, _, _ = _headroom_values(sample, None)
+        lines.append(
+            f"SWAP_PRESSURE: {_drain_text(free_percent, pressure_cause)}; "
+            "new heavy work is refused LIGHT_ONLY and holders drain on renewal"
+        )
+    lines.extend(_heavy_worker_lines(worker_report))
     return "\n".join(lines)
 
 
@@ -2388,6 +2591,14 @@ def renew(
             )
             _log("renew", label, "REFUSED", detail)
             return False, detail
+        pressure_cause = _pressure_cause(sample)
+        if pressure_cause is not None:
+            detail = (
+                f"DRAIN_HEAVY — {_drain_text(free_percent, pressure_cause)}; "
+                "do not launch another heavy step; checkpoint, wind down, and run light work"
+            )
+            _log("renew", label, "REFUSED", detail)
+            return False, detail
         if manual_active:
             detail = (
                 "YIELD_HEAVY — a manual human-session hold is active; checkpoint, "
@@ -2438,6 +2649,7 @@ def renew(
     idle_line = _idle_worker_line(signals["lean_workers"])
     if idle_line:
         detail += "\n  " + idle_line
+    detail += "".join("\n  " + line for line in _heavy_worker_lines(signals["lean_workers"]))
     _log("renew", label, "OK", f"lease={lease}; {detail}")
     return True, detail
 

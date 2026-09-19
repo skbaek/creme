@@ -10,6 +10,74 @@ from typing import Any, Callable, Optional
 from .session import codex_process_witness, lock_alive
 
 
+# Swap/compressor pressure that an aggregate "free percentage" can hide.
+#
+# Darwin's `memory_pressure` free percentage counts compressed and swapped-out
+# pages as free.  On 2026-09-19 a single `lean --worker` reached a 25 GiB
+# footprint (21 GiB of it compressed) on this 24 GiB host: swap stood at
+# 10.7 of 11.3 GiB used (95%, 528 MiB free) and the compressor occupied
+# 11.7 GiB, yet the probe still read 33% free, so no drain floor fired and the
+# desktop hung.  The host's normal state for comparison: swap 1-3 GiB used of a
+# 3-11 GiB total, compressor well under 4 GiB (0.8 GiB at this commit).
+#
+# macOS grows the swap total on demand, one swapfile at a time, so "percent of
+# the current swap total" alone is noise: 1.7 of 3 GiB used is an ordinary day.
+# Swap is therefore exhausted only when BOTH hold — the current swap space is
+# at least 90% used (the kernel is out of room and about to grow it again) and
+# swap in use is at least a quarter of physical memory (6 GiB here, twice the
+# normal upper end).  Swap merely left allocated after a recovery (6.4 GiB of
+# 11.3 GiB after the incident's wind-down) does not fire: an absolute swap
+# value alone is still not a verdict.  The compressor saturates when it
+# occupies 40% of physical memory (9.6 GiB here): the incident was 49%, the
+# normal state is under 17%, and Darwin's compressor itself is bounded near
+# half of RAM, beyond which pages go to swap.
+SWAP_EXHAUSTED_USED_FRACTION = 0.90
+SWAP_EXHAUSTED_MIN_PHYSICAL_FRACTION = 0.25
+COMPRESSOR_SATURATED_PHYSICAL_FRACTION = 0.40
+
+
+def swap_compressor_pressure(
+    physical_bytes: Optional[int],
+    swap_total_mib: Optional[float],
+    swap_used_mib: Optional[float],
+    compressor_bytes: Optional[int],
+) -> Optional[str]:
+    """Name swap/compressor exhaustion that a free percentage hides, or None.
+
+    A missing measurement contributes nothing: this clause can only add a
+    reason to drain, never remove one the free percentage already gives.
+    """
+    if not isinstance(physical_bytes, int) or physical_bytes <= 0:
+        return None
+    physical_gib = physical_bytes / 1024 ** 3
+    causes = []
+    if (
+        isinstance(swap_total_mib, (int, float))
+        and isinstance(swap_used_mib, (int, float))
+        and swap_total_mib > 0
+        and swap_used_mib >= SWAP_EXHAUSTED_USED_FRACTION * swap_total_mib
+        and swap_used_mib * 1024 ** 2
+        >= SWAP_EXHAUSTED_MIN_PHYSICAL_FRACTION * physical_bytes
+    ):
+        causes.append(
+            f"swap nearly exhausted: {swap_used_mib / 1024:.1f} of "
+            f"{swap_total_mib / 1024:.1f} GiB used "
+            f"({max(0.0, swap_total_mib - swap_used_mib):.0f} MiB free; "
+            f"{100 * swap_used_mib * 1024 ** 2 / physical_bytes:.0f}% of "
+            f"{physical_gib:.0f} GiB physical)"
+        )
+    if (
+        isinstance(compressor_bytes, int)
+        and compressor_bytes >= COMPRESSOR_SATURATED_PHYSICAL_FRACTION * physical_bytes
+    ):
+        causes.append(
+            f"compressor occupies {compressor_bytes / 1024 ** 3:.1f} of "
+            f"{physical_gib:.0f} GiB physical "
+            f"({100 * compressor_bytes / physical_bytes:.0f}%)"
+        )
+    return "; ".join(causes) if causes else None
+
+
 @dataclass(frozen=True)
 class CapabilityResult:
     capability: str
@@ -141,6 +209,19 @@ class Adapter:
         return self.result(
             "lean_workers", "UNAVAILABLE",
             f"Lean worker sampling is not implemented for {self.system}",
+        )
+
+    def process_footprints(self, pids: list[int]) -> CapabilityResult:
+        """Sample each named pid's memory footprint, compressed pages included.
+
+        RSS omits compressed and swapped-out pages, so a language-server
+        worker the compressor has absorbed looks small by RSS (3.9 GiB for a
+        25 GiB footprint on 2026-09-19).  Callers fall back to RSS, and say
+        so, when this is unavailable.
+        """
+        return self.result(
+            "process_footprints", "UNAVAILABLE",
+            f"process footprints are not implemented for {self.system}",
         )
 
     def gui_sessions(self, owner_uid: int) -> CapabilityResult:

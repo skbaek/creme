@@ -10,7 +10,8 @@ fail-closed safety outcomes. `ERROR` is an attempted operation that failed.
 | static facts | sysctl with portable runtime fallback | `/proc/meminfo` and portable runtime facts | host profile stays missing/limited; one heavy worker |
 | native platform identity | normalized `macos-<arch>` key and uv platform tag | normalized `linux-<arch>` key and uv platform tag | unsupported architecture is `UNAVAILABLE` |
 | managed Python identity | home-relative native uv alias/base prefixes | home-relative native uv alias/base prefixes | malformed version is `REFUSED`; nothing is installed |
-| memory headroom | `memory_pressure`; swap when permitted | `/proc/meminfo`; swap when readable | no soft admission; serialize one hard task |
+| memory headroom | `memory_pressure` (free percentage and compressor pages); `vm.swapusage` when permitted | `/proc/meminfo`; swap when readable | no soft admission; serialize one hard task |
+| process footprints | `top -l 1 -stats pid,mem,cmprs` over the host's Lean worker/server pids | `UNAVAILABLE` (RSS is reported instead, labelled `rss`) | heavy-worker reports fall back to RSS and say it may be understated |
 | telemetry | headroom plus process snapshot | headroom plus `ps` | no process attribution; headroom may still be usable |
 | semaphore core | locked state plus adaptive admission | locked state plus adaptive admission | one hard task; expired holds continue blocking |
 | manual GUI hold | local-user and launchd GUI-domain checks | `UNAVAILABLE` | explicit manual coordination outside Creme |
@@ -29,6 +30,17 @@ telemetry sample never proves a host is quiet or under pressure. Aggregate
 agent sandbox that denies `ps` can still enforce live admission. Swap is useful
 diagnostic context but may remain allocated after pressure recovers, so an
 absolute swap value alone is not an admission verdict.
+
+Darwin's free percentage counts compressed and swapped-out pages as free: on
+2026-09-19 it read 33% while swap was 95% used (528 MiB free) and the
+compressor held 11.7 of 24 GiB. The Darwin sample therefore also carries
+`memory_pressure_cause`, set when the current swap space is at least 90% used
+*and* swap in use is at least a quarter of physical memory, or when the
+compressor occupies at least 40% of physical memory. Admission treats a cause
+exactly like free memory below the 20% drain floor (`LIGHT_ONLY`, and
+`DRAIN_HEAVY` on renewal) and names it in the refusal and in `status`
+(`SWAP_PRESSURE:`). An adapter that does not measure it reports none, which
+leaves its verdicts unchanged.
 
 `python3 -m creme luna-reserve` is a guarded external-model capability, not a
 host resource probe. It fails closed: it refuses unless a zero-token read

@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
-from .base import CapabilityResult
+from .base import CapabilityResult, swap_compressor_pressure
 from .native import NativeAdapter
 from ..reclaim import (
     Process,
@@ -90,7 +90,11 @@ class DarwinAdapter(NativeAdapter):
 
     def memory_headroom(self) -> CapabilityResult:
         try:
-            pressure = self._run(["/usr/bin/memory_pressure", "-Q"])
+            # Without `-Q` the same probe also prints its page statistics,
+            # including "Pages used by compressor" (the figure `vm_stat` calls
+            # "Pages occupied by compressor"), so compressor occupancy needs
+            # no second command.
+            pressure = self._run(["/usr/bin/memory_pressure"])
         except (OSError, subprocess.SubprocessError) as exc:
             return self.result("memory_headroom", "UNAVAILABLE", str(exc))
         if pressure.returncode:
@@ -104,18 +108,35 @@ class DarwinAdapter(NativeAdapter):
             )
         free_pct = int(free_match.group(1))
         total_bytes = int(total_match.group(1)) if total_match else None
-        used_mib = None
+        page_match = re.search(r"page size of\s+(\d+)", pressure.stdout)
+        compressor_match = re.search(
+            r"Pages (?:used|occupied) by compressor:\s*(\d+)", pressure.stdout
+        )
+        compressor_bytes = (
+            int(compressor_match.group(1)) * int(page_match.group(1))
+            if compressor_match and page_match
+            else None
+        )
+        used_mib = total_mib = free_mib = None
         swap_detail = "swap unavailable"
         try:
             swap = self._run(["/usr/sbin/sysctl", "-n", "vm.swapusage"])
         except (OSError, subprocess.SubprocessError):
             swap = None
         if swap is not None and swap.returncode == 0:
-            swap_match = re.search(r"used\s*=\s*([0-9.]+)([MG])", swap.stdout)
-            if swap_match:
-                value = float(swap_match.group(1))
-                used_mib = value * (1024 if swap_match.group(2) == "G" else 1)
+            def swap_field(name: str) -> Optional[float]:
+                match = re.search(rf"{name}\s*=\s*([0-9.]+)([KMG])", swap.stdout)
+                if match is None:
+                    return None
+                scale = {"K": 1 / 1024, "M": 1, "G": 1024}[match.group(2)]
+                return float(match.group(1)) * scale
+
+            used_mib = swap_field("used")
+            total_mib = swap_field("total")
+            free_mib = swap_field("free")
+            if used_mib is not None:
                 swap_detail = "swap sampled"
+        cause = swap_compressor_pressure(total_bytes, total_mib, used_mib, compressor_bytes)
         data = {
             "memory_free_percent": free_pct,
             "memory_available_bytes": (
@@ -123,12 +144,15 @@ class DarwinAdapter(NativeAdapter):
             ),
             "physical_memory_bytes": total_bytes,
             "swap_used_mib": used_mib,
+            "swap_total_mib": total_mib,
+            "swap_free_mib": free_mib,
+            "compressor_bytes": compressor_bytes,
+            "memory_pressure_cause": cause,
         }
-        return self.result(
-            "memory_headroom", "OK",
-            f"Darwin aggregate memory headroom sampled; {swap_detail}",
-            data,
-        )
+        detail = f"Darwin aggregate memory headroom sampled; {swap_detail}"
+        if cause:
+            detail += f"; SWAP_PRESSURE: {cause}"
+        return self.result("memory_headroom", "OK", detail, data)
 
     def telemetry(self) -> CapabilityResult:
         headroom = self.memory_headroom()
@@ -236,7 +260,7 @@ class DarwinAdapter(NativeAdapter):
         lean = sample.data.get("lean_processes") or []
         if free is None:
             return self.result("quiet_host", "UNAVAILABLE", "memory headroom is unmeasurable")
-        quiet = not lean and free >= 25
+        quiet = not lean and free >= 25 and not sample.data.get("memory_pressure_cause")
         return self.result(
             "quiet_host", "OK" if quiet else "BUSY",
             "host meets conservative quiet checks" if quiet else "Lean activity or low memory prevents certification",
@@ -246,6 +270,64 @@ class DarwinAdapter(NativeAdapter):
     def lean_workers(self) -> "CapabilityResult":
         return self._lean_worker_sample(
             ["/bin/ps", "-axo", "pid=,ppid=,rss=,time=,command="]
+        )
+
+    _TOP_SIZE = re.compile(r"^([0-9.]+)([BKMGT])[+-]?$")
+
+    @classmethod
+    def _top_kib(cls, text: str) -> Optional[int]:
+        match = cls._TOP_SIZE.match(text.strip())
+        if match is None:
+            return None
+        scale = {"B": 1 / 1024, "K": 1, "M": 1024, "G": 1024 ** 2, "T": 1024 ** 3}
+        return int(float(match.group(1)) * scale[match.group(2)])
+
+    def process_footprints(self, pids: list[int]) -> CapabilityResult:
+        """Physical footprint per pid from one `top` sample (compressed pages included).
+
+        `top`'s MEM column is the kernel's physical footprint, which counts
+        pages the compressor holds for the process; RSS does not.
+        """
+        wanted = sorted({int(pid) for pid in pids})
+        if not wanted:
+            return self.result(
+                "process_footprints", "OK", "no pids requested", {"footprints": {}},
+            )
+        argv = ["/usr/bin/top", "-l", "1", "-stats", "pid,mem,cmprs"]
+        for pid in wanted:
+            argv += ["-pid", str(pid)]
+        try:
+            sample = self._run(argv)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self.result("process_footprints", "UNAVAILABLE", str(exc))
+        if sample.returncode:
+            return self.result("process_footprints", "UNAVAILABLE", "Darwin top sample failed")
+        footprints: dict[str, dict[str, int]] = {}
+        header_seen = False
+        for line in sample.stdout.splitlines():
+            fields = line.split()
+            if fields[:3] == ["PID", "MEM", "CMPRS"]:
+                header_seen = True
+                continue
+            if not header_seen or len(fields) != 3 or not fields[0].isdigit():
+                continue
+            pid = int(fields[0])
+            footprint = self._top_kib(fields[1])
+            compressed = self._top_kib(fields[2])
+            if pid not in wanted or footprint is None:
+                continue
+            footprints[str(pid)] = {
+                "footprint_kib": footprint,
+                "compressed_kib": compressed if compressed is not None else 0,
+            }
+        if not header_seen:
+            return self.result(
+                "process_footprints", "UNAVAILABLE", "Darwin top output had no process table",
+            )
+        return self.result(
+            "process_footprints", "OK",
+            f"sampled {len(footprints)} of {len(wanted)} footprint(s)",
+            {"footprints": footprints},
         )
 
     def gui_sessions(self, owner_uid: int) -> CapabilityResult:

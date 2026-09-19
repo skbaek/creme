@@ -158,6 +158,29 @@ reads as "did not think hard enough", and none would have been fixed by more
 effort. The levers that do work are a brief that names exactly what to check and
 in what form, and a master who verifies the result rather than quoting it.
 
+**Fourth day: operating rules learned (2026-09-19).** Current sizing evidence for every Luna route and effort
+is recorded per run in the goal store's model fit tables (`$GOAL_STORE/model-fit/codex.md`, `luna-reserve`
+columns; see the [model fit guide](model-fit.md)); the tables above are the historical record that preceded them.
+Rules that held across the day's 20-odd Lean and write runs:
+
+* **Mutant edits need exact-once anchors.** Both "mechanical" misses of one campaign quoted text that occurred
+  more than once; Luna applied the edit at the first occurrence. Every mutant brief says: apply only on an
+  exact-once match of the quoted text, otherwise stop and report. With that rule and "replace with a plausible
+  wrong value" mutants, 11 of the next 13 bit substantively at the predicted site; the other two reached the
+  predicted declaration only through a deterministic timeout (inconclusive by protocol).
+* **Never restate the build command in a brief.** The Lean preamble gives the exact command, with the base goal
+  label even in a `-mutation`/`-control`/`-rehearsal` worktree (`creme lake-build` resolves the worktree from the
+  working directory and refuses a suffixed label). A brief that restates it differently wins over the preamble
+  and fails the build.
+* **After a refused build the turn is over.** The preamble stops Lean work on a refusal; a steer arriving then
+  does not resume it. Let the turn end and send the correction as a new turn (the session keeps its context).
+* **Say what is frozen.** Name the frozen declarations (or "everything present at commit X") and say that
+  declarations new in the unit may be reshaped; otherwise Luna may stop at a blocker in its own new code.
+* **Bite-check every control Luna writes.** Disable the code the control guards, run the self-test, confirm that
+  exactly that control fails, restore. It takes two commands and is the only evidence the control tests anything.
+* **Write mode:** read the diff before accepting its first escalation; accept one exactly scoped command at a
+  time.
+
 Higher effort takes longer per turn, so raise `--timeout-seconds` (default 1800)
 for long `xhigh`/`max` turns; the broker interrupts a turn that outlives it.
 `--preflight-only` does everything up to thread creation, including the

@@ -501,6 +501,12 @@ cannot be done, send the whole dependent change as a decision packet.
 | `ambiguous-mixed` | Mixed diff whose registered provenance and semantic or reserved parts are not exact | `separate-or-escalate` | Separate the diff or send a decision packet; never relabel it as provenance |
 <!-- provenance-table:end -->
 
+A *pin* here is a pinned row or its pinned value: an audit row's name or its pinned axiom set, a claim or statement pin's text or
+hash, a reference commit. Strengthening a theorem's conclusion is not a pin movement when the theorem carries only an axiom pin whose
+pinned set is unchanged (the gate re-checks it), and no claim pin, statement hash or published text quotes the statement. That is
+ordinary engineering; say so in the merge event. Changing or weakening a statement that a claim pin, statement hash or publication
+quotes is `pin-reference`.
+
 An escalation is a **decision packet**, never a bare question: the
 recommendation, the two to four options with their consequences, the sources
 verified for each, the cost of waiting, and the default the master will

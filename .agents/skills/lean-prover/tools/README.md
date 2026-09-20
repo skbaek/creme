@@ -76,3 +76,15 @@ and a separately reviewed scoring packet before publishing them.
 
 Any run whose output is a timing takes the host **exclusively** — no other
 agent, gate, build, or sweep. Concurrent elaboration invalidates attribution.
+
+## Toolchain revalidation
+
+`lsp-probe.py` takes its diagnostics-finality rule from the Lean server's own
+source, and its docstring names the toolchain that was read: `v4.32.1`. That
+rule was re-read against `v4.34.0` during the 4.34 migration and still holds.
+
+The note lives here rather than in the file itself. `lsp-probe.py` is one of the
+four byte-for-byte exact copies recorded in `scripts/extraction-manifest.json`,
+so editing it — even a comment — breaks its provenance claim and fails
+`test_exact_copy_claims_match_destination_and_source_digest`. Record a
+revalidation in this file; never in a copied tool.

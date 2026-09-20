@@ -229,11 +229,13 @@ catalogue or defaults to a non-default service tier; no bucket is named
 `gpt-reserve` (the reserve is identified by that limit name, never by a
 hard-coded id); the reserve is reached, under a spend control, below the
 remaining-share floor (default 10%), or about to reset; the reserve and regular
-reset times are too close to tell apart; the regular bucket is available
-(see [Open verification](#open-verification)); an earlier attribution failure
-is recorded; or any model, profile, configuration, provider, service-tier, or
+reset times are too close to tell apart; an earlier attribution failure is
+recorded; or any model, profile, configuration, provider, service-tier, or
 sandbox override is attempted on the command line. `OPENAI_*` and `CODEX_*`
-variables other than `CODEX_HOME` are removed from the Codex environment.
+variables other than `CODEX_HOME` are removed from the Codex environment. An
+*available* regular bucket is **not** a refusal: it is reported in the bucket
+table, and attribution is what decides the run (see
+[Attribution with an available regular bucket](#attribution-with-an-available-regular-bucket)).
 
 **Isolation.** `codex app-server` has no `--ignore-user-config`, and the
 user configuration must never be edited or copied (a copied `auth.json` risks
@@ -390,15 +392,47 @@ the target, re-run any command that decides something, inspect the diff of a
 write-mode run before staging it, and run the owning repository's gates as
 usual. Verify the verdict too: `verdict=PASS` and exit `0` together.
 
-## Open verification
+## Attribution with an available regular bucket
 
-This workflow was first exercised while the regular bucket was exhausted, so
-no run has yet shown that a reserve run leaves an *available* regular bucket
-untouched. Until that is shown, `run` refuses while the regular bucket is
-available. After the regular reset, the master performs one tiny read-only run
-with `--allow-regular-available --effort low`, confirms exit `0`, a live and
-rollout attribution to the reserve, and unchanged regular usage before and
-after, and records the result. Only then may routine runs use that flag.
+This workflow was first exercised only while the regular bucket was exhausted,
+so `run` refused while the regular bucket was available, and
+`--allow-regular-available` was the one-off lift for the verification run that
+would settle it. **That run was made on 2026-09-20 and passed**, so the refusal
+is retired: a reserve run needs no flag while the regular bucket has capacity.
+
+One read-only `--effort low` run (run `20260920T073150Z-cff27d`, thread
+`01a0bdba-867b-7cf0-b66c-3b6da3a97cee`, 22,488 tokens) returned `verdict=PASS
+exit=0` with `live_snapshots=2/2` and `audit verdict=PASS
+models=['gpt-reserve']`, while the regular `codex` bucket stayed at 37.0% used
+and its `resets_at` did not move. Luna's answers were re-checked on the target
+and were exact.
+
+- **Attribute by `resets_at`, never by `limit_id`.** Both in-turn rollout
+  snapshots carried the label `limit_id: "codex"` — the wrong label — with
+  `resets_at=1790183837`, the *reserve* window. The regular window was
+  `1790444835`, three days away and far beyond the 3600 s
+  `discrimination_seconds`. The code already discriminates this way; the run
+  shows why the label must never be trusted.
+- **Scope.** One read-only, low-effort, single-turn 22k-token run. It does not
+  certify a long `xhigh`/`max` turn, write mode, Lean mode, or a brokered
+  multi-turn thread — the per-turn admission and attribution re-check covers
+  those. It says nothing about dollar cost; token counts are observables, not
+  prices. It does not test what happens if the reserve reaches 100% mid-turn;
+  that case is still untested, with the `ATTRIBUTION_FAILURE` tripwire behind
+  it.
+
+Nothing else moved. The remaining-share floor, `discrimination_seconds`,
+`jitter_seconds`, the per-turn attribution comparison, the
+`regular_delta_failures` check across a run, isolation, approvals, and the
+exit-`12` tripwire are unchanged.
+
+`--allow-regular-available` is still accepted by `run`, `start`, and `resume`
+so existing call sites and the recipes above keep working, but it now has no
+effect.
+
+Immutable evidence: Plans `f61cf6d1`,
+`reports/luna-reserve-attribution-verification-20260920.md`; the same record is
+summarised in the ignored host guidance.
 
 ## Broker
 

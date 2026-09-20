@@ -199,6 +199,32 @@ class BrokerSessionTest(BrokerHarness):
         self.assertNotIn("someone@example.invalid",
                          (self.state / "sessions" / session / "transcript.jsonl").read_text(encoding="utf-8"))
 
+    def test_start_is_admitted_with_an_available_regular_bucket(self):
+        # Retired 2026-09-20: start's own admission read used to refuse (exit 10) while the
+        # regular bucket had capacity, unless allow_regular_available was set. The refusal is
+        # discharged by run 20260920T073150Z-cff27d; the flag is a retained no-op, and a
+        # session record written with it must still load.
+        self.scenario["limits"] = limits(
+            regular_used=37, regular_reached=None, ordinary=True,
+            reserve_reset=self.reserve_reset, regular_reset=self.regular_reset,
+        )
+        self.write_scenario()
+        session, _ = self.start()
+        record, _ = self.wait(session)
+        self.assertEqual(record["turns"][-1]["verdict"], "PASS")
+        self.assertIs(L.Policy(**record["policy"]).allow_regular_available, False)
+        # Every further turn re-runs its own admission read, still without a flag.
+        self.simple("send", session, text="Say OK again.")
+        record, _ = self.wait(session)
+        self.assertEqual([turn["verdict"] for turn in record["turns"]], ["PASS", "PASS"])
+        # The retained flag is still accepted and still round-trips through the record.
+        code, lines, reply = B.cmd_start(ROOT, self.environ, "Say OK.", str(self.target), False, "low", "silent",
+                                         L.Policy(allow_regular_available=True).__dict__, [], 60)
+        self.assertEqual(code, 0, lines)
+        second, _ = self.wait(reply["session"])
+        self.assertEqual(second["turns"][-1]["verdict"], "PASS")
+        self.assertIs(L.Policy(**second["policy"]).allow_regular_available, True)
+
     def test_steer_changes_the_running_turn(self):
         self.scenario["turns"] = [{"complete_on_steer": True}]
         self.write_scenario()

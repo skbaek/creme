@@ -1569,7 +1569,8 @@ def parser() -> argparse.ArgumentParser:
     )
     luna_run.add_argument(
         "--allow-regular-available", action="store_true",
-        help="admit a run while the regular bucket is available (post-reset verification only)",
+        help="accepted but has no effect: the condition it guarded (reserve attribution with an "
+             "available regular bucket) was verified 2026-09-20; retained for compatibility",
     )
     _add_luna_refused_overrides(luna_run)
     luna_run.set_defaults(func=cmd_luna_reserve_run)
@@ -1595,7 +1596,7 @@ def parser() -> argparse.ArgumentParser:
         item.add_argument("--timeout-seconds", type=_positive, default=luna_reserve.DEFAULT_TIMEOUT_SECONDS,
                           help="per-turn timeout; the broker interrupts a longer turn")
         item.add_argument("--allow-regular-available", action="store_true",
-                          help="admit while the regular bucket is available (post-reset verification only)")
+                          help="accepted but has no effect (verified 2026-09-20); retained for compatibility")
         _add_luna_refused_overrides(item)
 
     luna_start = luna_commands.add_parser("start", help="start a brokered session and its first turn; returns at once")

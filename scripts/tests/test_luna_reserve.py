@@ -219,12 +219,36 @@ class AdmissionTest(unittest.TestCase):
     def test_imminent_reserve_reset_is_refused(self):
         self.assertRefused(self.decide(read(limits(reserve_reset=NOW + 60))), "resets within 15 minutes")
 
-    def test_available_regular_bucket_needs_explicit_verification_flag(self):
+    def test_available_regular_bucket_is_admitted_without_a_flag(self):
+        # Retired 2026-09-20. The refusal existed only because no run had shown that a
+        # reserve turn leaves an available regular bucket untouched; run
+        # 20260920T073150Z-cff27d showed it (report: Plans f61cf6d1). The flag is retained
+        # as a no-op, so passing it must change nothing about the decision.
         value = limits(regular_used=3, regular_reached=None, ordinary=True, regular_reset=RESERVE_RESET + 86400 * 3)
-        self.assertRefused(self.decide(read(value)), "regular bucket is available")
-        allowed = self.decide(read(value), L.Policy(allow_regular_available=True))
-        self.assertTrue(allowed["admitted"], allowed["refusals"])
-        self.assertTrue(allowed["warnings"])
+        decision = self.decide(read(value))
+        self.assertTrue(decision["admitted"], decision["refusals"])
+        self.assertTrue(decision["regular_available"])
+        self.assertEqual(decision["warnings"], [])
+        with_flag = self.decide(read(value), L.Policy(allow_regular_available=True))
+        self.assertTrue(with_flag["admitted"], with_flag["refusals"])
+        self.assertEqual(with_flag["warnings"], decision["warnings"])
+        self.assertEqual(with_flag["refusals"], decision["refusals"])
+
+    def test_available_regular_bucket_keeps_every_other_guard(self):
+        # The verification discharged one refusal and nothing adjacent: the reserve floor,
+        # reset discrimination, and the paid-credit warning still apply when the regular
+        # bucket is available.
+        available = dict(regular_used=3, regular_reached=None, ordinary=True,
+                         regular_reset=RESERVE_RESET + 86400 * 3)
+        self.assertRefused(self.decide(read(limits(reserve_used=95, **available))), "below the 10% floor")
+        self.assertRefused(self.decide(read(limits(reserve_used=100, **available))), "is reached")
+        close = dict(available, regular_reset=RESERVE_RESET + 60)
+        self.assertRefused(self.decide(read(limits(**close))), "cannot be discriminated")
+        credited = limits(regular_credits={"hasCredits": True, "unlimited": False, "balance": "10"}, **available)
+        decision = self.decide(read(credited))
+        self.assertTrue(decision["admitted"], decision["refusals"])
+        self.assertIn("the regular bucket has paid credits; a misattributed run could spend them",
+                      decision["warnings"])
 
     def test_child_environment_scrubs_billing_overrides(self):
         env, removed = L.child_environment({"OPENAI_API_KEY": "x", "CODEX_API_KEY": "y", "CODEX_HOME": "/h", "PATH": "/bin"})
@@ -754,6 +778,27 @@ class FakeAppServerRunTest(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old)
         self.assertFalse(self.log.exists())
+
+    def test_run_passes_with_an_available_regular_bucket_and_no_flag(self):
+        # End-to-end counterpart of the admission unit test: before 2026-09-20 this run was
+        # refused at preflight (exit 10) unless --allow-regular-available was passed.
+        self.scenario["limits"] = limits(
+            regular_used=37, regular_reached=None, ordinary=True,
+            reserve_reset=self.reserve_reset, regular_reset=self.regular_reset,
+        )
+        code, summary = self.run_request()
+        self.assertEqual(code, L.EXIT_OK, summary)
+        self.assertEqual(summary["verdict"], "PASS")
+        self.assertEqual(summary["warnings"], [])
+        admission = json.loads((Path(summary["run_dir"]) / "preflight.json").read_text(encoding="utf-8"))["admission"]
+        self.assertTrue(admission["regular_available"])
+        self.assertEqual(admission["refusals"], [])
+        self.assertEqual(admission["warnings"], [])
+        self.assertEqual(self.entries("forbidden-invocation"), [])
+        # The retained flag is still accepted and still admits.
+        code, summary = self.run_request(policy=L.Policy(allow_regular_available=True))
+        self.assertEqual(code, L.EXIT_OK, summary)
+        self.assertEqual(summary["verdict"], "PASS")
 
     def test_status_reports_admission_without_a_thread(self):
         self.scenario_path.write_text(json.dumps(self.scenario), encoding="utf-8")

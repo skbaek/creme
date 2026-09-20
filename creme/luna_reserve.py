@@ -287,6 +287,11 @@ class Policy:
     min_remaining_percent: float = DEFAULT_MIN_REMAINING_PERCENT
     jitter_seconds: int = DEFAULT_JITTER_SECONDS
     discrimination_seconds: int = DEFAULT_DISCRIMINATION_SECONDS
+    # Retired 2026-09-20 and kept only for compatibility: reading it changes nothing.
+    # It used to lift the refusal below, which existed solely because no run had shown
+    # that a reserve turn leaves an *available* regular bucket untouched. Run
+    # 20260920T073150Z-cff27d showed it. The field stays so that call sites and broker
+    # session records written before the retirement still load.
     allow_regular_available: bool = False
 
 
@@ -360,18 +365,16 @@ def admission(read: dict, policy: Policy, effort: Optional[str] = None,
         if reserve.window_minutes == regular.window_minutes and reserve.credits == regular.credits \
                 and regular.resets_at == reserve.resets_at:
             refusals.append("reserve and regular buckets are indistinguishable")
+    # An available regular bucket is reported, not refused. Until 2026-09-20 this was a
+    # refusal (liftable with --allow-regular-available) because no run had shown that a
+    # reserve turn leaves an available regular bucket untouched; run 20260920T073150Z-cff27d
+    # showed it, with the regular bucket unmoved at 37.0% used across the turn. What the run
+    # did not certify stays guarded elsewhere: every turn re-checks attribution against the
+    # reserve window by resets_at, a regular or credit movement across the run is a failure
+    # (regular_delta_failures), and a misattributed turn still exits ATTRIBUTION_FAILURE.
     regular_available = bool(limits.get("ordinaryUsageAllowed")) or (
         regular is not None and not regular.reached and regular.used_percent < 100
     )
-    if regular_available:
-        message = (
-            "the regular bucket is available; reserve attribution with an available "
-            "regular bucket is not yet verified on this host"
-        )
-        if policy.allow_regular_available:
-            warnings.append(message)
-        else:
-            refusals.append(message + " (pass --allow-regular-available only for the tiny verification run)")
     if regular is not None and isinstance(regular.credits, dict) and (
         regular.credits.get("hasCredits") or regular.credits.get("unlimited")
     ):

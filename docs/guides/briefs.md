@@ -90,6 +90,15 @@ not a permanent dependency on one vendor release. Reconcile it against the
 offerings available at dispatch and record what was actually run. Only a
 configuration the goal fixes as a reserved decision binds.
 
+A client may split the two axes across different mechanisms, and the sizing
+record must name both whatever the mechanism. In Claude Code a subagent
+profile fixes the effort and the Agent tool's `model` parameter chooses the
+model, overriding the profile; so the profiles are one per role and effort
+(`worker-high`, `reader-xhigh`, `reviewer-max`) and every model is available at
+every rung without a profile per pairing. Pass `model` explicitly: an omitted
+one inherits a default, which is a dispatch nobody chose and an observation
+that cannot be recorded.
+
 **Escalate effort before model.** When a standard-model worker looks
 insufficient — thrashing, repeating an approach, not converging — the first
 escalation is effort within the same model, one rung at a time:

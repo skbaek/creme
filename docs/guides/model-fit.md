@@ -117,10 +117,19 @@ includes waits for host admission and approvals.
 python3 -m creme model-fit add "$GOAL_STORE/model-fit/<client>.md" \
   --from-claude-transcript ~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl \
   --task-type lean-elaboration --option opus/high \
-  --route "claude-agent-tool (profile worker-opus-high)" --goal <goal> \
+  --route "claude-agent-tool (profile worker-high, model opus)" --goal <goal> \
   --verdict pass --verdict-source "\$GOAL_STORE/master/events.jsonl#<event_id>" \
   --failure-modes none --rework none --recorded-by "master claude opus/xhigh"
 ```
+
+In Claude Code the two axes come from different places, so record both. A
+subagent profile fixes only the **effort**; the **model** is the Agent tool's
+`model` parameter, which overrides whatever a profile's frontmatter says. So
+`--option` names the pairing that actually ran (`opus/high`), and the route
+detail names the profile and the model passed (`profile worker-high, model
+opus`). A dispatch that omitted `model` inherited a default rather than
+choosing one and is not a recordable observation; the effective model is
+recoverable from the subagent transcript if you need to check.
 
 `--from-luna-session <session dir>` and `--from-codex-rollout <rollout.jsonl>`
 fill `tokens`, `wall_time`, `turns`, `date`, `run`, and `source` the same way;

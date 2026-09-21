@@ -111,9 +111,10 @@ model, and re-dispatch the remainder to smaller workers.
 ## Model choice
 
 Use the client-visible model name, not a redundant API-family prefix or suffix
-that the user does not select. As reconciled on 2026-08-31, this workflow's
-Codex choices are **Sol**, **Terra**, and **Luna**; its Claude Code choices are
-**Fable** and **Opus**; its Muse choice, reconciled 2026-09-11, is
+that the user does not select. The Codex dispatch surface checked on 2026-09-21
+includes **Astra**, **Sol**, **Terra**, and **Luna**, matching the ordinary
+families in its fit table. The workflow's Claude Code choices are **Fable** and
+**Opus**; its Muse choice, reconciled 2026-09-11, is
 **muse-spark**, selected at launch with `--model`. Recheck those names at
 launch rather than treating this snapshot as a permanent product catalogue.
 

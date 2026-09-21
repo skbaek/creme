@@ -124,6 +124,24 @@ Two tiers matter for dispatch, whatever a client calls them:
 | the standard model | the balanced everyday worker and reviewer: bounded engineering, gate runs, document authoring, routine proof repair | Terra, with Luna for efficient bounded work whose route and falsifier are already clear | Opus | muse-spark at the session's effort |
 | the frontier model | the hardest quality-first judgment that cannot be packetized | Sol | Fable | muse-spark at ceiling effort (no second family observed) |
 
+**Codex dispatch coverage.** Codex's native spawn tool selects model and reasoning effort directly; a
+worker, reader or reviewer role comes from its brief. It therefore needs no
+model-by-effort profile grid like a client whose effort is fixed in profile
+files. Check the live tool schema and supported model settings before dispatch,
+and specify both axes when the brief's sizing decision chooses them. With the
+`collaboration.spawn_agent` interface, an explicit override requires
+`fork_turns="none"` or a finite history count; a full-history fork inherits the
+parent settings. Follow another interface's actual contract rather than copying
+these parameter names blindly.
+
+Keep dispatch availability separate from fit evidence. A `no data` cell means
+no verified observation, not an unavailable setting. Conversely, a table row
+does not establish that a current client can launch that option. Check supported
+settings and role constraints, then verify the effective configuration on real
+work. Do not manufacture an exhaustive grid of empty tasks or count a successful
+launch as a successful task. A reader or reviewer brief restricts its work; that
+alone does not establish a harness-enforced read-only sandbox.
+
 A Muse worker inherits its master's model and effort route; the client offers
 no per-worker model or effort selector. Size a Muse worker by launching (or
 relaunching) the session at the route its hardest brief needs, record that

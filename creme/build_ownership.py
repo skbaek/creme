@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import fcntl
 import hashlib
 import math
@@ -58,6 +59,10 @@ _SAFE_LEDGER_KEYS = {
     # to retrofit identity to old rows; missing identity is compatibility
     # evidence only, never an assertion that an old peak is exact today.
     "repository_identity", "input_context", "module_inputs", "identity_status",
+    # Additive, from workflow-streamlining-v1: module jobs that failed (never
+    # proof evidence; their run's peak is only a cost floor) and the per-run
+    # file holding Lake's full output.
+    "modules_failed", "log_path",
 }
 DEFAULT_LAKE_OVERHEAD_GIB = 1.0
 # A stale set this small has its concurrency computed exactly from the import
@@ -260,9 +265,11 @@ def _valid_ledger_row(row: Any) -> bool:
         "toolchain", "outcome", "toolchain_digest", "manifest_digest",
         "requested_contention", "evidence_contention", "estimate_source",
         "dependency", "dependency_rev",
-        "evidence_reason", "stale_detail", "hint",
+        "evidence_reason", "stale_detail", "hint", "log_path",
     )
     if not all(key not in row or isinstance(row[key], str) for key in optional_strings):
+        return False
+    if "modules_failed" in row and not _string_list(row["modules_failed"]):
         return False
     if "census" in row and not isinstance(row["census"], bool):
         return False
@@ -1184,6 +1191,118 @@ def _parse_build_output(lines: Iterable[str]) -> tuple[list[str], list[str], dic
     return sorted(set(rebuilt)), sorted(set(restored)), seconds
 
 
+_JOB_HEADER_RE = re.compile(r"^\s*(?:([\u2714\u2716\u26a0\u2139])\s*)?\[\d+/\d+\]\s")
+_FAILED_BUILDING_RE = re.compile(r"^\s*\u2716\s*\[\d+/\d+\]\s+Building\s+([A-Za-z0-9_'.]+)(?:\s|$)")
+_LOG_PREFIX_RE = re.compile(r"^(error|warning|info|trace):")
+_TOP_LEVEL_RE = re.compile(r"^(?:Some required \w+ logged failures|Build completed|error: build failed)")
+# Agent-facing Lake lines: at most this many from the head and from the tail.
+OUTPUT_HEAD_LINES = 100
+OUTPUT_TAIL_LINES = 100
+BUILD_LOG_RETENTION_DAYS = 30
+
+
+def _failed_jobs(lines: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Module jobs that failed, and every job Lake's closing list names as failed.
+
+    A failed module is never successful proof evidence: it is kept apart from
+    ``modules_rebuilt`` so its measured cost is only ever a floor.
+    """
+    modules: set[str] = set()
+    named: list[str] = []
+    listing = False
+    for line in lines:
+        match = _FAILED_BUILDING_RE.match(line)
+        if match:
+            modules.add(match.group(1))
+        if "logged failures" in line:
+            listing = True
+            continue
+        if listing:
+            item = _STALE_FAILURE_RE.match(line)
+            if item is None:
+                item = re.match(r"^\s*-\s+(\S.*?)\s*$", line)
+            if item is None:
+                listing = False
+            elif item.group(1) not in named:
+                named.append(item.group(1))
+    modules.update(name for name in named if re.fullmatch(r"[A-Za-z0-9_'.]+", name))
+    return sorted(modules), named
+
+
+class LakeOutputFilter:
+    """Select the Lake lines an agent needs: failed or warning jobs, and the verdict.
+
+    Reused and successful job headers (Built, Replayed, Fetched, Ran) and
+    ``trace:`` lines are dropped.  A failed or warning job's own log is kept,
+    as are unprefixed top-level lines such as Lake's closing failure list.
+    """
+
+    def __init__(self) -> None:
+        self.section_shown = True
+        self.prefix_shown = True
+
+    def keep(self, line: str) -> bool:
+        if _TOP_LEVEL_RE.match(line):
+            self.section_shown = self.prefix_shown = True
+            return True
+        header = _JOB_HEADER_RE.match(line)
+        if header:
+            self.section_shown = header.group(1) in {"\u2716", "\u26a0"}
+            self.prefix_shown = True
+            return self.section_shown
+        prefix = _LOG_PREFIX_RE.match(line)
+        if prefix:
+            self.prefix_shown = prefix.group(1) != "trace"
+        return self.section_shown and self.prefix_shown
+
+
+class BoundedPrinter:
+    """Print the first ``head`` kept lines live and the last ``tail`` at the end."""
+
+    def __init__(self, output: TextIO, head: int = OUTPUT_HEAD_LINES, tail: int = OUTPUT_TAIL_LINES) -> None:
+        self.output = output
+        self.head = head
+        self.tail: "collections.deque[str]" = collections.deque(maxlen=tail)
+        self.printed = 0
+        self.seen = 0
+
+    def add(self, line: str) -> None:
+        self.seen += 1
+        if self.printed < self.head:
+            self.printed += 1
+            print(line, end="" if line.endswith("\n") else "\n", file=self.output, flush=True)
+        else:
+            self.tail.append(line)
+
+    def finish(self, log: Optional[Path]) -> None:
+        elided = self.seen - self.printed - len(self.tail)
+        if elided > 0:
+            where = f"; full stream: {log}" if log is not None else ""
+            print(f"... {elided} diagnostic line(s) elided{where}", file=self.output)
+        for line in self.tail:
+            print(line, end="" if line.endswith("\n") else "\n", file=self.output)
+
+
+def _open_build_log(goal: str) -> tuple[Optional[Path], Optional[TextIO]]:
+    """A private per-run file beside the ledger that keeps Lake's full stream."""
+    directory = ledger_path().parent / "logs"
+    try:
+        _secure_dir(directory)
+        cutoff = time.time() - BUILD_LOG_RETENTION_DAYS * 86400
+        for old in directory.glob("*.log"):
+            try:
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+            except OSError:
+                continue
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        path = directory / f"{goal}-{stamp}-{os.getpid()}.log"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        return path, os.fdopen(fd, "w", encoding="utf-8")
+    except OSError:
+        return None, None
+
+
 def _module_hashes(worktree: Path, modules: Iterable[str]) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for module in modules:
@@ -1993,8 +2112,13 @@ def _evidence_rows(
     manifest_digest: Optional[str],
     input_identity: Optional[dict[str, Any]] = None,
     threads: Optional[int] = None,
+    failed: bool = False,
 ) -> tuple[list[dict[str, Any]], str]:
     """Successful measured rows in the relevant repository evidence cohort.
+
+    ``failed`` selects, from the same cohort, the unsuccessful rows that name
+    a failed module job instead.  Those are never measurements of a module:
+    they only floor the cost of the modules that failed.
 
     Old callers retain the former same-worktree behaviour.  Current build
     paths provide an identity: exact rows may then cross compatible linked
@@ -2014,7 +2138,10 @@ def _evidence_rows(
         row for row in rows
         if row.get("kind") == "build"
         and not row.get("probe")
-        and row.get("exit") == 0
+        and (
+            row.get("exit") != 0 and bool(row.get("modules_failed"))
+            if failed else row.get("exit") == 0
+        )
         and _finite_positive(row.get("peak_rss_mib"))
     ]
     if input_identity is None:
@@ -2403,13 +2530,13 @@ def _fallback_clause(
     the `source` string — and the `fit:` line that quotes it — never prints
     a bare default while asking for fallback-priced memory.
     """
-    if not (fallback or fallback_build):
-        return ""
     if term_origin is not None:
         return (
             f"; fallback prices {term_origin['module']} at {term_origin['peak_gib']:.2f} GiB "
             f"from row {term_origin['row_time']} ({term_origin['kind']})"
         )
+    if not (fallback or fallback_build):
+        return ""
     combined = {
         name: max(fallback.get(name, 0.0), fallback_build.get(name, 0.0))
         for name in set(fallback) | set(fallback_build)
@@ -2433,6 +2560,7 @@ def size_stale_set(
     settings: dict[str, int],
     default_gib: int,
     input_identity: Optional[dict[str, Any]] = None,
+    failed_rows: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     """Size a build from the modules it will elaborate, never from a target's name.
 
@@ -2446,6 +2574,11 @@ def size_stale_set(
     by the tightest broader rebuild that included its members, and by the
     profile default when none did.  When a drifted row's fallback peak alone
     sets the ask, the source names the module, peak, and row it came from.
+
+    An unmeasured module whose elaboration failed in ``failed_rows`` is
+    floored by that failed run's whole process peak.  The peak is the
+    closure's, not the module's own, so it is uncertain and only ever raises
+    the ask; it never counts as a measurement.
     """
     floor = int(settings["minimum_estimate_gib"])
     margin = int(settings["estimate_margin_gib"])
@@ -2464,8 +2597,21 @@ def size_stale_set(
         name: evidence["fallback_build_peak_gib"][name]
         for name in unmeasured if name in evidence["fallback_build_peak_gib"]
     }
-    fallback_floor = max([*fallback.values(), *fallback_build.values()], default=0.0)
-    has_fallback = bool(fallback or fallback_build)
+    failed_floor: dict[str, dict[str, Any]] = {}
+    for row in failed_rows:
+        peak_gib = float(row["peak_rss_mib"]) / 1024.0
+        for module in row.get("modules_failed") or []:
+            if module in unmeasured and peak_gib > failed_floor.get(module, {}).get("peak_gib", 0.0):
+                failed_floor[module] = {
+                    "peak_gib": peak_gib, "row_time": str(row.get("time")),
+                    "kind": "failed attempt: closure process peak, uncertain",
+                }
+    fallback_floor = max(
+        [*fallback.values(), *fallback_build.values(),
+         *(item["peak_gib"] for item in failed_floor.values())],
+        default=0.0,
+    )
+    has_fallback = bool(fallback or fallback_build or failed_floor)
     # A drifted single-module aggregate measures the named module's complete
     # prior process tree without sibling breadth. It remains unmeasured on the
     # current inputs and therefore keeps the default 1.25x admission charge,
@@ -2490,6 +2636,10 @@ def size_stale_set(
                 peak_gib,
                 {"module": module, **origin},
             ))
+    for module, origin in failed_floor.items():
+        priced_fallbacks.append((
+            math.ceil(origin["peak_gib"]) + margin, origin["peak_gib"], {"module": module, **origin},
+        ))
     fallback_term, _term_peak, fallback_term_origin = max(
         priced_fallbacks,
         key=lambda item: (item[0], item[1], item[2]["module"]),
@@ -2507,6 +2657,7 @@ def size_stale_set(
         "heavy": [name for name, _seconds in heavy],
         "fallback_modules": sorted(fallback),
         "fallback_build_modules": sorted(fallback_build),
+        "failed_attempt_modules": sorted(failed_floor),
         "fallback_peak_gib": round(fallback_floor, 2),
         "overhead_gib": round(float(evidence["overhead_gib"]), 2),
         "rows": evidence["rows"],
@@ -2872,8 +3023,12 @@ def derive_memory_gib(
             if repository is not None else None
         )
         rows, detail = _evidence_rows(worktree, *digests, fallback_identity)
+        failed_rows, _failed_detail = _evidence_rows(
+            worktree, *digests, fallback_identity, failed=True,
+        )
         fallback = size_stale_set(
             list(stale_set), stale.get("graph"), rows, settings, default_gib, fallback_identity,
+            failed_rows,
         )
         fallback_peak = float(fallback["fallback_peak_gib"] or fallback["peak_gib"])
         estimate = max(
@@ -2899,8 +3054,12 @@ def derive_memory_gib(
             "rows": 0,
             "keyed_on_elaboration": True,
         }
+    failed_rows, _failed_detail = _evidence_rows(
+        worktree, *digests, input_identity, threads, failed=True,
+    )
     sizing = size_stale_set(
         list(stale_set), stale.get("graph"), rows, settings, default_gib, input_identity,
+        failed_rows,
     )
     return int(sizing["estimate_gib"]), {
         "kind": sizing["kind"],
@@ -3104,6 +3263,7 @@ def run_lake_build(
     census: bool = False,
     dependency: Optional[str] = None,
     stdout: Optional[TextIO] = None,
+    full_output: bool = False,
 ) -> int:
     output = stdout or os.sys.stdout
     cwd = Path.cwd().resolve()
@@ -3381,6 +3541,17 @@ def run_lake_build(
     cleanup_proved = True
     termination_signal: Optional[int] = None
     prior_handlers: dict[int, Any] = {}
+    # Lake's full verbose stream goes to disk from the first line, so a killed
+    # run or a lost terminal still leaves every diagnostic; the terminal gets
+    # only failed/warning jobs, bounded, unless --full-output asks for all.
+    log_path, log_file = _open_build_log(goal)
+    print(
+        f"log: {log_path}" if log_path is not None
+        else "log: unavailable (could not create the build log file)",
+        file=output, flush=True,
+    )
+    selector = LakeOutputFilter()
+    printer = BoundedPrinter(output)
 
     def request_termination(signum: int, _frame: Any) -> None:
         nonlocal termination_signal
@@ -3404,7 +3575,16 @@ def run_lake_build(
         assert proc.stdout is not None
         for line in proc.stdout:
             lines.append(line)
-            print(line, end="", file=output)
+            if log_file is not None:
+                try:
+                    log_file.write(line)
+                    log_file.flush()
+                except OSError:
+                    pass
+            if full_output:
+                print(line, end="", file=output)
+            elif selector.keep(line):
+                printer.add(line)
         exit_code = proc.wait()
         if renewer is not None and renewer.refused:
             exit_code = exit_code or 2
@@ -3419,9 +3599,17 @@ def run_lake_build(
             sampler.stop()
         if renewer:
             renewer.stop()
+        if log_file is not None:
+            try:
+                log_file.close()
+            except OSError:
+                pass
+    if not full_output:
+        printer.finish(log_path)
     wall = time.monotonic() - started
     after = _swap_gib()
     rebuilt, restored, module_seconds = _parse_build_output(lines)
+    modules_failed, failed_named = _failed_jobs(lines)
     hashes = _module_hashes(worktree, rebuilt)
     identity_fields: dict[str, Any] = {}
     record_digests = worktree_digests(worktree)
@@ -3481,8 +3669,10 @@ def run_lake_build(
         "swap_before_gib": before, "swap_after_gib": after, "threads": threads,
         "probe": False, "admission": admission, "contention": contention,
         "modules_rebuilt": rebuilt, "modules_restored": restored,
+        **({"modules_failed": modules_failed} if modules_failed else {}),
         "module_hashes": hashes, "module_seconds": module_seconds,
         **({"module_peak_mib": module_peaks} if module_peaks else {}),
+        **({"log_path": str(log_path)} if log_path is not None else {}),
         "toolchain": str(real_lake), "renewals": renewer.verdicts if renewer else [],
         "memory_gib": memory_gib,
         "evidence_contention": contention,
@@ -3535,6 +3725,18 @@ def run_lake_build(
         "evidence": evidence,
         "memory_gib": memory_gib,
         "estimate": estimate_evidence,
+    }
+    failed = sorted(set(failed_named) | set(modules_failed))
+    summary["log"] = str(log_path) if log_path is not None else None
+    summary["failed"] = failed
+    summary["target_verdicts"] = {
+        target: (
+            "built" if exit_code == 0
+            else "interrupted" if interrupted
+            else "failed" if target in failed
+            else "not confirmed: the build failed"
+        )
+        for target in targets
     }
     if interrupted:
         summary["outcome"] = "killed"

@@ -1075,6 +1075,11 @@ def cmd_lake_build(arguments: argparse.Namespace) -> int:
         help="update one Git-pinned dependency and rebuild the full target, exclusively, in a GOAL-rehearsal worktree",
     )
     options.add_argument("--dependency", metavar="NAME")
+    options.add_argument(
+        "--full-output",
+        action="store_true",
+        help="print Lake's full verbose stream (default: failed/warning jobs only, bounded; the full stream is always in the run's log file)",
+    )
     options.add_argument("targets", nargs=argparse.REMAINDER)
     selected = options.parse_args(arguments.build_args)
     targets = list(selected.targets)
@@ -1090,6 +1095,7 @@ def cmd_lake_build(arguments: argparse.Namespace) -> int:
         wait_seconds=selected.wait,
         census=selected.census,
         dependency=selected.dependency,
+        full_output=selected.full_output,
     )
 
 

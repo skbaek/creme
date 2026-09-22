@@ -61,8 +61,6 @@ REQUIRED_SECTIONS = (
 )
 
 REQUIRED_PLACEHOLDERS = {
-    "ACQUIRE_OR_WAIT_COMMAND",
-    "ADDITIONAL_READ_FIRST_SOURCE",
     "AUTONOMOUS_DECISIONS",
     "BRANCH",
     "CHECKPOINT_ARTIFACT",
@@ -79,13 +77,10 @@ REQUIRED_PLACEHOLDERS = {
     "GATE_CATALOGUE",
     "GOAL_ID",
     "MASTER_DECISIONS",
-    "MEMORY_GIB",
     "OBJECTIVE",
     "OWNED_PATHS",
     "PRIMARY_AUTHORITY",
     "REACQUISITION_CONDITION",
-    "RELEASE_OR_WIND_DOWN_COMMAND",
-    "RENEW_COMMAND",
     "REPOSITORY",
     "REPOSITORY_INSTRUCTIONS",
     "RESOURCE_CLASS",
@@ -192,7 +187,7 @@ class MasterTemplateTest(unittest.TestCase):
         self.assertIn("Do not reacquire a hold or resume work until", normalized_pause)
         self.assertIn("{{REACQUISITION_CONDITION}}", normalized_pause)
 
-        returned = self.worker.split("## Return contract", 1)[1]
+        returned = " ".join(self.worker.split("## Return contract", 1)[1].split())
         self.assertIn("bounded condition/evidence digest", returned)
         self.assertIn("every exact command run and its terminal verdict", returned)
         self.assertIn("never acceptance evidence", returned)
@@ -209,10 +204,10 @@ class MasterTemplateTest(unittest.TestCase):
         self.assertIn("synthetic-reacquisition_condition", filled)
         self.assertIn("bounded condition/evidence digest", filled)
 
-    def test_master_guide_and_template_carry_one_identical_exact_rule(self):
+    def test_master_guide_carries_the_exact_rule_and_the_template_links_it(self):
         self.assertEqual(normalized_rule(self.master), EXPECTED_RULE)
-        self.assertEqual(normalized_rule(self.worker), EXPECTED_RULE)
-        self.assertEqual(normalized_rule(self.master), normalized_rule(self.worker))
+        self.assertNotIn(PROVENANCE_START, self.worker)
+        self.assertIn("master.md#registered-provenance-is-a-narrow-exception", self.worker)
 
     def test_normative_table_covers_the_autonomous_reserved_and_mixed_boundary(self):
         assert_decision_table(self.master)

@@ -1,8 +1,8 @@
 # Worker brief — `{{GOAL_ID}}`
 
-Replace every placeholder before dispatch. This filled brief is private
-runtime state; store it beneath the configured goal store's ignored
-`master/briefs/` directory, never in this tracked template.
+Replace every placeholder before dispatch and store the filled brief under the
+goal store's ignored `master/briefs/`. General policy lives in `AGENTS.md` and
+the guides it links; this brief states only what is specific to the work.
 
 ## Objective
 
@@ -19,12 +19,8 @@ Dependency relationship and required ancestry:
 
 ## Read-first sources
 
-Read each source in full before acting, in this authority order:
-
-1. `{{PRIMARY_AUTHORITY}}`
-2. `{{REPOSITORY_INSTRUCTIONS}}`
-3. `{{GATE_CATALOGUE}}`
-4. `{{ADDITIONAL_READ_FIRST_SOURCE}}`
+Read in full before acting, in this authority order: `{{PRIMARY_AUTHORITY}}`,
+`{{REPOSITORY_INSTRUCTIONS}}`, `{{GATE_CATALOGUE}}`.
 
 ## Owned repositories and paths
 
@@ -32,8 +28,8 @@ Read each source in full before acting, in this authority order:
 |---|---|---|
 | `{{REPOSITORY}}` | `{{OWNED_PATHS}}` | `{{EXCLUDED_PATHS}}` |
 
-Preserve unrelated state. Do not edit, stage, commit, merge, or push outside
-the allocation above.
+Preserve unrelated state. Do not edit, stage, or commit outside this
+allocation.
 
 ## Per-goal worktrees and branches
 
@@ -41,19 +37,14 @@ the allocation above.
 |---|---|---|
 | `{{REPOSITORY}}` | `{{WORKTREE}}` | `{{BRANCH}}` |
 
-Shared default-branch checkouts remain untouched. Commit and push only the
-dedicated branches authorized by this brief.
+Return local commits on this branch; the master pushes and merges.
 
 ## Resource class and coordination
 
-- Resource class: `{{RESOURCE_CLASS}}`
-- Conservative peak estimate when required: `{{MEMORY_GIB}}` GiB
-- Acquire or wait command: `{{ACQUIRE_OR_WAIT_COMMAND}}`
-- Renewal command: `{{RENEW_COMMAND}}`
-- Release or wind-down command: `{{RELEASE_OR_WIND_DOWN_COMMAND}}`
-
-Light work takes no hold. Any elaborating command uses the owned-build wrapper
-and the repository's gate catalogue; never substitute an uncoordinated build.
+Resource class: `{{RESOURCE_CLASS}}`. Light work takes no hold. Builds go
+through the owned-build wrapper, which sizes and admits them; follow
+[execution](../../docs/guides/execution.md#resource-classes) for waits and
+renewal.
 
 ## Convergence gate
 
@@ -68,20 +59,8 @@ and the repository's gate catalogue; never substitute an uncoordinated build.
 - Master-only decisions: {{MASTER_DECISIONS}}
 - User-reserved decisions: {{USER_RESERVED_DECISIONS}}
 
-<!-- provenance-rule:start -->
-> Registered-provenance exception: The master may approve a registered
-> generator's identity/provenance output caused solely by an already-authorized
-> source/input change if and only if the registered check is green, a relevant
-> falsifier bites, the diff is exact generator output, and no semantic reference
-> changes; generation never makes a reserved change autonomous, and an ambiguous
-> mixed diff must be separated or escalated as a decision packet.
-<!-- provenance-rule:end -->
-
-Pins or references, weakened baselines or budgets, allowlist growth, goldens,
-timeouts, publication, public claims or counts, licenses, external messages,
-spending, and dependent public contracts remain reserved even when generated.
-Consult the decision table in the master guide; do not relabel a mixed diff as
-provenance.
+Generated output never makes a reserved change autonomous; see the master
+guide's [registered-provenance rule](../../docs/guides/master.md#registered-provenance-is-a-narrow-exception).
 
 ## Expected checkpoints
 
@@ -90,7 +69,7 @@ provenance.
 | `{{CHECKPOINT_BOUNDARY}}` | `{{CHECKPOINT_ARTIFACT}}` | `{{CHECKPOINT_EVIDENCE}}` |
 
 At every coherent green boundary, inspect the complete diff, stage explicit
-owned paths, commit, push when authorized, and update the state brief.
+owned paths, commit, and update the state brief in place.
 
 ## State, report, and evidence paths
 
@@ -98,32 +77,20 @@ owned paths, commit, push when authorized, and update the state brief.
 - Final report: `{{FINAL_REPORT}}`
 - Evidence tree: `{{EVIDENCE_TREE}}`
 
-Update the state brief in place at each checkpoint; do not accumulate dated
-status accounts. Keep one current condition/evidence map, link detailed command
-receipts and immutable prior history, and preserve open decisions, findings,
-limits and unfinished conditions. Follow the master's
-[compact continuity](../../docs/guides/master.md#compact-continuity) rules.
-
-These files, exact candidate commits, and terminal verdicts are durable
-evidence. A chat summary is not acceptance evidence.
+A chat summary is not acceptance evidence.
 
 ## Pause and reacquisition
 
-On a pause request, finish or stop at a safe boundary, inspect the full diff,
-commit the coherent owned checkpoint, update the state brief with the exact
-next unit, and return. If this worker opened a Lean server or took a goal hold,
-run goal-scoped `python3 -m creme reclaim --wind-down {{GOAL_ID}}` first. Do not
+On a pause request, stop at a safe boundary, commit the coherent owned checkpoint
+(unfinished work goes on a labeled recovery branch), update the state brief with
+the exact next unit, and return. If this worker opened a Lean server or took a
+goal hold, run `python3 -m creme reclaim --wind-down {{GOAL_ID}}` first. Do not
 reacquire a hold or resume work until `{{REACQUISITION_CONDITION}}` is true.
 
 ## Return contract
 
-Return a bounded condition/evidence digest containing:
-
-1. exact commits and changed owned paths;
-2. each required condition and its inspectable evidence;
-3. every exact command run and its terminal verdict;
-4. open findings, decisions, and blockers; and
-5. the next coherent unit.
-
-The digest points to durable evidence; it does not replace that evidence, and
-the worker's statement that the task is complete is never acceptance evidence.
+Return a bounded condition/evidence digest: exact commits and changed owned
+paths; each required condition and its evidence; every exact command run and
+its terminal verdict; open findings, decisions, and blockers; the next coherent
+unit. The worker's statement that the task is complete is never acceptance
+evidence.

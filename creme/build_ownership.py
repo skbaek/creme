@@ -3251,6 +3251,219 @@ class RenewalThread(threading.Thread):
         self.join(timeout=2)
 
 
+# Refusals the walk answers: the whole closure does not fit now (LIGHT_ONLY)
+# or on any host state (NEVER_FITS), while one module at a time may.  Every
+# other refusal is about another session's holds, which a smaller unit would
+# meet just the same.
+WALK_TRIGGERS = ("LIGHT_ONLY", "NEVER_FITS")
+
+
+def _admission_token(admission: Any) -> str:
+    return str(admission or "").split(" — ", 1)[0].strip()
+
+
+def _walk_trigger(admission: str) -> bool:
+    return _admission_token(admission) in WALK_TRIGGERS
+
+
+def walk_order(
+    modules: Iterable[str], graph: Optional[dict[str, set[str]]]
+) -> Optional[list[str]]:
+    """Order a stale set deepest-first: every module after the ones it imports.
+
+    A module's height is the longest import chain below it inside the set, so
+    sorting by height (then name, for a stable order) is a topological order
+    of the import graph restricted to the set.  Without a graph the order is
+    unknown and nothing may be walked.
+    """
+    names = sorted(set(str(module) for module in modules))
+    if not names:
+        return []
+    if graph is None or any(name not in graph for name in names):
+        return None
+    members = set(names)
+    imports = {name: graph.get(name, set()) & members for name in names}
+    importers: dict[str, list[str]] = {name: [] for name in names}
+    for name, below in imports.items():
+        for imported in below:
+            importers[imported].append(name)
+    pending = {name: len(below) for name, below in imports.items()}
+    height = {name: 0 for name in names}
+    ready = [name for name in names if pending[name] == 0]
+    done = 0
+    while ready:
+        module = ready.pop()
+        done += 1
+        for importer in importers[module]:
+            height[importer] = max(height[importer], height[module] + 1)
+            pending[importer] -= 1
+            if pending[importer] == 0:
+                ready.append(importer)
+    if done != len(names):
+        return None  # an import cycle has no dependency order
+    return sorted(names, key=lambda name: (height[name], name))
+
+
+class _UnitOutput:
+    """Capture one walk unit's output, passing its admission-wait lines through live."""
+
+    def __init__(self, outer: TextIO) -> None:
+        self.outer = outer
+        self.parts: list[str] = []
+        self._pending = ""
+
+    def write(self, text: str) -> int:
+        self.parts.append(text)
+        self._pending += text
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            if line.startswith("fit:"):
+                print(f"  {line}", file=self.outer, flush=True)
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+    def getvalue(self) -> str:
+        return "".join(self.parts)
+
+
+def _last_json(text: str) -> dict[str, Any]:
+    for line in reversed(text.splitlines()):
+        if line.startswith("{"):
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                return value
+    return {}
+
+
+def _walk_unit(
+    goal: str,
+    unit_targets: list[str],
+    label: str,
+    *,
+    threads: int,
+    wait_seconds: Optional[int],
+    full_output: bool,
+    output: TextIO,
+) -> dict[str, Any]:
+    """Run one ordinary owned build and print one line about it.
+
+    The unit is a complete `run_lake_build`: its own probe, class, estimate,
+    admission, hold, ledger row, and log file.  Its own output is kept out of
+    the walk's stream unless the unit did not succeed, when the (already
+    bounded) diagnostics are what the caller needs.
+    """
+    buffer = _UnitOutput(output)
+    started = time.monotonic()
+    code = run_lake_build(
+        goal, unit_targets, threads=threads, wait_seconds=wait_seconds,
+        stdout=buffer, full_output=full_output,
+    )
+    elapsed = round(time.monotonic() - started, 1)
+    summary = _last_json(buffer.getvalue())
+    admission = _admission_token(summary.get("admission")) or str(summary.get("status", "UNKNOWN"))
+    build_seconds = summary.get("wall_seconds")
+    unit = {
+        "unit": label, "targets": unit_targets, "exit": code, "admission": admission,
+        "build_seconds": build_seconds, "elapsed_seconds": elapsed,
+        "log": summary.get("log"),
+    }
+    if summary.get("status") == "REFUSED":
+        unit["refused"] = True
+    if summary.get("failed"):
+        unit["failed"] = summary["failed"]
+    if "target_verdicts" in summary:
+        unit["target_verdicts"] = summary["target_verdicts"]
+    if code != 0:
+        print(buffer.getvalue(), end="", file=output)
+    build_text = f"{build_seconds:.1f}s" if isinstance(build_seconds, (int, float)) else "-"
+    print(
+        f"walk {label}: {admission} exit {code} build {build_text} elapsed {elapsed:.1f}s"
+        + (f" log {unit['log']}" if unit["log"] else ""),
+        file=output, flush=True,
+    )
+    return unit
+
+
+def _walk_stale_set(
+    goal: str,
+    targets: list[str],
+    order: list[str],
+    whole_admission: str,
+    *,
+    threads: int,
+    wait_seconds: Optional[int],
+    full_output: bool,
+    output: TextIO,
+) -> int:
+    """Build a refused closure one stale module at a time, then the targets.
+
+    Sequential by design: host memory is the constraint, so no unit runs
+    beside another.  The first unit that fails or is refused stops the walk;
+    everything above it would only fail again.
+    """
+    print(
+        f"walk: the whole closure was refused ({whole_admission}); building "
+        f"{len(order)} stale module(s) one at a time, imports first",
+        file=output, flush=True,
+    )
+    units: list[dict[str, Any]] = []
+    stopped: Optional[dict[str, Any]] = None
+    remaining: list[str] = []
+    for index, module in enumerate(order):
+        unit = _walk_unit(
+            goal, [module], f"{index + 1}/{len(order)} {module}",
+            threads=threads, wait_seconds=wait_seconds, full_output=full_output, output=output,
+        )
+        unit["module"] = module
+        units.append(unit)
+        if unit["exit"] != 0:
+            stopped = unit
+            remaining = order[index + 1:]
+            break
+    final: Optional[dict[str, Any]] = None
+    if stopped is None:
+        final = _walk_unit(
+            goal, list(targets), f"targets {' '.join(targets)}",
+            threads=threads, wait_seconds=wait_seconds, full_output=full_output, output=output,
+        )
+        exit_code = int(final["exit"])
+        verdicts = final.get("target_verdicts") or {
+            target: ("built" if exit_code == 0 else "not confirmed: the target build did not run")
+            for target in targets
+        }
+        failed_unit = final if exit_code != 0 else None
+    else:
+        exit_code = int(stopped["exit"])
+        verdicts = {
+            target: f"not built: the walk stopped at {stopped['module']}" for target in targets
+        }
+        failed_unit = stopped
+    refused = failed_unit is not None and failed_unit.get("refused", False)
+    summary = {
+        "status": "OK" if exit_code == 0 else "REFUSED" if refused else "ERROR",
+        "exit": exit_code,
+        "walk": {
+            "whole_closure_admission": whole_admission,
+            "order": order,
+            "units_built": [unit["module"] for unit in units if unit["exit"] == 0],
+            "failed_unit": failed_unit,
+            "remaining": remaining,
+            "units": units,
+            "targets_unit": final,
+        },
+        "target_verdicts": verdicts,
+    }
+    if refused:
+        summary["admission"] = failed_unit["admission"]
+    print(json.dumps(summary, sort_keys=True), file=output)
+    return exit_code
+
+
 def run_lake_build(
     goal: str,
     targets: list[str],
@@ -3264,6 +3477,7 @@ def run_lake_build(
     dependency: Optional[str] = None,
     stdout: Optional[TextIO] = None,
     full_output: bool = False,
+    walk: bool = False,
 ) -> int:
     output = stdout or os.sys.stdout
     cwd = Path.cwd().resolve()
@@ -3316,6 +3530,22 @@ def run_lake_build(
             "status": "REFUSED", "detail": "--dependency is only meaningful with --census",
         }, sort_keys=True), file=output)
         return 2
+    if walk:
+        conflicts = [
+            flag for flag, given in (
+                ("--probe", probe), ("--census", census),
+                ("--memory-gib", memory_gib is not None), ("--contention", contention is not None),
+            ) if given
+        ]
+        if conflicts:
+            print(json.dumps({
+                "status": "REFUSED",
+                "detail": (
+                    f"--walk cannot be combined with {', '.join(conflicts)}: each walk unit "
+                    "derives its own class and estimate from its own probe"
+                ),
+            }, sort_keys=True), file=output)
+            return 2
     try:
         real_lake, real_lean, sysroot = resolve_toolchain(worktree)
     except RuntimeError as exc:
@@ -3453,22 +3683,52 @@ def run_lake_build(
             file=output,
         )
     else:
-        admitted, admission = semaphore.adaptive_acquire(
-            goal,
-            "classified lake build",
-            semaphore.ADAPTIVE_LEASE_SECONDS,
-            memory_gib=memory_gib,
-            contention=contention,
-            wait_seconds=wait_seconds,
-            estimate_source=_estimate_note(estimate_evidence),
-            **(
-                {
-                    "poll_seconds": float(settings()["wait_poll_seconds"]),
-                    "announce": lambda line: print(line, file=output, flush=True),
-                }
-                if wait_seconds is not None else {}
-            ),
-        )
+        def acquire(wait: Optional[int]) -> tuple[bool, str]:
+            return semaphore.adaptive_acquire(
+                goal,
+                "classified lake build",
+                semaphore.ADAPTIVE_LEASE_SECONDS,
+                memory_gib=memory_gib,
+                contention=contention,
+                wait_seconds=wait,
+                estimate_source=_estimate_note(estimate_evidence),
+                **(
+                    {
+                        "poll_seconds": float(settings()["wait_poll_seconds"]),
+                        "announce": lambda line: print(line, file=output, flush=True),
+                    }
+                    if wait is not None else {}
+                ),
+            )
+
+        if walk:
+            # The walk is a fallback: the whole closure is asked for first,
+            # without waiting, and built in one invocation when admitted.
+            walk_modules = probe_evidence.get("stale_set") if probe_evidence is not None else None
+            order = (
+                walk_order(walk_modules, probe_evidence.get("graph"))
+                if walk_modules is not None else None
+            )
+            admitted, admission = acquire(None)
+            if not admitted and not _walk_trigger(admission) and wait_seconds is not None:
+                # A refusal another session will lift is waited out for the
+                # whole closure exactly as without --walk.
+                admitted, admission = acquire(wait_seconds)
+            if not admitted and _walk_trigger(admission):
+                if order is not None and len(order) > 1:
+                    return _walk_stale_set(
+                        goal, targets, order, admission,
+                        threads=threads, wait_seconds=wait_seconds,
+                        full_output=full_output, output=output,
+                    )
+                evidence = dict(evidence)
+                evidence["walk"] = (
+                    "not walked: the stale closure is a single module"
+                    if order is not None
+                    else "not walked: the probe named no stale set to order"
+                )
+        else:
+            admitted, admission = acquire(wait_seconds)
 
     def release_hold() -> tuple[bool, str]:
         if fresh:

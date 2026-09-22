@@ -861,6 +861,7 @@ class BuildOwnershipTest(unittest.TestCase):
             census=False,
             dependency=None,
             full_output=False,
+            walk=False,
         )
 
     def test_lake_build_cli_forwards_explicit_one_thread(self) -> None:

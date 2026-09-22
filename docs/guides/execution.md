@@ -454,6 +454,15 @@ closure — every module a build would elaborate, not only the frontier Lake
 stops at — so a broad rebuild can be planned as one build of the top of its
 import chain instead of walked a layer at a time.
 
+When the whole stale closure cannot be admitted — refused `LIGHT_ONLY`, or
+`NEVER_FITS` because its estimate exceeds even an idle host — pass `--walk`
+instead of walking the stale set by hand. The wrapper first asks for the whole
+closure and builds it in one invocation if admitted; otherwise it builds the
+stale modules one at a time, imports first, each as an ordinary owned build
+with its own probe, estimate, admission, hold, ledger row, and log, then builds
+the requested targets. It stops at the first unit that fails or is refused and
+names it and the modules left unbuilt. `--wait` applies to each unit.
+
 The wrapper prints only failed and warning jobs (bounded) and Lake's verdict,
 then a JSON summary with a per-target verdict, the failed modules, and the
 `log:` path holding Lake's full stream from the first line; `--full-output`

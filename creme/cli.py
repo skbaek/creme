@@ -1080,6 +1080,14 @@ def cmd_lake_build(arguments: argparse.Namespace) -> int:
         action="store_true",
         help="print Lake's full verbose stream (default: failed/warning jobs only, bounded; the full stream is always in the run's log file)",
     )
+    options.add_argument(
+        "--walk",
+        action="store_true",
+        help=(
+            "if the whole stale closure is refused LIGHT_ONLY or NEVER_FITS, build its stale "
+            "modules one owned unit at a time, imports first, then the targets"
+        ),
+    )
     options.add_argument("targets", nargs=argparse.REMAINDER)
     selected = options.parse_args(arguments.build_args)
     targets = list(selected.targets)
@@ -1096,6 +1104,7 @@ def cmd_lake_build(arguments: argparse.Namespace) -> int:
         census=selected.census,
         dependency=selected.dependency,
         full_output=selected.full_output,
+        walk=selected.walk,
     )
 
 

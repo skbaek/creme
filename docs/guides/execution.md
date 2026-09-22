@@ -454,8 +454,11 @@ closure — every module a build would elaborate, not only the frontier Lake
 stops at — so a broad rebuild can be planned as one build of the top of its
 import chain instead of walked a layer at a time.
 
-On completion the wrapper lists the modules it rebuilt on a `restart:` line
-of its own; a file's language-server worker keeps the imports it loaded until
+The wrapper prints only failed and warning jobs (bounded) and Lake's verdict,
+then a JSON summary with a per-target verdict, the failed modules, and the
+`log:` path holding Lake's full stream from the first line; `--full-output`
+prints the whole stream. On completion it lists the modules it rebuilt on a
+`restart:` line of its own; a file's language-server worker keeps the imports it loaded until
 it is refreshed. The edit loop — diagnostics first, the build is not a
 type-checker, how to refresh a worker — is in the `lean-prover` skill.
 

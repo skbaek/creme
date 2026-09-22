@@ -444,6 +444,11 @@ finds itself about to escalate, it first writes the decision entry as if it
 had decided, and escalates only if that entry would violate one of the four
 bullets above.
 
+A reserved question can take hours to answer, and a client's question tool may
+block the session until it is answered. Before asking, dispatch every unit
+that does not depend on the answer, including preparation that serves either
+option, so that the wait delays only the work that truly needs the decision.
+
 ### Registered provenance is a narrow exception
 
 <!-- provenance-rule:start -->

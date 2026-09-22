@@ -1809,3 +1809,47 @@ class LiveStateCompatibilityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailedAttemptFloorTest(unittest.TestCase):
+    """workflow-streamlining-v1: a failed elaboration still leaves a cost floor."""
+
+    def failed(self, peak_gib: float) -> dict:
+        row = _row("2026-09-20T00:00:00Z", ["B"], peak_gib, exit_code=1)
+        row["modules_failed"] = ["A"]
+        return row
+
+    def test_a_failed_attempt_floors_an_otherwise_unmeasured_module(self) -> None:
+        cheap = owned.size_stale_set(["A"], {"A": set()}, [], SETTINGS, 8)
+        self.assertEqual(cheap["estimate_gib"], 4)
+        sizing = owned.size_stale_set(
+            ["A"], {"A": set()}, [], SETTINGS, 8, failed_rows=[self.failed(5.4)],
+        )
+        self.assertEqual(sizing["unmeasured"], ["A"])
+        self.assertEqual(sizing["failed_attempt_modules"], ["A"])
+        self.assertEqual(sizing["estimate_gib"], 7)       # ceil(5.4) + 1 GiB margin
+        self.assertIn("failed attempt", sizing["source"])
+        self.assertIn("uncertain", sizing["source"])
+
+    def test_a_successful_measurement_is_not_overridden_by_a_failed_attempt(self) -> None:
+        rows = [_row("2026-09-21T00:00:00Z", ["A"], 2.1, lean_gib=1.5)]
+        sizing = owned.size_stale_set(
+            ["A"], {"A": set()}, rows, SETTINGS, 8, failed_rows=[self.failed(5.4)],
+        )
+        self.assertEqual(sizing["kind"], "measured")
+        self.assertEqual(sizing["estimate_gib"], 3)
+
+    def test_the_ledger_path_reads_failed_rows_and_never_counts_them_as_measured(self) -> None:
+        with _isolated() as root:
+            (root / "ledger.jsonl").write_text(
+                json.dumps(self.failed(5.4)) + "\n", encoding="utf-8",
+            )
+            measured, _detail = owned._evidence_rows(Path("/w"), "tc", "mf")
+            self.assertEqual(measured, [])
+            estimate, evidence = owned.derive_memory_gib(
+                Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8,
+                stale={"stale": 1, "stale_set": ["A"], "graph": {"A": set()}},
+            )
+        self.assertEqual(estimate, 7)
+        self.assertEqual(evidence["unmeasured_modules"], ["A"])
+        self.assertIn("failed attempt", evidence["source"])

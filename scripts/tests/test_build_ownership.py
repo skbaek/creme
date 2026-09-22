@@ -200,12 +200,6 @@ class BuildOwnershipTest(unittest.TestCase):
         self.assertIn("one** hold sized for its Lean rows", joined)
         self.assertIn("take no hold at all", joined)
 
-    def test_the_guide_says_not_to_filter_the_wrappers_output(self) -> None:
-        joined = " ".join(
-            (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()
-        )
-        self.assertIn("Never filter the wrapper's output", joined)
-
     def test_doctor_validates_every_client_surface(self) -> None:
         checks = check_client_surface(ROOT)
         by_name = {check.name: check for check in checks}
@@ -866,6 +860,7 @@ class BuildOwnershipTest(unittest.TestCase):
             wait_seconds=7,
             census=False,
             dependency=None,
+            full_output=False,
         )
 
     def test_lake_build_cli_forwards_explicit_one_thread(self) -> None:
@@ -1039,7 +1034,7 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
                 pass
 
         output = io.StringIO()
-        with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), patch(
+        with _ledger_and_log(), patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), patch(
             "creme.build_ownership.repository_identity", return_value=None
         ), patch(
             "creme.build_ownership.resolve_toolchain", return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))
@@ -1118,7 +1113,7 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
             events.append("ledger")
             captured.append(row)
 
-        with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), patch(
+        with _ledger_and_log(), patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), patch(
             "creme.build_ownership.repository_identity", return_value=None
         ), patch(
             "creme.build_ownership.resolve_toolchain", return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))
@@ -1677,6 +1672,152 @@ class QueueRollupTest(unittest.TestCase):
             "profile default (full target)": 1,
             "profile default (no measurement)": 1,
         })
+
+
+# A verbose Lake stream: reused and successful jobs, trace lines, one warning
+# job, one failed module job, and Lake's closing failure list.
+FAILED_STREAM = (
+    [f"✔ [{index}/400] Replayed Pkg.R{index}\n" for index in range(1, 300)]
+    + [
+        "✔ [300/400] Built Pkg.Ok (1.2s)\n",
+        "trace: .> LEAN_PATH=/very/long lean Pkg/Ok.lean\n",
+        "✔ [301/400] Ran Pkg:exe\n",
+        "⚠ [302/400] Built Pkg.Warn (0.5s)\n",
+        "trace: .> LEAN_PATH=/very/long lean Pkg/Warn.lean\n",
+        "warning: Pkg/Warn.lean:3:0: unused variable `x`\n",
+        "✖ [303/400] Building Pkg.Bad (2.0s)\n",
+        "trace: .> LEAN_PATH=/very/long lean Pkg/Bad.lean\n",
+        "error: Pkg/Bad.lean:7:2: type mismatch\n",
+        "  h\n",
+        "has type\n",
+        "error: Lean exited with code 1\n",
+        "✔ [304/400] Fetched Pkg.Late\n",
+        "Some required targets logged failures:\n",
+        "- Pkg.Bad\n",
+        "error: build failed\n",
+    ]
+)
+
+
+class BoundedOutputTest(unittest.TestCase):
+    """workflow-streamlining-v1: bounded terminal output, full stream on disk."""
+
+    def build(self, stream: list[str], exit_code: int, **kwargs):
+        rows: list[dict] = []
+
+        class FakeProc:
+            pid = 424242
+            stdout = list(stream)
+
+            def wait(self, timeout=None):
+                return exit_code
+
+        class FakeSampler:
+            def __init__(self, _pid, worktree=None):
+                self.samples = 1
+                self.unavailable_samples = 0
+                self.peak_rss_mib = 5530.0
+                self.peak_lean_rss_mib = 5000.0
+                self.max_concurrent_lean = 1
+                self.module_peak_mib = {}
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        class FakeRenewer:
+            def __init__(self, _goal, _proc):
+                self.refused = False
+                self.cleanup_proved = True
+                self.verdicts: list[str] = []
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        output = io.StringIO()
+        with _ledger_and_log() as (ledger, _), patch(
+            "creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")
+        ), patch("creme.build_ownership.repository_identity", return_value=None), patch(
+            "creme.build_ownership.stale_evidence", return_value=UNPROBED
+        ), patch(
+            "creme.build_ownership.resolve_toolchain", return_value=(Path("/tool/lake"), Path("/tool/lean"), Path("/tool"))
+        ), patch("creme.build_ownership.semaphore.adaptive_acquire", return_value=(True, "ADMITTED_HARD")), patch(
+            "creme.build_ownership.semaphore.adaptive_release", return_value=(True, "released")
+        ), patch("creme.build_ownership.guard_bin", return_value=Path("/guard")), patch(
+            "creme.build_ownership.subprocess.Popen", return_value=FakeProc()
+        ), patch("creme.build_ownership.ProcessSampler", FakeSampler), patch(
+            "creme.build_ownership.RenewalThread", FakeRenewer
+        ), patch("creme.build_ownership._process_group_alive", return_value=False), patch(
+            "creme.build_ownership._module_hashes", return_value={}
+        ), patch("creme.build_ownership._swap_gib", return_value=None), patch(
+            "creme.build_ownership.append_ledger", side_effect=rows.append
+        ):
+            code = owned.run_lake_build(
+                "g", ["Pkg.Bad", "Pkg.Ok"], contention="sensitive", memory_gib=8,
+                stdout=output, **kwargs,
+            )
+            text = output.getvalue()
+            summary = json.loads(text.splitlines()[-1])
+            log = Path(summary["log"])
+            self.assertEqual(log.parent, ledger.resolve().parent / "logs")
+            logged = log.read_text(encoding="utf-8")
+        return code, text, summary, rows[0], logged
+
+    def test_a_failed_build_prints_only_diagnostics_and_a_verdict(self) -> None:
+        code, text, summary, row, logged = self.build(FAILED_STREAM, 1)
+        self.assertEqual(code, 1)
+        self.assertEqual(logged, "".join(FAILED_STREAM))
+        for hidden in ("Replayed", "Fetched", "Ran Pkg", "Built Pkg.Ok", "trace:"):
+            self.assertNotIn(hidden, text)
+        for shown in ("Building Pkg.Bad", "type mismatch", "has type", "unused variable",
+                      "logged failures", "- Pkg.Bad", "error: build failed"):
+            self.assertIn(shown, text)
+        self.assertEqual(summary["status"], "ERROR")
+        self.assertEqual(summary["failed"], ["Pkg.Bad"])
+        self.assertEqual(summary["target_verdicts"], {
+            "Pkg.Bad": "failed", "Pkg.Ok": "not confirmed: the build failed",
+        })
+        self.assertEqual(row["modules_failed"], ["Pkg.Bad"])
+        self.assertEqual(row["modules_rebuilt"], ["Pkg.Ok", "Pkg.Warn"])
+        self.assertEqual(row["log_path"], summary["log"])
+        self.assertTrue(owned._valid_ledger_row({"schema_version": 1, "time": "2026-09-23T00:00:00Z", **row}))
+
+    def test_the_diagnostic_lines_are_bounded_head_and_tail(self) -> None:
+        errors = [f"error: Pkg/Bad.lean:{index}:0: problem {index}\n" for index in range(500)]
+        stream = ["✖ [1/1] Building Pkg.Bad\n", *errors, "error: build failed\n"]
+        code, text, _summary, _row, logged = self.build(stream, 1)
+        self.assertEqual(code, 1)
+        self.assertEqual(logged, "".join(stream))
+        self.assertIn("problem 0\n", text)
+        self.assertIn("problem 499\n", text)
+        self.assertNotIn("problem 250\n", text)
+        self.assertIn("diagnostic line(s) elided; full stream: ", text)
+        self.assertLessEqual(len(text.splitlines()), owned.OUTPUT_HEAD_LINES + owned.OUTPUT_TAIL_LINES + 4)
+
+    def test_a_successful_build_prints_no_progress_lines(self) -> None:
+        stream = [f"✔ [{i}/3] Replayed Pkg.R{i}\n" for i in range(1, 3)] + [
+            "✔ [3/3] Built Pkg.Ok (1.2s)\n", "Build completed successfully (3 jobs).\n",
+        ]
+        code, text, summary, row, _logged = self.build(stream, 0)
+        self.assertEqual(code, 0)
+        self.assertNotIn("Replayed", text)
+        self.assertNotIn("Built Pkg.Ok", text)
+        self.assertIn("Build completed successfully", text)
+        self.assertEqual(summary["status"], "OK")
+        self.assertEqual(summary["failed"], [])
+        self.assertEqual(summary["target_verdicts"], {"Pkg.Bad": "built", "Pkg.Ok": "built"})
+        self.assertNotIn("modules_failed", row)
+
+    def test_full_output_restores_the_whole_stream(self) -> None:
+        code, text, _summary, _row, _logged = self.build(FAILED_STREAM, 1, full_output=True)
+        self.assertEqual(code, 1)
+        self.assertIn("".join(FAILED_STREAM), text)
+        self.assertNotIn("elided", text)
 
 
 if __name__ == "__main__":

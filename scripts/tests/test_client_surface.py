@@ -442,7 +442,7 @@ class ClientSurfaceTest(unittest.TestCase):
         self.assertNotIn(
             "Extra-High-class lead reasoning plus automatic", guide
         )
-        for model in ("Sol", "Terra", "Luna", "Fable", "Opus", "muse-spark"):
+        for model in ("Astra", "Sol", "Luna", "Fable", "Opus", "muse-spark"):
             self.assertIn(model, guide)
         for selector in (
             "Light",

@@ -190,10 +190,18 @@ class ModelFitTest(unittest.TestCase):
         errors, _ = self.add(self.claude, option="sol/high")
         self.assertTrue(any("names a codex model" in e for e in errors), errors)
         self.add(self.claude)
-        self._hand_edit("- option: opus/high", "- option: terra/high")
+        self._hand_edit("- option: opus/high", "- option: astra/high")
         self.assertRejected("names a codex model")
         errors, _ = self.add(self.dir / "codex.md", option="opus/high", route="codex-subagent")
         self.assertTrue(any("names a claude-code model" in e for e in errors), errors)
+
+    def test_new_ids_skip_ids_held_in_the_archive(self):
+        archive = self.dir / "archive"
+        archive.mkdir()
+        (archive / "claude-code-opus-5.md").write_text("### cc-0007\n\n- option: opus/high\n", encoding="utf-8")
+        self.add(self.claude)
+        self.assertIn("### cc-0008", self.claude.read_text(encoding="utf-8"))
+        self.assertEqual(self.errors(), [])
 
     def test_rejects_luna_reserve_route_confusion(self):
         codex = self.dir / "codex.md"

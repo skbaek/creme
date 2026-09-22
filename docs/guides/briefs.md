@@ -111,10 +111,10 @@ model, and re-dispatch the remainder to smaller workers.
 ## Model choice
 
 Use the client-visible model name, not a redundant API-family prefix or suffix
-that the user does not select. The Codex dispatch surface checked on 2026-09-21
-includes **Astra**, **Sol**, **Terra**, and **Luna**, matching the ordinary
-families in its fit table. The workflow's Claude Code choices are **Fable** and
-**Opus**; its Muse choice, reconciled 2026-09-11, is
+that the user does not select. As reconciled on 2026-09-23, the workflow's
+Codex choices are **Astra**, **Sol**, and **Luna** (all GPT-6; Terra is
+retired); its Claude Code choices are **Fable**, **Opus** (Opus 5.5), and
+**Sonnet**; its Muse choice, reconciled 2026-09-11, is
 **muse-spark**, selected at launch with `--model`. Recheck those names at
 launch rather than treating this snapshot as a permanent product catalogue.
 
@@ -122,8 +122,8 @@ Two tiers matter for dispatch, whatever a client calls them:
 
 | tier | what it is for | Codex today | Claude Code today | Muse today |
 |---|---|---|---|---|
-| the standard model | the balanced everyday worker and reviewer: bounded engineering, gate runs, document authoring, routine proof repair | Terra, with Luna for efficient bounded work whose route and falsifier are already clear | Opus | muse-spark at the session's effort |
-| the frontier model | the hardest quality-first judgment that cannot be packetized | Sol | Fable | muse-spark at ceiling effort (no second family observed) |
+| the standard model | the balanced everyday worker and reviewer: bounded engineering, gate runs, document authoring, routine proof repair | Sol, with Luna for efficient bounded work whose route and falsifier are already clear | Opus | muse-spark at the session's effort |
+| the frontier model | the hardest quality-first judgment that cannot be packetized | Astra | Fable | muse-spark at ceiling effort (no second family observed) |
 
 **Codex dispatch coverage.** Codex's native spawn tool selects model and reasoning effort directly; a
 worker, reader or reviewer role comes from its brief. It therefore needs no
@@ -172,8 +172,8 @@ a first-pass check) to Codex Luna reserve as a pseudo-subagent through
 `python3 -m creme luna-reserve run`, saving its own and its workers' tokens.
 In Lean mode it also elaborates a unit whose statements a Claude or frontier
 designer has frozen, and runs mutation-control campaigns, with the master
-checking headers at each build approval; the Luna reserve guide records which
-shapes have worked at which effort. It never replaces a worker for
+checking headers at each build approval; its effort fit is recorded in the
+Codex fit table's `luna-reserve` columns. It never replaces a worker for
 architecture, interface design, or a non-delegable judgment, and it is never a
 fallback when a client is busy or out of quota. Its brief states the question, the target directory, read-only
 or write mode, and the evidence to quote; the master verifies the answer

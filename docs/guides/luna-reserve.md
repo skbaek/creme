@@ -54,114 +54,19 @@ whether a run would be admitted.
 `run` sends one brief as one turn on a new thread and follows it to completion.
 Effort is `low`, `medium` (default), `high`, `xhigh`, or `max`: every level
 the `gpt-reserve` catalogue lists, and admission re-checks the live catalogue.
-**Erring high is cheap, and that part is now measured.** A read-only `xhigh`
-review consuming 4,721,198 input tokens moved the reserve bucket from 17% to
-19%; a 889,070-token `xhigh` probe did not move it at all. There is no economic
-reason to economize on effort, so reserve cost does not decide the level; wall time
-does, and so does over-elaboration.
-
-**Read-only design and review: `medium`** (controlled runs, 2026-09-18). On a
-design question with known ground truth, run at every level with a replicate and a
-target that could not leak the answer: every level found the deciding structural
-point (7 of 7 runs); `medium` reached the correct verdict 2 of 2 at roughly half of
-`high`'s tokens and wall time; `low` was right only 1 of 2 — it found the obstacle
-and then stopped instead of resolving it. No correctness gain was observed above
-`medium`, and the proposed designs grew more elaborate as effort rose. Run-to-run
-spread at a FIXED effort was 1.3–1.9x in tokens, so compare levels only with
-replicates. **Write mode and Lean mode have no controlled runs — keep `high` there**;
-every failure seen in real use so far happened while writing. Details and the
-pre-registered next experiments: the master record's
-`briefs/luna-effort-calibration-20260918.md`.
-
-**Field observations, second day of real use (2026-09-18; single runs, no
-replicates — a working default, not a measurement).** By mode:
-
-| Mode | Default | What was seen |
-|---|---|---|
-| read-only, existence or location only | `low` | right locations; ignored "quote verbatim"; one false `MISSING` for a `private` declaration |
-| read-only, anything the master will rely on | `medium` | no fabricated signature in about sixty citations; two lemmas placed in the wrong same-named directory |
-| write, document synthesis into a fixed template | `medium` | faithful and sourced; over-uses placeholders; did not notice a cross-source impossibility |
-| write, code whose result a command checks | `high` | followed a long exact specification and a self-check against a proved bound |
-| Lean, edits and small units from frozen statements | `high` | closed a new 92-line module (dependent record, inductive relation, four lemmas), a change to a public inductive with its consumers, and a three-lemma de-duplication across two modules; `xhigh` on a similar task showed no gain |
-| Lean, a proof by mirroring a named template | `xhigh` (only level tried) | proved a 200-line shared lemma whose statement was only sketched, by mirroring an existing proof that establishes the fact internally; about 50 minutes and four reserve points — the first run whose reserve cost was visible |
-
-Lean mode is therefore a fit for more than named edits: **a small unit whose
-statements are already frozen** is within reach, and that is the pattern to
-prefer — a frontier worker freezes the statements, Luna elaborates them, the
-master reads `git diff` at the build-approval prompt, before accepting the
-build that would certify the edit. A proof whose shape is given by a named
-proof to mirror is also within reach. Finding a proof with no template has
-worked once since then, expensively (see "The first open-shape proof" below). For edits, try `xhigh` only after a `high` attempt has
-failed; for a mirrored proof, try `high` first too and record the difference,
-because only `xhigh` has been run.
-
-**Third day: whole units from frozen designs (2026-09-18/19; single runs).**
-One master session used Luna for most of a DRIP/vault wave: 13 sessions, about
-4,000 elaborated lines across ten Blanc modules, four control campaigns (34
-controls), and three Creme code changes. Every Lean run was at `high` and none
-needed a retry for depth. What was seen:
-
-| Mode | Default | What was seen |
-|---|---|---|
-| Lean, a whole unit from a frozen Claude design (statements AND transcribed proofs, donor lines named, fallbacks listed) | `high` | 11 multi-turn runs (613-line generic module; its DRIP instance; an 11-rung re-derivation keeping every statement byte-identical; 774-, 680-, 391- and 1035-line leaves). Zero statement drift across all of them (the master diffed every header against the design at each build approval); elaboration fallbacks rarely needed. A long session carried three dependent units over 8 turns without losing context. |
-| Lean, mutation controls in a `-mutation` worktree | `high` | 34 controls; every one applied, built, restored byte-identically and reported "at predicted site: yes/no" honestly. Quality is set by the MUTANT LIST: lists that name the site where the removed or falsified fact is CONSUMED bit there 29 of 29 times (15 + 6 + 8); a list whose edit breaks an earlier reference first fails only mechanically ("unknown identifier"/"invalid field") — 4 of 5 in one campaign — and one mutant hit a heartbeat timeout (inconclusive). |
-| Lean, a model-level inhabitant by mirroring a named theorem (statement given as meaning + spelling latitude) | `high` | exact first time; read the statement at the approval prompt |
-| read-only, an interface for several consumers | `medium` | facts and citations accurate; the proposed interface was unusable (hooks quantified over all states/messages, so unsatisfiable). A Lean-free Claude designer did this well; use Luna for the fact inventory only |
-| write, code + tests in Creme | `high` | clean when the brief enumerated the test cases; once returned without the required tests while reporting "added regression test" — check the test list, not the summary |
-
-The division of labour that paid most: **a Lean-free Claude designer freezes
-statements and transcribes proofs from named donors (satisfiability of every
-hook shown per consumer), Luna elaborates, the master checks headers at each
-build approval.** Two Lean sessions run concurrently (distinct goals); use
-`approve-builds` with `--header-base` to take the per-build round trips off the
-master. On any Luna proof failure, retry the same thread at `xhigh` (`stop`,
-then `resume THREAD --effort xhigh`), then `max`, before re-routing.
-
-**The first open-shape proof (2026-09-19; one run, confounded).** A locator
-theorem whose brief named the lemma route but gave no proof to mirror cost
-52.6M thread tokens over three `high` turns (the hoists it needed plus the
-theorem), 2.7 times an eight-turn session that elaborated about 2,400 frozen
-lines. At `high` Luna reached the exact remaining goal and diagnosed the
-blocker correctly (a constructor it had written itself returned `Nonempty`,
-losing the call slot's identity), then stopped: it read "the target exactly as
-the brief states it" as freezing its own new declarations too. Resumed at
-`xhigh` with a scope clarification, it passed in one turn (about 2.3 times the
-tokens and 2.1 times the wall time of the `high` attempt). The clarification
-and the effort changed together, so this does not show that `xhigh` was needed;
-`max` was not reached. What it does show: finding a proof, not the size of the
-unit, is the expensive shape. Every Lean brief should also say which
-declarations are frozen (by name, or "everything present at commit X") and
-that declarations new in the unit may be reshaped. The master's review of the
-passing turn still found a 25-line inline copy of a `private` lemma, which the
-duplication gate does not catch, and a docstring on the wrong declaration.
-
-**But effort is NOT the main lever, and the ladder below `high` is
-uncalibrated.** Across the first twelve real uses (2026-09-18) the efforts
-actually run were one `low`, eight `high` and three `xhigh` — `medium` was never
-exercised, and no task was ever run at two efforts, so nothing here is a
-controlled comparison. Two things the evidence does show:
-
-* `high` closed a genuinely nontrivial Lean task — 31 `#print axioms` entries
-  plus their imports, correct, with the audited count predicted in advance and a
-  non-standard axiom set flagged unprompted. So "use `xhigh`/`max` for Lean"
-  overstates what Lean work needs.
-* Raising effort did not prevent the failures that actually occurred. Both
-  `xhigh` read-only reviews were directionally right and quantitatively wrong —
-  one inflated a count, the other proposed an interface with roughly twice the
-  fields the proofs needed.
-
-Every failure observed so far has been a **scope or verification** failure, not
-a depth failure: a registration whose census was `0` and therefore checked
-nothing; audit entries printed but not pinned, because the author did not know a
-second list existed; a count measured against a stale commit. None of these
-reads as "did not think hard enough", and none would have been fixed by more
-effort. The levers that do work are a brief that names exactly what to check and
-in what form, and a master who verifies the result rather than quoting it.
-
-**Fourth day: operating rules learned (2026-09-19).** Current sizing evidence for every Luna route and effort
-is recorded per run in the goal store's model fit tables (`$GOAL_STORE/model-fit/codex.md`, `luna-reserve`
-columns; see the [model fit guide](model-fit.md)); the tables above are the historical record that preceded them.
-Rules that held across the day's 20-odd Lean and write runs:
+Effort guidance for the current Luna release (GPT-6 Luna since 2026-09-23) is
+not yet measured: record each run in the goal store's model fit tables
+(`$GOAL_STORE/model-fit/codex.md`, `luna-reserve` columns; see the
+[model fit guide](model-fit.md)) and let them decide once a cell guides. Until
+then start write and Lean runs at `high` and read-only runs at `medium`, and on
+a Lean proof failure retry the same thread at `xhigh` (`stop`, then `resume
+THREAD --effort xhigh`) before re-routing. GPT-5.6 Luna's calibration is
+archived at `$GOAL_STORE/model-fit/archive/luna-reserve-guide-gpt-5.6.md`. What
+carried over from it is about briefs and verification, not effort: the
+failures seen were scope and verification failures, the pattern that paid most
+was a designer freezing statements, Luna elaborating, and the master checking
+headers at each build approval (`approve-builds --header-base`), and these rules
+held:
 
 * **Mutant edits need exact-once anchors.** Both "mechanical" misses of one campaign quoted text that occurred
   more than once; Luna applied the edit at the first occurrence. Every mutant brief says: apply only on an

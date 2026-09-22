@@ -60,7 +60,7 @@ CLIENTS: dict[str, Client] = {
         name="claude-code",
         prefix="cc",
         title="Claude Code",
-        families={family: STANDARD_EFFORTS for family in ("fable", "opus", "sonnet", "haiku")},
+        families={family: STANDARD_EFFORTS for family in ("fable", "opus", "sonnet")},
         routes={
             "claude-agent-tool": "Claude subagent spawned through the Agent tool by a Claude Code master",
             "claude-session": "a separate Claude Code session the master briefed",
@@ -71,7 +71,7 @@ CLIENTS: dict[str, Client] = {
         prefix="cx",
         title="Codex",
         families={
-            **{family: STANDARD_EFFORTS for family in ("astra", "sol", "terra", "luna")},
+            **{family: STANDARD_EFFORTS for family in ("astra", "sol", "luna")},
             "luna-reserve": STANDARD_EFFORTS,
         },
         routes={
@@ -604,10 +604,15 @@ def summarize_file(path: Path) -> list[str]:
     return []
 
 
-def next_ident(client: Client, observations: list[Observation]) -> str:
+def next_ident(client: Client, observations: list[Observation], archive: Optional[Path] = None) -> str:
+    """The next free id, counting ids archived beside the table so none is ever reused."""
+    idents = [observation.ident for observation in observations]
+    if archive is not None and archive.is_dir():
+        for path in sorted(archive.glob("*.md")):
+            idents += re.findall(rf"^### ({client.prefix}-\d+)$", path.read_text(encoding="utf-8"), re.M)
     highest = 0
-    for observation in observations:
-        match = re.match(rf"^{client.prefix}-(\d+)$", observation.ident)
+    for ident in idents:
+        match = re.match(rf"^{client.prefix}-(\d+)$", ident)
         if match:
             highest = max(highest, int(match.group(1)))
     return f"{client.prefix}-{highest + 1:04d}"
@@ -619,7 +624,7 @@ def add_observation(path: Path, fields: dict[str, str], dry_run: bool = False) -
     if existing:
         return existing, ""
     assert table.client is not None
-    ident = next_ident(table.client, table.observations)
+    ident = next_ident(table.client, table.observations, path.parent / "archive")
     observation = Observation(ident, {k: v for k, v in fields.items() if v not in (None, "")}, 0)
     errors = [f"{path.name}: {e}" for e in validate_observation(observation, table.client)]
     if errors:

@@ -15,8 +15,8 @@ The tables are in the goal store by default, at
 
 | file | client | options (columns) |
 |---|---|---|
-| `claude-code.md` | Claude Code | `fable`, `opus`, `sonnet`, `haiku` × `low` `medium` `high` `xhigh` `max` |
-| `codex.md` | Codex | `astra`, `sol`, `terra`, `luna` × `low` … `max`, and `luna-reserve` × `low` … `max` |
+| `claude-code.md` | Claude Code | `fable`, `opus`, `sonnet` × `low` `medium` `high` `xhigh` `max` |
+| `codex.md` | Codex | `astra`, `sol`, `luna` × `low` … `max`, and `luna-reserve` × `low` … `max` |
 | `muse.md` | Muse | `muse-spark` × `none` `minimal` `low` `medium` `high` `xhigh` `max` |
 
 `luna-reserve` is a separate column group because it is a different route to
@@ -24,8 +24,16 @@ the Luna model (the `gpt-reserve` allowance through the Creme broker, usually
 driven by a non-Codex master), and its fit need not equal that of a Luna
 worker under a Codex master. The option list is the one
 `creme/model_fit.py` fixes; when a client adds, renames, or retires a
-selectable model or effort, change that list and this table together, and
-keep the retired columns' observations.
+selectable model or effort, change that list and this table together.
+
+**An option names its family's current release.** Each table's header states
+which release every family denotes and since when. When a release is
+superseded (a new Opus, a new Sol) or a family is retired, move that family's
+observations to `$GOAL_STORE/model-fit/archive/<client>-<release>.md` with a
+line saying what superseded them, and let its cells restart empty: a run on
+the old release is not evidence about the new one. The archive is history,
+never selection evidence; `validate` does not read it, and `add` numbers new
+observations past every archived id.
 
 Only the goal store holds the files, because their evidence links resolve only
 there and in the host-local master record, and because a public table would

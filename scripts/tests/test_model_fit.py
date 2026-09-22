@@ -255,9 +255,6 @@ class ModelFitTest(unittest.TestCase):
             self.assertIn(model_fit.POINTER, text)
         for text in (briefs, master):
             self.assertIn("(model-fit.md)", text)
-        self.assertIn("record the observation", master)
-        self.assertIn("read your client's file before sizing a worker", briefs)
-        self.assertIn("record the observation after verifying", briefs)
         for task in model_fit.TASK_TYPES:
             self.assertIn(f"`{task}`", method)
         for client in model_fit.CLIENTS:

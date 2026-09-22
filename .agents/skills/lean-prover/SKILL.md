@@ -29,8 +29,8 @@ is loop evidence.** It is complete on its own. Do not follow it with a build
 "to confirm for real". If the diagnostics say `Imports are out of date`, the
 imports are not current: probe, build the narrow target, refresh the file's
 worker — call any lean tool on two other Lean files and then on this one, which
-evicts and reloads it under `LEAN_LSP_MAX_OPEN_FILES=2` — and read the
-diagnostics again. That is the repair, and a stale import is the usual reason a
+evicts and reloads it under `LEAN_LSP_MAX_OPEN_FILES=2`; editing the file does
+not reload its imports — and read the diagnostics again. That is the repair, and a stale import is the usual reason a
 clean pass looked untrustworthy.
 
 ## 1. Establish a baseline
@@ -42,10 +42,8 @@ clean pass looked untrustworthy.
 - If the guard surfaces `Imports are out of date`, keep compilation ownership
   explicit: run `~/creme/scripts/creme lake-build GOAL --probe -- TARGET` from the
   goal worktree. Exit 3 means stale; run the narrow target through the same
-  command without `--probe`, then refresh the file's worker — call any lean
-  tool on two other Lean files and then on this one, which evicts and reloads
-  it under `LEAN_LSP_MAX_OPEN_FILES=2` — and repeat the goal and diagnostics
-  checks. Editing your own file does not reload its imports. `lean_build` is intentionally unavailable and bare
+  command without `--probe`, then refresh the file's worker as above and
+  repeat the goal and diagnostics checks. `lean_build` is intentionally unavailable and bare
   `lake build` is prohibited. `lean_profile_proof` is also unavailable because
   it shells to unowned compilation. Narrow targets belong in the loop; the
   repository catalogue's full target belongs at green checkpoints and still
@@ -59,12 +57,9 @@ clean pass looked untrustworthy.
   queue; it returns admitted, `WAIT_TIMEOUT`, or refused for a reason waiting
   cannot change. Never write a shell loop around
   `~/creme/.semaphore/semaphore status`.
-- The wrapper prints the modules it rebuilt on its own `restart:` line. A file
-  worker keeps the imports it loaded, so before trusting diagnostics in a file
-  that imports one of them, query two other Lean files and then that file
-  again: `LEAN_LSP_MAX_OPEN_FILES=2` evicts and reloads it. Editing your own
-  file does not, and `reclaim --idle-workers` frees the memory without
-  refreshing the diagnostics.
+- The wrapper prints the modules it rebuilt on its own `restart:` line. Before
+  trusting diagnostics in a file that imports one of them, refresh its worker
+  as above; `reclaim --idle-workers` frees memory without refreshing anything.
 - `hint: REPEAT_FAIL` in the wrapper's JSON means the previous build of these
   same targets also failed recently. Nothing is refused; it is telling you the
   next error was already visible in `lean_diagnostic_messages`.

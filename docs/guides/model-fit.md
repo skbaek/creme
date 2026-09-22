@@ -166,7 +166,9 @@ benchmark. Controlled comparisons, where they exist, are cited from `notes`.
 
 ## Selection rule
 
-Before sizing a worker, read your client's file.
+Before sizing a worker, read the summary grid of your client's file (the block
+between the summary markers), not its observations; open a cell's observations
+only when that cell decides the choice.
 
 - A cell marked `guides` (at least three verified runs) for the brief's task
   type informs the choice: prefer an option whose verified runs pass, avoid
@@ -175,12 +177,21 @@ Before sizing a worker, read your client's file.
 - Otherwise the [briefs guide's](briefs.md#sizing-a-worker) sizing rules
   decide: the standard model first, the effort ladder before the frontier
   model.
-- The dispatch log line says which applied: `fit: <file> <task-type> ×
-  <option> guides (Nv)` or `fit: no guiding cell; sizing rules`.
 
-After verifying the result, record the observation, including failures and
-runs whose verdict stays unknown. An unrecorded failure biases every later
-dispatch.
+**Record exceptions, not every run** (user decision, 2026-09-23). Record an
+observation only when it would change a future choice:
+
+- a `fail`, or a `partial` whose shortfall was the run's own;
+- a run that contradicts the guiding cell it was sized by;
+- a deliberate test of an option on a cell with no guidance, such as a first
+  trial of a new release or a cheaper rung;
+- a cost observation that would change the choice between options of
+  comparable quality.
+
+A run that went as its sizing expected is not recorded. Batch recordings and
+commit them with the verification they cite at a real checkpoint, not as a
+transaction per run. The per-run rule this replaces cost more reading and
+bookkeeping than its uncontrolled evidence was worth.
 
 ## Validation
 

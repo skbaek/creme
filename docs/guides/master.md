@@ -55,40 +55,9 @@ valid worker artifacts; the board points at whichever a piece of work uses.
 The tracked [generic runtime layout](../../templates/master-runtime/README.md)
 documents this shape without containing a host record.
 
-During one authorized publication, the writer may also create one empty
-private `.record-transaction-v1.*` description and one matching
-`*.record-tmp` file. The atomically created description binds the operation,
-nonce, source-log digest, target-log digest, and target-board digest. Readers
-wait for an active writer, validate a crash-left description against the
-authoritative log, and render the resulting projection without changing any
-byte. Only a renewed writer holding the record lock removes a verified
-interrupted publication. A temporary-looking name without the exact
-description and source/target relationship is unknown data and causes
-refusal; neither description nor digest grants lease authority.
-
-The writer first renews before waiting on private serialization. Once it
-holds the record lock, it enters a semaphore-owned authority transaction that
-authenticates and renews the same lease while retaining the public lease mutex
-through recovery and publication. Release or succession therefore completes
-before that transaction and makes it refuse without a core write, or waits
-until the authorized transaction finishes. The cross-subsystem lock order is
-always private record serialization followed by the semaphore mutex.
-
-Explicit legacy migration also recognizes the optional root-level
-`observations.md` sidecar used by the manual workflow. Migration records its
-exact bytes, size, and SHA-256 in the verified backup and report, retains the
-obsolete root file, and seals it against later changes. Its prose never
-becomes board facts. After migration, ongoing workflow observations are
-`note` events in `events.jsonl`; `audits/` remains reserved for independent
-audit reports.
-
-A published backup directory contains exactly `manifest.json` and
-`originals/`; any other child makes both migration planning and ordinary
-record reads refuse unchanged. An interrupted staging backup is removable
-only after every remaining node is verified as an exact publication prefix of
-the current legacy snapshot. Cleanup removes that prefix in reverse
-publication order and syncs each parent, so repeated process deaths leave a
-smaller verified prefix that an authorized retry can continue.
+Transaction, lock-order, and legacy-migration internals of the record writer are
+in [the record internals](../maintainer/master-record.md); an operating master
+needs only the supported commands above and their refusals.
 
 Nothing the next master on this host needs may live only in a client's
 transcript, memory directory, session title, or terminal scrollback. A
@@ -171,7 +140,8 @@ On the user's direction to start as master, the session runs:
    subtree is ignored and untracked. If no store is configured, or this
    privacy check fails, do not enter persistent master mode.
 2. Read `master/README.md`, the bounded validated continuity digest, every
-   file in `master/intent/`, and the open findings in `master/audits/`.
+   current file in `master/intent/` (not `intent/archive/`, which holds
+   fulfilled session directives), and the open findings in `master/audits/`.
    Retrieve full selected goal records and all open decisions/findings using
    the digest's exact lookup/pagination instructions. Follow the current state
    and report pointers; use raw board/event history only for a specific unresolved
@@ -346,9 +316,13 @@ introduced and again after any change to the state layout.
 
 ## Workers
 
-The master coordinates; it does not elaborate. It never opens a Lean file,
-runs a build, or takes a goal hold itself. Doing so fills the one context
-that has to hold the whole picture with details that belong to a worker.
+The master coordinates; by default it does not elaborate. Proof work, builds,
+and anything that needs a goal hold go to workers, because they fill the one
+context that has to hold the whole picture. A small, clearly owned task that
+needs no hold — a doc edit, a record update, a short check — the master may do
+itself when briefing a worker would cost more than the task, weighed against
+the master model's price: a frontier-model master delegates even small work
+that a cheaper worker can do.
 
 A worker is a subagent the master spawns inside its own session, through
 whichever delegation mechanism the client provides, with a brief, a per-goal
@@ -365,16 +339,17 @@ effort for its hardest non-delegable judgment, preferring the standard model
 and escalating effort within it before reaching for the frontier one, as
 [the briefs guide](briefs.md) describes; that guide holds the brief contract
 and the model-and-effort ladder the goal document no longer carries.
-Before sizing, read your client's model fit table, which is in the goal store
-by default at `$GOAL_STORE/model-fit/<client>.md`, and log whether a guiding
-cell or the sizing rules decided; after accepting or rejecting the result,
-record the observation with the verdict's evidence link, as
-[the model fit guide](model-fit.md) describes. A worker never records its own
-observation.
+The client's model fit table (`$GOAL_STORE/model-fit/<client>.md`) informs
+sizing and records only the exceptions [the model fit guide](model-fit.md)
+lists; a worker never records its own observation.
 
 A worker dies with the master. It therefore checkpoints to Git and its state
 brief at every green boundary, so that a successor master can respawn it from
-those files and lose only the work since the last checkpoint. It never writes
+those files and lose only the work since the last checkpoint. Unfinished work
+at a pause is a **savepoint**, not a checkpoint: commit it to a clearly labeled
+local recovery branch in its own repository and record that ref, its base, and
+its known failures in the state brief — never full file copies or patches in
+the goal store, and never a merge or implicit publication. It never writes
 under `master/`. It reports twice: in files — commits on its branch, a state
 brief, a report, evidence — and in its return value to the master.
 
@@ -393,7 +368,11 @@ evidence, and neither is a green signal whose failure mode was never shown
 to bite. This is the [execution guide's](execution.md) completion rule, and
 it is the only reviewer left once the user stops reading reports.
 
-Run workers in parallel when their file ownership is disjoint. The semaphore
+Run workers in parallel when their file ownership is disjoint **and** their
+imports load: a proof packet whose prerequisites still fail to build is not
+independent, so repair the prerequisites first or scope the packet as
+read-only analysis, and do not re-probe a known failed prerequisite until its
+identity changes. The semaphore
 governs their Lean memory exactly as it governs any session; a worker takes
 its own goal holds through the owned-build wrapper and winds them down when it
 returns.

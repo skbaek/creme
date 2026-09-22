@@ -182,7 +182,7 @@ A wait blocks the command that issued it. Either line up light work first and
 issue the wait when you have nothing else to do, or issue it in the background
 and read its result when the client hands it back.
 
-**The client's foreground ceiling is 600 s.** The Claude client kills a
+**Claude Code: the foreground ceiling is 600 s.** The Claude client kills a
 foreground tool call at 600 s when that is the timeout it was given, and only
 backgrounds a call whose stated timeout was shorter; B11 lost two ten-minute
 waits and a head-of-queue place to exactly that, and a foreground `--wait
@@ -455,39 +455,9 @@ stops at — so a broad rebuild can be planned as one build of the top of its
 import chain instead of walked a layer at a time.
 
 On completion the wrapper lists the modules it rebuilt on a `restart:` line
-of its own. A file worker keeps the imports it loaded when it started, so
-neither the rebuild nor an edit to your own file changes what it reports about
-them. To refresh one file: **query two other Lean files, then that file
-again.** With `LEAN_LSP_MAX_OPEN_FILES=2` the second query evicts its worker
-and the third starts a fresh one against the rebuilt `.olean`s. `reclaim
---idle-workers` frees that memory but does **not** refresh diagnostics — it
-terminates the worker while the MCP layer keeps answering from its cache. A
-stale `.olean` from a neighbour's build is the usual reason an agent stops
-believing the language server.
-
-Never filter the wrapper's output. `hint:` and `restart:` are printed as their
-own lines precisely so a pipeline that keeps only `^error` and `Build complete`
-still sees them; a filter that drops the JSON line drops them too.
-
-### The build is not a type-checker
-
-A wrapper build is for artifacts and boundaries. It is not how you find out
-whether an edit compiles.
-
-1. Make the edit.
-2. Run `lean_diagnostic_messages` on the edited file. It reports **every**
-   error in the file at once; a build reports the first one and stops.
-3. For a type mismatch, `lean_goal` at the tactic and `lean_hover_info` on the
-   symbol tell you what the two types actually are. Reading them is faster
-   than guessing and rebuilding.
-4. Build only when a module is registered or an import changes, when a
-   checkpoint or commit is due, or when the repository catalogue requires it.
-
-**A clean `lean_diagnostic_messages` pass on a file whose imports are current
-is loop evidence.** It does not need confirming with a build. If diagnostics
-say `Imports are out of date`, they are not current: probe, build the narrow
-target, refresh that file's worker (query two other Lean files, then it again),
-and read them again — that is the repair, not a reason to distrust the tool.
+of its own; a file's language-server worker keeps the imports it loaded until
+it is refreshed. The edit loop — diagnostics first, the build is not a
+type-checker, how to refresh a worker — is in the `lean-prover` skill.
 
 When a build exits 1 and the previous build of the same targets also failed
 within the repeat window, the JSON carries `hint: REPEAT_FAIL` naming the
@@ -596,10 +566,10 @@ It takes host exclusivity, keeps the dependency Git-pinned, and records the
 resolved revision on its ledger row.
 
 Inspect the full diff and status, stage only owned paths, commit coherent green
-checkpoints, and push the goal's non-protected branch. Never force-push.
-Default/protected branch merges belong to the master under the merge policy in
-[the master guide](master.md); a worker hands its green candidate to the
-master rather than merging it.
+checkpoints. Never force-push. A worker's return is its local commits; the
+master pushes branches at coordinated durability or integration checkpoints
+(a local commit is not an off-host backup), and default/protected branch
+merges belong to it under the merge policy in [the master guide](master.md).
 
 ## Context and completion
 

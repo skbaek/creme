@@ -48,10 +48,14 @@ sessions have burned hours on waits whose completion predicate never fired.
 Every brief that involves a wait longer than a single command therefore states
 all three:
 
-- **Foreground by default.** Long gates and builds run attached with a long
-  yield, never detached behind `sleep N; check`. A detached wait whose wake
-  condition is "the report changed" or "the process is gone" has repeatedly
-  missed the event it waited for.
+- **One tracked handle.** A long gate or build runs as one command whose
+  completion the client itself reports, with its output going to a log file
+  from the first attempt: attached with a long yield in Codex, the Bash tool's
+  `run_in_background` in Claude Code (see
+  [execution](execution.md#sizing-the-wait-and-working-while-it-runs)). Never
+  detach it behind `sleep N; check` or `nohup`: a wait whose wake condition is
+  "the report changed" or "the process is gone" has repeatedly missed the
+  event it waited for.
 - **Bounded polls with a re-dispatch exit.** Any unavoidable poll names its
   interval (at most 10 minutes), its round cap (at most 6), and what happens
   at the cap: commit the checkpoint, write a state brief, and report back for
@@ -67,13 +71,11 @@ Choose each worker's model and effort for the **hardest non-delegable judgment**
 in its brief, not for the total volume of mechanical work. Volume is what more
 workers are for; only judgment justifies a higher rung.
 
-**Consult the model fit tables first.** The tables are in the goal store by
-default, at `$GOAL_STORE/model-fit/<client>.md`; read your client's file before
-sizing a worker and record the observation after verifying its result. A cell
+**Consult the model fit tables first.** Read the summary grid of your
+client's file in the goal store (`$GOAL_STORE/model-fit/<client>.md`). A cell
 with at least three master-verified runs for the brief's task type informs the
-choice; otherwise the rules below decide, and the dispatch log says which
-applied. The format, vocabulary, and recording command are in
-[the model fit guide](model-fit.md).
+choice; otherwise the rules below decide. Record only the exceptions
+[the model fit guide](model-fit.md) lists.
 
 Sizing is a dispatch decision made against the client's currently available
 offerings, not a property of the goal. Recheck the installed client's models

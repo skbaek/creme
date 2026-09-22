@@ -457,13 +457,8 @@ class ClientSurfaceTest(unittest.TestCase):
     def test_lean_task_wind_down_is_part_of_the_execution_contract(self) -> None:
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         execution = (ROOT / "docs/guides/execution.md").read_text(encoding="utf-8")
-        lean_loops = (ROOT / "docs/guides/lean-edit-loops.md").read_text(
-            encoding="utf-8"
-        )
-        for text in (agents, execution, lean_loops):
+        for text in (agents, execution):
             self.assertIn("reclaim --wind-down GOAL", text)
-        self.assertIn("before yielding to a requested pause or restart", agents)
-        self.assertIn("not wind-down evidence", agents)
         normalized_execution = " ".join(execution.split())
         self.assertIn("only then", normalized_execution)
         self.assertIn("leaves the matching hold intact", normalized_execution)
@@ -473,7 +468,9 @@ class ClientSurfaceTest(unittest.TestCase):
         execution = (ROOT / "docs/guides/execution.md").read_text(encoding="utf-8")
         capabilities = (ROOT / "docs/capabilities.md").read_text(encoding="utf-8")
 
-        for text in (agents, execution):
+        # The contract lives in the execution guide; AGENTS.md links to it.
+        self.assertIn("docs/guides/execution.md#resource-classes", agents)
+        for text in (execution,):
             for concept in (
                 "adaptive-acquire",
                 "DEFER_FOR_HARD",

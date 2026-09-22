@@ -119,25 +119,18 @@ class BuildOwnershipTest(unittest.TestCase):
             text = surface.read_text(encoding="utf-8")
             self.assertNotIn("python3 -m creme lake-build", text, surface)
             self.assertNotIn("python3 -m creme\nlake-build", text, surface)
-            self.assertIn("~/creme/scripts/creme lake-build", text.replace("\n", " "), surface)
+        # Stated once canonically; other surfaces link rather than repeat it.
+        canonical = (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8")
+        self.assertIn("~/creme/scripts/creme lake-build", canonical.replace("\n", " "))
 
-    def test_every_lean_surface_states_the_diagnostics_first_loop(self) -> None:
-        """B6: a reader of any one surface can reproduce the loop."""
-        surfaces = (
-            ROOT / "AGENTS.md",
-            ROOT / "docs" / "guides" / "execution.md",
-            ROOT / "docs" / "guides" / "lean-edit-loops.md",
-            ROOT / ".agents" / "skills" / "lean-prover" / "SKILL.md",
-            ROOT / ".agents" / "skills" / "lean-inspector" / "SKILL.md",
+    def test_the_proof_skill_states_the_diagnostics_first_loop(self) -> None:
+        """B6: the loop lives in the skill a proof worker loads."""
+        text = " ".join(
+            (ROOT / ".agents" / "skills" / "lean-prover" / "SKILL.md").read_text(encoding="utf-8").split()
         )
-        for surface in surfaces:
-            text = " ".join(surface.read_text(encoding="utf-8").split())
-            self.assertIn("lean_diagnostic_messages", text, surface)
-            self.assertIn("imports are current", text.lower(), surface)
-            self.assertIn("loop evidence", text.lower(), surface)
-        for surface in surfaces[:4]:
-            text = " ".join(surface.read_text(encoding="utf-8").split())
-            self.assertIn("--wait", text, surface)
+        self.assertIn("lean_diagnostic_messages", text)
+        self.assertIn("imports are current", text.lower())
+        self.assertIn("loop evidence", text.lower())
 
     def test_the_narrow_build_example_no_longer_copies_a_contention_class(self) -> None:
         text = (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8")
@@ -151,13 +144,10 @@ class BuildOwnershipTest(unittest.TestCase):
             self.assertNotIn("--memory-gib", line)
 
     def test_the_guides_forbid_a_hand_rolled_status_poll(self) -> None:
-        for surface in (
-            ROOT / "AGENTS.md",
-            ROOT / "docs" / "guides" / "execution.md",
-            ROOT / ".agents" / "skills" / "lean-prover" / "SKILL.md",
-        ):
-            text = " ".join(surface.read_text(encoding="utf-8").split()).lower()
-            self.assertIn("never write a shell loop around", text, surface)
+        text = " ".join(
+            (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()
+        ).lower()
+        self.assertIn("never write a shell loop around", text)
 
     def test_no_surface_still_says_restart_the_lean_server(self) -> None:
         """B9: the instruction names a mechanism this client actually has."""
@@ -172,12 +162,10 @@ class BuildOwnershipTest(unittest.TestCase):
             joined = " ".join(surface.read_text(encoding="utf-8").split())
             self.assertNotIn("restart the Lean server", joined, surface)
             self.assertNotIn("restart the server", joined, surface)
-            self.assertIn("two other Lean files", joined, surface)
-        for surface in surfaces:
-            # The prose names the setting the mechanism depends on; the wrapper
-            # stays client-neutral and only states the two extra queries.
-            joined = " ".join(surface.read_text(encoding="utf-8").split())
-            self.assertIn("LEAN_LSP_MAX_OPEN_FILES", joined, surface)
+        # The refresh mechanism is stated in the skill a proof worker loads.
+        skill = " ".join(surfaces[3].read_text(encoding="utf-8").split())
+        self.assertIn("two other Lean files", skill)
+        self.assertIn("LEAN_LSP_MAX_OPEN_FILES", skill)
 
     def test_the_guide_states_the_fit_arithmetic_a_waiter_needs(self) -> None:
         """B10: a reader can compute why a large estimate is unschedulable."""

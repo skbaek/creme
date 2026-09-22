@@ -75,3 +75,31 @@ reviewer reasoning, credentials, session IDs, and rollout paths are excluded.
 The supported compatibility spelling `guardian_subagent` is normalized to
 `auto_review`; generated configuration uses the canonical `auto_review` name.
 Built-in permission-profile IDs such as `:workspace` remain visible.
+
+## Host delegates
+
+If the Codex sandbox denies telemetry or reclamation, use only a generated
+host delegate that `python3 -m creme doctor` reports as current:
+
+```sh
+~/.codex/bin/codex-host-telemetry
+~/.codex/bin/codex-reclaim-lean --dry-run
+~/.codex/bin/codex-reclaim-lean --wind-down GOAL
+```
+
+These stable approval targets dispatch back into the canonical Creme checkout.
+Their generated rules allow only telemetry, reclamation `--dry-run`, and
+goal-scoped `--wind-down`; stronger reclamation remains approval-gated. Never
+persist a prefix for a shell script under `/tmp`, a goal worktree, or another
+sandbox-writable path. Never use a copied standalone helper or a bundle that
+`doctor` marks stale; preview and regenerate the complete delegates-and-rules
+set with `python3 -m creme host-wrappers`, then fully restart Codex, because
+rules load only at process startup.
+
+If the bundle includes `codex-creme-contained-build`, use it for a
+host-contained owned build instead of persistently approving `systemd-run`, a
+safe runner, or a temporary shell script; a drift refusal means preview and
+reinstall the bundle after review, never bypass the pin. If it includes
+`codex-creme-contained-workflow`, use its reviewed operations for registered
+gates and fixture work under [the recipe contract](contained-workflow.md); the
+generic `lean-safe-run -- COMMAND` path is for humans only.

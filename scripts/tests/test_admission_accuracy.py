@@ -1178,6 +1178,8 @@ class _Harness:
             patch("creme.build_ownership.subprocess.Popen", return_value=FakeProc()),
             patch("creme.build_ownership.ProcessSampler", FakeSampler),
             patch("creme.build_ownership.RenewalThread", FakeRenewer),
+            # The real watchdog samples the real host; these builds are fakes.
+            patch("creme.build_ownership.Watchdog", _QuietWatchdog),
             patch("creme.build_ownership._process_group_alive", return_value=False),
             patch("creme.build_ownership._module_hashes", return_value={}),
             patch("creme.build_ownership._parse_build_output",
@@ -1192,6 +1194,20 @@ class _Harness:
             for item in patches:
                 stack.enter_context(item)
             return owned.run_lake_build("g", ["T"], stdout=self.output, **kwargs)
+
+
+class _QuietWatchdog:
+    def __init__(self, *_args, **_kwargs):
+        self.retracted = False
+        self.cleanup_proved = True
+        self.min_available_gib = None
+        self.events: list[str] = []
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
 
 
 class WrapperSurfaceTest(unittest.TestCase):

@@ -167,17 +167,6 @@ class BuildOwnershipTest(unittest.TestCase):
         self.assertIn("two other Lean files", skill)
         self.assertIn("LEAN_LSP_MAX_OPEN_FILES", skill)
 
-    def test_the_guide_states_the_fit_arithmetic_a_waiter_needs(self) -> None:
-        """B10: a reader can compute why a large estimate is unschedulable."""
-        joined = " ".join(
-            (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()
-        )
-        self.assertIn("currently fit", joined)
-        self.assertIn("ceil(1.25 x estimate)", joined)
-        self.assertIn("max(2 GiB, 25% of physical RAM)", joined)
-        self.assertIn("available >= charged + reserve", joined)
-        self.assertIn("10 GiB estimate needs 19.0 GiB", joined)
-
     def test_the_guide_forbids_a_sleep_loop_on_your_own_process_too(self) -> None:
         joined = " ".join(
             (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()

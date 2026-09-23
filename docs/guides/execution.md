@@ -52,13 +52,12 @@ brief is private runtime state; the tracked template remains placeholders only.
 - Light: inventories, docs, static scans, link checks, and unit tests without
   Lean elaboration. No hold; prefer this class while heavy work is deferred.
 - Elaboration: ordinary Lean MCP steps, focused builds, and compiling gates.
-  Request adaptive admission with a conservative peak-memory estimate. It may
-  grant a soft or hard hold.
-- Contention-sensitive: cold or unexpectedly broad rebuilds, commands that
-  create multiple Lean workers, previously observed spikes, and long
-  indivisible work that could make the interactive host unusable under
-  contention. Request `sensitive`; correctness under contention does not make
-  soft coordination wise.
+  Request adaptive admission with your best evidence of the unit's peak
+  memory. It may grant a soft or hard hold.
+- Contention-sensitive: work you know must not overlap anything — commands
+  that create multiple Lean workers outside the wrapper, previously observed
+  spikes, long indivisible work that could make the interactive host unusable.
+  Request `sensitive` explicitly; the wrapper never derives it.
 - Exclusive: timing, whole-tree sweeps, and mutation campaigns. Request
   `exclusive` and verify the host is quiet when the repository gate requires
   that stronger condition.
@@ -69,15 +68,14 @@ Classify from what the unit actually does, not from the nearest example:
 |---|---|
 | fixture, static, link, schema, and other non-elaborating gates | light — no hold at all |
 | a unit test suite that does not elaborate Lean | light |
-| a warm narrow build whose stale set is small and whose measured peak is modest | `tolerant` |
-| a warm **full target** whose stale closure is small and whose measured peak is modest | `tolerant` — it is judged by its closure, not by naming no target |
-| a warm **package or library target** (`jaune`, `Blanc`) under the same conditions | `tolerant` — the target resolves to its Lake roots first |
+| any owned build (`creme lake-build`) without a stated class | `tolerant`, its need sized from the stale closure |
+| a warm **full target** whose stale closure is small | `tolerant` — it is judged by its closure, not by naming no target |
+| a warm **package or library target** (`jaune`, `Blanc`) | `tolerant` — the target resolves to its Lake roots first |
 | a focused language-server proof loop | `tolerant` |
-| a full or package target whose Lake configuration cannot be read | `sensitive` — "roots unresolved" |
+| a full or package target whose Lake configuration cannot be read | `tolerant`, unproven — "roots unresolved" |
 | a build whose probe reports every artifact current (`FRESH`) | no hold at all — it elaborates nothing |
-| a small stale set whose modules have no measurement of their own | `sensitive`, sized at the narrow default (4 GiB here), not the host default |
-| a cold worktree, an unmeasured target, or a broad closure | `sensitive` |
-| anything that creates several Lean workers, or a previously observed spike | `sensitive` |
+| a stale set with a module that has no peak evidence at all | `tolerant`, **unproven**, sized at a default (4 GiB narrow, else 8 GiB) |
+| Lean workers started outside the wrapper, or a previously observed spike | `sensitive` |
 | a long indivisible command that cannot reach a renewal boundary | `sensitive` |
 | timing, whole-tree sweeps, mutation campaigns, dependency censuses | `exclusive` |
 
@@ -99,9 +97,10 @@ host for no safety benefit.
 ```
 
 `ADMITTED_SOFT` and `ADMITTED_HARD` authorize the named heavy unit.
-`DEFER_FOR_HARD` means another hold or the parallel peak budget makes
-serialization safer; `LIGHT_ONLY` means current headroom cannot preserve the
-host usability reserve. Do not retry in a loop. Reorder independent light
+`DEFER_FOR_HARD` means another hold, or the needs already admitted, leave no
+room now; `LIGHT_ONLY` means the need does not fit what is available now;
+`DEFER_UNPROVEN` means another unit without peak evidence is already running.
+All three are waitable. Do not retry in a loop. Reorder independent light
 work, wait for an existing heavy unit to wind down, or split the planned work.
 The explicit `soft-acquire` and `hard-acquire` compatibility commands are also
 pressure-gated; they cannot bypass a low-memory refusal. `release` removes
@@ -113,46 +112,56 @@ remain available for compatibility.
 `--wait SECS` on `adaptive-acquire` and on `creme lake-build` queues the
 request under the same mutex and returns when it is admitted, when `SECS`
 elapses (`WAIT_TIMEOUT`, nonzero exit, no hold), or immediately on a verdict
-waiting cannot change — a manual human hold, the drain floor, or an estimate
-whose charged peak plus the reserve exceeds physical memory. A live headroom
-shortfall remains waitable; the largest tranquil observation is useful history,
-not a bound on future availability. Among the waiters that
+waiting cannot change — a manual human hold, swap/compressor pressure, or a
+need that exceeds physical memory less the floor (`NEVER_FITS`). A live
+headroom shortfall remains waitable. Among the waiters that
 currently fit, the oldest goes first; a large request refused for headroom
 never blocks a smaller one behind it, and a waiter whose process dies is
 dropped. Waiting can only postpone a request. It never admits one past a
 floor, and it never changes a verdict you would have received without it.
 
-#### What "currently fit" means, in numbers
+#### Launch and watch: what "currently fit" means
 
-Arrival order decides between the requests that fit *at that pass*. Fit is:
-
-```
-charged  = max(estimate + 1, 1.30 x estimate) # exact measured stale set
-         = ceil(1.25 x estimate)              # default/fallback/explicit
-reserve  = max(2 GiB, 25% of physical RAM)    # the host usability reserve
-it fits when   available >= charged + reserve
-```
-
-On this 24 GiB host the reserve is 6.0 GiB, so an 8 GiB estimate needs
-16.0 GiB available and a **10 GiB estimate needs 19.0 GiB** — about 79% free.
-With three sessions running, this host offered 16.5–19.0 GiB all through the
-B9 window, so a 10 GiB request was unschedulable and was passed over 26 times
-in 107 minutes while smaller requests behind it were admitted in 0.0 s. That
-is the policy working, not a fault — **and a larger estimate than the evidence
-supports is the surest way to starve.** State one only when you know the build
-is cold or broad; otherwise omit `--memory-gib` and let the wrapper derive it.
-
-You never have to guess which case you are in. Before it blocks, a `--wait`
-prints its own arithmetic, says where the estimate came from, and says what
-would fit if this one does not:
+Admission refuses only the obviously infeasible; a watchdog answers the rest
+while the build runs (decision launch-and-watch-admission-20260923).
 
 ```
-fit: estimate 10 GiB -> charged 13 GiB (x1.25) + reserve 6.0 GiB = 19.0 GiB needed;
-     18.7 GiB available now (77% free) -> does not fit now
-fit: estimate 10 GiB is derived, not explicit (derived: broader rebuild: 284 of
-     294 stale module(s) unmeasured; the tightest of 1 successful rebuild(s) …)
-fit: at this instant an estimate of at most 10 GiB would fit; a larger one is
-     queued in arrival order but passed over by every request that fits
+need      = the unit's best peak evidence, no margin:
+            own measured peak -> recorded floors -> an unproven default
+it fits when   need + needs already admitted <= available - 2 GiB floor
+NEVER_FITS when need > physical RAM - 2 GiB floor
+at most one unproven unit (a default, not evidence) runs at a time
+```
+
+"Available" is the platform adapter's figure. On macOS it is
+`memory_pressure`'s free percentage, which counts memory the compressor could
+reclaim as available and barely moves while a build allocates; there, the
+swap/compressor pressure cause is what turns the watchdog red. There is no
+multiplier, no estimate margin, and no reserve: on this 24 GiB host a measured 14.8 GiB build is admitted whenever
+16.8 GiB is available. A larger estimate than the evidence supports still only
+makes a request harder to schedule, so state one only when you know it.
+
+While Lake runs, the owned-build wrapper samples the host about once a
+second. When available memory falls below the floor, or swap/compressor
+pressure appears, it first reclaims the goal's own idle language-server
+workers; if the host is still red three seconds later, the youngest unproven
+admitted build retracts — its process group is terminated through the normal
+interruption path — and if the pressure persists, older builds follow,
+youngest first, five seconds apart. A retracted build exits **75** with JSON
+`"status": "RETRACTED"`, a `hint`, and a ledger row (`outcome: retracted`)
+whose observed peak floors the in-flight module next time, so the retry is
+sized by what it actually used. `--walk` re-queues a retracted unit once at
+that peak and stops if it retracts again. Holds taken with `adaptive-acquire`
+(language-server loops, gate runners) are admitted by the same arithmetic and
+keep the renewal verdicts below; they are never retracted.
+
+Before it blocks, a `--wait` prints its own arithmetic, says where the need
+came from, and says what would fit if this one does not:
+
+```
+fit: need 10.2 GiB + admitted 4.0 GiB + floor 2.0 GiB = 16.2 GiB; 15.4 GiB available now (64% free) -> does not fit now
+fit: at this instant a need of at most 9.4 GiB would fit; a larger one is queued in arrival order but passed over by every request that fits
+fit: need 10.2 GiB is derived, not explicit (derived: broader rebuild: …)
 ```
 
 The second line is the one to read when the number surprises you. **Derived**
@@ -165,9 +174,9 @@ instead. In B11 a session read a derived 12 GiB as "an explicit --memory-gib
 
 `semaphore status` prints, under every waiter, the verdict the queue would give
 it right now — computed by the same function the queue uses — with the same
-arithmetic. If it says `LIGHT_ONLY` with a reserve line while the host looks
-free, the estimate is the problem; if it says `DEFER_HEAVY`, something is
-holding and waiting is the right answer.
+arithmetic. If it says `LIGHT_ONLY` while the host looks free, the need is
+the problem; if it says `DEFER_HEAVY`, something is holding and waiting is the
+right answer.
 
 #### Sizing the wait, and working while it runs
 
@@ -261,8 +270,9 @@ re-samples under the mutex and authorizes a heavy start.
 
 Pressure is not only the free percentage. On macOS nearly exhausted swap or a
 saturated compressor (`memory_pressure_cause`, see the capability contract)
-counts as below the drain floor even when the aggregate probe reads healthy,
-and refusals and `status` say `swap/compressor pressure` with the numbers.
+refuses new heavy work, drains renewals, and turns the build watchdog red even
+when the aggregate probe reads healthy; refusals and `status` say
+`swap/compressor pressure` with the numbers.
 Separately, `status`, `renew`, and headroom refusals list every `lean --worker`
 or `lean --server` whose physical footprint (compressed pages included, not
 RSS) is 8 GiB or more as `HEAVY_LEAN_WORKER`, with its pid, owning goal (from
@@ -274,10 +284,12 @@ checkpoint and wind down.
 
 Renewal is both a lease heartbeat and an in-session pressure check. Call it
 before the next elaboration/build unit and at least every five minutes during
-an interactive MCP session. Under moderate pressure—or when recorded worker
-count/peak reservations are already unsafe—non-priority soft holders receive
-`YIELD_HEAVY`, leaving the oldest live coherent unit priority. At the drain
-threshold every holder receives `DRAIN_HEAVY`. In either case, launch no new
+an interactive MCP session. Under moderate pressure—or when the worker count
+or admitted needs are already above what the host holds—non-priority soft
+holders receive `YIELD_HEAVY`, leaving the oldest live coherent unit priority.
+At the drain threshold every holder receives `DRAIN_HEAVY`. A wrapper-owned
+build renews as `CONTINUE_WATCHED` instead: its watchdog, not renewal,
+answers memory pressure. In either case, launch no new
 heavy action: checkpoint, wind down, and move to light work. A long command
 that cannot reach a renewal boundary belongs in the sensitive class before it
 starts.
@@ -418,34 +430,21 @@ exact module input identity. A
 broad row without per-module peaks measures no single module: its peak is its
 breadth. The build's peak is then the Lake overhead plus the peaks that can
 elaborate at the same time, which the import order decides (two modules in
-one chain never overlap). `tolerant` needs a small stale set, every module in
-it measured, and that modelled peak below the threshold. An exact measured
-estimate is the whole-GiB ceiling of that model; admission adds the measured
-margin once. So `-- Blanc` with one stale root module is
+one chain never overlap). That modelled peak is the need, charged as it is.
+So `-- Blanc` with one stale root module is
 priced from that module, whatever a 376-module rebuild of `-- Blanc` peaked
 at an hour earlier, and a two-target list inherits its members' rows.
 
-When a module is unmeasured: a small stale set (at most the tolerant module
-count) whose members never elaborated for `heavy_module_seconds` in any
-measured rebuild takes the **narrow default** (`narrow_default_gib`, 4 GiB),
-`sensitive`, so a fresh worktree's first narrow build is admitted at once and
-measured instead of starting at the host default it could never fit; a small
-set with a member that did elaborate that long in a broad rebuild keeps the
-profile default, because that member is a heavy one whose cost is not yet on
-its own row; a large set is bounded by the tightest broader successful rebuild
-that included its members, and by the profile default when none did. Anything
-missing, drifted, or unreadable keeps `sensitive`. State a class explicitly
-when you know something the ledger cannot — a cold worktree, a rebuild you
-expect to be broad, a command that will spawn several workers. The JSON
-records both the class you asked for and the class the evidence supports, and
-the estimate's `source` names which rule sized it.
-
-A prior single-module aggregate in the same repository and execution context
-may remain a floor after that module's source identity changes when that module
-is the sole stale request. It stays fallback evidence, keeps `sensitive`, and receives the default admission
-charge; it is never relabelled exact. Its whole-GiB estimate is the ceiling of
-the prior aggregate, without also adding an estimator margin. Other fallback
-and blind-default paths retain their existing estimator margin and charge.
+A module without an exact measurement is priced by a recorded floor when one
+exists — its peak on a drifted or other-toolchain row, or a failed or
+retracted attempt — and the result is still evidence (`floor evidence`). Only
+when some stale module has no peak evidence at all is the need a default, and
+the build **unproven**: a large set is bounded by the tightest broader
+successful rebuild that included its members; otherwise a small set of short
+modules takes the narrow default (`narrow_default_gib`, 4 GiB) and a set with
+a heavy member or above the narrow count takes the profile default. The
+estimate's `source` names the rule and the row, and `need_gib`/`unproven` are
+in the JSON and the ledger row.
 
 A probe that reports every selected artifact current means the build
 elaborates nothing, and the wrapper then **takes no hold**: the row says
@@ -455,13 +454,14 @@ stops at — so a broad rebuild can be planned as one build of the top of its
 import chain instead of walked a layer at a time.
 
 When the whole stale closure cannot be admitted — refused `LIGHT_ONLY`, or
-`NEVER_FITS` because its estimate exceeds even an idle host — pass `--walk`
+`NEVER_FITS` because its need exceeds even an idle host — pass `--walk`
 instead of walking the stale set by hand. The wrapper first asks for the whole
 closure and builds it in one invocation if admitted; otherwise it builds the
 stale modules one at a time, imports first, each as an ordinary owned build
 with its own probe, estimate, admission, hold, ledger row, and log, then builds
-the requested targets. It stops at the first unit that fails or is refused and
-names it and the modules left unbuilt. `--wait` applies to each unit.
+the requested targets. A unit the watchdog retracts is re-queued once at its
+observed peak. It stops at the first unit that fails, is refused, or retracts
+twice, and names it and the modules left unbuilt. `--wait` applies to each unit.
 
 The wrapper prints only failed and warning jobs (bounded) and Lake's verdict,
 then a JSON summary with a per-target verdict, the failed modules, and the
@@ -523,23 +523,18 @@ Older rows are never migrated or retrospectively asserted exact. When Git can
 still prove a removed linked worktree belonged to the same repository, legacy
 peaks and durations may remain conservative fallback floors; otherwise they
 are excluded from cross-worktree selection. Fallback can keep a known costly
-module expensive, but it cannot make a stale set `tolerant` or override a
-newer exact cohort. New exact reuse begins only with newly recorded applicable
+module expensive, but it never overrides a newer exact cohort. New exact reuse begins only with newly recorded applicable
 measurements. A whole-build aggregate floors a module only when its row ran on
 the current toolchain; another toolchain's direct module peak remains a floor
 only until the current toolchain has measured that module. A failed build
 floors a failed module by its own recorded peak, or by the run's whole peak
 only when it was the run's sole failed module.
 
-A legacy row can avoid the estimator's additional whole-GiB margin only for a
-single requested stale module when the selector revalidates its Git repository,
-toolchain and manifest and the row itself records the same thread count,
-sensitive execution, one target/root/rebuilt module, one concurrent Lean
-process, and a complete usable sample with no unavailable observations. The
-row's whole-process aggregate remains a fallback floor and receives the normal
-unmeasured admission charge. It does not become exact or make contention
-tolerant. Missing, partial, foreign, mixed-origin, or multi-module evidence
-keeps the conservative estimator margin.
+A legacy row is labelled a `legacy own-singleton aggregate` only when the
+selector revalidates its Git repository, toolchain and manifest and the row
+itself records the same thread count, sensitive execution, one
+target/root/rebuilt module, one concurrent Lean process, and a complete usable
+sample. It remains a floor, never exact evidence.
 
 This is a same-host, same-user performance boundary. The guarded resolver
 checks one coherent Lean/Lake sysroot and the exact identity stores only a

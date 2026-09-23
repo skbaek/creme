@@ -36,10 +36,10 @@ Darwin's free percentage counts compressed and swapped-out pages as free: on
 compressor held 11.7 of 24 GiB. The Darwin sample therefore also carries
 `memory_pressure_cause`, set when the current swap space is at least 90% used
 *and* swap in use is at least a quarter of physical memory, or when the
-compressor occupies at least 40% of physical memory. Admission treats a cause
-exactly like free memory below the 20% drain floor (`LIGHT_ONLY`, and
-`DRAIN_HEAVY` on renewal) and names it in the refusal and in `status`
-(`SWAP_PRESSURE:`). An adapter that does not measure it reports none, which
+compressor occupies at least 40% of physical memory. A cause refuses new
+heavy work (`LIGHT_ONLY`), drains unwatched holders on renewal
+(`DRAIN_HEAVY`), turns the build watchdog red, and is named in the refusal and
+in `status` (`SWAP_PRESSURE:`). An adapter that does not measure it reports none, which
 leaves its verdicts unchanged.
 
 `python3 -m creme luna-reserve` is a guarded external-model capability, not a
@@ -165,60 +165,64 @@ hold fields. The state directory is mode `0700`; its mutex, state, and log are
 mode `0600` so free-form hold notes are not exposed to other local users.
 
 Adaptive acquisition samples aggregate headroom while holding the same mutex
-that protects the hold transition, then chooses soft, hard, or refusal. The
-portable safety floor reserves the greater of 25% physical memory or 2 GiB
-(capped at half of very small hosts) for the desktop, clients, and estimation
-error. Exact measured-stale-set estimates are charged the greater of 1 GiB or
-30%; default, fallback, and explicit estimates keep the 25% margin rounded up.
-The estimator does not add a second margin to an exact measured estimate. The
-host profile's
-`heavy_workers` remains an upper bound, while simultaneous charged peaks must
-also fit the remaining budget. A `sensitive` or `exclusive` request is hard
-even if concurrent execution would be semantically valid.
+that protects the hold transition, then chooses soft, hard, or refusal
+(launch-and-watch, decision launch-and-watch-admission-20260923). A unit is
+charged its need — its best peak evidence, with no multiplier, estimate
+margin, or memory reserve — and fits when its need plus the needs of the
+holds already admitted is at most live availability less a fixed 2 GiB floor.
+Only a need above physical memory less that floor is permanently impossible
+(`NEVER_FITS`); every other shortfall is waitable. At most one unproven unit
+(a default rather than evidence) runs at a time (`DEFER_UNPROVEN`). The host
+profile's `heavy_workers` remains an upper bound on parallel soft holds, and a
+`sensitive` or `exclusive` request is hard even if concurrent execution would
+be semantically valid. Swap/compressor pressure refuses new heavy work. If
+aggregate headroom is unavailable, adaptive acquisition allows only
+one hard holder. A manual human session blocks adaptive heavy work and makes existing
+agent holders yield on their next renewal. Explicit soft/hard acquisition
+passes through the same live check and is not an escape hatch.
 
-New heavy work is refused below 20% free memory or when its charged peak plus
-the usability reserve does not fit live availability. If aggregate headroom is
-unavailable, adaptive acquisition allows only one hard holder. A manual human
-session blocks adaptive heavy work and makes existing agent holders yield on
-their next renewal. Explicit soft/hard acquisition passes through the same
-live check and is not an escape hatch.
-
-Only a charged peak plus reserve above physical memory is permanently
-impossible. Other headroom shortfalls remain transient. Historical tranquil
-headroom is displayed as context and never treated as a future capacity bound.
+The owned build wrapper then watches the build: about once a second it
+samples headroom, and in the red zone (availability below the floor, or a
+pressure cause) it reclaims the goal's idle language-server workers, then
+retracts the youngest unproven watched build after a short grace and older
+ones in turn if pressure persists, recording the outcome `retracted` (exit
+75) with its observed peak as evidence. On Darwin the availability figure is
+the free percentage, which counts compressible memory as free and barely
+moves while a build allocates, so there the pressure cause is the operative
+trigger.
 
 Renewal re-samples headroom. Below 30% with multiple soft holders—or whenever
-the recorded worker count/peak reservations already exceed the current safe
-budget—every non-priority holder is told to yield. The oldest live coherent
+the recorded worker count or admitted needs already exceed what the host
+holds—every non-priority holder is told to yield. The oldest live coherent
 unit retains priority; an expired hold does not outrank a live heartbeat.
-Below 20%, all holders are told to drain and no lease is renewed. These
-verdicts do not kill a command already in progress; the execution contract
-requires agents to renew between heavy units, classify indivisible spikes as
-sensitive before launch, checkpoint, and wind down on `YIELD_HEAVY` or
-`DRAIN_HEAVY`.
+Below 20%, or under a pressure cause, all holders are told to drain and no
+lease is renewed. A hold the wrapper watches renews through memory pressure
+(`CONTINUE_WATCHED`), because its watchdog answers it. These verdicts do not
+kill a command already in progress; the execution contract requires agents to
+renew between heavy units, classify indivisible spikes as sensitive before
+launch, checkpoint, and wind down on `YIELD_HEAVY` or `DRAIN_HEAVY`.
 
-Admission metadata, including the exact charge selected at admission, is
-encoded additively in the existing private note field so
-live schema-v1 holds and pre-update launchers remain structurally compatible.
-Renewal, conversion, and aggregate-budget checks reuse that persisted charge.
-Legacy holds without it receive the more conservative of the current measured
-and default peak charges. Malformed additive fields retain any valid encoded
-estimate and recompute that conservative charge. Status hides
-the encoding and reports the decoded estimate and contention class.
-Because an older reader does not recognize the new charge field, deployment
-requires a quiescent admission boundary: no live goal holds or queued old
-admission loops, and every subsequent admission command must use the updated
-Creme runtime. The master lease heartbeat is separate from goal admission and
-continues under its existing authenticated acquisition.
+Admission metadata — the need, and whether it is unproven and watched — is
+encoded additively in the existing private note field so live schema-v1 holds
+and pre-update launchers remain structurally compatible. Renewal, conversion,
+and the admitted-needs sum reuse that persisted need. A hold written before
+launch-and-watch carries a margin-inflated charge, which is read as its need
+unchanged (it only over-counts), and reads as proven and unwatched. A hold
+without a charge, or with a malformed one, uses its encoded estimate. Status
+hides the encoding and reports the decoded need and class. An older reader
+treats a new, smaller need as malformed and recharges it by its old rule,
+which is conservative; a new waiter entry carries additive fields an older
+reader drops, so deployment still wants a quiescent admission boundary. The
+master lease heartbeat is separate from goal admission.
 
 ### Waiting
 
 `--wait SECS` enqueues a request and polls internally under the same mutex,
 returning on admission, on `WAIT_TIMEOUT`, or immediately on a verdict waiting
-cannot change: a manual human hold, the drain floor, or a charged peak larger
-than the whole heavy-work budget. Each pass re-runs the identical admission
-decision against a fresh sample, so waiting can only postpone a request and
-never relaxes a floor, the usability reserve, the peak margin, or the worker
+cannot change: a manual human hold, swap/compressor pressure, or a need
+larger than physical memory less the floor. Each pass re-runs the identical
+admission decision against a fresh sample, so waiting can only postpone a
+request and never relaxes the floor, the one-unproven rule, or the worker
 limit. Among the waiters that currently fit, the oldest is admitted first; a
 waiter refused only for headroom does not delay a smaller one behind it, and a
 waiter whose process is gone or whose heartbeat has lapsed is dropped on the
@@ -231,7 +235,8 @@ a queue field there would make every pre-cutover launcher treat live state as
 corrupt. A malformed queue entry is skipped and reported; an unreadable queue
 file is preserved under a `queue.corrupt.*.json` name and waiting degrades to
 independent admission rather than blocking work. Queue entries carry a label,
-pid, uid, class, estimate, and timestamps — never a free-form note.
+pid, uid, class, estimate, need, unproven and watched flags, and timestamps —
+never a free-form note.
 
 ### Idleness signals
 

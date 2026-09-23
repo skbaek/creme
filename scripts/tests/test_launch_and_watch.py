@@ -45,6 +45,14 @@ class _Clock:
 class WatchdogUnitTest(unittest.TestCase):
     """The watchdog's order of answers under an injected host and clock."""
 
+    def setUp(self) -> None:
+        # A retraction is logged to the semaphore state: keep it out of the host's.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = patch.dict(os.environ, {"CREME_SEMAPHORE_DIR": tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def make(self, samples, *, goal="g", order=None, grace=3.0, step=5.0):
         clock = _Clock()
         calls: list[str] = []
@@ -168,7 +176,7 @@ class _RetractingHost(_FakeHost):
         self.next_retracted = False
         return super().popen(args, **kwargs)
 
-    def run(self, targets, **kwargs) -> int:
+    def watchdog_class(self):
         host = self
 
         class FakeWatchdog:
@@ -189,8 +197,7 @@ class _RetractingHost(_FakeHost):
             def stop(self):
                 pass
 
-        with patch("creme.build_ownership.Watchdog", FakeWatchdog):
-            return super().run(targets, **kwargs)
+        return FakeWatchdog
 
 
 class RetractedOutcomeTest(unittest.TestCase):

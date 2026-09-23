@@ -482,8 +482,6 @@ class ClientSurfaceTest(unittest.TestCase):
                 self.assertIn(concept, text)
         for concept in (
             "memory_headroom",
-            "25% physical memory",
-            "25% margin",
             "one hard holder",
             "process enumeration",
         ):

@@ -55,6 +55,14 @@ valid worker artifacts; the board points at whichever a piece of work uses.
 The tracked [generic runtime layout](../../templates/master-runtime/README.md)
 documents this shape without containing a host record.
 
+Every record directory is mode `0700`; every record file is mode `0600`.
+Files written by a client tool often start `0644`: the lease holder's
+`master event` tightens owned record files and directories under the
+record lock (never loosening, never following a symlink, never touching a
+foreign-owned node) and lists them in `modes_normalized`, while read-only
+commands refuse with the offending path, its mode, and the `chmod` that
+fixes it.
+
 Transaction, lock-order, and legacy-migration internals of the record writer are
 in [the record internals](../maintainer/master-record.md); an operating master
 needs only the supported commands above and their refusals.

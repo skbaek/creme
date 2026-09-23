@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import fcntl
 import hashlib
 import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import threading
 import uuid
@@ -96,6 +98,41 @@ class RenewalRefused(MasterRecordError):
     """The current invocation could not prove master lease authority."""
 
 
+class MasterModeError(MasterRecordError):
+    """A private record node has the wrong permission bits.
+
+    This is deliberately distinct from structural or migration failures so
+    that read-only callers report the exact path, mode, and repair instead of
+    a misleading diagnosis.
+    """
+
+    def __init__(self, path: Path, mode: int, expected: int, *, directory: bool) -> None:
+        self.violation = ModeViolation(str(path), mode, expected, directory)
+        super().__init__(mode_violation_detail((self.violation,)))
+
+
+@dataclass(frozen=True)
+class ModeViolation:
+    path: str
+    mode: int
+    expected: int
+    directory: bool
+
+
+@dataclass(frozen=True)
+class ModeChange:
+    path: str
+    before: int
+    after: int
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "path": self.path,
+            "from": f"{self.before:04o}",
+            "to": f"{self.after:04o}",
+        }
+
+
 FaultInjector = Callable[[str], None]
 Renewal = Callable[[], tuple[bool, str]]
 LeaseSnapshot = Callable[[], dict[str, Any]]
@@ -129,6 +166,7 @@ class AppendResult:
     board: dict[str, Any]
     repaired_stale_board: bool
     already_present: bool = False
+    normalized_modes: tuple[ModeChange, ...] = ()
 
 
 _thread_locks_guard = threading.Lock()
@@ -566,6 +604,203 @@ def _normalized_root(root: Path) -> Path:
     return normalized
 
 
+_MODE_DETAIL_LIMIT = 20
+
+
+def mode_violation_detail(violations: Sequence[ModeViolation]) -> str:
+    """Name each offending path and mode, and the one command that fixes them."""
+    shown = list(violations[:_MODE_DETAIL_LIMIT])
+    parts = [
+        f"{'directory' if item.directory else 'file'} {item.path} has mode "
+        f"{item.mode:04o}, expected {item.expected:04o}"
+        for item in shown
+    ]
+    files = [shlex.quote(item.path) for item in shown if not item.directory]
+    directories = [shlex.quote(item.path) for item in shown if item.directory]
+    commands = []
+    if files:
+        commands.append("chmod 600 " + " ".join(files))
+    if directories:
+        commands.append("chmod 700 " + " ".join(directories))
+    detail = "private master record mode violation: " + "; ".join(parts)
+    omitted = len(violations) - len(shown)
+    if omitted > 0:
+        detail += f"; and {omitted} more (rerun after fixing these)"
+    detail += (
+        f"; fix: {' && '.join(commands)} "
+        "(the lease holder's next `python3 -m creme master event` also "
+        "tightens owned modes automatically)"
+    )
+    return detail
+
+
+def _expected_mode(info: os.stat_result) -> Optional[int]:
+    if stat.S_ISDIR(info.st_mode):
+        return 0o700
+    if stat.S_ISREG(info.st_mode):
+        return 0o600
+    return None
+
+
+_KNOWN_ROOT_NODES = frozenset(
+    {
+        EVENTS_NAME,
+        BOARD_NAME,
+        LOCK_NAME,
+        README_NAME,
+        *PRIVATE_DIRECTORIES,
+        MIGRATION_REPORT_NAME,
+        MIGRATION_BACKUP_ROOT_NAME,
+        *MIGRATION_RETAINED_ROOT_FILES,
+    }
+)
+
+
+def _private_nodes(root: Path) -> Iterator[tuple[Path, os.stat_result]]:
+    """Yield the root and the recognized record nodes, never following a link.
+
+    Only the standard layout and migration artifacts are visited: an unknown
+    root node is not part of the record, is never changed, and layout
+    validation refuses it with its own diagnosis.  Directories not owned by
+    the current user, and directories that cannot be listed, are yielded but
+    not entered; layout validation refuses them too.
+    """
+    try:
+        info = root.lstat()
+    except OSError:
+        return
+    yield root, info
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        return
+    pending = []
+    for name in sorted(_KNOWN_ROOT_NODES, reverse=True):
+        path = root / name
+        try:
+            pending.append((path, path.lstat()))
+        except OSError:
+            continue
+    while pending:
+        path, info = pending.pop()
+        yield path, info
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            continue
+        try:
+            with os.scandir(path) as entries:
+                children = list(entries)
+        except OSError:
+            continue
+        for entry in sorted(children, key=lambda item: item.name, reverse=True):
+            try:
+                child = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            pending.append((Path(entry.path), child))
+
+
+def mode_violations(root: Path) -> tuple[ModeViolation, ...]:
+    """Owned regular files and directories whose mode is not 0600/0700.
+
+    Symlinks, foreign-owned nodes, and special files are not mode violations;
+    layout validation refuses them with their own diagnosis.
+    """
+    root = _normalized_root(root)
+    found = []
+    for path, info in _private_nodes(root):
+        expected = _expected_mode(info)
+        if expected is None or info.st_uid != os.geteuid():
+            continue
+        mode = stat.S_IMODE(info.st_mode)
+        if mode != expected:
+            found.append(
+                ModeViolation(str(path), mode, expected, stat.S_ISDIR(info.st_mode))
+            )
+    return tuple(found)
+
+
+def _tighten_node(path: Path, info: os.stat_result, expected: int) -> Optional[ModeChange]:
+    """Clear permission bits outside ``expected`` without following links.
+
+    Only an owned, singly linked regular file or an owned directory is
+    changed, through a descriptor proven to be the inspected inode.  Nothing
+    is ever loosened: the result is ``mode & expected``.
+    """
+    if info.st_uid != os.geteuid() or stat.S_ISLNK(info.st_mode):
+        return None
+    directory = stat.S_ISDIR(info.st_mode)
+    if not directory and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+        return None
+    if stat.S_IMODE(info.st_mode) & ~expected == 0:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            or opened.st_uid != os.geteuid()
+            or stat.S_ISDIR(opened.st_mode) != directory
+            or (not directory and opened.st_nlink != 1)
+        ):
+            return None
+        before = stat.S_IMODE(opened.st_mode)
+        after = before & expected
+        if after == before:
+            return None
+        os.fchmod(descriptor, after)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    return ModeChange("", before, after)
+
+
+def _relative(root: Path, path: Path) -> str:
+    return "." if path == root else path.relative_to(root).as_posix()
+
+
+def _normalize_lock_prerequisites(root: Path) -> list[ModeChange]:
+    """Tighten the root and lock file so the record lock can be taken."""
+    changes = []
+    for path in (root, root / LOCK_NAME):
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        expected = _expected_mode(info)
+        if expected is None:
+            continue
+        change = _tighten_node(path, info, expected)
+        if change is not None:
+            changes.append(ModeChange(_relative(root, path), change.before, change.after))
+    return changes
+
+
+def normalize_private_modes(root: Path) -> tuple[ModeChange, ...]:
+    """Tighten owned file/directory modes under ``root`` to 0600/0700.
+
+    Callers must hold the exclusive record lock and proven master authority.
+    Symlinks are never followed, foreign-owned nodes are never touched, and
+    permission bits are only ever removed, so layout validation still refuses
+    anything this cannot make private.
+    """
+    root = _normalized_root(root)
+    changes = []
+    for path, info in _private_nodes(root):
+        expected = _expected_mode(info)
+        if expected is None:
+            continue
+        change = _tighten_node(path, info, expected)
+        if change is not None:
+            changes.append(ModeChange(_relative(root, path), change.before, change.after))
+    return tuple(changes)
+
+
 def _validate_owner_mode(path: Path, mode: int, *, directory: bool) -> os.stat_result:
     try:
         info = path.lstat()
@@ -578,7 +813,9 @@ def _validate_owner_mode(path: Path, mode: int, *, directory: bool) -> os.stat_r
     if info.st_uid != os.geteuid():
         raise MasterRecordError(f"private path {path.name} is not owned by the current user")
     if stat.S_IMODE(info.st_mode) != mode:
-        raise MasterRecordError(f"private path {path.name} must have mode {mode:04o}")
+        raise MasterModeError(
+            path, stat.S_IMODE(info.st_mode), mode, directory=directory
+        )
     if not directory and info.st_nlink != 1:
         raise MasterRecordError(f"private file {path.name} must not have hard links")
     return info
@@ -614,8 +851,8 @@ def _validate_private_tree(root: Path) -> None:
                 )
             if stat.S_ISDIR(info.st_mode):
                 if stat.S_IMODE(info.st_mode) != 0o700:
-                    raise MasterRecordError(
-                        f"private directory {path.name} must have mode 0700"
+                    raise MasterModeError(
+                        path, stat.S_IMODE(info.st_mode), 0o700, directory=True
                     )
                 pending.append(path)
                 continue
@@ -624,8 +861,8 @@ def _validate_private_tree(root: Path) -> None:
                     f"private path {path.name} must be a regular file or directory"
                 )
             if stat.S_IMODE(info.st_mode) != 0o600:
-                raise MasterRecordError(
-                    f"private file {path.name} must have mode 0600"
+                raise MasterModeError(
+                    path, stat.S_IMODE(info.st_mode), 0o600, directory=False
                 )
             if info.st_nlink != 1:
                 raise MasterRecordError(
@@ -1321,10 +1558,12 @@ class RecordWriter:
         # The first renewal is deliberately outside the record lock: a
         # nonholder must not serialize or inspect private state as a writer.
         _renew_or_refuse(self.renew)
+        prerequisites = _normalize_lock_prerequisites(self.root)
         with _locked_record(self.root):
             try:
                 with self.authority_transaction() as snapshot:
-                    return self._append_authorized(
+                    normalized = normalize_private_modes(self.root)
+                    result = self._append_authorized(
                         snapshot,
                         kind,
                         payload,
@@ -1333,6 +1572,26 @@ class RecordWriter:
                     )
             except semaphore.MasterAuthorityRefused as exc:
                 raise RenewalRefused(f"master renewal refused: {exc}") from exc
+        return dataclasses.replace(
+            result, normalized_modes=(*prerequisites, *normalized)
+        )
+
+    def normalize_modes(self) -> tuple[ModeChange, ...]:
+        """Tighten owned record modes as the proven master, under the lock.
+
+        This lets an authenticated writer repair the common case of a private
+        file created with a default 0644 mode before read-side preflight would
+        refuse it.  Nothing is appended to the event log.
+        """
+        _renew_or_refuse(self.renew)
+        prerequisites = _normalize_lock_prerequisites(self.root)
+        with _locked_record(self.root):
+            try:
+                with self.authority_transaction():
+                    normalized = normalize_private_modes(self.root)
+            except semaphore.MasterAuthorityRefused as exc:
+                raise RenewalRefused(f"master renewal refused: {exc}") from exc
+        return (*prerequisites, *normalized)
 
     def _append_authorized(
         self,

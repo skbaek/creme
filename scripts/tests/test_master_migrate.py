@@ -287,6 +287,37 @@ class MasterMigrationTest(unittest.TestCase):
             "CURRENT",
         )
 
+    def test_widened_mode_after_migration_is_a_mode_error_not_a_migration_error(self):
+        self.make_legacy()
+        self.assertEqual(
+            master_migrate.migrate(self.root, apply=True, renew=self.renew).status, "OK"
+        )
+        brief = self.root / "briefs" / "written-by-a-tool.md"
+        brief.write_bytes(b"synthetic brief\n")
+        os.chmod(brief, 0o644)
+        location = SimpleNamespace(record_root=self.root)
+        plan = master_operations.plan_initialization(location)
+        self.assertEqual(plan.status, "REFUSED")
+        self.assertNotIn("migration", plan.detail)
+        self.assertIn(f"file {brief} has mode 0644, expected 0600", plan.detail)
+        self.assertIn(f"chmod 600 {brief}", plan.detail)
+        self.assertEqual(stat.S_IMODE(brief.lstat().st_mode), 0o644)
+        writer = master_runtime.RecordWriter(
+            self.root,
+            renew=lambda: (True, "synthetic holder verified"),
+            lease_snapshot=lambda: {
+                "schema_version": 4,
+                "lease": {"client": "codex", "lease_id": "a" * 32},
+            },
+        )
+        changes = writer.normalize_modes()
+        self.assertEqual(
+            [change.to_dict() for change in changes],
+            [{"path": "briefs/written-by-a-tool.md", "from": "0644", "to": "0600"}],
+        )
+        self.assertEqual(stat.S_IMODE(brief.lstat().st_mode), 0o600)
+        self.assertEqual(master_operations.plan_initialization(location).status, "CURRENT")
+
     def test_completed_migration_rejects_changed_prefix_and_malformed_suffix(self):
         cases = ("altered", "reordered", "truncated", "malformed-suffix")
         for case in cases:

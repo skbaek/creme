@@ -410,10 +410,24 @@ class MasterRuntimeTest(unittest.TestCase):
 
     def test_non_private_layout_component_refuses_before_a_core_write(self):
         before = self.core_bytes()
-        os.chmod(self.root / "intent", 0o755)
-        with self.assertRaisesRegex(master_runtime.MasterRecordError, "mode 0700"):
+        # Removing permission bits cannot make an owner-unwritable directory
+        # private, so the writer still refuses before any core write.
+        os.chmod(self.root / "intent", 0o500)
+        self.addCleanup(os.chmod, self.root / "intent", 0o700)
+        with self.assertRaisesRegex(master_runtime.MasterModeError, "mode 0500, expected 0700"):
             self.writer().append("note", self.note_payload())
         self.assertEqual(self.core_bytes(), before)
+        self.assertEqual(stat.S_IMODE((self.root / "intent").lstat().st_mode), 0o500)
+
+    def test_writer_tightens_a_widened_layout_component_before_appending(self):
+        os.chmod(self.root / "intent", 0o755)
+        result = self.writer().append("note", self.note_payload())
+        self.assertEqual(
+            [change.to_dict() for change in result.normalized_modes],
+            [{"path": "intent", "from": "0755", "to": "0700"}],
+        )
+        self.assertEqual(stat.S_IMODE((self.root / "intent").lstat().st_mode), 0o700)
+        self.assertEqual(len(master_runtime.read_record(self.root).events), 1)
 
     def test_unsafe_nested_private_nodes_refuse_current_without_mutation(self):
         cases = ("symlink", "file-mode", "directory-mode", "hardlink", "fifo")

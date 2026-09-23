@@ -504,16 +504,38 @@ def cmd_master_event(arguments: argparse.Namespace) -> int:
     if location is None:
         _json({"status": "unavailable", "detail": error})
         return 2
-    status, plan = _master_record_status(location)
-    if status is not None:
-        _json({"status": status, "detail": plan.detail})
-        return 2
+    writer = master_runtime.RecordWriter(location.record_root)
+    normalized: tuple[master_runtime.ModeChange, ...] = ()
     try:
-        kind, payload = master_runtime.parse_event_input(_read_event_source(arguments.source))
-        result = master_runtime.RecordWriter(location.record_root).append(kind, payload)
+        # The authenticated writer tightens owned modes (for example a brief
+        # written 0644 by a client tool) before the read-side preflight, which
+        # would otherwise refuse the record.  A nonholder is refused here.
+        if location.record_root.is_dir() and master_runtime.mode_violations(
+            location.record_root
+        ):
+            normalized = writer.normalize_modes()
     except master_runtime.MasterRecordError as exc:
         _json({"status": "refused", "detail": str(exc)})
         return 2
+    status, plan = _master_record_status(location)
+    if status is not None:
+        _json({
+            "status": status,
+            "detail": plan.detail,
+            "modes_normalized": [change.to_dict() for change in normalized],
+        })
+        return 2
+    try:
+        kind, payload = master_runtime.parse_event_input(_read_event_source(arguments.source))
+        result = writer.append(kind, payload)
+    except master_runtime.MasterRecordError as exc:
+        _json({
+            "status": "refused",
+            "detail": str(exc),
+            "modes_normalized": [change.to_dict() for change in normalized],
+        })
+        return 2
+    normalized = (*normalized, *result.normalized_modes)
     _json({
         "status": "OK",
         "event": {
@@ -523,6 +545,7 @@ def cmd_master_event(arguments: argparse.Namespace) -> int:
         },
         "source": result.board["source"],
         "board_repaired": result.repaired_stale_board,
+        "modes_normalized": [change.to_dict() for change in normalized],
     })
     return 0
 

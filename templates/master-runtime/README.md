@@ -37,5 +37,11 @@ master/
   it. A name alone is never accepted as a transaction or lease authority.
 
 Every runtime directory is mode `0700`; every runtime file is mode `0600`.
+Files written by a client tool often start `0644`: the lease holder's
+`master event` tightens owned record files and directories under the
+record lock (never loosening, never following a symlink, never touching a
+foreign-owned node) and lists them in `modes_normalized`, while read-only
+commands refuse with the offending path, its mode, and the `chmod` that
+fixes it.
 The whole `master/` subtree must be ignored and untracked. See the
 [master guide](../../docs/guides/master.md) for authority and recovery rules.

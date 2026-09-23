@@ -822,13 +822,37 @@ def _sem_result(ok: bool, detail: str) -> int:
     return 0 if ok else 1
 
 
+def _hold_heartbeat(label: str, interval: int, detach: bool, owner_pid: Optional[int]) -> int:
+    """Start (or, without ``detach``, run) the heartbeat of an acquired hold."""
+    if owner_pid is None:
+        owner_pid, found = semaphore.hold_heartbeat_owner()
+        if owner_pid is None:
+            return _sem_result(False, (
+                f"heartbeat not started ({found}); the hold {label} stays acquired — "
+                "renew it manually or release it"
+            ))
+    if detach:
+        ok, detail = semaphore.hold_heartbeat_detached(label, interval, owner_pid)
+    else:
+        ok, detail = semaphore.hold_heartbeat(label, interval, owner_pid=owner_pid)
+    if not ok:
+        detail += f"; the hold {label} is not renewed by a heartbeat — renew it manually or release it"
+    return _sem_result(ok, detail)
+
+
 def cmd_semaphore(arguments: argparse.Namespace) -> int:
     action = arguments.action
     if action == "status":
         print(semaphore.status_text())
         return 0
     if action == "adaptive-acquire":
-        return _sem_result(*semaphore.adaptive_acquire(
+        if arguments.detach and arguments.heartbeat is None:
+            return _sem_result(False, "--detach needs --heartbeat SECS")
+        if arguments.heartbeat is not None and arguments.heartbeat >= arguments.lease:
+            return _sem_result(False, (
+                f"--heartbeat {arguments.heartbeat} must be shorter than --lease {arguments.lease}"
+            ))
+        ok, detail = semaphore.adaptive_acquire(
             arguments.label,
             arguments.note,
             arguments.lease,
@@ -841,13 +865,21 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
             # A queued request blocks the caller's turn, so the arithmetic that
             # decides it is printed before the wait begins, not after it fails.
             announce=(print if arguments.wait is not None else None),
-        ))
+        )
+        if not ok or arguments.heartbeat is None:
+            return _sem_result(ok, detail)
+        _sem_result(ok, detail)
+        return _hold_heartbeat(arguments.label, arguments.heartbeat, arguments.detach, None)
     if action == "hard-release":
         # Kept for the contained-workflow runtime's recovery path.
         return _sem_result(*semaphore.release("hard", arguments.label))
     if action == "release":
         return _sem_result(*semaphore.adaptive_release(arguments.label))
     if action == "renew":
+        if arguments.heartbeat is not None:
+            return _hold_heartbeat(arguments.label, arguments.heartbeat, arguments.detach, arguments.owner_pid)
+        if arguments.detach or arguments.owner_pid is not None:
+            return _sem_result(False, "--detach and --owner-pid need --heartbeat SECS")
         return _sem_result(*semaphore.renew(arguments.label, arguments.lease))
     if action == "break":
         return _sem_result(*semaphore.break_expired(arguments.label, arguments.reason))
@@ -1420,6 +1452,21 @@ def parser() -> argparse.ArgumentParser:
             "(WAIT_TIMEOUT), or on a verdict waiting cannot change; never poll by hand"
         ),
     )
+    adaptive.add_argument(
+        "--heartbeat",
+        type=_positive,
+        metavar="SECS",
+        help=(
+            "after admission, renew the hold every SECS seconds while the agent client "
+            "above this command lives; stops by itself on release, on the client's "
+            "exit, or on a YIELD_HEAVY/DRAIN_HEAVY renewal verdict"
+        ),
+    )
+    adaptive.add_argument(
+        "--detach",
+        action="store_true",
+        help="with --heartbeat: run it in its own process session and return once it has started",
+    )
     sem_commands.add_parser("hard-release").add_argument("label")
     adaptive_release = sem_commands.add_parser(
         "release",
@@ -1429,6 +1476,18 @@ def parser() -> argparse.ArgumentParser:
     renew = sem_commands.add_parser("renew")
     renew.add_argument("label")
     renew.add_argument("--lease", type=int, default=semaphore.DEFAULT_LEASE_SECONDS)
+    renew.add_argument(
+        "--heartbeat",
+        type=_positive,
+        metavar="SECS",
+        help="keep renewing the existing hold every SECS seconds (see adaptive-acquire --heartbeat)",
+    )
+    renew.add_argument("--detach", action="store_true", help="with --heartbeat: run it detached")
+    renew.add_argument(
+        "--owner-pid",
+        type=_positive,
+        help="with --heartbeat: the process whose exit ends it; defaults to the agent client above this command",
+    )
     breaking = sem_commands.add_parser("break")
     breaking.add_argument("label")
     breaking.add_argument("--reason", required=True)

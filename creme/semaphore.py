@@ -2369,8 +2369,12 @@ def renew(
     adapter: Optional[Adapter] = None,
     policy: Optional[dict[str, Any]] = None,
     watched: bool = False,
+    acquired_at: Optional[float] = None,
 ) -> tuple[bool, str]:
     """Extend a hold's lease, or refuse with DRAIN_HEAVY/YIELD_HEAVY.
+
+    ``acquired_at`` binds the renewal to one acquisition: a hold released and
+    re-acquired under the same label is a different hold and is not renewed.
 
     ``watched`` is the owned-build wrapper renewing a hold its watchdog
     governs: memory pressure is answered by that watchdog's retraction, so
@@ -2388,6 +2392,8 @@ def renew(
         hold = next((item for item in candidates if item["label"] == label), None)
         if hold is None:
             return False, "hold not found"
+        if acquired_at is not None and float(hold["acquired_at"]) != float(acquired_at):
+            return False, "hold not found (the label was released and acquired again)"
         sample = selected.memory_headroom()
         configured_total = selected_policy.get("physical_memory_gib")
         if isinstance(configured_total, bool) or not isinstance(configured_total, (int, float)):
@@ -3808,3 +3814,292 @@ def master_heartbeat_detached(interval: int) -> tuple[bool, str]:
         f"heartbeat detached as pid {process.pid}, renewing every {interval}s for "
         f"client {prepared.client}; log: {log}"
     )
+
+
+# -- goal-hold heartbeat -------------------------------------------------------
+#
+# A language-server proof loop holds a manual ``adaptive-acquire`` hold for
+# far longer than one lease.  The heartbeat renews it on the owner's behalf,
+# bound to the agent client process above the acquiring invocation (the same
+# ancestry walk that binds the master lease), and ends by itself when the hold
+# is released or replaced, when that client is gone, or on the first renewal
+# verdict it may not override.  It never signals or kills anything.
+#
+# One heartbeat per hold: ``heartbeats.json`` beside the holds names the one
+# process that owns each label's heartbeat, written under the semaphore mutex.
+# A heartbeat that finds another pid named there stops.  The file is
+# scheduling state, never a safety verdict; readers that predate it ignore it.
+
+HOLD_HEARTBEATS_NAME = "heartbeats.json"
+HOLD_HEARTBEAT_SCHEMA_VERSION = 1
+HOLD_HEARTBEAT_LOG_NAME = "hold-heartbeat.log"
+HOLD_HEARTBEAT_CLAIM_SECONDS = 10.0
+
+
+def hold_heartbeats_path(root: Optional[Path] = None) -> Path:
+    return (root or state_root()) / HOLD_HEARTBEATS_NAME
+
+
+def _valid_hold_heartbeat(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    for key in ("pid", "owner_pid", "interval", "beats"):
+        value = entry.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+    for key in ("hold_acquired_at", "started_at"):
+        value = entry.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+    return entry.get("stopped_at") is None or isinstance(entry.get("stopped_at"), (int, float))
+
+
+def _load_hold_heartbeats(root: Path) -> dict[str, Any]:
+    path = hold_heartbeats_path(root)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = None
+    beats = raw.get("heartbeats") if isinstance(raw, dict) else None
+    clean = {
+        str(label): entry
+        for label, entry in (beats.items() if isinstance(beats, dict) else ())
+        if _valid_hold_heartbeat(entry)
+    }
+    return {"schema_version": HOLD_HEARTBEAT_SCHEMA_VERSION, "heartbeats": clean}
+
+
+def _find_hold(state: dict[str, Any], label: str) -> Optional[dict[str, Any]]:
+    holds = ([state["hard"]] if state["hard"] else []) + state["soft"]
+    return next((item for item in holds if item["label"] == label), None)
+
+
+def _hold_heartbeat_running(entry: Optional[dict[str, Any]], hold: dict[str, Any]) -> bool:
+    return (
+        entry is not None
+        and entry.get("stopped_at") is None
+        and float(entry["hold_acquired_at"]) == float(hold["acquired_at"])
+        and _pid_alive(int(entry["pid"]))
+    )
+
+
+def hold_heartbeat_entry(label: str) -> Optional[dict[str, Any]]:
+    """The recorded heartbeat for ``label``, running or last stopped."""
+    with locked_state() as (path, _state):
+        return _load_hold_heartbeats(path.parent)["heartbeats"].get(label)
+
+
+def _hold_heartbeat_precheck(
+    label: str, interval: int,
+) -> tuple[Optional[bool], str, Optional[dict[str, Any]]]:
+    """``(None, "", hold)`` to proceed, or a final ``(ok, detail, None)``."""
+    if interval < 1 or interval > MAX_LEASE_SECONDS:
+        return False, f"heartbeat interval must be 1..{MAX_LEASE_SECONDS} seconds", None
+    if not label or label == MANUAL_LABEL:
+        return False, "manual hold has no heartbeat", None
+    with locked_state() as (path, state):
+        hold = _find_hold(state, label)
+        if hold is None:
+            return False, "hold not found; acquire it before starting its heartbeat", None
+        if interval >= int(hold["lease_seconds"]):
+            return False, (
+                f"heartbeat interval {interval}s must be shorter than the hold's "
+                f"lease of {hold['lease_seconds']}s"
+            ), None
+        entry = _load_hold_heartbeats(path.parent)["heartbeats"].get(label)
+        if _hold_heartbeat_running(entry, hold):
+            return True, (
+                f"heartbeat for {label} already runs as pid {entry['pid']}; "
+                "no second heartbeat started"
+            ), None
+        return None, "", dict(hold)
+
+
+def _record_hold_heartbeat_stop(label: str, pid: int, reason: str) -> None:
+    with locked_state() as (path, _state):
+        root = path.parent
+        data = _load_hold_heartbeats(root)
+        entry = data["heartbeats"].get(label)
+        if entry is None or entry["pid"] != pid:
+            return
+        entry["stopped_at"] = _now()
+        entry["stop_reason"] = reason
+        _write_json(hold_heartbeats_path(root), data)
+    _log("hold-heartbeat", label, "STOPPED", reason)
+
+
+def hold_heartbeat(
+    label: str,
+    interval: int,
+    *,
+    owner_pid: int,
+    adapter: Optional[Adapter] = None,
+    policy: Optional[dict[str, Any]] = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.time,
+    max_beats: Optional[int] = None,
+) -> tuple[bool, str]:
+    """Renew ``label``'s hold every ``interval`` seconds while ``owner_pid`` lives.
+
+    Stops, recording why, when the hold is released or replaced, when the
+    owner is gone, when another heartbeat has taken the label over, or on a
+    refused renewal (YIELD_HEAVY, DRAIN_HEAVY): the heartbeat then stops
+    renewing so the hold lapses, and leaves stopping the work to its owner.
+    Like the master heartbeat it sleeps in short wall-clock slices, so a host
+    sleep delays a renewal by at most one slice after waking.
+    """
+    if isinstance(owner_pid, bool) or not isinstance(owner_pid, int) or owner_pid < 1:
+        return False, "heartbeat owner pid must be a positive integer"
+    try:
+        verdict, detail, hold = _hold_heartbeat_precheck(label, interval)
+    except SemaphoreError as exc:
+        return False, str(exc)
+    if verdict is not None or hold is None:
+        return bool(verdict), detail
+    selected = adapter or get_adapter()
+    me = os.getpid()
+    acquired_at = float(hold["acquired_at"])
+    lease = int(hold["lease_seconds"])
+    with locked_state() as (path, state):
+        # Claim under the mutex: a concurrent starter that got here first owns it.
+        current = _find_hold(state, label)
+        if current is None or float(current["acquired_at"]) != acquired_at:
+            return False, "hold not found; it was released before its heartbeat started"
+        root = path.parent
+        data = _load_hold_heartbeats(root)
+        entry = data["heartbeats"].get(label)
+        if _hold_heartbeat_running(entry, current) and entry["pid"] != me:
+            return True, (
+                f"heartbeat for {label} already runs as pid {entry['pid']}; "
+                "no second heartbeat started"
+            )
+        data["heartbeats"][label] = {
+            "pid": me, "owner_pid": owner_pid, "hold_acquired_at": acquired_at,
+            "interval": interval, "started_at": _now(), "beats": 0,
+            "renewed_at": None, "stopped_at": None, "stop_reason": None,
+        }
+        _write_json(hold_heartbeats_path(root), data)
+    _log("hold-heartbeat", label, "OK",
+         f"pid {me} renews every {interval}s (lease={lease}) while owner pid {owner_pid} lives")
+    beats = 0
+    last = clock()
+
+    def stopped(ok: bool, reason: str) -> tuple[bool, str]:
+        text = f"heartbeat stopped after {beats} renewal(s): {reason}"
+        try:
+            _record_hold_heartbeat_stop(label, me, reason)
+        except (OSError, SemaphoreError):
+            pass
+        return ok, text
+
+    while True:
+        try:
+            with locked_state() as (path, state):
+                current = _find_hold(state, label)
+                entry = _load_hold_heartbeats(path.parent)["heartbeats"].get(label)
+        except SemaphoreError as exc:
+            return stopped(False, f"state unreadable: {exc}")
+        if entry is None or entry["pid"] != me:
+            return True, f"heartbeat stopped after {beats} renewal(s): another heartbeat owns {label}"
+        if current is None:
+            return stopped(True, "the hold was released")
+        if float(current["acquired_at"]) != acquired_at:
+            return stopped(True, "the hold was released and acquired again")
+        if not _pid_alive(owner_pid):
+            return stopped(True, f"the owning client pid {owner_pid} is gone; the hold will lapse")
+        now = clock()
+        if now - last >= interval:
+            ok, detail = renew(label, lease, adapter=selected, policy=policy, acquired_at=acquired_at)
+            if not ok:
+                first = detail.splitlines()[0] if detail else "renewal refused"
+                return stopped(False, f"renewal refused, renewing stopped: {first}")
+            beats += 1
+            last = now
+            try:
+                with locked_state() as (path, _state):
+                    data = _load_hold_heartbeats(path.parent)
+                    entry = data["heartbeats"].get(label)
+                    if entry is not None and entry["pid"] == me:
+                        entry["beats"] = beats
+                        entry["renewed_at"] = _now()
+                        _write_json(hold_heartbeats_path(path.parent), data)
+            except (OSError, SemaphoreError):
+                pass
+            if max_beats is not None and beats >= max_beats:
+                return stopped(True, "beat limit reached")
+        remaining = interval - (clock() - last)
+        sleep(max(1.0, min(float(HEARTBEAT_SLICE_SECONDS), remaining)))
+
+
+def hold_heartbeat_owner(adapter: Optional[Adapter] = None) -> tuple[Optional[int], str]:
+    """The agent client above this invocation, which a hold heartbeat outlives never."""
+    pid, _family, found = _client_process(adapter or get_adapter())
+    return pid, found
+
+
+def hold_heartbeat_detached(
+    label: str,
+    interval: int,
+    owner_pid: int,
+    *,
+    claim_seconds: float = HOLD_HEARTBEAT_CLAIM_SECONDS,
+    poll: Callable[[float], None] = time.sleep,
+) -> tuple[bool, str]:
+    """Start ``hold_heartbeat`` in its own process session and confirm its claim.
+
+    The child runs ``renew LABEL --heartbeat SECS --owner-pid PID`` through the
+    canonical launcher and logs to ``hold-heartbeat.log`` beside the holds.
+    Returns once the child has recorded itself as the label's heartbeat, or
+    with the child's own verdict if it exits first.
+    """
+    try:
+        verdict, detail, _hold = _hold_heartbeat_precheck(label, interval)
+    except SemaphoreError as exc:
+        return False, str(exc)
+    if verdict is not None:
+        return verdict, detail
+    root = state_root()
+    launcher = canonical_creme_root() / NEUTRAL_STATE_RELATIVE.parent / "semaphore"
+    log = root / HOLD_HEARTBEAT_LOG_NAME
+    log_fd: Optional[int] = None
+    try:
+        log_fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        os.fchmod(log_fd, 0o600)
+        process = subprocess.Popen(
+            [
+                sys.executable, str(launcher), "renew", label,
+                "--heartbeat", str(interval), "--owner-pid", str(owner_pid),
+            ],
+            stdin=subprocess.DEVNULL, stdout=log_fd, stderr=log_fd,
+            start_new_session=True, close_fds=True, env=os.environ.copy(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = f"could not start detached heartbeat: {exc}"
+        _log("hold-heartbeat", label, "REFUSED", detail)
+        return False, detail
+    finally:
+        if log_fd is not None:
+            os.close(log_fd)
+    deadline = time.monotonic() + claim_seconds
+    while True:
+        entry = hold_heartbeat_entry(label)
+        if entry is not None and entry["pid"] == process.pid and entry.get("stopped_at") is None:
+            return True, (
+                f"heartbeat detached as pid {process.pid}, renewing {label} every {interval}s "
+                f"while client pid {owner_pid} lives; log: {log}"
+            )
+        code = process.poll()
+        if code is not None:
+            if entry is not None and entry["pid"] != process.pid and entry.get("stopped_at") is None:
+                return True, f"heartbeat for {label} already runs as pid {entry['pid']}; no second heartbeat started"
+            reason = (entry or {}).get("stop_reason") if (entry or {}).get("pid") == process.pid else None
+            return False, (
+                f"detached heartbeat exited with status {code} before renewing"
+                + (f": {reason}" if reason else f"; see {log}")
+            )
+        if time.monotonic() >= deadline:
+            return False, (
+                f"detached heartbeat pid {process.pid} has not claimed {label} after "
+                f"{claim_seconds:.0f}s; see {log} and renew manually until it does"
+            )
+        poll(0.05)

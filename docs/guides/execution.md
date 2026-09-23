@@ -235,10 +235,14 @@ the acquiring process alive across the unit or use the wrapper, which does.
 ### Renewal and pressure
 
 Renewal is both a lease heartbeat and an in-session pressure check. Call it
-before the next elaboration/build unit and at least every five minutes during
-an interactive MCP session. Under moderate pressure—or when the worker count
-or admitted needs are already above what the host holds—non-priority soft
-holders receive `YIELD_HEAVY`, leaving the oldest live coherent unit priority.
+before the next elaboration/build unit, and during an interactive MCP session
+at least every five minutes or pass `--heartbeat SECS --detach` to
+`adaptive-acquire`: one renewer per hold, bound to the agent client, that stops
+by itself on release, on the client's exit, or on a `YIELD_HEAVY`/`DRAIN_HEAVY`
+verdict, which it records in the log without killing anything. Under moderate
+pressure—or when the worker count or admitted needs are already above what the
+host holds—non-priority soft holders receive `YIELD_HEAVY`, leaving the oldest
+live coherent unit priority.
 At the drain threshold every holder receives `DRAIN_HEAVY`. A wrapper-owned
 build renews as `CONTINUE_WATCHED` instead: its watchdog, not renewal,
 answers memory pressure. In either case, launch no new

@@ -25,8 +25,10 @@ Rebuilding after each edit turns the compiler into a slow error enumerator and
 takes a host hold that another session is waiting for.
 
 **A clean `lean_diagnostic_messages` pass on a file whose imports are current
-is loop evidence.** It is complete on its own. Do not follow it with a build
-"to confirm for real". If the diagnostics say `Imports are out of date`, the
+is loop evidence.** Within the loop it is complete on its own: do not follow
+each edit with a build "to confirm for real". A checkpoint or commit is
+different: it needs the module's narrow owned build green, because on Lean 4.34
+the server has reported a module clean that the build then failed. If the diagnostics say `Imports are out of date`, the
 imports are not current: probe, build the narrow target, refresh the file's
 worker — call any lean tool on two other Lean files and then on this one, which
 evicts and reloads it under `LEAN_LSP_MAX_OPEN_FILES=2`; editing the file does

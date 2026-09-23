@@ -38,14 +38,11 @@ resource class, required checks, and a clear return contract; under the master
 model each packet is a written brief, per [the briefs guide](briefs.md). The lead retains
 integration, conflict reconciliation, final verification, and user-only
 decisions. Parallel work is useful only when it leaves evidence that can be
-merged without overlapping authority. Instantiate the tracked
-[generic worker brief](../../templates/master-runtime/worker-brief.md) for
-every delegated packet: it makes exact starting refs and dependencies,
-read-first sources, owned repositories/paths, per-goal worktrees/branches,
-coordination commands, the convergence gate and biting control, decision
-authority, checkpoints, state/report/evidence paths, pause and wind-down,
-reacquisition conditions, and the bounded evidence return explicit. A filled
-brief is private runtime state; the tracked template remains placeholders only.
+merged without overlapping authority. The tracked
+[generic worker brief](../../templates/master-runtime/worker-brief.md) lists
+the fields a packet may need; fill the ones that apply and leave general
+policy in the guides. A filled brief is private runtime state; the tracked
+template remains placeholders only.
 
 ## Resource classes
 

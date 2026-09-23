@@ -118,8 +118,13 @@ file); its verdicts are candidates, discharged in step 4 against the real file.
 Declare the target complete only when the intended goals are closed and the
 edited proof has no new errors. When the task requires theorem-level assurance
 and the fully qualified declaration name is known, use `lean_verify` to check
-axioms and the source scan. Run any project verification selected by the
-repository's authoritative gate catalogue separately.
+axioms and the source scan. Its axiom list is advisory, not evidence: it comes
+from `#print axioms`, which on Lean v4.30 and later can under-report axioms
+reached through an imported inductive
+([lean4#15226](https://github.com/leanprover/lean4/issues/15226)). Take
+axiom evidence only from the repository's from-scratch audit gate. Run any
+project verification selected by the repository's authoritative gate
+catalogue separately.
 
 In Blanc, if the work built, generalized, or hoisted a common-library
 declaration, the discoverability closure in

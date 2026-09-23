@@ -269,6 +269,18 @@ def check_goal_store(workspace: Path, profile: Optional[dict[str, Any]]) -> list
                 "add `/master-archive/` to the goal store's .gitignore)",
             )]
         detail = f"{store} ({state}; master/ and master-archive/ are ignored and untracked)"
+        staging = sorted(
+            path.name
+            for path in (store / "master-archive").iterdir()
+            if path.name.startswith(".staging-")
+        ) if (store / "master-archive").is_dir() else []
+        if staging:
+            return [Check(
+                "goal store",
+                STATUS_WARN,
+                f"{detail[:-1]}; interrupted retirement staging remains: {staging[:3]}; "
+                "rerun `master retire-migration --apply` to remove it)",
+            )]
     return [Check("goal store", STATUS_OK, detail)]
 
 

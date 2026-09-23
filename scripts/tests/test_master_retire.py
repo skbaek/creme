@@ -325,6 +325,72 @@ class MasterRetireTest(unittest.TestCase):
         self.assertEqual(result["status"], "CURRENT")
         self.assertFalse(self.archive_parent.exists())
 
+    def rewrite_report(self, **changes):
+        path = self.root / "migration.json"
+        report = json.loads(path.read_bytes())
+        report.update(changes)
+        _write(path, _canonical(report))
+
+    def test_translated_history_is_refused_and_nothing_changes(self):
+        for changes in (
+            {"translations": [{"path": "log.md", "rows": 1}]},
+            {"translated_log_sha256": hashlib.sha256(b"row\n").hexdigest()},
+        ):
+            with self.subTest(changes=sorted(changes)):
+                self.rewrite_report(
+                    translations=[],
+                    translated_log_sha256=hashlib.sha256(b"").hexdigest(),
+                )
+                self.rewrite_report(**changes)
+                before = _tree(self.root)
+                code, result = self.retire()
+                self.assertEqual(code, 2, result)
+                self.assertEqual(result["status"], "REFUSED")
+                self.assertIn("translated legacy history", result["detail"])
+                self.assertIn("1cc5c48", result["detail"])
+                self.assertEqual(_tree(self.root), before)
+                self.assertFalse(self.archive_parent.exists())
+
+    def test_crash_while_staging_leaves_no_staging_after_rerun(self):
+        from creme import doctor
+
+        real = master_retire._copy_nodes
+
+        def crash(source, target, inventory):
+            (target / "log.md").write_bytes(b"partial")
+            (target / "log.md").chmod(0o600)
+            raise OSError("synthetic crash while staging")
+
+        with mock.patch("creme.master_retire._copy_nodes", crash):
+            code, result = self.retire()
+        self.assertEqual(code, 2)
+        self.assertEqual(len(master_retire.stale_staging(self.archive_parent)), 1)
+        self.assertTrue((self.root / "migration.json").exists())
+        profile = {"workspace": {"goal_store": "goals"}}
+        [check] = doctor.check_goal_store(self.workspace, profile)
+        self.assertEqual(check.status, doctor.STATUS_WARN, check.detail)
+        self.assertIn("staging remains", check.detail)
+        with mock.patch("creme.master_retire._copy_nodes", real):
+            code, result = self.retire()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["status"], "OK")
+        self.assertEqual(master_retire.stale_staging(self.archive_parent), [])
+        self.assertEqual(
+            sorted(os.listdir(self.archive_parent)), [Path(result["archive"]).name]
+        )
+        [check] = doctor.check_goal_store(self.workspace, profile)
+        self.assertEqual(check.status, doctor.STATUS_OK, check.detail)
+
+    def test_unrecognized_staging_entry_refuses(self):
+        self.archive_parent.mkdir(mode=0o700)
+        (self.archive_parent / ".staging-foreign").mkdir(mode=0o700)
+        before = _tree(self.root)
+        code, result = self.retire()
+        self.assertEqual(code, 2)
+        self.assertIn("unrecognized staging entry", result["detail"])
+        self.assertEqual(_tree(self.root), before)
+        self.assertTrue((self.archive_parent / ".staging-foreign").is_dir())
+
     def test_doctor_requires_the_archive_to_be_ignored(self):
         from creme import doctor
 

@@ -43,6 +43,9 @@ _ROOT_FILES = master_runtime.LEGACY_MIGRATION_ROOT_FILES
 _NODES = master_runtime.LEGACY_MIGRATION_NODES
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _ARCHIVE_NAME = re.compile(r"legacy-migration-[0-9]{8}(-[0-9]+)?")
+_STAGING_NAME = re.compile(r"\.staging-legacy-migration-[0-9]{8}(-[0-9]+)?-[0-9a-f]{16}")
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+_LEGACY_MIGRATOR_COMMIT = "1cc5c48"
 
 Renewal = Callable[[], tuple[bool, str]]
 AuthorityTransaction = Callable[[], ContextManager[Any]]
@@ -185,6 +188,16 @@ def _verify_legacy(root: Path, present: Sequence[str]) -> dict[str, Any]:
     report = _strict_object(_read_private(root / _REPORT, 0o600), "migration report")
     if report.get("status") != "complete":
         raise RetirementError("migration report is not complete; finish or recover it first")
+    # The translator that could re-derive a translated legacy log is retired,
+    # so only a migration that translated nothing can be checked here.
+    if report.get("translations") != [] or report.get(
+        "translated_log_sha256", _EMPTY_SHA256
+    ) != _EMPTY_SHA256:
+        raise RetirementError(
+            "migration report records translated legacy history whose event-log "
+            "prefix this Creme cannot verify; retire it with a pre-retirement "
+            f"Creme checkout that carries the migrator ({_LEGACY_MIGRATOR_COMMIT})"
+        )
     backup = report.get("backup")
     if not isinstance(backup, dict):
         raise RetirementError("migration report has no backup reference")
@@ -340,6 +353,59 @@ def _archive_candidates(archive_parent: Path) -> list[Path]:
         for name in os.listdir(archive_parent)
         if _ARCHIVE_NAME.fullmatch(name)
     )
+
+
+def stale_staging(archive_parent: Path) -> list[Path]:
+    """Staging directories an interrupted retirement left behind."""
+    if not archive_parent.is_dir() or archive_parent.is_symlink():
+        return []
+    return sorted(
+        archive_parent / name
+        for name in os.listdir(archive_parent)
+        if name.startswith(".staging-")
+    )
+
+
+def _remove_stale_staging(archive_parent: Path) -> None:
+    """Remove this command's own interrupted staging copies, verified first.
+
+    A staging directory holds private copies of legacy nodes; one left by a
+    crash would otherwise persist.  Only an exact staging name, owned
+    owner-only directories and files, no links, and the staging layout
+    (``record/`` and optionally ``manifest.json``) are removed; anything else
+    refuses.
+    """
+    for staging in stale_staging(archive_parent):
+        if _STAGING_NAME.fullmatch(staging.name) is None:
+            raise RetirementError(f"unrecognized staging entry {staging.name}; inspect it by hand")
+        _check_directory(staging)
+        children = set(os.listdir(staging))
+        if not children <= {ARCHIVE_NODES_NAME, ARCHIVE_MANIFEST_NAME}:
+            raise RetirementError(f"staging {staging.name} has an unexpected layout")
+        doomed_files: list[Path] = []
+        doomed_directories: list[Path] = [staging]
+        pending = [staging]
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    path = Path(entry.path)
+                    if entry.is_symlink():
+                        raise RetirementError(f"staging path {path} is a symlink")
+                    if entry.is_dir(follow_symlinks=False):
+                        _check_directory(path)
+                        doomed_directories.append(path)
+                        pending.append(path)
+                    else:
+                        info = path.lstat()
+                        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                            raise RetirementError(f"staging path {path} is not an owned file")
+                        doomed_files.append(path)
+        for path in doomed_files:
+            path.unlink()
+        for path in sorted(doomed_directories, key=lambda item: len(item.parts), reverse=True):
+            path.rmdir()
+        _fsync_directory(archive_parent)
 
 
 def _new_archive_path(archive_parent: Path, today: str) -> Path:
@@ -522,6 +588,9 @@ def retire(
         master_runtime._renew_or_refuse(renew)
         with master_runtime._locked_record(root):
             with _authority(renew, authority_transaction)():
+                if archive_parent.is_dir():
+                    _check_directory(archive_parent)
+                    _remove_stale_staging(archive_parent)
                 plan, manifest, target = _plan(root, archive_parent, today)
                 if plan.status == "PREVIEW":
                     assert manifest is not None and target is not None

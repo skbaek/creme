@@ -72,7 +72,9 @@ those nodes, copies them into `$GOAL_STORE/master-archive/legacy-migration-DATE/
 record, and records a `procedure` event binding the manifest digest.
 `master restore-migration NAME --apply` copies them back byte for byte; a
 restored record is readable only by a Creme checkout that still carries the
-migrator (`1cc5c48` or earlier).
+migrator (`1cc5c48` or earlier). While any legacy node remains, this code
+refuses every record read, so a host that still has them runs the retirement
+(from a checkout that has the command) before merging or pulling this code.
 
 Transaction and lock-order internals of the record writer are
 in [the record internals](../maintainer/master-record.md); an operating master

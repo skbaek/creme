@@ -289,7 +289,7 @@ class SemaphorePressureTest(unittest.TestCase):
         # The kernel level was not sampled (fixture): nothing here is critical.
         self.assertIsNone(build_ownership.watchdog_critical(sample, 2.0))
 
-    def test_the_kernel_critical_level_is_read_and_is_critical(self):
+    def test_the_kernel_pressure_level_is_read_and_retracts_once_held(self):
         from creme import build_ownership
 
         runs = [
@@ -300,7 +300,9 @@ class SemaphorePressureTest(unittest.TestCase):
         with mock.patch.object(DarwinAdapter, "_run", side_effect=runs):
             sample = DarwinAdapter().memory_headroom()
         self.assertEqual(sample.data["memory_pressure_level"], 4)
-        self.assertIn("critical", build_ownership.watchdog_critical(sample, 2.0))
+        # A raised kernel level retracts only once it has been held 10 s.
+        self.assertIsNone(build_ownership.watchdog_critical(sample, 2.0, warning_seconds=9.0))
+        self.assertIn("held 10s", build_ownership.watchdog_critical(sample, 2.0, warning_seconds=10.0))
 
     # (b) a healthy sample keeps today's verdict
     def test_healthy_sample_is_admitted_unchanged(self):

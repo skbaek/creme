@@ -279,7 +279,7 @@ def _valid_log_row(row: Any) -> bool:
     return (
         isinstance(row, dict)
         and all(isinstance(row.get(key), str) for key in ("time", "action", "label", "verdict", "detail"))
-        and row["verdict"] in {"OK", "REFUSED"}
+        and row["verdict"] in {"OK", "REFUSED", "RETRACTED"}
     )
 
 
@@ -903,7 +903,11 @@ def _admission_decision(
         )
 
     if not converting and unproven:
-        running = [item["label"] for item in live_others if hold_flags(item)["unproven"]]
+        now = _now()
+        running = [
+            item["label"] for item in live_others
+            if hold_flags(item)["unproven"] and not _stranded(item, now)
+        ]
         if running:
             return _refuse(
                 "DEFER_UNPROVEN",
@@ -2483,6 +2487,20 @@ def renew(
     return True, detail
 
 
+def _stranded(hold: dict[str, Any], now: Optional[float] = None) -> bool:
+    """A hold whose lease lapsed and whose recorded process is gone.
+
+    The one-unproven rule and the watchdog's retraction order both ignore it:
+    it can run nothing, so it neither blocks an unproven unit nor ranks.
+    """
+    if not _expired(hold, now):
+        return False
+    try:
+        return not _pid_alive(int(hold["pid"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def retraction_order() -> list[dict[str, Any]]:
     """Watched holds in the order the watchdog retracts them.
 
@@ -2495,7 +2513,7 @@ def retraction_order() -> list[dict[str, Any]]:
     now = _now()
     watched = []
     for hold in holds:
-        if hold.get("manual") or _expired(hold, now):
+        if hold.get("manual") or _stranded(hold, now):
             continue
         flags = hold_flags(hold)
         if not flags["watched"]:

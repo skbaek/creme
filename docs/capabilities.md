@@ -183,14 +183,19 @@ passes through the same live check and is not an escape hatch.
 
 The owned build wrapper then watches the build: about once a second it
 samples headroom. At the drain level (availability below the floor, or a
-pressure cause) it only reclaims the goal's idle language-server workers. On
-a critical signal — Darwin's `kern.memorystatus_vm_pressure_level` of 4
-(carried as `memory_pressure_level`), swap in use rising by 1 GiB within
-10 s, or on Linux `MemAvailable` below the floor or PSI memory "full" avg10
-at 10% (`memory_available_direct`, `memory_psi_full_avg10`) — it retracts the
+pressure cause) it only reclaims, in the background, the goal's
+language-server workers idle two minutes or more. On a retraction signal —
+Darwin's `kern.memorystatus_vm_pressure_level` at 2 (warning) or above
+(carried as `memory_pressure_level`) held 10 s, swap in use rising by 1 GiB
+within 10 s, or on Linux `MemAvailable` below the floor or PSI memory "full"
+avg10 at 10% (`memory_available_direct`, `memory_psi_full_avg10`) — it
+retracts the
 youngest unproven watched build after a short grace and older ones in turn if
 the signal persists, recording the outcome `retracted` (exit 75) with its
-observed peak as evidence. Admitted needs are summed in full even though
+observed peak as evidence (per module when sampled, else as a floor on the
+unfinished stale closure). A retraction is logged with verdict `RETRACTED`, and
+a stranded hold (lease lapsed, process gone) neither blocks the one-unproven
+rule nor ranks for retraction. Admitted needs are summed in full even though
 running units already reduce availability; that is deliberately
 conservative. On Darwin the availability figure is the free percentage, which
 counts compressible memory as free and barely moves while a build allocates,

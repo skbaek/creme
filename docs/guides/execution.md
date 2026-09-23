@@ -144,21 +144,24 @@ makes a request harder to schedule, so state one only when you know it.
 
 While Lake runs, the owned-build wrapper samples the host about once a
 second, at two levels. At the **drain** level — the swap/compressor pressure
-cause, or available memory below the floor — it reclaims the goal's own idle
-language-server workers and nothing more; admission already refuses new heavy
-work there, and builds of 14.2–14.8 GiB completed under exactly that signal.
-Only a **critical** signal retracts: the kernel's critical VM pressure level
-(`kern.memorystatus_vm_pressure_level` = 4, macOS), swap in use rising by
-1 GiB within 10 s, or on Linux `MemAvailable` below the floor or PSI memory
-"full" avg10 at 10% or more. On macOS the live retraction signals are
-therefore the kernel level and swap growth; the free percentage never gets
-there first. If a critical signal persists three seconds, the youngest
+cause, or available memory below the floor — it reclaims the goal's own
+language-server workers idle for two minutes or more, in the background, and
+nothing more; admission already refuses new heavy work there. Only a
+**retraction** signal stops a build: the kernel's VM pressure level at warning
+or worse (`kern.memorystatus_vm_pressure_level` >= 2, macOS) held for 10 s,
+swap in use rising by 1 GiB within 10 s, or on Linux `MemAvailable` below the
+floor or PSI memory "full" avg10 at 10% or more. On macOS the live retraction
+signals are therefore the kernel level and swap growth; the free percentage
+never gets there first. A build that has already exited is never retracted.
+If a retraction signal persists three seconds, the youngest
 unproven admitted build retracts — its process group is terminated through
 the normal interruption path — and if it persists, older builds follow,
 youngest first, five seconds apart. A retracted build exits **75** with JSON
 `"status": "RETRACTED"`, a `hint`, and a ledger row (`outcome: retracted`)
-whose observed peak floors the in-flight module next time, so the retry is
-sized by what it actually used. `--walk` re-queues a retracted unit once at
+whose observed peak floors the retry: the in-flight modules' own peaks when
+the sampler saw them, otherwise the whole run's peak as a floor for any stale
+set that still contains every unfinished module, so a plain `--wait` retry is
+never priced as before. `--walk` re-queues a retracted unit once at
 that peak and stops if it retracts again. Holds taken with `adaptive-acquire`
 (language-server loops, gate runners) are admitted by the same arithmetic and
 keep the renewal verdicts below; they are never retracted.

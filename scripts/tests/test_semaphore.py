@@ -2753,6 +2753,35 @@ class LaunchAndWatchAdmissionTest(unittest.TestCase):
         self.assertEqual(decision.verdict, "DEFER_UNPROVEN")
         self.assertTrue(decision.waitable)
 
+    def test_a_stranded_unproven_hold_neither_blocks_nor_ranks(self):
+        dead = subprocess.Popen([os.sys.executable, "-c", "pass"])
+        dead.wait()
+        stranded = semaphore._hold(
+            "gone", "proof", 600, memory_gib=4, contention="tolerant", charged_gib=4.0,
+            unproven=True, watched=True,
+        )
+        stranded.update(pid=dead.pid, acquired_at=1.0, renewed_at=1.0)
+        decision = self.decide(4.0, state={"hard": None, "soft": [stranded]}, unproven=True)
+        self.assertTrue(decision.admitted, decision.detail)
+        # An expired hold whose process is still alive still blocks.
+        blocking = dict(stranded, pid=os.getpid())
+        decision = self.decide(4.0, state={"hard": None, "soft": [blocking]}, unproven=True)
+        self.assertEqual(decision.verdict, "DEFER_UNPROVEN")
+        # And the watchdog's order agrees with admission.
+        path = Path(self.tmp.name) / "state.json"
+        path.write_text(json.dumps({"schema_version": 1, "hard": None, "soft": [stranded]}))
+        self.assertEqual(semaphore.retraction_order(), [])
+        path.write_text(json.dumps({"schema_version": 1, "hard": None, "soft": [blocking]}))
+        self.assertEqual([item["label"] for item in semaphore.retraction_order()], ["gone"])
+
+    def test_a_retraction_row_is_a_valid_log_row(self):
+        from datetime import datetime, timezone
+
+        semaphore.record_retraction("goal", "available 1.20 GiB is below the 2.00 GiB floor")
+        rows, corrupt, status = semaphore.read_log(datetime(2000, 1, 1, tzinfo=timezone.utc))
+        self.assertEqual(corrupt, 0, status)
+        self.assertEqual([(row["action"], row["verdict"]) for row in rows], [("retract", "RETRACTED")])
+
     def test_swap_pressure_still_drains_admission(self):
         adapter = HeadroomAdapter(free_percent=81, total_gib=24)
         sample = adapter.memory_headroom()

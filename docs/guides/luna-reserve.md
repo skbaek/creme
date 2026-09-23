@@ -542,8 +542,8 @@ tripwire all apply unchanged.
   `reclaim --wind-down GOAL`, so admitting both could reclaim the other
   session's language server. The headroom floor and semaphore remain the
   resource safeguards. Before starting, it refuses when
-  memory headroom is unavailable, below the semaphore's 20% drain floor
-  (`DRAIN_HEAVY`/`LIGHT_ONLY`), or below the host-guidance floor of 30%; when
+  memory headroom is unavailable, below the semaphore's 20% renewal drain
+  percentage (`DRAIN_HEAVY`), or below the host-guidance floor of 30%; when
   another label holds the hard semaphore or a manual hold is active; and when
   a `lean` or `lake` process already runs with its working directory inside
   the target. It takes no hold itself: builds are admitted by the wrapper.

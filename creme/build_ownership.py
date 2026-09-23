@@ -37,13 +37,16 @@ RETRACTED_EXIT = 75
 WATCHDOG_INTERVAL_SECONDS = 1.0
 WATCHDOG_GRACE_SECONDS = 3.0
 WATCHDOG_STEP_SECONDS = 5.0
-# Critical signals, the only ones that retract a running build (decision
-# 2026-09-23: builds of 14.2-14.8 GiB completed under the drain-level
-# compressor signal and must not be retracted by it).
-DARWIN_CRITICAL_PRESSURE_LEVEL = 4        # kern.memorystatus_vm_pressure_level
+# Retraction ("critical") signals.  The drain-level compressor cause alone
+# never retracts; the user chose this red zone on 2026-09-23.
+DARWIN_WARNING_PRESSURE_LEVEL = 2         # kern.memorystatus_vm_pressure_level >= 2 ...
+DARWIN_WARNING_SUSTAINED_SECONDS = 10.0   # ... held for 10 seconds
 SWAP_GROWTH_CRITICAL_MIB = 1024.0         # swap in use rising by 1 GiB ...
 SWAP_GROWTH_WINDOW_SECONDS = 10.0         # ... within 10 seconds
 PSI_FULL_CRITICAL_AVG10 = 10.0            # Linux: all tasks stalled 10% of the last 10 s
+# Drain-level reclaim takes only language-server workers idle this long, so an
+# agent's live server between two requests is never killed.
+WATCHDOG_RECLAIM_IDLE_MINUTES = 2
 # A walk re-queues a retracted unit once; without --wait it waits this long.
 WALK_REQUEUE_WAIT_SECONDS = 3600
 RUNTIME_RELATIVE = Path(".creme/lean-build-ownership")
@@ -586,8 +589,8 @@ def _under_cover(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """How far each admitted estimate fell below the peak it was charged for.
 
     Computed from the estimate the row carries and the peak it measured, so
-    the +1 GiB margin becomes a measured quantity over any window, including
-    windows recorded before the field existed.
+    under-sizing is a measured quantity over any window, including windows
+    recorded before the field existed.
     """
     cases: list[dict[str, Any]] = []
     measured = 0
@@ -2633,6 +2636,7 @@ def size_stale_set(
     ``toolchain_digest`` scopes fallback evidence as ``module_cost_evidence``
     describes.
     """
+    failed_rows = list(failed_rows)
     limit = int(settings["tolerant_module_count"])
     narrow_default = int(settings["narrow_default_gib"])
     heavy_seconds = float(settings["heavy_module_seconds"])
@@ -2727,7 +2731,27 @@ def size_stale_set(
         "unproven": False,
     }
 
+    # A retracted attempt without per-module peaks floors the closure it was
+    # building: any stale set that still contains all of its unfinished
+    # modules needs at least that run's observed peak.
+    closure_floor, closure_origin = 0.0, None
+    for row in failed_rows:
+        if row.get("outcome") != "retracted":
+            continue
+        members = set(str(module) for module in row.get("modules_failed") or [])
+        if members and members <= set(names) and _finite_positive(row.get("peak_rss_mib")):
+            peak = float(row["peak_rss_mib"]) / 1024.0
+            if peak > closure_floor:
+                closure_floor, closure_origin = peak, str(row.get("time"))
+
     def finish(kind: str, need: float, source: str, unproven: bool = False) -> dict[str, Any]:
+        if closure_floor > need:
+            need = closure_floor
+            source += (
+                f"; retracted attempt at {closure_origin} floors this closure at "
+                f"{closure_floor:.2f} GiB"
+            )
+        result["closure_floor_gib"] = round(closure_floor, 2) if closure_floor else None
         need = round(max(float(need), 0.1), 2)
         result.update({
             "kind": kind,
@@ -3277,7 +3301,8 @@ def _reclaim_idle_workers(goal: str) -> str:
     """Reclaim this goal's idle language-server workers through the scoped path."""
     try:
         completed = subprocess.run(
-            [os.sys.executable, "-m", "creme", "reclaim", "--idle-workers", "0", "--goal", goal],
+            [os.sys.executable, "-m", "creme", "reclaim", "--idle-workers",
+             str(WATCHDOG_RECLAIM_IDLE_MINUTES), "--goal", goal],
             cwd=str(semaphore.canonical_creme_root()), capture_output=True, text=True,
             timeout=15, check=False,
         )
@@ -3307,15 +3332,24 @@ def watchdog_red(sample: Any, floor_gib: float) -> Optional[str]:
     return None
 
 
+def _pressure_level(sample: Any) -> Optional[int]:
+    data = getattr(sample, "data", None)
+    level = data.get("memory_pressure_level") if isinstance(data, dict) else None
+    return level if isinstance(level, int) and not isinstance(level, bool) else None
+
+
 def watchdog_critical(
     sample: Any,
     floor_gib: float,
     swap_history: Optional[list[tuple[float, float]]] = None,
+    warning_seconds: Optional[float] = None,
 ) -> Optional[str]:
-    """Why the host is at the critical level now, or None; only this retracts.
+    """Why the host is at the retraction level now, or None; only this retracts.
 
-    Critical is the kernel's own critical VM pressure level (Darwin), swap in
-    use rising by `SWAP_GROWTH_CRITICAL_MIB` within
+    Retraction level is the kernel's VM pressure level at warning or worse
+    (Darwin, >= `DARWIN_WARNING_PRESSURE_LEVEL`) held for
+    `DARWIN_WARNING_SUSTAINED_SECONDS` (``warning_seconds`` is how long it has
+    held), swap in use rising by `SWAP_GROWTH_CRITICAL_MIB` within
     `SWAP_GROWTH_WINDOW_SECONDS` (``swap_history`` holds ``(time, MiB)``),
     or, where availability is a direct measure (Linux `MemAvailable`),
     availability below the floor or PSI memory "full" at
@@ -3324,9 +3358,12 @@ def watchdog_critical(
     if sample is None or getattr(sample, "status", None) != "OK" or not isinstance(sample.data, dict):
         return None
     data = sample.data
-    level = data.get("memory_pressure_level")
-    if isinstance(level, int) and not isinstance(level, bool) and level >= DARWIN_CRITICAL_PRESSURE_LEVEL:
-        return f"kernel memory pressure level is critical ({level})"
+    level = _pressure_level(sample)
+    if (
+        level is not None and level >= DARWIN_WARNING_PRESSURE_LEVEL
+        and warning_seconds is not None and warning_seconds >= DARWIN_WARNING_SUSTAINED_SECONDS
+    ):
+        return f"kernel memory pressure level {level} held {warning_seconds:.0f}s"
     if swap_history:
         latest_time, latest = swap_history[-1]
         earliest = min(
@@ -3375,8 +3412,10 @@ class Watchdog(threading.Thread):
         grace: float = WATCHDOG_GRACE_SECONDS,
         step: float = WATCHDOG_STEP_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        reclaim_async: bool = True,
     ) -> None:
         super().__init__(daemon=True)
+        self.reclaim_async = reclaim_async
         self.goal = goal
         self.proc = proc
         self.floor_gib = float(floor_gib)
@@ -3397,6 +3436,7 @@ class Watchdog(threading.Thread):
         self._critical: Optional[float] = None
         self._deadline: Optional[float] = None
         self._swap: list[tuple[float, float]] = []
+        self._warning: Optional[float] = None
 
     def _rank(self) -> tuple[int, int]:
         try:
@@ -3407,8 +3447,23 @@ class Watchdog(threading.Thread):
         labels = [str(item.get("label")) for item in order]
         return (labels.index(self.goal) if self.goal in labels else len(labels)), len(labels)
 
+    def _reclaim_in_background(self) -> None:
+        """Reclaim without delaying the next sample's retraction decision."""
+        def run() -> None:
+            try:
+                self.events.append(self.reclaim(self.goal))
+            except Exception as exc:
+                self.events.append(f"reclaim failed: {type(exc).__name__}")
+        if self.reclaim_async:
+            threading.Thread(target=run, daemon=True).start()
+        else:
+            run()
+
     def check(self) -> bool:
         """One sample; returns True once this unit has been retracted."""
+        poll = getattr(self.proc, "poll", None)
+        if callable(poll) and poll() is not None:
+            return False  # the build already exited: there is nothing to retract
         try:
             sample = self.probe()
         except Exception:
@@ -3425,7 +3480,16 @@ class Watchdog(threading.Thread):
         if isinstance(swap, (int, float)) and not isinstance(swap, bool):
             self._swap.append((now, float(swap)))
             self._swap = [item for item in self._swap if now - item[0] <= SWAP_GROWTH_WINDOW_SECONDS]
-        critical = watchdog_critical(sample, self.floor_gib, self._swap)
+        level = _pressure_level(sample)
+        if level is not None and level >= DARWIN_WARNING_PRESSURE_LEVEL:
+            if self._warning is None:
+                self._warning = now
+        else:
+            self._warning = None
+        critical = watchdog_critical(
+            sample, self.floor_gib, self._swap,
+            None if self._warning is None else now - self._warning,
+        )
         why = critical or watchdog_red(sample, self.floor_gib)
         if why is None:
             if self._episode is not None:
@@ -3435,7 +3499,7 @@ class Watchdog(threading.Thread):
         if self._episode is None:
             self._episode = now
             self.events.append(f"{'critical' if critical else 'drain'}: {why}")
-            self.events.append(self.reclaim(self.goal))
+            self._reclaim_in_background()
         if critical is None:
             if self._critical is not None:
                 self.events.append(f"critical cleared after {now - self._critical:.1f}s")
@@ -3450,6 +3514,8 @@ class Watchdog(threading.Thread):
         if now < float(self._deadline or now):
             return False
         self.events.append(f"retract after {now - self._critical:.1f}s critical: {critical}")
+        if callable(poll) and poll() is not None:
+            return False
         self.retracted = True
         try:
             semaphore.record_retraction(self.goal, critical)
@@ -4224,9 +4290,10 @@ def run_lake_build(
         # partial peaks floor them next time, as a failed attempt's would.
         in_flight = sorted(module for module in sampled_peaks if module not in rebuilt)
         if not in_flight and probe_evidence is not None:
-            remaining = sorted(set(probe_evidence.get("stale_set") or []) - set(rebuilt))
-            if len(remaining) == 1:
-                in_flight = remaining
+            # No per-module attribution: the observed process peak floors the
+            # whole remaining stale set as a closure (see size_stale_set), so
+            # a retry of that set is never priced as before.
+            in_flight = sorted(set(probe_evidence.get("stale_set") or []) - set(rebuilt))
         modules_failed = sorted(set(modules_failed) | set(in_flight))
     module_peaks = {
         module: round(value, 1)
@@ -4254,9 +4321,8 @@ def run_lake_build(
         )
         if rebuilt else None
     )
-    # The margin the estimate carried over what the build actually needed.
-    # Recording it per row makes the +1 GiB a measured quantity rather than a
-    # belief; the margin itself is unchanged.
+    # How far the build's peak exceeded the need it was admitted on: the
+    # watchdog's work, recorded per row as a measured quantity.
     under_cover = (
         round(max(0.0, peak_mib / 1024.0 - float(need_gib)), 2)
         if peak_mib is not None else None

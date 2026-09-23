@@ -79,9 +79,9 @@ jobs:
           python3 -m creme cache-copy config "$RUNNER_TEMP/creme-cache-copy"
           python3 -m creme cache-copy config "$RUNNER_TEMP/creme-cache-copy" --execute
           diff -r config "$RUNNER_TEMP/creme-cache-copy"
-          python3 -m creme semaphore soft-acquire creme-linux-ci --note "Linux runtime acceptance"
+          python3 -m creme semaphore adaptive-acquire creme-linux-ci --note "Linux runtime acceptance" --memory-gib 1
           python3 -m creme semaphore status
-          python3 -m creme semaphore soft-release creme-linux-ci
+          python3 -m creme semaphore release creme-linux-ci
           set +e
           python3 -m creme reclaim --dry-run > "$RUNNER_TEMP/creme-reclaim.json"
           reclaim_status=$?

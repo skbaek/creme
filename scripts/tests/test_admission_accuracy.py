@@ -100,12 +100,14 @@ class StaleSetSizingTest(unittest.TestCase):
         self.assertEqual(sizing["kind"], "measured")
         self.assertAlmostEqual(sizing["overhead_gib"], 0.6, places=2)
         self.assertAlmostEqual(sizing["peak_gib"], 2.1, places=2)
-        self.assertEqual(sizing["estimate_gib"], 3)      # ceil(2.1); charge adds the margin
+        self.assertEqual(sizing["need_gib"], 2.1)          # the peak itself: no margin
+        self.assertEqual(sizing["estimate_gib"], 3)
+        self.assertFalse(sizing["unproven"])
 
-    def test_measured_estimate_flows_to_admission_with_one_margin(self) -> None:
+    def test_measured_need_flows_to_admission_with_no_margin(self) -> None:
         rows = [_row("2026-09-04T00:00:00Z", ["A"], 8.4, lean_gib=7.8)]
         sizing = owned.size_stale_set(["A"], {"A": set()}, rows, SETTINGS, 8)
-        self.assertEqual(sizing["estimate_gib"], 9)
+        self.assertEqual((sizing["estimate_gib"], sizing["need_gib"]), (9, 8.4))
         source = f"derived: {sizing['source']}"
         policy = {
             "task_memory_gib": 2, "heavy_workers": 2, "light_workers": 4,
@@ -116,10 +118,10 @@ class StaleSetSizingTest(unittest.TestCase):
         )), patch("creme.semaphore._runtime_admission_policy", return_value=policy):
             ok, detail = semaphore.adaptive_acquire(
                 "measured", "measured build", memory_gib=sizing["estimate_gib"],
-                estimate_source=source,
+                estimate_source=source, need_gib=sizing["need_gib"],
             )
             self.assertTrue(ok, detail)
-            self.assertIn("charged=11.7 GiB", detail)
+            self.assertIn("need=8.4 GiB", detail)
 
     def test_the_spelling_of_a_target_list_is_not_evidence(self) -> None:
         """B11 F1: one broad rebuild pinned every later `-- Blanc` at 12 GiB."""
@@ -140,7 +142,7 @@ class StaleSetSizingTest(unittest.TestCase):
                 Path("/w"), ["Pkg"], SETTINGS, ("tc", "mf"), 8, 1
             )
         # The keying B11 ran under: the maximum peak of every row spelled `Pkg`.
-        self.assertEqual(keyed, 12)
+        self.assertEqual((keyed, evidence["need_gib"]), (11, 10.17))
         self.assertIn("target rows", evidence["source"])
 
     def test_a_chain_elaborates_one_at_a_time_and_an_antichain_together(self) -> None:
@@ -155,7 +157,7 @@ class StaleSetSizingTest(unittest.TestCase):
         independent = owned.size_stale_set(["A", "B"], {"A": set(), "B": set()}, rows, SETTINGS, 8)
         self.assertEqual(independent["width"], 2)
         self.assertAlmostEqual(independent["peak_gib"], 3.6, places=2)
-        self.assertEqual(independent["estimate_gib"], 4)
+        self.assertEqual((independent["estimate_gib"], independent["need_gib"]), (4, 3.6))
 
     def test_the_width_is_the_largest_antichain_of_the_import_order(self) -> None:
         graph = {"Top": {"Mid"}, "Mid": {"Leaf"}, "Leaf": set(), "Side": set()}
@@ -173,6 +175,7 @@ class StaleSetSizingTest(unittest.TestCase):
         self.assertEqual(sizing["kind"], "narrow default")
         self.assertEqual(sizing["unmeasured"], ["M3"])
         self.assertEqual(sizing["estimate_gib"], SETTINGS["narrow_default_gib"])
+        self.assertTrue(sizing["unproven"])
 
     def test_a_member_that_elaborated_for_long_keeps_the_profile_default(self) -> None:
         """B11 02:44:47: two modules, one of them 261 s, peaked at 7.4 GiB."""
@@ -201,7 +204,8 @@ class StaleSetSizingTest(unittest.TestCase):
         rows = [_row("2026-09-04T00:00:00Z", ["A"], 5.5, lean_gib=4.9)]
         sizing = owned.size_stale_set(["A", "B"], None, rows, SETTINGS, 8)
         self.assertEqual(sizing["kind"], "narrow default")
-        self.assertEqual(sizing["estimate_gib"], 7)     # ceil(5.5) + 1 > 4
+        self.assertEqual(sizing["need_gib"], 5.5)       # the measured part, above the default 4
+        self.assertTrue(sizing["unproven"])
 
     def test_an_unmeasured_broad_set_is_bounded_by_the_tightest_broader_rebuild(self) -> None:
         stale = [f"W{index}" for index in range(20)]
@@ -214,7 +218,8 @@ class StaleSetSizingTest(unittest.TestCase):
         sizing = owned.size_stale_set(stale, None, rows, SETTINGS, 8)
         self.assertEqual(sizing["kind"], "broader rebuild")
         self.assertAlmostEqual(sizing["peak_gib"], 5.9, places=2)
-        self.assertEqual(sizing["estimate_gib"], 7)
+        self.assertEqual((sizing["estimate_gib"], sizing["need_gib"]), (6, 5.9))
+        self.assertFalse(sizing["unproven"])
         # A rebuild that missed a tenth of the set is not a cover.
         rows[1]["modules_rebuilt"] = stale[:17] + [f"Y{i}" for i in range(13)]
         sizing = owned.size_stale_set(stale, None, rows, SETTINGS, 8)
@@ -226,6 +231,7 @@ class StaleSetSizingTest(unittest.TestCase):
         sizing = owned.size_stale_set(stale, None, rows, SETTINGS, 8)
         self.assertEqual(sizing["kind"], "profile default")
         self.assertEqual(sizing["estimate_gib"], 8)
+        self.assertTrue(sizing["unproven"])
 
     def test_recorded_module_peaks_are_preferred_to_narrow_row_bounds(self) -> None:
         rows = [_row("2026-09-04T00:00:00Z", ["A", "B"], 4.0, lean_gib=3.0, concurrency=2,
@@ -247,38 +253,36 @@ class StaleSetSizingTest(unittest.TestCase):
         self.assertEqual(sizing["kind"], "fresh")
         self.assertIn("takes no hold", sizing["source"])
 
-    def _classify(self, stale_set, rows, graph=None, **settings):
+    def _size(self, stale_set, rows, graph=None, **settings):
         with _isolated() as root:
             (root / "ledger.jsonl").write_text(
                 "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
             )
-            return owned.classify_contention(
-                Path("/w"), ["T"], Path("/lake"), dict(SETTINGS, **settings), ("tc", "mf"),
+            return owned.derive_memory_gib(
+                Path("/w"), ["T"], dict(SETTINGS, **settings), ("tc", "mf"), 8, None,
                 {"roots": ["T"], "package_roots": ["T"], "resolution": "T (module)",
                  "stale": len(stale_set), "detail": "fixture",
                  "stale_set": list(stale_set), "graph": graph},
-            )
+            )[1]
 
-    def test_the_class_is_decided_by_the_same_sizing(self) -> None:
+    def test_proven_means_every_stale_module_has_peak_evidence(self) -> None:
         rows = [_row("2026-09-04T00:00:00Z", ["A"], 2.1, lean_gib=1.5)]
-        verdict, evidence = self._classify(["A"], rows)
-        self.assertEqual(verdict, "tolerant", evidence)
-        self.assertEqual(evidence["sizing"], "measured")
-        verdict, evidence = self._classify(["A", "B"], rows)
-        self.assertEqual(verdict, "sensitive")
-        self.assertIn("1 of 2 stale module(s) unmeasured", evidence["reason"])
+        evidence = self._size(["A"], rows)
+        self.assertEqual((evidence["kind"], evidence["unproven"]), ("measured", False))
+        evidence = self._size(["A", "B"], rows)
+        self.assertEqual((evidence["kind"], evidence["unproven"]), ("narrow default", True))
+        # A large measured peak is still proven: size no longer serializes.
         heavy = [_row("2026-09-04T00:00:00Z", ["A"], 6.0, lean_gib=5.4)]
-        verdict, evidence = self._classify(["A"], heavy)
-        self.assertEqual(verdict, "sensitive")
-        self.assertIn("modelled peak 6.00 GiB is not below", evidence["reason"])
-        self.assertEqual(self._classify(["A"], [])[0], "sensitive")
+        evidence = self._size(["A"], heavy)
+        self.assertEqual((evidence["need_gib"], evidence["unproven"]), (6.0, False))
+        self.assertTrue(self._size(["A"], [])["unproven"])
 
     def test_a_drifted_digest_is_still_no_evidence(self) -> None:
         rows = [_row("2026-09-04T00:00:00Z", ["A"], 2.1, lean_gib=1.5)]
         rows[0]["manifest_digest"] = "other"
-        verdict, evidence = self._classify(["A"], rows)
-        self.assertEqual(verdict, "sensitive")
-        self.assertIn("unmeasured", evidence["reason"])
+        evidence = self._size(["A"], rows)
+        self.assertTrue(evidence["unproven"])
+        self.assertIn("no peak evidence", evidence["source"])
 
     def test_the_estimate_follows_the_named_stale_set(self) -> None:
         rows = [_row("2026-09-04T00:00:00Z", ["A"], 2.1, lean_gib=1.5, targets=("OTHER",))]
@@ -307,7 +311,7 @@ class StaleSetSizingTest(unittest.TestCase):
                 Path("/w"), ["A", "B"], SETTINGS, ("tc", "mf"), 8, None,
                 {"roots": ["A", "B"], "stale": None, "stale_set": None, "graph": None},
             )
-        self.assertEqual(estimate, 4)
+        self.assertEqual((estimate, evidence["need_gib"]), (3, 2.3))
         self.assertIn("2 from member targets", evidence["source"])
 
     def test_the_narrow_default_and_heavy_seconds_are_profile_tunables(self) -> None:
@@ -362,11 +366,10 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                 self.WORKTREE, ["A"], SETTINGS, ("tc", "mf"), 8,
                 stale=self.STALE, input_identity=identity, identity_detail=detail,
             )
-            verdict, classification = owned.classify_contention(
-                self.WORKTREE, ["A"], Path("/lake"), SETTINGS, ("tc", "mf"),
-                self.STALE, identity, detail,
-            )
-        return estimate, evidence, verdict, classification
+        # Under launch-and-watch the class is always derived tolerant; what
+        # evidence decides is whether the need is proven.
+        verdict = "unproven" if evidence["unproven"] else "proven"
+        return estimate, evidence, verdict, evidence
 
     def test_identical_linked_worktree_source_is_exact_and_tolerant(self) -> None:
         identity = self.identity()
@@ -377,7 +380,7 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
         estimate, evidence, verdict, _classification = self.derive([row], identity)
         self.assertEqual(estimate, 2)
         self.assertEqual(evidence["kind"], "measured")
-        self.assertEqual(verdict, "tolerant")
+        self.assertEqual(verdict, "proven")
 
     def test_exact_new_low_measurement_replaces_old_drifted_high_peak(self) -> None:
         current = self.identity(source="current")
@@ -392,7 +395,7 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
         estimate, evidence, verdict, _classification = self.derive([old, new], current)
         self.assertEqual(estimate, 2)
         self.assertEqual(evidence["kind"], "measured")
-        self.assertEqual(verdict, "tolerant")
+        self.assertEqual(verdict, "proven")
 
     def test_changed_source_or_local_dependency_is_not_current_module_evidence(self) -> None:
         old = _row(
@@ -404,9 +407,11 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                 estimate, evidence, verdict, _classification = self.derive(
                     [old], self.identity(source=changed),
                 )
-                self.assertEqual(estimate, 13)  # the lower module peak retains its margin
-                self.assertNotEqual(evidence["kind"], "measured")
-                self.assertEqual(verdict, "sensitive")
+                # The drifted row still floors the need: overhead + 11.5 GiB
+                # and the 12.0 GiB whole build agree, with no margin.
+                self.assertEqual((estimate, evidence["need_gib"]), (12, 12.0))
+                self.assertEqual(evidence["kind"], "floor evidence")
+                self.assertEqual(verdict, "proven")
 
     def test_toolchain_manifest_configuration_and_thread_contexts_do_not_match(self) -> None:
         old = _row(
@@ -418,9 +423,9 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                 estimate, evidence, verdict, _classification = self.derive(
                     [old], self.identity(context=context),
                 )
-                self.assertEqual(estimate, 13)
-                self.assertNotEqual(evidence["kind"], "measured")
-                self.assertEqual(verdict, "sensitive")
+                self.assertGreaterEqual(evidence["need_gib"], 12.0)
+                self.assertEqual(evidence["kind"], "floor evidence")
+                self.assertEqual(verdict, "proven")
 
     def test_another_repository_with_the_same_module_name_cannot_contribute(self) -> None:
         other = _row(
@@ -430,7 +435,7 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
         estimate, evidence, verdict, _classification = self.derive([other], self.identity())
         self.assertEqual(estimate, 4)
         self.assertEqual(evidence["kind"], "narrow default")
-        self.assertEqual(verdict, "sensitive")
+        self.assertEqual(verdict, "unproven")
 
     def test_cached_failed_or_unusable_samples_are_never_exact(self) -> None:
         current = self.identity()
@@ -445,12 +450,16 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
             "2026-09-08T00:02:00Z", ["A"], 2.0, lean_gib=1.5,
             module_peaks={"A": 1.5}, identity=current, samples=0,
         )
-        for row in (cached, failed, unusable):
+        for row, kind, verdict_expected in (
+            (cached, "narrow default", "unproven"),
+            (failed, "narrow default", "unproven"),
+            # An unusable sample is not exact, but its module peak floors A.
+            (unusable, "floor evidence", "proven"),
+        ):
             with self.subTest(row=row["time"]):
                 estimate, evidence, verdict, _classification = self.derive([row], current)
-                self.assertEqual(estimate, 4)
-                self.assertNotEqual(evidence["kind"], "measured")
-                self.assertEqual(verdict, "sensitive")
+                self.assertEqual(evidence["kind"], kind)
+                self.assertEqual(verdict, verdict_expected)
 
     def test_missing_or_malformed_additive_identity_is_fallback_not_exact(self) -> None:
         current = self.identity()
@@ -468,9 +477,8 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
         for row in (missing, malformed):
             with self.subTest(row=row["time"]):
                 estimate, evidence, verdict, _classification = self.derive([row], current)
-                self.assertEqual(estimate, 13)
+                self.assertGreaterEqual(evidence["need_gib"], 12.0)
                 self.assertNotEqual(evidence["kind"], "measured")
-                self.assertEqual(verdict, "sensitive")
 
     def test_changed_source_preserves_the_prior_whole_build_floor(self) -> None:
         old = _row(
@@ -482,9 +490,8 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
         )
         # The old whole-build peak (not just its 6.74 GiB lean subprocess) is
         # a conservative lower bound until a current exact row arrives.
-        self.assertEqual(estimate, 8)
-        self.assertEqual(evidence["kind"], "narrow default")
-        self.assertEqual(verdict, "sensitive")
+        self.assertEqual((estimate, evidence["need_gib"]), (8, 7.32))
+        self.assertEqual(evidence["kind"], "floor evidence")
 
     def test_changed_source_broad_row_is_not_current_covering_evidence(self) -> None:
         modules = [f"M{index}" for index in range(13)]
@@ -522,10 +529,9 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
         )
         sizing = owned.size_stale_set(["M0"], {"M0": set()}, [old], SETTINGS, 8, current)
         # A broad 12 GiB process does not say that this module cost 12 GiB;
-        # its direct old module peak is retained as fallback but it stays
-        # unmeasured/current-sensitive until an exact row exists.
-        self.assertEqual(sizing["kind"], "narrow default")
-        self.assertEqual(sizing["estimate_gib"], SETTINGS["narrow_default_gib"])
+        # its direct old module peak floors it instead.
+        self.assertEqual(sizing["kind"], "floor evidence")
+        self.assertLess(sizing["need_gib"], 4.0)
 
     def test_identity_unavailable_keeps_a_legacy_high_peak_as_a_floor(self) -> None:
         legacy = _row(
@@ -538,10 +544,9 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
         estimate, evidence, verdict, _classification = self.derive(
             [legacy], None, "fixture identity unavailable",
         )
-        self.assertEqual(estimate, 13)
-        self.assertEqual(evidence["kind"], "profile default")
-        self.assertIn("compatibility fallback", evidence["source"])
-        self.assertEqual(verdict, "sensitive")
+        self.assertGreaterEqual(evidence["need_gib"], 12.0)
+        self.assertIn("identity unavailable", evidence["source"])
+        self.assertIn("repository-scoped evidence", evidence["source"])
 
     def test_removed_legacy_linked_worktree_keeps_a_scoped_high_peak_floor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, _isolated() as state:
@@ -559,7 +564,7 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                 repository, ["A"], SETTINGS, ("tc", "mf"), 8,
                 stale=self.STALE, input_identity=identity,
             )
-        self.assertEqual(estimate, 13)
+        self.assertGreaterEqual(evidence["need_gib"], 12.0)
         self.assertNotEqual(evidence["kind"], "measured")
 
     def _complete_legacy_singleton(self, worktree: Path, peak: float = 9.0366) -> dict:
@@ -598,24 +603,19 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                 repository, ["A"], SETTINGS, ("tc", "mf"), 8,
                 stale=self.STALE, input_identity=identity, threads=2,
             )
-            verdict, _classification = owned.classify_contention(
-                repository, ["A"], Path("/lake"), SETTINGS, ("tc", "mf"), self.STALE,
-                identity, threads=2,
-            )
         self.assertEqual(len(selected), 2)
         self.assertIs(
             selected[0].get(owned._LEGACY_OWN_SINGLETON),
             owned._LEGACY_OWN_SINGLETON_TOKEN,
         )
         self.assertNotEqual(selected[0].get("identity_status"), "exact")
-        self.assertEqual(estimate, 10)
         candidates = owned.module_cost_evidence(selected, SETTINGS, identity)["fallback_candidates"]["A"]
         self.assertIn("legacy own-singleton aggregate", {item["kind"] for item in candidates})
         self.assertIn("drifted single-module aggregate", evidence["source"])
-        self.assertEqual(semaphore._charged_memory_gib(estimate), 13.0)
-        self.assertEqual(verdict, "sensitive")
+        # The need is the 9.09 GiB drifted whole build: no margin, no tier.
+        self.assertEqual((estimate, evidence["need_gib"]), (10, 9.09))
 
-    def test_legacy_singleton_reduced_margin_requires_every_recorded_execution_fact(self) -> None:
+    def test_legacy_singleton_label_requires_every_recorded_execution_fact(self) -> None:
         mutations = {
             "wrong threads": lambda row: row.update(threads=1),
             "boolean threads": lambda row: row.update(threads=True),
@@ -662,8 +662,6 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                         repository, ["A"], SETTINGS, ("tc", "mf"), 8,
                         stale=self.STALE, input_identity=identity, threads=2,
                     )
-                    self.assertNotEqual(estimate, 10)
-                    self.assertGreaterEqual(estimate, 8)
                     self.assertNotIn("legacy own-singleton aggregate", evidence["source"])
 
     def test_foreign_repository_and_pins_do_not_enter_legacy_singleton_cohort(self) -> None:
@@ -685,7 +683,7 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
             )
         self.assertEqual(selected, [])
 
-    def test_less_specific_legacy_origin_retains_margin_in_a_mixed_cohort(self) -> None:
+    def test_mixed_legacy_cohort_names_the_qualified_floor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, _isolated() as state:
             repository = Path(tmp) / "repo"
             subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
@@ -701,10 +699,12 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                 repository, ["A"], SETTINGS, ("tc", "mf"), 8,
                 stale=self.STALE, input_identity=identity, threads=2,
             )
-        self.assertEqual(estimate, 11)
-        self.assertIn("whole-build aggregate", evidence["source"])
+        # Default Lake overhead plus A's 8.39 GiB own peak (9.39) bounds the
+        # 9.03 GiB whole build; the qualified row is the one named.
+        self.assertEqual(evidence["need_gib"], 9.39)
+        self.assertIn("legacy own-singleton aggregate", evidence["source"])
 
-    def test_legacy_singleton_reduced_margin_never_applies_to_multi_module_request(self) -> None:
+    def test_legacy_singleton_floor_in_a_multi_module_request_is_unproven(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, _isolated() as state:
             repository = Path(tmp) / "repo"
             subprocess.run(["git", "init", str(repository)], check=True, capture_output=True, text=True)
@@ -720,7 +720,9 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                 repository, ["A", "B"], SETTINGS, ("tc", "mf"), 8,
                 stale=stale, input_identity=identity, threads=2,
             )
-        self.assertEqual(estimate, 11)
+        # B has no evidence at all, so the pair is an unproven default that
+        # still names A's floor.
+        self.assertTrue(evidence["unproven"])
         self.assertIn("legacy own-singleton aggregate", evidence["source"])
 
     def test_identity_unavailable_in_a_new_linked_worktree_keeps_same_repo_floor(self) -> None:
@@ -752,12 +754,11 @@ class MeasurementIdentitySelectionTest(unittest.TestCase):
                 stale={**self.STALE, "stale": None, "stale_set": None, "graph": None},
                 input_identity=None, identity_detail="dirty dependency checkout",
             )
-        self.assertEqual(estimate, 13)
-        self.assertEqual(evidence["kind"], "profile default")
+        self.assertGreaterEqual(evidence["need_gib"], 12.0)
         self.assertIn("identity unavailable", evidence["source"])
-        self.assertEqual(target_estimate, 13)
-        self.assertEqual(target_evidence["kind"], "profile default")
-        self.assertIn("conservative target fallback peak 12.00 GiB", target_evidence["source"])
+        self.assertEqual(target_evidence["need_gib"], 12.0)
+        self.assertEqual(target_evidence["kind"], "target fallback")
+        self.assertIn("target fallback peak 12.00 GiB", target_evidence["source"])
 
 
 class InputIdentityCollectionTest(unittest.TestCase):
@@ -1019,7 +1020,6 @@ class B11ReplayTest(unittest.TestCase):
             old = self.old_estimate(["Blanc"], moment)
             new = self.new_estimate([self.BLANC], moment)
             self.assertEqual(old, 12, moment)
-            self.assertFalse(self.fits(old, available), moment)
             self.assertEqual(new["kind"], "measured", (moment, new["source"]))
             self.assertEqual(new["estimate_gib"], 3, moment)
             self.assertTrue(self.fits(new["estimate_gib"], available), moment)
@@ -1030,7 +1030,6 @@ class B11ReplayTest(unittest.TestCase):
         old = self.old_estimate([self.MESSAGE, self.BACKING], moment)
         new = self.new_estimate([self.MESSAGE, self.BACKING], moment)
         self.assertEqual(old, 8)
-        self.assertFalse(self.fits(old, 14.4))
         self.assertEqual(new["kind"], "measured")
         self.assertEqual(new["width"], 1)            # Backing is in Message's closure
         self.assertEqual(new["estimate_gib"], 3)
@@ -1070,17 +1069,18 @@ class B11ReplayTest(unittest.TestCase):
         self.assertGreater(float(landed["peak_rss_mib"]) / 1024.0, old)
         new = self.new_estimate(stale, moment)
         self.assertEqual(new["kind"], "broader rebuild")
-        self.assertEqual(new["estimate_gib"], 12)
-        self.assertFalse(self.fits(new["estimate_gib"], 16.3))
-        self.assertGreaterEqual(new["estimate_gib"], float(landed["peak_rss_mib"]) / 1024.0)
+        self.assertEqual(new["need_gib"], 10.17)
+        # Launch-and-watch admits it at 16.3 GiB: the need, not a margin,
+        # still covers the 9.87 GiB the build actually reached.
+        self.assertTrue(self.fits(new["need_gib"], 16.3))
+        self.assertGreaterEqual(new["need_gib"], float(landed["peak_rss_mib"]) / 1024.0)
 
     def test_the_same_list_with_two_stale_modules_is_sized_from_those_two(self) -> None:
         """03:04:30: the list inherited its own 10 GiB row; two modules were stale."""
         moment = "2026-09-04T03:04:30Z"
         landed = next(row for row in self.rows if len(row["modules_rebuilt"]) == 294)
         old = self.old_estimate(landed["targets"], moment)
-        self.assertEqual(old, 11)
-        self.assertFalse(self.fits(old, 17.5))          # 50 minutes, then WAIT_TIMEOUT
+        self.assertEqual(old, 11)                       # 50 minutes, then WAIT_TIMEOUT
         stale = ["Blanc.ProrataWethVaultFunctional", "Blanc.ProrataWethVaultDust"]
         new = self.new_estimate(stale, moment)
         self.assertEqual(new["kind"], "measured")
@@ -1094,7 +1094,7 @@ class B11ReplayTest(unittest.TestCase):
         """02:02:27: jaune's first narrow build refused at 63% free on an 8 GiB default."""
         new = owned.size_stale_set(["Jaune.Fork", "Jaune.Machine"], None, [], SETTINGS, 8)
         self.assertEqual(new["estimate_gib"], 4)
-        self.assertFalse(self.fits(8, 15.1))
+        self.assertTrue(new["unproven"])
         self.assertTrue(self.fits(4, 15.1))
 
 
@@ -1712,19 +1712,19 @@ class FitLineProvenanceTest(_SignalBase):
 
     def test_a_derived_estimate_is_never_called_explicit(self) -> None:
         text = self.announce(12, "derived: measured stale set: 1 module(s) all measured")
-        self.assertIn("estimate 12 GiB is derived, not explicit", text)
+        self.assertIn("need 12 GiB is derived, not explicit", text)
         self.assertIn("measured stale set", text)
         self.assertNotIn("an explicit --memory-gib", text)
 
     def test_an_explicit_estimate_is_called_explicit_with_the_evidence(self) -> None:
         text = self.announce(12, "explicit --memory-gib 12; the evidence supports 4 GiB (x)")
-        self.assertIn("estimate 12 GiB is explicit", text)
+        self.assertIn("need 12 GiB is explicit", text)
         self.assertIn("the evidence supports 4 GiB", text)
         self.assertIn("an explicit --memory-gib 12 exceeds this host's default", text)
 
     def test_the_command_line_keeps_its_meaning(self) -> None:
         text = self.announce(12, None)
-        self.assertIn("estimate 12 GiB is explicit", text)
+        self.assertIn("need 12 GiB is explicit", text)
         self.assertIn("an explicit --memory-gib 12 exceeds", text)
         self.assertNotIn("is explicit", self.announce(None, None))
 
@@ -1775,10 +1775,12 @@ class LiveStateCompatibilityTest(unittest.TestCase):
             self.assertEqual(set(hold), semaphore.HOLD_KEYS)
         queue, notes = semaphore._load_queue(self.root)
         self.assertEqual(notes, [], notes)
-        self.assertEqual(set(self.raw["queue.json"]), set(semaphore._empty_queue()))
+        # A queue written before launch-and-watch still carries the retired
+        # tranquil-baseline keys; the reader ignores them.
+        self.assertLessEqual(set(semaphore._empty_queue()), set(self.raw["queue.json"]))
         self.assertEqual(len(queue["waiters"]), len(self.raw["queue.json"]["waiters"]))
         for waiter in self.raw["queue.json"]["waiters"]:
-            self.assertEqual(set(waiter), semaphore.WAITER_KEYS)
+            self.assertEqual(set(waiter) - semaphore.WAITER_OPTIONAL_KEYS, semaphore.WAITER_KEYS)
         master = semaphore._validate_master(self.raw["master.json"])
         self.assertEqual(set(master), set(semaphore._empty_master()))
 
@@ -1788,10 +1790,10 @@ class LiveStateCompatibilityTest(unittest.TestCase):
         self.assertIn("hard:", text)
         self.assertEqual((self.root / "state.json").read_bytes(), before)
         after = json.loads((self.root / "queue.json").read_text(encoding="utf-8"))
-        self.assertEqual(set(after), set(semaphore._empty_queue()))
+        self.assertLessEqual(set(semaphore._empty_queue()), set(after))
         self.assertEqual(after["schema_version"], semaphore.QUEUE_SCHEMA_VERSION)
         for waiter in after["waiters"]:
-            self.assertEqual(set(waiter), semaphore.WAITER_KEYS)
+            self.assertEqual(set(waiter) - semaphore.WAITER_OPTIONAL_KEYS, semaphore.WAITER_KEYS)
         for observation in after["workers"].values():
             self.assertEqual(set(observation), idle_workers.OBSERVATION_KEYS)
         self.assertEqual(
@@ -1804,7 +1806,7 @@ class LiveStateCompatibilityTest(unittest.TestCase):
         self.assertEqual(set(hold), semaphore.HOLD_KEYS)
         note, gib, contention = semaphore._decode_admission_note(hold["note"], 8)
         self.assertEqual((note, gib, contention), ("note", 4, "tolerant"))
-        self.assertEqual(set(semaphore._empty_queue()), {"schema_version", "waiters", "activity", "workers", "tranquil_max_gib", "tranquil_max_at"})
+        self.assertEqual(set(semaphore._empty_queue()), {"schema_version", "waiters", "activity", "workers"})
 
 
 if __name__ == "__main__":
@@ -1822,12 +1824,14 @@ class FailedAttemptFloorTest(unittest.TestCase):
     def test_a_failed_attempt_floors_an_otherwise_unmeasured_module(self) -> None:
         cheap = owned.size_stale_set(["A"], {"A": set()}, [], SETTINGS, 8)
         self.assertEqual(cheap["estimate_gib"], 4)
+        self.assertTrue(cheap["unproven"])
         sizing = owned.size_stale_set(
             ["A"], {"A": set()}, [], SETTINGS, 8, failed_rows=[self.failed(5.4)],
         )
         self.assertEqual(sizing["unmeasured"], ["A"])
         self.assertEqual(sizing["failed_attempt_modules"], ["A"])
-        self.assertEqual(sizing["estimate_gib"], 7)       # ceil(5.4) + 1 GiB margin
+        self.assertEqual(sizing["need_gib"], 5.4)         # the sole failure's peak, no margin
+        self.assertFalse(sizing["unproven"])
         self.assertIn("failed attempt", sizing["source"])
         self.assertIn("uncertain", sizing["source"])
 
@@ -1850,6 +1854,6 @@ class FailedAttemptFloorTest(unittest.TestCase):
                 Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8,
                 stale={"stale": 1, "stale_set": ["A"], "graph": {"A": set()}},
             )
-        self.assertEqual(estimate, 7)
+        self.assertEqual((estimate, evidence["need_gib"]), (6, 5.4))
         self.assertEqual(evidence["unmeasured_modules"], ["A"])
         self.assertIn("failed attempt", evidence["source"])

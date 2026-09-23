@@ -141,37 +141,30 @@ class SiblingPollutionTest(unittest.TestCase):
     """Fix 1: a multi-module narrow row no longer taxes each member its aggregate."""
 
     def test_the_fixture_row_is_the_polluting_shape(self) -> None:
-        # Guards the premise: narrow (8 <= 8) with an aggregate that prices 11.
+        # Guards the premise: narrow (8 <= 8) with a 9.30 GiB sibling aggregate.
         self.assertEqual(len(POLLUTING_MODULES), SETTINGS["tolerant_module_count"])
-        self.assertEqual(
-            math.ceil(POLLUTING_AGGREGATE_MIB / 1024.0) + SETTINGS["estimate_margin_gib"], 11,
-        )
+        self.assertEqual(math.ceil(POLLUTING_AGGREGATE_MIB / 1024.0), 10)
 
     def test_polluting_row_prices_each_single_from_its_own_peak(self) -> None:
         row = _polluting_row()
         current = _current(POLLUTING_MODULES)
-        # Access elaborated 42 s in the polluting row, so the unchanged heavy
-        # rule keeps it at the profile default — still priced from its own
-        # 2.96 GiB peak (term 4, below the default), never the 9.30 aggregate.
-        expected = {
-            "Blanc.LidoCircuitBreakerAccess": ("heavy module", 8),
-            "Blanc.LidoCircuitBreakerAuthority": ("narrow default", 4),
-            "Blanc.LidoTriggerableWithdrawalsGatewayAuthorization": ("narrow default", 4),
-            "Blanc.LidoTriggerableWithdrawalsGatewayPauseFor": ("narrow default", 4),
-        }
+        # Each single's own drifted peak is its floor: Lake overhead plus that
+        # peak, never the 9.30 GiB sibling aggregate and no default above it.
         for module in SINGLES:
             with self.subTest(module=module):
                 sizing = owned.size_stale_set(
                     [module], {module: set()}, [row], SETTINGS, 8, current,
                 )
                 own_gib = POLLUTING_PEAKS_MIB[module] / 1024.0
-                kind, estimate = expected[module]
-                self.assertEqual(sizing["kind"], kind)
+                self.assertEqual(sizing["kind"], "floor evidence")
+                self.assertFalse(sizing["unproven"])
                 self.assertEqual(sizing["unmeasured"], [module])
                 self.assertEqual(sizing["fallback_build_modules"], [])
                 self.assertEqual(sizing["fallback_modules"], [module])
                 self.assertAlmostEqual(sizing["fallback_peak_gib"], round(own_gib, 2), places=2)
-                self.assertEqual(sizing["estimate_gib"], estimate)
+                self.assertAlmostEqual(
+                    sizing["need_gib"], round(owned.DEFAULT_LAKE_OVERHEAD_GIB + own_gib, 2), places=2,
+                )
 
     def test_fallback_origin_records_the_module_peak_and_its_row(self) -> None:
         evidence = owned.module_cost_evidence(
@@ -193,14 +186,14 @@ class SiblingPollutionTest(unittest.TestCase):
             identity=_identity(["A"], "old"), samples=3,
         )
         sizing = owned.size_stale_set(["A"], {"A": set()}, [row], SETTINGS, 8, _current(["A"]))
-        self.assertEqual(sizing["kind"], "narrow default")
-        self.assertEqual(sizing["estimate_gib"], 8)
+        self.assertEqual(sizing["kind"], "floor evidence")
+        self.assertEqual(sizing["need_gib"], 7.32)
         self.assertEqual(sizing["fallback_build_modules"], ["A"])
         self.assertIn("A", sizing["source"])
         self.assertIn("7.32", sizing["source"])
         self.assertIn("drifted single-module aggregate", sizing["source"])
 
-    def test_actual_vault_fallback_remains_unmeasured_but_drops_the_duplicate_margin(self) -> None:
+    def test_actual_vault_fallback_remains_unmeasured_and_floors_the_need(self) -> None:
         module = "Blanc.ProxyPairOssifiableArtifacts"
         old = _row(
             "2026-09-14T07:12:28.170407Z", [module], 9304.4 / 1024.0,
@@ -211,13 +204,12 @@ class SiblingPollutionTest(unittest.TestCase):
             [module], {module: set()}, [old], SETTINGS, 8,
             _identity([module], "ef603cf5"),
         )
-        self.assertEqual(sizing["kind"], "heavy module")
+        self.assertEqual(sizing["kind"], "floor evidence")
         self.assertEqual(sizing["unmeasured"], [module])
-        self.assertEqual(sizing["estimate_gib"], 10)
-        self.assertEqual(owned.semaphore._charged_memory_gib(10, "default"), 13)
+        self.assertEqual((sizing["estimate_gib"], sizing["need_gib"]), (10, 9.09))
         self.assertIn("drifted single-module aggregate", sizing["source"])
 
-    def test_multi_module_stale_set_keeps_the_estimator_margin(self) -> None:
+    def test_a_stale_set_with_one_bare_module_is_unproven_but_keeps_the_floor(self) -> None:
         old = _row(
             "2026-09-14T07:12:28Z", ["A"], 7.32, lean_gib=6.74,
             module_peaks={"A": 6.74}, seconds={"A": 30.0},
@@ -227,10 +219,13 @@ class SiblingPollutionTest(unittest.TestCase):
             ["A", "B"], {"A": set(), "B": set()}, [old], SETTINGS, 8,
             {**_identity(["A", "B"], "new")},
         )
-        self.assertEqual(sizing["estimate_gib"], 9)
+        # A elaborated 30 s, so B's missing evidence takes the profile default,
+        # which A's 7.32 GiB floor does not exceed.
+        self.assertEqual((sizing["kind"], sizing["need_gib"]), ("heavy module", 8.0))
+        self.assertTrue(sizing["unproven"])              # B has no evidence at all
         self.assertEqual(sizing["unmeasured"], ["A", "B"])
 
-    def test_lower_nonqualifying_floor_can_win_after_its_retained_margin(self) -> None:
+    def test_lean_floors_are_modelled_and_tree_floors_bound_them(self) -> None:
         single = _row(
             "2026-09-14T07:12:28Z", ["A"], 7.32, lean_gib=6.74,
             module_peaks={"A": 6.74}, seconds={"A": 30.0},
@@ -246,9 +241,10 @@ class SiblingPollutionTest(unittest.TestCase):
             _identity(["A", "B"], "new"),
         )
         self.assertEqual(sizing["fallback_peak_gib"], 7.32)
-        self.assertEqual(sizing["estimate_gib"], 9)
-        self.assertIn("7.10 GiB", sizing["source"])
-        self.assertIn("module peak", sizing["source"])
+        # A's higher 7.10 GiB own peak plus the 0.90 GiB measured overhead
+        # (8.00) exceeds the single-module row's 7.32 GiB whole build.
+        self.assertEqual(sizing["need_gib"], 8.0)
+        self.assertIn("whole-build floor 7.32 GiB", sizing["source"])
 
     def test_narrow_row_without_recorded_peaks_keeps_the_aggregate_floor(self) -> None:
         # No per-module peak anywhere: there is nothing more specific, so the
@@ -259,7 +255,7 @@ class SiblingPollutionTest(unittest.TestCase):
             identity=_identity(["A", "B"], "old"), samples=3,
         )
         sizing = owned.size_stale_set(["A"], {"A": set()}, [row], SETTINGS, 8, _current(["A", "B"]))
-        self.assertEqual(sizing["estimate_gib"], 9)
+        self.assertEqual(sizing["need_gib"], 7.5)
         self.assertIn("fallback prices A at 7.50 GiB", sizing["source"])
         self.assertIn(time, sizing["source"])
         self.assertIn("whole-build aggregate", sizing["source"])
@@ -277,21 +273,22 @@ class FallbackMessagingTest(unittest.TestCase):
         )
         sizing = owned.size_stale_set(["A"], {"A": set()}, [row], SETTINGS, 8, _current(["A", "B"]))
         # The 9.3 GiB sibling aggregate is not attributed; A's own 6.5 GiB
-        # peak sets the ask at ceil(6.5) + 1 = 8 instead of 11.
-        self.assertEqual(sizing["estimate_gib"], 8)
+        # peak plus Lake overhead sets the need.
+        self.assertEqual(sizing["need_gib"], 7.5)
         self.assertIn("fallback prices A at 6.50 GiB", sizing["source"])
         self.assertIn(time, sizing["source"])
         self.assertIn("module peak", sizing["source"])
 
-    def test_quiet_source_when_fallback_does_not_set_the_ask(self) -> None:
+    def test_a_floor_need_names_the_module_peak_it_came_from(self) -> None:
         module = "Blanc.LidoTriggerableWithdrawalsGatewayAuthorization"
         sizing = owned.size_stale_set(
             [module], {module: set()}, [_polluting_row()], SETTINGS, 8,
             _current(POLLUTING_MODULES),
         )
-        self.assertEqual(sizing["estimate_gib"], 4)
-        self.assertTrue(sizing["source"].startswith("narrow default 4 GiB"))
-        self.assertNotIn("fallback prices", sizing["source"])
+        self.assertEqual(sizing["estimate_gib"], 3)
+        self.assertTrue(sizing["source"].startswith("floor evidence"))
+        self.assertIn(f"fallback prices {module} at 1.35 GiB", sizing["source"])
+        self.assertIn("module peak", sizing["source"])
 
     def test_fit_note_quotes_the_named_fallback(self) -> None:
         time = "2026-09-13T08:20:00Z"
@@ -312,7 +309,7 @@ class FallbackMessagingTest(unittest.TestCase):
 class DriftedEvidenceStaysConservativeTest(unittest.TestCase):
     """The fix prices less; it never promotes drifted rows to measured."""
 
-    def test_drifted_polluting_row_stays_unmeasured_and_sensitive(self) -> None:
+    def test_drifted_polluting_row_stays_unmeasured_but_floors_the_need(self) -> None:
         module = "Blanc.LidoTriggerableWithdrawalsGatewayAuthorization"
         row = _polluting_row(_recent_time())
         current = _current(POLLUTING_MODULES)
@@ -326,15 +323,10 @@ class DriftedEvidenceStaysConservativeTest(unittest.TestCase):
                 Path("/current"), [module], SETTINGS, ("tc", "mf"), 8,
                 stale=stale, input_identity=current,
             )
-            verdict, classification = owned.classify_contention(
-                Path("/current"), [module], Path("/lake"), SETTINGS, ("tc", "mf"),
-                stale, current,
-            )
-        self.assertEqual(estimate, 4)
-        self.assertEqual(evidence["kind"], "narrow default")
+        self.assertEqual(estimate, 3)
+        self.assertEqual(evidence["kind"], "floor evidence")
         self.assertEqual(evidence["unmeasured_modules"], [module])
-        self.assertEqual(verdict, "sensitive")
-        self.assertIn("unmeasured", classification["reason"])
+        self.assertEqual(evidence["measured_modules"], 0)
 
 
 if __name__ == "__main__":

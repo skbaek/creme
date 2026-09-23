@@ -47,6 +47,7 @@ class FailedFloorAttributionTest(unittest.TestCase):
                 self.assertEqual(sizing["failed_attempt_modules"], [])
                 self.assertEqual(sizing["kind"], "narrow default")
                 self.assertEqual(sizing["estimate_gib"], 4)
+                self.assertTrue(sizing["unproven"])
                 self.assertNotIn("failed attempt", sizing["source"])
 
     def test_multi_failure_row_uses_a_failed_modules_own_peak(self) -> None:
@@ -55,12 +56,13 @@ class FailedFloorAttributionTest(unittest.TestCase):
         )
         sizing = owned.size_stale_set(["A"], {"A": set()}, [], SETTINGS, 8, failed_rows=[row])
         self.assertEqual(sizing["failed_attempt_modules"], ["A"])
-        self.assertEqual(sizing["estimate_gib"], 7)            # ceil(5.2) + 1 GiB margin
+        self.assertEqual(sizing["need_gib"], 6.2)              # Lake overhead + A's own 5.2 GiB
         self.assertIn("own peak", sizing["source"])
         self.assertIn("2026-09-23T01:36:15Z", sizing["source"])
         other = owned.size_stale_set(["B"], {"B": set()}, [], SETTINGS, 8, failed_rows=[row])
         self.assertEqual(other["failed_attempt_modules"], [])
         self.assertEqual(other["estimate_gib"], 4)
+        self.assertTrue(other["unproven"])
 
     def test_single_failure_join_row_still_floors_by_the_closure_peak(self) -> None:
         # The Join case that motivated the floor: four deps rebuilt, one failure.
@@ -69,7 +71,7 @@ class FailedFloorAttributionTest(unittest.TestCase):
             ["Join"], {"Join": set()}, [], SETTINGS, 8, failed_rows=[row],
         )
         self.assertEqual(sizing["failed_attempt_modules"], ["Join"])
-        self.assertEqual(sizing["estimate_gib"], 7)            # ceil(5.4) + 1 GiB margin
+        self.assertEqual(sizing["need_gib"], 5.4)              # the closure's peak, no margin
         self.assertIn("sole failed module", sizing["source"])
         self.assertIn("2026-09-20T00:00:00Z", sizing["source"])
 
@@ -99,7 +101,7 @@ class ToolchainScopeTest(unittest.TestCase):
             ["A"], {"A": set()}, [self.old_singleton(), self.new_pair()], SETTINGS, 8,
             _current(["A"]),
         )
-        self.assertEqual(sizing["estimate_gib"], 11)
+        self.assertEqual(sizing["need_gib"], 9.85)           # the old aggregate still floors
 
     def test_newer_current_toolchain_measurement_supersedes_old_toolchain_floors(self) -> None:
         sizing = owned.size_stale_set(
@@ -108,8 +110,8 @@ class ToolchainScopeTest(unittest.TestCase):
         )
         self.assertEqual(sizing["fallback_build_modules"], [])
         self.assertAlmostEqual(sizing["fallback_peak_gib"], 0.52, places=2)
-        self.assertEqual(sizing["kind"], "narrow default")
-        self.assertEqual(sizing["estimate_gib"], 4)
+        self.assertEqual(sizing["kind"], "floor evidence")
+        self.assertEqual(sizing["need_gib"], 1.2)            # overhead + the 0.52 GiB facade
 
     def test_old_toolchain_aggregate_never_floors_but_own_peak_remains_alone(self) -> None:
         # With no current-toolchain evidence, the old module peak stays a
@@ -123,7 +125,7 @@ class ToolchainScopeTest(unittest.TestCase):
             ["A"], {"A": set()}, [self.old_singleton()], SETTINGS, 8, _current(["A"]),
             toolchain_digest=NEW_TC,
         )
-        self.assertEqual(sizing["estimate_gib"], 11)           # ceil(9.17) + 1 GiB margin
+        self.assertEqual(sizing["need_gib"], 9.81)             # overhead + the old 9.17 GiB own peak
         self.assertIn("2026-09-18T22:44:09Z", sizing["source"])
         self.assertIn("module peak", sizing["source"])
 
@@ -154,7 +156,7 @@ class ToolchainScopeTest(unittest.TestCase):
                 stale={"stale": 1, "stale_set": ["A"], "graph": {"A": set()}},
                 input_identity=_current(["A"]),
             )
-        self.assertEqual(estimate, 4, evidence["source"])
+        self.assertEqual((estimate, evidence["need_gib"]), (2, 1.2), evidence["source"])
 
 
 if __name__ == "__main__":

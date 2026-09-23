@@ -279,12 +279,13 @@ class SemaphorePressureTest(unittest.TestCase):
         text = semaphore.status_text()
         self.assertIn("SWAP_PRESSURE: swap/compressor pressure: swap nearly exhausted", text)
 
-    def test_incident_never_becomes_a_tranquil_baseline(self):
-        queue = {}
+    def test_the_incident_is_red_for_the_build_watchdog(self):
+        from creme import build_ownership
+
         sample = darwin_headroom((pressure_output(60, 11.7), swap_output(3072.0, 1699.81)))
         self.assertIsNotNone(sample.data["memory_pressure_cause"])
-        self.assertFalse(semaphore._observe_memory_tranquil(queue, sample, 24.0, busy=False))
-        self.assertNotIn("tranquil_max_gib", queue)
+        # 60% free is far above the floor; the pressure cause alone makes it red.
+        self.assertIn("swap/compressor pressure", build_ownership.watchdog_red(sample, 2.0))
 
     # (b) a healthy sample keeps today's verdict
     def test_healthy_sample_is_admitted_unchanged(self):

@@ -23,9 +23,6 @@ DYNAMIC_KEYS = {
 # and pre-cutover launchers keep reading an untuned profile unchanged.
 ADMISSION_DEFAULTS = {
     "tolerant_module_count": 8,
-    "tolerant_peak_gib": 4,
-    "estimate_margin_gib": 1,
-    "minimum_estimate_gib": 2,
     "estimate_sample_rows": 5,
     "idle_hold_seconds": 120,
     "repeat_fail_seconds": 600,
@@ -37,11 +34,11 @@ ADMISSION_DEFAULTS = {
     "narrow_default_gib": 4,
     "heavy_module_seconds": 20,
 }
+# Margin-era tunables retired by launch-and-watch admission.  A profile that
+# still carries one stays valid; the value is ignored.
+RETIRED_ADMISSION_KEYS = {"tolerant_peak_gib", "estimate_margin_gib", "minimum_estimate_gib"}
 ADMISSION_RANGES = {
     "tolerant_module_count": (1, 4096),
-    "tolerant_peak_gib": (1, 64),
-    "estimate_margin_gib": (0, 32),
-    "minimum_estimate_gib": (1, 32),
     "estimate_sample_rows": (1, 200),
     "idle_hold_seconds": (10, 86400),
     "repeat_fail_seconds": (10, 86400),
@@ -135,10 +132,12 @@ def validate_data(
     if admission is not None:
         if not isinstance(admission, dict):
             return ProfileValidation("INVALID", "admission must be an object")
-        unknown = sorted(set(admission) - set(ADMISSION_DEFAULTS))
+        unknown = sorted(set(admission) - set(ADMISSION_DEFAULTS) - RETIRED_ADMISSION_KEYS)
         if unknown:
             return ProfileValidation("INVALID", f"unknown admission settings: {unknown}")
         for key, value in admission.items():
+            if key in RETIRED_ADMISSION_KEYS:
+                continue
             low, high = ADMISSION_RANGES[key]
             if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
                 return ProfileValidation(

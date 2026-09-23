@@ -20,7 +20,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, NamedTuple, Optional
+from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional
 from urllib.parse import unquote
 
 from . import idle_workers
@@ -38,25 +38,17 @@ ADAPTIVE_LEASE_SECONDS = 600
 NEUTRAL_STATE_RELATIVE = Path(".semaphore/state")
 ADMISSION_NOTE_PREFIX = "@creme-admission:"
 ADMISSION_CONTENTION = {"tolerant", "sensitive", "exclusive"}
-ADMISSION_PEAK_MULTIPLIER = 1.25
-ADMISSION_RESERVE_FRACTION = 0.25
-ADMISSION_MIN_RESERVE_GIB = 2.0
-# e1e8bb8 single margin for the measured tier (variance phase 1, 0/279 escapes):
-# a fully measured stale set needs one margin in one place, not the stacked
-# default charge. Every other kind keeps the 1.25 charge unchanged.
-MEASURED_MARGIN_ADD_GIB = 1.0
-MEASURED_MARGIN_MULTIPLIER = 1.30
-# How long an observed tranquil maximum stays admissible as NEVER_FITS
-# evidence. Past the window the gate falls back to the host-absolute check.
-TRANQUIL_BASELINE_WINDOW_SECONDS = 86400
+# Launch-and-watch admission (decision launch-and-watch-admission-20260923).
+# A unit is charged its best evidence of peak memory with no margin; the sum of
+# admitted needs must fit what the host has available now, less this one fixed
+# floor.  The owned-build watchdog, not a predicted margin, answers a unit
+# that outgrows its evidence.
+ADMISSION_FLOOR_GIB = 2.0
+# Renewal only: a holder the wrapper does not watch drains below this
+# aggregate free percentage, and yields to the oldest holder below the
+# contention percentage.
 ADMISSION_DRAIN_PERCENT = 20
 ADMISSION_CONTENTION_PERCENT = 30
-# A tranquil observation needs the host genuinely calm: more than half free
-# while the semaphore is idle.  At 40% free with nothing held, something
-# outside the semaphore owns the memory, and that something may go away — so
-# such a moment must not become NEVER_FITS evidence against a host-feasible
-# ask.  Only a calm majority-free observation may set the baseline.
-ADMISSION_TRANQUIL_PERCENT = 50
 QUEUE_NAME = "queue.json"
 QUEUE_SCHEMA_VERSION = 2
 WAIT_POLL_SECONDS = 3.0
@@ -74,6 +66,9 @@ WAITER_KEYS = {
     "id", "label", "pid", "uid", "contention",
     "memory_gib", "estimate_source", "enqueued_at", "heartbeat_at",
 }
+# Additive launch-and-watch waiter fields; an entry written before them lacks
+# them and reads as a proven, unwatched need of `memory_gib`.
+WAITER_OPTIONAL_KEYS = {"need_gib", "unproven", "watched"}
 HOLD_KEYS = {
     "label", "pid", "uid", "note", "manual",
     "acquired_at", "renewed_at", "lease_seconds",
@@ -371,17 +366,24 @@ def _empty_queue() -> dict[str, Any]:
         "waiters": [],
         "activity": {},
         "workers": {},
-        "tranquil_max_gib": None,
-        "tranquil_max_at": None,
     }
 
 
 def _valid_waiter(entry: Any) -> bool:
     if not isinstance(entry, dict):
         return False
-    keys = set(entry)
+    keys = set(entry) - WAITER_OPTIONAL_KEYS
     if keys != WAITER_KEYS and keys != WAITER_KEYS - {"estimate_source"}:
         return False
+    need = entry.get("need_gib")
+    if need is not None and (
+        isinstance(need, bool) or not isinstance(need, (int, float))
+        or not math.isfinite(need) or need <= 0
+    ):
+        return False
+    for flag in ("unproven", "watched"):
+        if flag in entry and not isinstance(entry[flag], bool):
+            return False
     if "estimate_source" in entry:
         source = entry["estimate_source"]
         if source is not None and not isinstance(source, str):
@@ -459,28 +461,11 @@ def _load_queue(root: Path) -> tuple[dict[str, Any], list[str]]:
         for key, value in (workers or {}).items()
         if isinstance(workers, dict) and idle_workers._valid_observation(value)
     }
-    tranquil_max = raw.get("tranquil_max_gib")
-    if (
-        isinstance(tranquil_max, bool)
-        or not isinstance(tranquil_max, (int, float))
-        or not math.isfinite(tranquil_max)
-        or tranquil_max < 0
-    ):
-        tranquil_max = None
-    tranquil_at = raw.get("tranquil_max_at")
-    if (
-        isinstance(tranquil_at, bool)
-        or not isinstance(tranquil_at, (int, float))
-        or not math.isfinite(tranquil_at)
-    ):
-        tranquil_at = None
     return {
         "schema_version": QUEUE_SCHEMA_VERSION,
         "waiters": kept,
         "activity": clean_activity,
         "workers": clean_workers,
-        "tranquil_max_gib": float(tranquil_max) if tranquil_max is not None else None,
-        "tranquil_max_at": float(tranquil_at) if tranquil_at is not None else None,
     }, notes
 
 
@@ -557,16 +542,37 @@ def _encode_admission_note(
     memory_gib: int,
     contention: str,
     charged_gib: Optional[float] = None,
+    *,
+    unproven: bool = False,
+    watched: bool = False,
 ) -> str:
     payload: dict[str, Any] = {"contention": contention, "memory_gib": memory_gib}
     if charged_gib is not None:
+        # `charged_gib` is the unit's need: its best peak evidence, no margin.
         payload["charged_gib"] = charged_gib
+    if unproven:
+        payload["unproven"] = True
+    if watched:
+        payload["watched"] = True
     metadata = json.dumps(
         payload,
         sort_keys=True,
         separators=(",", ":"),
     )
     return f"{ADMISSION_NOTE_PREFIX}{metadata} {note}"
+
+
+def _admission_payload(note: str) -> Optional[dict[str, Any]]:
+    if not note.startswith(ADMISSION_NOTE_PREFIX):
+        return None
+    encoded, separator, _user_note = note[len(ADMISSION_NOTE_PREFIX):].partition(" ")
+    if not separator:
+        return None
+    try:
+        metadata = json.loads(encoded)
+    except json.JSONDecodeError:
+        return None
+    return metadata if isinstance(metadata, dict) else None
 
 
 def _decode_admission_metadata(
@@ -576,21 +582,14 @@ def _decode_admission_metadata(
     """Read additive admission metadata while preserving schema-v1 state.
 
     Encoding the reservation in the existing free-form note avoids an in-place
-    state-schema cutover. Pre-update readers reject the new metadata shape and
-    can fall back to a smaller profile estimate, so deployment requires the
-    documented quiescent admission boundary.
+    state-schema cutover.  A hold written before launch-and-watch carries a
+    margin-inflated `charged_gib`; it is read as that unit's need unchanged,
+    which only over-counts it.
     """
-    if not note.startswith(ADMISSION_NOTE_PREFIX):
+    metadata = _admission_payload(note)
+    if metadata is None:
         return note, default_memory_gib, "legacy", None
-    encoded, separator, user_note = note[len(ADMISSION_NOTE_PREFIX):].partition(" ")
-    if not separator:
-        return note, default_memory_gib, "legacy", None
-    try:
-        metadata = json.loads(encoded)
-    except json.JSONDecodeError:
-        return note, default_memory_gib, "legacy", None
-    if not isinstance(metadata, dict):
-        return note, default_memory_gib, "legacy", None
+    user_note = note[len(ADMISSION_NOTE_PREFIX):].partition(" ")[2]
     memory_gib = metadata.get("memory_gib")
     contention = metadata.get("contention")
     charged_gib = metadata.get("charged_gib")
@@ -600,23 +599,19 @@ def _decode_admission_metadata(
         or memory_gib < 1
     ):
         return note, default_memory_gib, "legacy", None
-    valid_contention = contention in ADMISSION_CONTENTION
-    decoded_contention = str(contention) if valid_contention else "legacy"
+    decoded_contention = str(contention) if contention in ADMISSION_CONTENTION else "legacy"
     valid_charge = (
         not isinstance(charged_gib, bool)
         and isinstance(charged_gib, (int, float))
         and math.isfinite(float(charged_gib))
-        and float(charged_gib) >= min(
-            _charged_memory_gib(memory_gib, "measured"),
-            _charged_memory_gib(memory_gib, "default"),
-        )
+        # A need is never more than a whole GiB below the estimate it was
+        # rounded up into; a smaller charge is malformed.
+        and float(charged_gib) > memory_gib - 1
     )
-    # Malformed or future metadata must not erase the valid encoded estimate.
-    # Keep that estimate and conservatively recompute its reservation below.
-    if not valid_charge:
-        charged_gib = None
+    # Malformed metadata must not erase the valid encoded estimate: the need
+    # falls back to that estimate below.
     return user_note, memory_gib, decoded_contention, (
-        float(charged_gib) if charged_gib is not None else None
+        float(charged_gib) if valid_charge else None
     )
 
 
@@ -628,6 +623,20 @@ def _decode_admission_note(
         note, default_memory_gib,
     )
     return user_note, memory_gib, contention
+
+
+def hold_flags(hold: dict[str, Any]) -> dict[str, bool]:
+    """Whether a hold's evidence is unproven and whether a wrapper watches it.
+
+    A hold written before these flags existed reads as proven and unwatched:
+    the old code serialized unmeasured work under a hard hold, and no
+    watchdog can retract it.
+    """
+    metadata = _admission_payload(str(hold.get("note") or "")) or {}
+    return {
+        "unproven": metadata.get("unproven") is True,
+        "watched": metadata.get("watched") is True,
+    }
 
 
 def _runtime_admission_policy(adapter: Adapter) -> dict[str, Any]:
@@ -655,50 +664,6 @@ def _runtime_admission_policy(adapter: Adapter) -> dict[str, Any]:
         "physical_memory_gib": physical_gib,
         "profile_status": checked.status,
     }
-
-
-def _reserve_gib(total_gib: Optional[float]) -> Optional[float]:
-    if total_gib is None:
-        return None
-    return min(
-        total_gib / 2,
-        max(ADMISSION_MIN_RESERVE_GIB, total_gib * ADMISSION_RESERVE_FRACTION),
-    )
-
-
-def _estimate_kind(estimate_source: Optional[str]) -> str:
-    """Sort an estimate into a charge tier by provenance.
-
-    Only "measured stale set" (every stale module exact-measured) takes the
-    single margin: target-rows/max-of had a +5.17 GiB escape in the ledger, and
-    every default tier escapes dozens of builds under every candidate rule, so
-    they all keep today's charge. Unknown and explicit asks are default tier.
-    """
-    if not isinstance(estimate_source, str):
-        return "default"
-    source = estimate_source
-    if source.startswith("derived:"):
-        source = source[len("derived:"):].strip()
-    if source.startswith("measured stale set"):
-        return "measured"
-    return "default"
-
-
-def _charged_memory_gib(memory_gib: int, kind: str = "default") -> float:
-    if kind == "measured":
-        return round(max(memory_gib + MEASURED_MARGIN_ADD_GIB,
-                         memory_gib * MEASURED_MARGIN_MULTIPLIER), 2)
-    return max(1, math.ceil(memory_gib * ADMISSION_PEAK_MULTIPLIER))
-
-
-def _largest_fitting_estimate_gib(chargeable_gib: float, kind: str = "default") -> int:
-    """Find the largest integer estimate using the executed charge function."""
-    if not math.isfinite(chargeable_gib) or chargeable_gib < 0:
-        return 0
-    for estimate in range(math.floor(chargeable_gib), -1, -1):
-        if _charged_memory_gib(estimate, kind) <= chargeable_gib:
-            return estimate
-    return 0
 
 
 def _headroom_values(
@@ -745,175 +710,63 @@ def _drain_text(free_percent: Optional[int], cause: str) -> str:
     )
 
 
-def _observe_memory_tranquil(
-    queue: dict[str, Any],
-    sample: Any,
-    configured_total_gib: Optional[float],
-    *,
-    busy: bool,
-    now: Optional[float] = None,
-) -> bool:
-    """Ratchet the tranquil-available maximum up, never down.
-
-    The baseline answers one question: how much memory has this host calmly
-    held free while doing no heavy work?  Only a constrained moment (no live
-    holds, no live waiters — the caller reports busyness because it alone
-    knows whether its own waiter is already enqueued) with headroom well
-    above the drain floor and at least the reserve usable may move it, and
-    only upward.  A stale baseline is evidence of nothing; the gate treats
-    it as absent.
-    """
-    if busy or _pressure_cause(sample) is not None:
-        return False
-    free_percent, available_gib, total_gib = _headroom_values(sample, configured_total_gib)
-    if (
-        free_percent is None
-        or available_gib is None
-        or free_percent < ADMISSION_TRANQUIL_PERCENT
-    ):
-        return False
-    reserve_gib = _reserve_gib(total_gib)
-    if reserve_gib is None or available_gib < reserve_gib:
-        return False
-    previous = queue.get("tranquil_max_gib")
-    if (
-        isinstance(previous, (int, float))
-        and not isinstance(previous, bool)
-        and available_gib <= previous
-    ):
-        return False
-    queue["tranquil_max_gib"] = available_gib
-    queue["tranquil_max_at"] = now if now is not None else _now()
-    return True
-
-
-def _tranquil_fit(
-    available_gib: Optional[float],
-    memory_gib: int,
-    kind: str,
-    tranquil_max_gib: Optional[float],
-    reserve_gib: float,
-    total_gib: Optional[float],
-    baseline_fresh: bool = True,
-) -> tuple[str, str]:
-    """Judge live fit and physical impossibility without freezing past headroom.
-
-    Returns a verdict and a note.  ``NEVER_FITS`` fires only on evidence no
-    wait can change: the charged peak plus the usability reserve exceeds
-    physical memory. A tranquil maximum is a past observation, so it can
-    explain a wait but cannot prove that future headroom is impossible.
-    """
-    charged = _charged_memory_gib(memory_gib, kind)
-    needed = charged + reserve_gib
-    physically_impossible = total_gib is not None and needed > total_gib
-    if physically_impossible:
-        return (
-            "NEVER_FITS",
-            f"the {total_gib:.0f} GiB host cannot provide the {needed:.1f} GiB total "
-            "need while preserving the reserve",
-        )
-    if available_gib is not None:
-        if available_gib >= needed:
-            return "USABLE_NOW", ""
-        if tranquil_max_gib is not None and not baseline_fresh:
-            return (
-                "WAIT",
-                "the tranquil baseline is stale, so fit is judged against live "
-                "headroom only",
-            )
-        if isinstance(tranquil_max_gib, (int, float)) and not isinstance(tranquil_max_gib, bool):
-            return (
-                "WAIT",
-                f"the historical tranquil maximum was {tranquil_max_gib:.1f} GiB free; "
-                "it is advisory rather than a future upper bound",
-            )
-        return (
-            "WAIT",
-            "no smooth baseline seen yet (no constrained moment recorded); "
-            "fit judged against live headroom only",
-        )
-    return (
-        "WAIT",
-        "memory headroom is unavailable and no usable bound is confirmed; "
-        "heavy work serializes under a hard hold",
+def _hold_need(hold: dict[str, Any], default_memory_gib: int) -> float:
+    """The memory an admitted hold may still claim: its recorded need."""
+    _, memory_gib, _, charged_gib = _decode_admission_metadata(
+        hold["note"], default_memory_gib,
     )
+    return charged_gib if charged_gib is not None else float(memory_gib)
+
+
+def _admitted_need_gib(holds: Iterable[dict[str, Any]], default_memory_gib: int) -> float:
+    return round(sum(
+        _hold_need(item, default_memory_gib) for item in holds if not item.get("manual")
+    ), 2)
 
 
 def fit_arithmetic(
     sample: Any,
     policy: dict[str, Any],
-    memory_gib: int,
-    estimate_source: Optional[str] = None,
+    need_gib: float,
+    admitted_gib: float = 0.0,
 ) -> dict[str, Any]:
-    """The numbers behind the usability-reserve test, deciding nothing.
+    """The numbers behind the fit test, deciding nothing.
 
-    `_admission_decision` stays the only producer of a verdict.  This exposes
-    the arithmetic it applies so a waiter, and anyone reading `status`, can see
-    why a request does or does not fit right now.
+    `_admission_decision` stays the only producer of a verdict.  A unit fits
+    when its need plus the needs already admitted is at most what is
+    available now less the floor.
     """
     configured_total = policy.get("physical_memory_gib")
     if isinstance(configured_total, bool) or not isinstance(configured_total, (int, float)):
         configured_total = None
-    kind = _estimate_kind(estimate_source)
-    free_percent, available_gib, total_gib = _headroom_values(sample, configured_total)
-    reserve_gib = _reserve_gib(total_gib)
-    charged_gib = _charged_memory_gib(memory_gib, kind)
-    needed_gib = charged_gib + reserve_gib if reserve_gib is not None else None
-    chargeable = (
-        available_gib - reserve_gib
-        if available_gib is not None and reserve_gib is not None
-        else None
-    )
+    free_percent, available_gib, _total_gib = _headroom_values(sample, configured_total)
+    needed_gib = round(float(need_gib) + float(admitted_gib) + ADMISSION_FLOOR_GIB, 2)
     return {
-        "estimate_gib": memory_gib,
-        "estimate_kind": kind,
-        "charged_gib": charged_gib,
-        "reserve_gib": round(reserve_gib, 1) if reserve_gib is not None else None,
-        "needed_gib": round(needed_gib, 1) if needed_gib is not None else None,
+        "need_gib": round(float(need_gib), 2),
+        "admitted_gib": round(float(admitted_gib), 2),
+        "floor_gib": ADMISSION_FLOOR_GIB,
+        "needed_gib": needed_gib,
         "available_gib": round(available_gib, 2) if available_gib is not None else None,
         "free_percent": free_percent,
-        "largest_fitting_estimate_gib": (
-            _largest_fitting_estimate_gib(chargeable, kind)
-            if chargeable is not None
-            else None
+        "largest_fitting_need_gib": (
+            round(max(0.0, available_gib - ADMISSION_FLOOR_GIB - float(admitted_gib)), 2)
+            if available_gib is not None else None
         ),
-        "fits": (
-            None
-            if needed_gib is None or available_gib is None
-            else available_gib >= needed_gib
-        ),
+        "fits": None if available_gib is None else available_gib >= needed_gib,
     }
 
 
 def fit_line(fit: dict[str, Any]) -> str:
-    if fit.get("estimate_kind", "default") == "measured":
-        margin = f"(measured max(+{MEASURED_MARGIN_ADD_GIB:.1f},x{MEASURED_MARGIN_MULTIPLIER}))"
-    else:
-        margin = f"(x{ADMISSION_PEAK_MULTIPLIER})"
-    if fit["needed_gib"] is None or fit["available_gib"] is None:
+    if fit["available_gib"] is None:
         return (
-            f"fit: estimate {fit['estimate_gib']} GiB charges {fit['charged_gib']} GiB "
-            f"{margin}; memory headroom is unavailable, so heavy "
+            f"fit: need {fit['need_gib']} GiB; memory headroom is unavailable, so heavy "
             "work serializes under a hard hold"
         )
     return (
-        f"fit: estimate {fit['estimate_gib']} GiB -> charged {fit['charged_gib']} GiB "
-        f"{margin} + reserve {fit['reserve_gib']} GiB = "
-        f"{fit['needed_gib']} GiB needed; {fit['available_gib']} GiB available now "
-        f"({fit['free_percent']}% free) -> "
+        f"fit: need {fit['need_gib']} GiB + admitted {fit['admitted_gib']} GiB + floor "
+        f"{fit['floor_gib']} GiB = {fit['needed_gib']} GiB; {fit['available_gib']} GiB "
+        f"available now ({fit['free_percent']}% free) -> "
         + ("fits now" if fit["fits"] else "does not fit now")
-    )
-
-
-def _hold_reservation(hold: dict[str, Any], default_memory_gib: int) -> float:
-    _, memory_gib, _, charged_gib = _decode_admission_metadata(
-        hold["note"], default_memory_gib,
-    )
-    if charged_gib is not None:
-        return charged_gib
-    return max(
-        _charged_memory_gib(memory_gib, "measured"),
-        _charged_memory_gib(memory_gib, "default"),
     )
 
 
@@ -941,10 +794,17 @@ def _admission_decision(
     policy: dict[str, Any],
     sample: Any = None,
     idle_report: Optional[dict[str, Any]] = None,
-    estimate_source: Optional[str] = None,
-    tranquil_max_gib: Optional[float] = None,
-    tranquil_max_at: Optional[float] = None,
+    need_gib: Optional[float] = None,
+    unproven: bool = False,
 ) -> Decision:
+    """Refuse only the obviously infeasible; the watchdog handles the rest.
+
+    ``need_gib`` is the unit's best peak evidence with no margin (the whole
+    ``memory_gib`` when absent).  It fits when it plus every admitted need is
+    at most available memory less `ADMISSION_FLOOR_GIB`, and it can never fit
+    when it alone exceeds physical memory less that floor.  At most one
+    unproven unit (a conservative default rather than evidence) runs at once.
+    """
     hard = state["hard"]
     matching_soft = [item for item in state["soft"] if item["label"] == label]
     other_soft = [item for item in state["soft"] if item["label"] != label]
@@ -973,16 +833,18 @@ def _admission_decision(
             "DEFER_FOR_HARD", f"soft holds block hard acquisition: {labels}", waitable=True
         )
 
+    default_gib = int(policy["task_memory_gib"])
     prior_memory = None
     if requested_kind == "hard" and matching_soft:
-        _, prior_memory, _, _ = _decode_admission_metadata(
-            matching_soft[0]["note"], int(policy["task_memory_gib"]),
-        )
+        _, prior_memory, _, _ = _decode_admission_metadata(matching_soft[0]["note"], default_gib)
     converting = (
         requested_kind == "hard"
         and bool(matching_soft)
         and prior_memory == memory_gib
     )
+    need = float(need_gib) if need_gib is not None else float(memory_gib)
+    if converting:
+        need = _hold_need(matching_soft[0], default_gib)
     # A queue pass evaluates every waiter against one sample so arrival order
     # is decided from a single view of the host, not a drifting one.
     if sample is None:
@@ -991,24 +853,8 @@ def _admission_decision(
     if isinstance(configured_total, bool) or not isinstance(configured_total, (int, float)):
         configured_total = None
     free_percent, available_gib, total_gib = _headroom_values(sample, configured_total)
-    reserve_gib = _reserve_gib(total_gib)
-    kind = _estimate_kind(estimate_source)
-    charged_gib = _charged_memory_gib(memory_gib, kind)
-    if converting:
-        charged_gib = _hold_reservation(
-            matching_soft[0], int(policy["task_memory_gib"]),
-        )
     requires_hard = requested_kind == "hard" or contention != "tolerant"
     reasons = []
-
-    if not converting and free_percent is not None and free_percent < ADMISSION_DRAIN_PERCENT:
-        return _refuse(
-            "LIGHT_ONLY",
-            f"available memory is {free_percent}% (<{ADMISSION_DRAIN_PERCENT}%); "
-            "do not start heavy work; checkpoint or wind down heavy sessions and run light work"
-            + _heavy_worker_note(idle_report),
-            waitable=False,
-        )
 
     pressure_cause = _pressure_cause(sample)
     if not converting and pressure_cause is not None:
@@ -1024,66 +870,49 @@ def _admission_decision(
         requires_hard = True
         reasons.append(f"memory headroom unavailable ({sample.detail}); limited mode serializes heavy work")
 
-    if not converting and reserve_gib is not None:
-        baseline_fresh = (
-            tranquil_max_at is None
-            or _now() - tranquil_max_at <= TRANQUIL_BASELINE_WINDOW_SECONDS
+    if not converting and total_gib is not None and need > total_gib - ADMISSION_FLOOR_GIB:
+        largest = max(0.0, total_gib - ADMISSION_FLOOR_GIB)
+        return _refuse(
+            "NEVER_FITS",
+            f"need {need:.1f} GiB exceeds the {total_gib:.0f} GiB host less the "
+            f"{ADMISSION_FLOOR_GIB:.0f} GiB floor; largest fitting need is {largest:.1f} GiB; "
+            "split or reduce the task",
+            waitable=False,
         )
-        gate, note = _tranquil_fit(
-            available_gib, memory_gib, kind, tranquil_max_gib,
-            reserve_gib, total_gib, baseline_fresh,
+
+    live_others = [item for item in other_soft if not item.get("manual")]
+    admitted_gib = _admitted_need_gib(live_others, default_gib)
+    if (
+        not converting
+        and available_gib is not None
+        and need + admitted_gib > available_gib - ADMISSION_FLOOR_GIB
+    ):
+        decision = "DEFER_FOR_HARD" if other_soft else "LIGHT_ONLY"
+        action = (
+            "wait for current heavy holds to wind down"
+            if other_soft
+            else "wait for memory to recover and run light work"
         )
-        if gate == "NEVER_FITS":
-            # No host state satisfies the ask: the charged peak and reserve
-            # exceed physical memory. Waiting cannot change that, but a
-            # narrower ask can, so the refusal names one.
-            if total_gib is not None:
-                chargeable = total_gib - reserve_gib
-            else:
-                chargeable = 0.0
-            largest = _largest_fitting_estimate_gib(chargeable, kind)
+        return _refuse(
+            decision,
+            f"{available_gib:.1f} GiB is available but need {need:.1f} GiB + admitted "
+            f"{admitted_gib:.1f} GiB + floor {ADMISSION_FLOOR_GIB:.0f} GiB does not fit; {action}"
+            + _reclaimable_note(idle_report)
+            + _heavy_worker_note(idle_report),
+            waitable=True,
+        )
+
+    if not converting and unproven:
+        running = [item["label"] for item in live_others if hold_flags(item)["unproven"]]
+        if running:
             return _refuse(
-                "NEVER_FITS",
-                f"{memory_gib} GiB estimate needs {charged_gib + reserve_gib:.1f} GiB free, "
-                f"but {note}; largest fitting estimate is {largest} GiB; "
-                "split or reduce the task",
-                waitable=False,
-            )
-        if available_gib is not None and available_gib < charged_gib + reserve_gib:
-            decision = "DEFER_FOR_HARD" if other_soft else "LIGHT_ONLY"
-            action = (
-                "wait for current heavy holds to wind down, then acquire hard"
-                if other_soft
-                else "wait for memory to recover and run light work"
-            )
-            return _refuse(
-                decision,
-                f"{available_gib:.1f} GiB is available but this task needs {charged_gib} GiB "
-                f"plus a {reserve_gib:.1f} GiB usability reserve; {action}"
-                + _reclaimable_note(idle_report)
-                + _heavy_worker_note(idle_report),
+                "DEFER_UNPROVEN",
+                f"unproven unit {', '.join(running)} is already running and at most one "
+                "unit without peak evidence runs at a time; wait for it to finish",
                 waitable=True,
             )
 
-        active_reservations = sum(
-            _hold_reservation(item, int(policy["task_memory_gib"]))
-            for item in other_soft
-            if not item.get("manual")
-        )
-        # Simultaneous charged peaks are bounded by physical memory. A past
-        # tranquil observation is not a capacity limit.
-        if total_gib is not None:
-            reservation_budget = max(0.0, float(total_gib) - reserve_gib)
-        else:
-            reservation_budget = 0.0
-        if active_reservations + charged_gib > reservation_budget:
-            requires_hard = True
-            reasons.append(
-                f"parallel peak reservations would charge {active_reservations + charged_gib} GiB "
-                f"against a {reservation_budget:.1f} GiB budget"
-            )
-
-    active_workers = sum(not item.get("manual") for item in other_soft)
+    active_workers = len(live_others)
     if active_workers >= int(policy["heavy_workers"]):
         requires_hard = True
         reasons.append(
@@ -1115,12 +944,13 @@ def _admission_decision(
     headroom = (
         f"headroom={free_percent}%" if free_percent is not None else "headroom=unavailable"
     )
-    rationale = "; ".join(reasons) if reasons else "parallel admission fits the live and reserved budgets"
+    rationale = "; ".join(reasons) if reasons else "need plus admitted needs fits above the floor"
     return Decision(
         True,
         selected_kind,
         f"ADMITTED_{selected_kind.upper()}",
-        f"{headroom}; memory={memory_gib} GiB (charged={charged_gib} GiB); {rationale}",
+        f"{headroom}; need={need:.1f} GiB{' (unproven)' if unproven else ''}; "
+        f"admitted={admitted_gib:.1f} GiB; {rationale}",
         True,
     )
 
@@ -1147,6 +977,8 @@ def _hold(
     memory_gib: Optional[int] = None,
     contention: str = "tolerant",
     charged_gib: Optional[float] = None,
+    unproven: bool = False,
+    watched: bool = False,
 ) -> dict[str, Any]:
     now = _now()
     return {
@@ -1156,7 +988,10 @@ def _hold(
         "note": (
             note
             if manual or memory_gib is None
-            else _encode_admission_note(note, memory_gib, contention, charged_gib)
+            else _encode_admission_note(
+                note, memory_gib, contention, charged_gib,
+                unproven=unproven, watched=watched,
+            )
         ),
         "manual": manual,
         "acquired_at": now,
@@ -1777,6 +1612,24 @@ def _signal_lines(label: str, signals: dict[str, dict[str, Any]], indent: str) -
     return lines
 
 
+def _waiter_need(waiter: dict[str, Any]) -> float:
+    need = waiter.get("need_gib")
+    return float(need) if need is not None else float(waiter["memory_gib"])
+
+
+def _hold_line(hold: dict[str, Any], now: float, default_memory_gib: int) -> str:
+    state_word = "expired-blocking" if _expired(hold, now) else "live"
+    note, memory_gib, contention = _decode_admission_note(hold["note"], default_memory_gib)
+    flags = hold_flags(hold)
+    return (
+        f"{hold['label']} ({state_word}) pid={hold['pid']} "
+        f"need={_hold_need(hold, default_memory_gib):g}GiB contention={contention}"
+        + (" unproven" if flags["unproven"] else "")
+        + (" watched" if flags["watched"] else "")
+        + f" held={int(now - float(hold['acquired_at']))}s note={note!r}"
+    )
+
+
 def status_text(adapter: Optional[Adapter] = None) -> str:
     selected = adapter or get_adapter()
     now = _now()
@@ -1803,44 +1656,26 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
         sample = None
         if policy is not None:
             sample = selected.memory_headroom()
-            configured = policy.get("physical_memory_gib")
-            if isinstance(configured, bool) or not isinstance(configured, (int, float)):
-                configured = None
-            # Status reads the host anyway, so it feeds the tranquil baseline
-            # on every constrained look — the gate's evidence accrues without
-            # a wait in progress.
-            if _observe_memory_tranquil(
-                queue,
-                sample,
-                configured,
-                busy=state["hard"] is not None or bool(state["soft"]) or bool(waiters),
-                now=now,
-            ):
-                try:
-                    _save_queue(root, queue)
-                except OSError:
-                    pass
         would: dict[str, tuple[Decision, dict[str, Any]]] = {}
         if waiters and policy is not None:
             # One sample for every waiter, and the same decision function the
             # queue uses, so the printed verdict is the live one rather than a
             # second implementation that could drift from it.
             for waiter in waiters:
-                source = waiter.get("estimate_source")
                 decision = _admission_decision(
                     state, "adaptive", str(waiter["label"]), int(waiter["memory_gib"]),
                     str(waiter["contention"]), selected, policy, sample,
                     idle_report=worker_report,
-                    estimate_source=source if isinstance(source, str) else None,
-                    tranquil_max_gib=queue.get("tranquil_max_gib"),
-                    tranquil_max_at=queue.get("tranquil_max_at"),
+                    need_gib=_waiter_need(waiter),
+                    unproven=waiter.get("unproven") is True,
+                )
+                admitted = _admitted_need_gib(
+                    (item for item in state["soft"] if item["label"] != waiter["label"]),
+                    int(policy["task_memory_gib"]),
                 )
                 would[str(waiter["id"])] = (
                     decision,
-                    fit_arithmetic(
-                        sample, policy, int(waiter["memory_gib"]),
-                        source if isinstance(source, str) else None,
-                    ),
+                    fit_arithmetic(sample, policy, _waiter_need(waiter), admitted),
                 )
     try:
         default_memory_gib = int((policy or {})["task_memory_gib"])
@@ -1849,25 +1684,13 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
     lines = list(master_lines)
     hard = state["hard"]
     if hard:
-        state_word = "expired-blocking" if _expired(hard, now) else "live"
-        note, memory_gib, contention = _decode_admission_note(hard["note"], default_memory_gib)
-        lines.append(
-            f"hard: {hard['label']} ({state_word}) pid={hard['pid']} "
-            f"memory={memory_gib}GiB contention={contention} "
-            f"held={int(now - float(hard['acquired_at']))}s note={note!r}"
-        )
+        lines.append(f"hard: {_hold_line(hard, now, default_memory_gib)}")
         lines.extend(_signal_lines(hard["label"], signals, "  "))
     else:
         lines.append("hard: free")
     lines.append(f"soft (S={len(state['soft'])}):")
     for hold in state["soft"]:
-        state_word = "expired-blocking" if _expired(hold, now) else "live"
-        note, memory_gib, contention = _decode_admission_note(hold["note"], default_memory_gib)
-        lines.append(
-            f"  {hold['label']} ({state_word}) pid={hold['pid']} "
-            f"memory={memory_gib}GiB contention={contention} "
-            f"held={int(now - float(hold['acquired_at']))}s note={note!r}"
-        )
+        lines.append(f"  {_hold_line(hold, now, default_memory_gib)}")
         lines.extend(_signal_lines(hold["label"], signals, "    "))
     if not state["soft"]:
         lines.append("  none")
@@ -1875,8 +1698,9 @@ def status_text(adapter: Optional[Adapter] = None) -> str:
     for index, waiter in enumerate(_ordered_waiters(waiters), start=1):
         lines.append(
             f"  {index}. {waiter['label']} pid={waiter['pid']} "
-            f"memory={waiter['memory_gib']}GiB contention={waiter['contention']} "
-            f"waited={int(now - float(waiter['enqueued_at']))}s"
+            f"need={_waiter_need(waiter):g}GiB contention={waiter['contention']} "
+            + ("unproven " if waiter.get("unproven") is True else "")
+            + f"waited={int(now - float(waiter['enqueued_at']))}s"
         )
         verdict = would.get(str(waiter["id"]))
         if verdict is not None:
@@ -1910,16 +1734,18 @@ def _admit(
     contention: str,
     adapter: Optional[Adapter],
     policy: Optional[dict[str, Any]],
-    estimate_source: Optional[str] = None,
+    need_gib: Optional[float] = None,
+    unproven: bool = False,
+    watched: bool = False,
 ) -> tuple[bool, str]:
     invalid, selected, selected_policy, requested_memory = _validate_request(
         label, lease, contention, memory_gib, adapter, policy
     )
     if invalid:
         return False, invalid
+    need = _request_need(need_gib, requested_memory)
     with locked_state() as (path, state):
         signals = _refresh_signals(path.parent, state, selected, _now())
-        queue, _queue_notes = _load_queue(path.parent)
         admitted, selected_kind, decision, detail, _ = _admission_decision(
             state,
             requested_kind,
@@ -1929,16 +1755,12 @@ def _admit(
             selected,
             selected_policy,
             idle_report=signals["lean_workers"],
-            estimate_source=estimate_source,
-            tranquil_max_gib=queue.get("tranquil_max_gib"),
-            tranquil_max_at=queue.get("tranquil_max_at"),
+            need_gib=need,
+            unproven=unproven,
         )
         if not admitted or selected_kind is None:
             _log(f"{requested_kind}-acquire", label, "REFUSED", f"{decision}: {detail}")
             return False, f"{decision} — {detail}"
-        charged_gib = _charged_memory_gib(
-            requested_memory, _estimate_kind(estimate_source),
-        )
         if requested_kind == "hard":
             prior = next((item for item in state["soft"] if item["label"] == label), None)
             if prior is not None:
@@ -1946,33 +1768,48 @@ def _admit(
                     prior["note"], int(selected_policy["task_memory_gib"]),
                 )
                 if prior_memory == requested_memory:
-                    charged_gib = _hold_reservation(
-                        prior, int(selected_policy["task_memory_gib"]),
-                    )
-        if selected_kind == "soft":
-            state["soft"].append(
-                _hold(
-                    label,
-                    note,
-                    lease,
-                    memory_gib=requested_memory,
-                    contention=contention,
-                    charged_gib=charged_gib,
-                )
-            )
-        else:
-            state["soft"] = []
-            state["hard"] = _hold(
-                label,
-                note,
-                lease,
-                memory_gib=requested_memory,
-                contention=contention,
-                charged_gib=charged_gib,
-            )
+                    need = _hold_need(prior, int(selected_policy["task_memory_gib"]))
+        _install_hold(
+            state, selected_kind, label, note, lease, requested_memory, contention,
+            need, unproven=unproven, watched=watched,
+        )
         _save(path, state)
     _log(f"{requested_kind}-acquire", label, "OK", f"{decision}: {detail}")
     return True, f"{decision} — {detail}"
+
+
+def _request_need(need_gib: Optional[float], memory_gib: int) -> float:
+    if (
+        need_gib is None or isinstance(need_gib, bool)
+        or not isinstance(need_gib, (int, float))
+        or not math.isfinite(float(need_gib)) or float(need_gib) <= 0
+    ):
+        return float(memory_gib)
+    return round(float(need_gib), 2)
+
+
+def _install_hold(
+    state: dict[str, Any],
+    kind: str,
+    label: str,
+    note: str,
+    lease: int,
+    memory_gib: int,
+    contention: str,
+    need: float,
+    *,
+    unproven: bool,
+    watched: bool,
+) -> None:
+    hold = _hold(
+        label, note, lease, memory_gib=memory_gib, contention=contention,
+        charged_gib=need, unproven=unproven, watched=watched,
+    )
+    if kind == "soft":
+        state["soft"].append(hold)
+    else:
+        state["soft"] = []
+        state["hard"] = hold
 
 
 def acquire(
@@ -2082,13 +1919,16 @@ def _waiting_admit(
     sleep: Callable[[float], None] = time.sleep,
     announce: Optional[Callable[[str], None]] = None,
     estimate_source: Optional[str] = None,
+    need_gib: Optional[float] = None,
+    unproven: bool = False,
+    watched: bool = False,
 ) -> tuple[bool, str]:
     """Enqueue one request and return only when it is decided.
 
     Waiting can postpone a request; it can never admit one past a floor. Every
-    pass re-evaluates the live decision under the mutex, so the drain
-    threshold, the usability reserve, and manual human holds behave exactly as
-    they do without ``--wait``.  Only the queue decides *which* fitting waiter
+    pass re-evaluates the live decision under the mutex, so the floor, the
+    pressure drain, the one-unproven rule, and manual human holds behave
+    exactly as they do without ``--wait``.  Only the queue decides *which* fitting waiter
     goes first, and only one log row is written per enqueue and per outcome.
 
     Every pass is also *observed*: the verdict it produced and the seconds it
@@ -2102,6 +1942,7 @@ def _waiting_admit(
         return False, invalid
     if wait_seconds < 1 or wait_seconds > MAX_WAIT_SECONDS:
         return False, f"--wait must be 1..{MAX_WAIT_SECONDS} seconds"
+    need = _request_need(need_gib, requested_memory)
 
     waiter_id = uuid.uuid4().hex
     holder: Optional[str] = None
@@ -2115,18 +1956,18 @@ def _waiting_admit(
     cancelled: Optional[BaseException] = None
 
     if announce is not None:
-        fit = fit_arithmetic(
-            selected.memory_headroom(), selected_policy, requested_memory,
-            estimate_source,
+        admitted_now = _admitted_need_gib(
+            (item for item in snapshot()["soft"] if item["label"] != label),
+            int(selected_policy["task_memory_gib"]),
         )
+        fit = fit_arithmetic(selected.memory_headroom(), selected_policy, need, admitted_now)
         announce(fit_line(fit))
-        if fit["fits"] is False and fit["largest_fitting_estimate_gib"] is not None:
+        if fit["fits"] is False and fit["largest_fitting_need_gib"] is not None:
             announce(
-                f"fit: at this instant an estimate of at most "
-                f"{fit['largest_fitting_estimate_gib']} GiB would fit; a larger one is "
-                "queued in arrival order but passed over by every request that fits"
+                f"fit: at this instant a need of at most {fit['largest_fitting_need_gib']} GiB "
+                "would fit; a larger one is queued in arrival order but passed over by "
+                "every request that fits"
             )
-        default_gib = int(selected_policy["task_memory_gib"])
         # Where the number came from decides what a starved waiter should do
         # about it, so the line says derived or explicit in so many words.  A
         # caller that passes no source is the command line, whose estimate is
@@ -2137,16 +1978,17 @@ def _waiting_admit(
         explicit = source is not None and source.startswith("explicit")
         if source is not None:
             announce(
-                f"fit: estimate {requested_memory} GiB is "
+                f"fit: need {need:g} GiB is "
                 + ("explicit" if explicit else "derived, not explicit")
+                + (", unproven" if unproven else "")
                 + f" ({source})"
             )
+        default_gib = int(selected_policy["task_memory_gib"])
         if explicit and requested_memory > default_gib:
             announce(
                 f"fit: an explicit --memory-gib {requested_memory} exceeds this host's default "
-                f"estimate of {default_gib} GiB and is charged "
-                f"{_charged_memory_gib(requested_memory)} GiB; state it only when you know the "
-                "build is cold or broad"
+                f"estimate of {default_gib} GiB and is charged in full; state it only when you "
+                "know the build is cold or broad"
             )
 
     def entry(now: float) -> dict[str, Any]:
@@ -2160,6 +2002,9 @@ def _waiting_admit(
             "estimate_source": estimate_source,
             "enqueued_at": enqueued_at,
             "heartbeat_at": now,
+            "need_gib": need,
+            "unproven": unproven,
+            "watched": watched,
         }
 
     def deregister() -> None:
@@ -2196,24 +2041,6 @@ def _waiting_admit(
                     item for item in queue["waiters"] if item["id"] != waiter_id
                 ]
                 sample = selected.memory_headroom()
-                configured_total = selected_policy.get("physical_memory_gib")
-                if isinstance(configured_total, bool) or not isinstance(
-                    configured_total, (int, float)
-                ):
-                    configured_total = None
-                # The baseline sees quiescence only: this pass observes before
-                # self-enqueue, so our own waiter never marks the host busy.
-                _observe_memory_tranquil(
-                    queue,
-                    sample,
-                    configured_total,
-                    busy=(
-                        state["hard"] is not None
-                        or bool(state["soft"])
-                        or bool(queue["waiters"])
-                    ),
-                    now=now,
-                )
                 queue["waiters"].append(entry(now))
                 registered = True
                 _save_queue(root, queue)
@@ -2224,9 +2051,8 @@ def _waiting_admit(
                         state, "adaptive", item["label"], int(item["memory_gib"]),
                         str(item["contention"]), selected, selected_policy, sample,
                         idle_report=signals["lean_workers"],
-                        estimate_source=item.get("estimate_source"),
-                        tranquil_max_gib=queue.get("tranquil_max_gib"),
-                        tranquil_max_at=queue.get("tranquil_max_at"),
+                        need_gib=_waiter_need(item),
+                        unproven=item.get("unproven") is True,
                     )
                     for item in _ordered_waiters(queue["waiters"])
                 }
@@ -2256,7 +2082,11 @@ def _waiting_admit(
                 record["passes"] += 1
                 if not mine.admitted:
                     fit = fit_arithmetic(
-                        sample, selected_policy, requested_memory, estimate_source
+                        sample, selected_policy, need,
+                        _admitted_need_gib(
+                            (item for item in state["soft"] if item["label"] != label),
+                            int(selected_policy["task_memory_gib"]),
+                        ),
                     )
                     if (
                         fit["fits"] is False
@@ -2266,25 +2096,12 @@ def _waiting_admit(
                     ):
                         tightest = (float(fit["needed_gib"]), float(fit["available_gib"]))
 
-                if announce is not None and not announced:
-                    _free, _avail, _total = _headroom_values(sample, configured_total)
-                    _reserve = _reserve_gib(_total)
-                    if _reserve is not None:
-                        _at = queue.get("tranquil_max_at")
-                        _gate, _note = _tranquil_fit(
-                            _avail, requested_memory, _estimate_kind(estimate_source),
-                            queue.get("tranquil_max_gib"), _reserve, _total,
-                            _at is None or now - _at <= TRANQUIL_BASELINE_WINDOW_SECONDS,
-                        )
-                        if _note:
-                            announce(f"fit: {_note}")
-
                 if not announced:
                     detail = "; ".join(
                         [
                             f"position={_position(queue['waiters'], waiter_id)}",
                             f"waiter={waiter_id[:8]}",
-                            f"memory={requested_memory}GiB",
+                            f"need={need:g}GiB" + (" unproven" if unproven else ""),
                             f"contention={contention}",
                             *notes,
                         ]
@@ -2299,23 +2116,10 @@ def _waiting_admit(
                         if item["id"] != waiter_id
                         and float(item["enqueued_at"]) < enqueued_at
                     ]
-                    if mine.kind == "soft":
-                        state["soft"].append(_hold(
-                            label, note, lease,
-                            memory_gib=requested_memory, contention=contention,
-                            charged_gib=_charged_memory_gib(
-                                requested_memory, _estimate_kind(estimate_source),
-                            ),
-                        ))
-                    else:
-                        state["soft"] = []
-                        state["hard"] = _hold(
-                            label, note, lease,
-                            memory_gib=requested_memory, contention=contention,
-                            charged_gib=_charged_memory_gib(
-                                requested_memory, _estimate_kind(estimate_source),
-                            ),
-                        )
+                    _install_hold(
+                        state, str(mine.kind), label, note, lease, requested_memory,
+                        contention, need, unproven=unproven, watched=watched,
+                    )
                     _drop_waiter(root, waiter_id)
                     _save(path, state)
                     registered = False
@@ -2415,7 +2219,17 @@ def adaptive_acquire(
     poll_seconds: float = WAIT_POLL_SECONDS,
     announce: Optional[Callable[[str], None]] = None,
     estimate_source: Optional[str] = None,
+    need_gib: Optional[float] = None,
+    unproven: bool = False,
+    watched: bool = False,
 ) -> tuple[bool, str]:
+    """Admit a unit on its need (best peak evidence, no margin).
+
+    ``unproven`` marks a need that is a conservative default rather than
+    evidence; ``watched`` marks a hold whose owner runs the launch-and-watch
+    watchdog and may therefore be retracted under pressure.
+    """
+    flags = {"need_gib": need_gib, "unproven": unproven, "watched": watched}
     if wait_seconds is not None:
         return _waiting_admit(
             label,
@@ -2429,6 +2243,7 @@ def adaptive_acquire(
             poll_seconds=poll_seconds,
             announce=announce,
             estimate_source=estimate_source,
+            **flags,
         )
     return _admit(
         "adaptive",
@@ -2439,7 +2254,7 @@ def adaptive_acquire(
         contention=contention,
         adapter=adapter,
         policy=policy,
-        estimate_source=estimate_source,
+        **flags,
     )
 
 
@@ -2549,7 +2364,15 @@ def renew(
     *,
     adapter: Optional[Adapter] = None,
     policy: Optional[dict[str, Any]] = None,
+    watched: bool = False,
 ) -> tuple[bool, str]:
+    """Extend a hold's lease, or refuse with DRAIN_HEAVY/YIELD_HEAVY.
+
+    ``watched`` is the owned-build wrapper renewing a hold its watchdog
+    governs: memory pressure is answered by that watchdog's retraction, so
+    the memory-derived drain and yield refusals do not apply; a manual human
+    hold still yields it.
+    """
     if label == MANUAL_LABEL:
         return False, "manual hold has no heartbeat"
     if lease < 1 or lease > MAX_LEASE_SECONDS:
@@ -2575,14 +2398,20 @@ def renew(
         priority_pool = live_soft or soft
         priority_label = priority_pool[0]["label"] if priority_pool else None
         over_worker_limit = len(soft) > int(selected_policy["heavy_workers"])
-        reserve_gib = _reserve_gib(total_gib)
         over_reservation_budget = False
-        if reserve_gib is not None and total_gib is not None:
-            charged = sum(
-                _hold_reservation(item, int(selected_policy["task_memory_gib"]))
-                for item in soft
+        if total_gib is not None:
+            charged = _admitted_need_gib(soft, int(selected_policy["task_memory_gib"]))
+            over_reservation_budget = charged > max(0.0, total_gib - ADMISSION_FLOOR_GIB)
+        if watched and not manual_active:
+            hold["renewed_at"] = _now()
+            hold["lease_seconds"] = lease
+            _save(path, state)
+            detail = (
+                "CONTINUE_WATCHED — hold renewed; the wrapper's watchdog answers pressure"
+                + (f"; headroom={free_percent}%" if free_percent is not None else "")
             )
-            over_reservation_budget = charged > max(0.0, total_gib - reserve_gib)
+            _log("renew", label, "OK", f"lease={lease}; {detail}")
+            return True, detail
         if free_percent is not None and free_percent < ADMISSION_DRAIN_PERCENT:
             detail = (
                 f"DRAIN_HEAVY — available memory is {free_percent}% "
@@ -2625,7 +2454,7 @@ def renew(
                     f"{len(soft)} holders exceed worker limit {selected_policy['heavy_workers']}"
                 )
             if over_reservation_budget:
-                budget.append("parallel peak reservations exceed the safe budget")
+                budget.append("admitted needs exceed physical memory less the floor")
             trigger = "; ".join([pressure, *budget])
             detail = (
                 f"YIELD_HEAVY — {trigger}; priority hold {priority_label} keeps the next "
@@ -2652,6 +2481,35 @@ def renew(
     detail += "".join("\n  " + line for line in _heavy_worker_lines(signals["lean_workers"]))
     _log("renew", label, "OK", f"lease={lease}; {detail}")
     return True, detail
+
+
+def retraction_order() -> list[dict[str, Any]]:
+    """Watched holds in the order the watchdog retracts them.
+
+    Unproven units go first, then proven ones; within each, the youngest
+    admission first.  Unwatched holds (language-server loops, gate runners)
+    are never retracted and do not appear.
+    """
+    with locked_state() as (_path, state):
+        holds = ([state["hard"]] if state["hard"] else []) + list(state["soft"])
+    now = _now()
+    watched = []
+    for hold in holds:
+        if hold.get("manual") or _expired(hold, now):
+            continue
+        flags = hold_flags(hold)
+        if not flags["watched"]:
+            continue
+        watched.append({
+            "label": hold["label"],
+            "acquired_at": float(hold["acquired_at"]),
+            "unproven": flags["unproven"],
+        })
+    return sorted(watched, key=lambda item: (not item["unproven"], -item["acquired_at"], item["label"]))
+
+
+def record_retraction(label: str, detail: str) -> None:
+    _log("retract", label, "RETRACTED", detail)
 
 
 def manual_acquire(note: str = "human using another macOS account") -> tuple[bool, str]:

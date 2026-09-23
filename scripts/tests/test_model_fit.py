@@ -88,7 +88,7 @@ class ModelFitTest(unittest.TestCase):
         self.add(self.claude, verdict="unknown", verdict_source="none — no master record names this run")
         text = self.claude.read_text(encoding="utf-8")
         self.assertIn("| lean-elaboration | no data | no data | 3v: 3P 0A 0F +1U guides |", text)
-        self.assertIn("#### lean-elaboration × opus/high", text)
+        self.assertIn("- lean-elaboration × opus/high: 3v: 3P 0A 0F +1U guides; output 400; wall 900s", text)
         self.assertEqual(self.errors(), [])
         _, counts = model_fit.validate_dir(self.dir)
         self.assertEqual(counts["claude-code"], {"observations": 4, "verified": 3, "unknown": 1})

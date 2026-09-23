@@ -94,6 +94,7 @@ CLIENTS: dict[str, Client] = {
     ),
 }
 
+FAILURE_MODES_SHOWN = 3
 VERDICTS = ("pass", "partial", "fail", "unknown")
 TOKEN_KEYS = ("uncached_input", "cache_read", "cache_write", "output", "reasoning")
 FIELDS = (
@@ -374,15 +375,6 @@ def _cell_text(observations: list[Observation]) -> str:
     return text
 
 
-def _median_text(values: list[int], unit: str = "") -> str:
-    if not values:
-        return "n/a"
-    median = int(statistics.median(values))
-    if len(values) == 1:
-        return f"{median:,}{unit} (n=1)"
-    return f"median {median:,}{unit} (range {min(values):,}–{max(values):,}{unit}, n={len(values)})"
-
-
 def derive_summary(client: Client, observations: list[Observation]) -> str:
     by_cell: dict[tuple[str, str], list[Observation]] = {}
     for observation in observations:
@@ -405,37 +397,30 @@ def derive_summary(client: Client, observations: list[Observation]) -> str:
             cells = [_cell_text(by_cell.get((task, f"{family}/{effort}"), [])) for effort in efforts]
             out.append(f"| {task} | " + " | ".join(cells) + " |")
         out.append("")
-    out.append("### Cells with data")
+    out.append("### Populated cells")
+    out.append("")
+    out.append("One line per cell with data: verdicts; up to three most recent failure modes; median output")
+    out.append("tokens and wall time. The observations below the summary hold everything else.")
     out.append("")
     populated = [key for key in ((t, o) for t in TASK_TYPES for o in client.options()) if key in by_cell]
     if not populated:
         out.append("No observations yet.")
-        out.append("")
     for task, option in populated:
         cell = by_cell[(task, option)]
-        out.append(f"#### {task} × {option}")
-        out.append("")
-        out.append(f"- verdicts: {_cell_text(cell)}")
-        out.append("- observations: " + ", ".join(
-            f"{o.ident} ({o.verdict})" for o in cell))
+        line = f"- {task} × {option}: {_cell_text(cell)}"
         modes = [f"{o.ident}: {o.fields.get('failure_modes')}" for o in cell
                  if o.fields.get("failure_modes", "none").lower() not in {"none", "n/a"}]
-        out.append("- failure modes: " + ("; ".join(modes) if modes else "none recorded"))
-        reworks = [f"{o.ident}: {o.fields.get('rework')}" for o in cell
-                   if o.fields.get("rework", "none").lower() not in {"none", "n/a"}]
-        out.append("- rework noted by the master: " + ("; ".join(reworks) if reworks else "none recorded"))
+        if modes:
+            shown = "; ".join(modes[-FAILURE_MODES_SHOWN:])
+            more = len(modes) - FAILURE_MODES_SHOWN
+            line += f"; failures: {shown}" + (f" (+{more} earlier)" if more > 0 else "")
         output_tokens: list[int] = []
-        total_input: list[int] = []
         walls: list[int] = []
-        turns: list[int] = []
         for o in cell:
             try:
                 tokens = parse_tokens(o.fields.get("tokens", ""))
                 if tokens["output"] is not None:
                     output_tokens.append(tokens["output"])
-                parts = [tokens[k] for k in ("uncached_input", "cache_read", "cache_write")]
-                if all(p is not None for p in parts):
-                    total_input.append(sum(p for p in parts if p is not None))
             except ModelFitError:
                 pass
             try:
@@ -444,16 +429,12 @@ def derive_summary(client: Client, observations: list[Observation]) -> str:
                     walls.append(wall)
             except ModelFitError:
                 pass
-            try:
-                turn = parse_count("turns", o.fields.get("turns", "n/a"))
-                if turn is not None:
-                    turns.append(turn)
-            except ModelFitError:
-                pass
-        out.append(f"- cost, all {len(cell)} runs (observables only): output tokens {_median_text(output_tokens)}; "
-                   f"input incl. cache {_median_text(total_input)}; wall {_median_text(walls, 's')}; "
-                   f"turns {_median_text(turns)}")
-        out.append("")
+        if output_tokens:
+            line += f"; output {int(statistics.median(output_tokens)):,}"
+        if walls:
+            line += f"; wall {int(statistics.median(walls)):,}s"
+        out.append(line)
+    out.append("")
     return "\n".join(out).rstrip("\n")
 
 

@@ -68,6 +68,10 @@ them is archived in
   serialized wall-clock observation with an idealized parallel sum.
 - Never mark completion based on a plan, a silent command, or a green signal
   whose failure mode was not shown to bite.
+- Ask finite evidence (fixtures, differentials, oracles) only for what no
+  theorem states: statement-to-spec fidelity, agreement with an external
+  referent, and measurements. Never require finite coverage of a property a
+  named theorem proves; see [evidence economy](master.md#evidence-economy).
 
 The executing worker may adapt internal implementation, packet boundaries, and
 cheap test selection. Changes to objective, public claim, security boundary,

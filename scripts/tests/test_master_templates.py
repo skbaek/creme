@@ -30,6 +30,7 @@ EXPECTED_RULE = (
 
 EXPECTED_CLASSIFICATIONS = {
     "registered-provenance": "autonomous",
+    "evidence-economy": "autonomous",
     "pin-reference": "reserved",
     "baseline": "reserved",
     "budget": "reserved",
@@ -213,10 +214,12 @@ class MasterTemplateTest(unittest.TestCase):
         assert_decision_table(self.master)
         rows = decision_rows(self.master)
         self.assertEqual(rows["registered-provenance"], "autonomous")
+        self.assertEqual(rows["evidence-economy"], "autonomous")
         self.assertEqual(rows["ambiguous-mixed"], "separate-or-escalate")
         self.assertEqual(
             {identifier for identifier, value in rows.items() if value == "reserved"},
-            set(EXPECTED_CLASSIFICATIONS) - {"registered-provenance", "ambiguous-mixed"},
+            set(EXPECTED_CLASSIFICATIONS)
+            - {"registered-provenance", "evidence-economy", "ambiguous-mixed"},
         )
 
     def test_swapping_any_classification_row_makes_the_table_control_fail(self):

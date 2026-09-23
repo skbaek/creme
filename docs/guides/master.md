@@ -490,6 +490,7 @@ cannot be done, send the whole dependent change as a decision packet.
 | ID | Change | Classification | Required evidence or action |
 |---|---|---|---|
 | `registered-provenance` | Registered generator identity/provenance output caused solely by an already-authorized source/input change | `autonomous` | Green registered check, biting relevant falsifier, and exact generator-only diff with no semantic reference movement |
+| `evidence-economy` | Removal of finite evidence that re-checks a theorem-proved property, re-runs Jaune conformance per contract, or reruns a harness self-test beyond its own files ([evidence economy](#evidence-economy)) | `autonomous` | Removal ledger naming each removed check's covering theorem, Jaune test, or retained check; model-diverse reviewer acceptance; remaining rows green |
 | `pin-reference` | Pin or semantic reference movement | `reserved` | User decision, even when generated |
 | `baseline` | Baseline weakening | `reserved` | User decision, even when generated |
 | `budget` | Budget weakening | `reserved` | User decision, even when generated |
@@ -534,6 +535,29 @@ that names:
 A procedure retired without that entry is reinstated by the next audit.
 Adding a procedure needs the same entry in the other direction: the failure
 it answers, and the evidence.
+
+## Evidence economy
+
+Standing user directive (2026-09-23; `$GOAL_STORE/master/intent/evidence-economy-20260923.md`),
+for Blanc and by the same reasoning Jaune:
+
+- Finite evidence covers only what no theorem states: statement-to-spec
+  fidelity, agreement with an external referent, and measurements. A review
+  finding against a proved property is answered by citing the theorem, not
+  by adding cases.
+- EVM conformance belongs to Jaune's own tests, not to each Blanc contract.
+- A harness self-test shows its controls bite when they are written or
+  changed. Its cache inputs are the harness's own files, a restore is checked
+  by byte identity, and each mutant runs the narrowest mode that reaches its
+  diagnostic.
+- Every gate row carries a measured cost, and a costly row states the unique
+  protection it gives.
+- Trim wherever found. Removing finite evidence under these rules is not
+  weakening under the registered-provenance rule when a removal ledger maps
+  each removed check to the theorem, Jaune test, or retained check that
+  covers it, and a model-diverse reviewer accepts the ledger. A check with no
+  covering item stays. Goals and briefs the master writes must not demand
+  the redundant coverage in the first place.
 
 ## Independent audit
 

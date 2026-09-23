@@ -94,8 +94,15 @@ external messages, spend, and dependent public contracts are never autonomous;
 see the master guide's registered-provenance rule.
 
 A control must be shown to bite: the surrounding tree still builds, failure
-lands at the control, and removing only the control restores green. Run
-mutation campaigns in disposable worktrees.
+lands at the control, and removing only the control restores green. For a
+script or data control, restored bytes identical to a green baseline are that
+evidence; do not rerun. Show a control bites when it is written or changed,
+and run mutation campaigns in disposable worktrees.
+
+Finite evidence covers only what no theorem states. Do not add fixture,
+differential, or mutation coverage for a property a named theorem proves, and
+trim such coverage where you find it; see
+[evidence economy](docs/guides/master.md#evidence-economy).
 
 ## Host coordination
 

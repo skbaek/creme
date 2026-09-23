@@ -16,7 +16,8 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, TextIO
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Optional, TextIO
 
 from . import semaphore
 from .adapters import get_adapter
@@ -30,6 +31,24 @@ STALE_EXIT = 3
 DEFAULT_MEMORY_GIB = 8
 DEFAULT_THREADS = 2
 RENEW_INTERVAL_SECONDS = 240
+# The watchdog's retraction exit (EX_TEMPFAIL): the build was stopped under
+# memory pressure and its observed peak is now evidence; retry when it fits.
+RETRACTED_EXIT = 75
+WATCHDOG_INTERVAL_SECONDS = 1.0
+WATCHDOG_GRACE_SECONDS = 3.0
+WATCHDOG_STEP_SECONDS = 5.0
+# Retraction ("critical") signals.  The drain-level compressor cause alone
+# never retracts; the user chose this red zone on 2026-09-23.
+DARWIN_WARNING_PRESSURE_LEVEL = 2         # kern.memorystatus_vm_pressure_level >= 2 ...
+DARWIN_WARNING_SUSTAINED_SECONDS = 10.0   # ... held for 10 seconds
+SWAP_GROWTH_CRITICAL_MIB = 1024.0         # swap in use rising by 1 GiB ...
+SWAP_GROWTH_WINDOW_SECONDS = 10.0         # ... within 10 seconds
+PSI_FULL_CRITICAL_AVG10 = 10.0            # Linux: all tasks stalled 10% of the last 10 s
+# Drain-level reclaim takes only language-server workers idle this long, so an
+# agent's live server between two requests is never killed.
+WATCHDOG_RECLAIM_IDLE_MINUTES = 2
+# A walk re-queues a retracted unit once; without --wait it waits this long.
+WALK_REQUEUE_WAIT_SECONDS = 3600
 RUNTIME_RELATIVE = Path(".creme/lean-build-ownership")
 LEDGER_NAME = "ledger.jsonl"
 _SAFE_LEDGER_KEYS = {
@@ -63,6 +82,10 @@ _SAFE_LEDGER_KEYS = {
     # proof evidence; their run's peak is only a cost floor) and the per-run
     # file holding Lake's full output.
     "modules_failed", "log_path",
+    # Additive, from launch-and-watch-v1: the need admission charged (best
+    # peak evidence, no margin), whether it was an unproven default, the
+    # watchdog's lowest observed availability, and what the watchdog did.
+    "need_gib", "unproven", "min_available_gib", "watchdog_events",
 }
 DEFAULT_LAKE_OVERHEAD_GIB = 1.0
 # A stale set this small has its concurrency computed exactly from the import
@@ -258,6 +281,7 @@ def _valid_ledger_row(row: Any) -> bool:
         "peak_rss_mib", "peak_lean_rss_mib", "max_concurrent_lean",
         "swap_before_gib", "swap_after_gib", "sampling_samples", "sampling_unavailable",
         "stale_modules", "estimate_gib", "estimate_under_cover_gib",
+        "need_gib", "min_available_gib",
     )
     if not all(key not in row or _number_or_none(row[key]) for key in optional_numbers):
         return False
@@ -270,6 +294,10 @@ def _valid_ledger_row(row: Any) -> bool:
     if not all(key not in row or isinstance(row[key], str) for key in optional_strings):
         return False
     if "modules_failed" in row and not _string_list(row["modules_failed"]):
+        return False
+    if "watchdog_events" in row and not _string_list(row["watchdog_events"]):
+        return False
+    if "unproven" in row and not isinstance(row["unproven"], bool):
         return False
     if "census" in row and not isinstance(row["census"], bool):
         return False
@@ -561,8 +589,8 @@ def _under_cover(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """How far each admitted estimate fell below the peak it was charged for.
 
     Computed from the estimate the row carries and the peak it measured, so
-    the +1 GiB margin becomes a measured quantity over any window, including
-    windows recorded before the field existed.
+    under-sizing is a measured quantity over any window, including windows
+    recorded before the field existed.
     """
     cases: list[dict[str, Any]] = []
     measured = 0
@@ -2588,31 +2616,27 @@ def size_stale_set(
     failed_rows: Iterable[dict[str, Any]] = (),
     toolchain_digest: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Size a build from the modules it will elaborate, never from a target's name.
+    """Size a build's need from the modules it will elaborate, with no margin.
 
-    Every module in the stale set with a measured `lean` peak contributes it;
-    the build's peak is the Lake overhead plus the peaks that can run at the
-    same time.  When some module is unmeasured: a small set whose members
-    never elaborated for long takes the narrow default; a small set with a
-    member that elaborated for ``heavy_module_seconds`` or more in some broad
-    rebuild takes the profile default, because that member is a heavy one
-    whose cost is simply not yet recorded on its own; a large set is bounded
-    by the tightest broader rebuild that included its members, and by the
-    profile default when none did.  When a drifted row's fallback peak alone
-    sets the ask, the source names the module, peak, and row it came from.
+    The need is the Lake overhead plus the peaks that can run at the same
+    time.  A module's peak is its own measurement; failing that, a recorded
+    floor (a drifted or other-toolchain row, or a failed or retracted attempt).
+    When every stale module has one of those, the need is evidence.  When
+    some module has none, a large set is bounded by the tightest broader
+    rebuild that included its members; otherwise the need is a conservative
+    default (the narrow default for a small set of short modules, the profile
+    default for a heavy member or a large set) and the result is ``unproven``.
 
     An unmeasured module whose elaboration failed in ``failed_rows`` is
     floored by that failed run: by the module's own recorded peak when the
     row has one, otherwise by the run's whole process peak only when it is
     the row's sole failed module.  A row with several failed modules and no
     per-module peak cannot say which of them the peak belongs to, so it
-    floors none of them; they fall through to the other rules.  The floor is
-    uncertain and only ever raises the ask; it never counts as a measurement.
+    floors none of them.  The floor only ever raises the need.
     ``toolchain_digest`` scopes fallback evidence as ``module_cost_evidence``
     describes.
     """
-    floor = int(settings["minimum_estimate_gib"])
-    margin = int(settings["estimate_margin_gib"])
+    failed_rows = list(failed_rows)
     limit = int(settings["tolerant_module_count"])
     narrow_default = int(settings["narrow_default_gib"])
     heavy_seconds = float(settings["heavy_module_seconds"])
@@ -2640,9 +2664,11 @@ def size_stale_set(
             if _finite_positive(own):
                 peak_gib = float(own) / 1024.0
                 kind = "failed attempt: module's own peak, uncertain"
+                level = "lean"
             elif len(failed_modules) == 1:
                 peak_gib = float(row["peak_rss_mib"]) / 1024.0
                 kind = "failed attempt: closure process peak, sole failed module, uncertain"
+                level = "tree"
             else:
                 # Several failures share one whole-process peak: attributing
                 # it to each of them would over-charge every one.
@@ -2650,6 +2676,7 @@ def size_stale_set(
             if peak_gib > failed_floor.get(module, {}).get("peak_gib", 0.0):
                 failed_floor[module] = {
                     "peak_gib": peak_gib, "row_time": str(row.get("time")), "kind": kind,
+                    "level": level,
                 }
     fallback_floor = max(
         [*fallback.values(), *fallback_build.values(),
@@ -2657,39 +2684,34 @@ def size_stale_set(
         default=0.0,
     )
     has_fallback = bool(fallback or fallback_build or failed_floor)
-    # A drifted single-module aggregate measures the named module's complete
-    # prior process tree without sibling breadth. It remains unmeasured on the
-    # current inputs and therefore keeps the default 1.25x admission charge,
-    # but does not also take the estimator's whole-GiB margin. Less specific
-    # fallback evidence retains that margin.
-    # The reduced estimator margin is intentionally confined to one requested
-    # stale module. Every candidate is priced before selecting the winner, so
-    # a slightly lower, less-specific floor cannot lose its retained margin to
-    # a higher raw drifted aggregate.
-    priced_fallbacks: list[tuple[int, float, dict[str, Any]]] = []
-    for module in set(fallback) | set(fallback_build):
-        for origin in evidence.get("fallback_candidates", {}).get(module, []):
-            peak_gib = float(origin["peak_gib"])
-            reduced = (
-                len(names) == 1
-                and origin.get("kind") in {
-                    "drifted single-module aggregate", "legacy own-singleton aggregate",
-                }
-            )
-            priced_fallbacks.append((
-                math.ceil(peak_gib) + (0 if reduced else margin),
-                peak_gib,
-                {"module": module, **origin},
-            ))
-    for module, origin in failed_floor.items():
-        priced_fallbacks.append((
-            math.ceil(origin["peak_gib"]) + margin, origin["peak_gib"], {"module": module, **origin},
-        ))
-    fallback_term, _term_peak, fallback_term_origin = max(
-        priced_fallbacks,
-        key=lambda item: (item[0], item[1], item[2]["module"]),
-        default=(0, 0.0, None),
-    )
+    # Every unmeasured module that has some peak evidence (a drifted or other-
+    # toolchain row, or a failed or retracted attempt) contributes that floor;
+    # a module with none is truly unmeasured, and only then is the need a
+    # default.  A `lean`-process floor enters the concurrency model like a
+    # measurement; a whole-process-tree floor already includes Lake's
+    # overhead, so it bounds the need directly instead.
+    lean_floors: dict[str, float] = {}
+    tree_floors: dict[str, float] = {}
+    for name in unmeasured:
+        failed = failed_floor.get(name)
+        lean = max(
+            fallback.get(name, 0.0),
+            failed["peak_gib"] if failed and failed["level"] == "lean" else 0.0,
+        )
+        tree = max(
+            fallback_build.get(name, 0.0),
+            failed["peak_gib"] if failed and failed["level"] == "tree" else 0.0,
+        )
+        if lean > 0.0:
+            lean_floors[name] = lean
+        if tree > 0.0:
+            tree_floors[name] = tree
+    bare = [name for name in unmeasured if name not in lean_floors and name not in tree_floors]
+    fallback_term_origin: Optional[dict[str, Any]] = None
+    if failed_floor:
+        module, origin = max(failed_floor.items(), key=lambda item: (item[1]["peak_gib"], item[0]))
+        if origin["peak_gib"] >= fallback_floor:
+            fallback_term_origin = {"module": module, **origin}
     heavy = sorted(
         ((name, evidence["seconds"][name]) for name in unmeasured
          if evidence["seconds"].get(name, 0.0) >= heavy_seconds),
@@ -2706,13 +2728,45 @@ def size_stale_set(
         "fallback_peak_gib": round(fallback_floor, 2),
         "overhead_gib": round(float(evidence["overhead_gib"]), 2),
         "rows": evidence["rows"],
+        "unproven": False,
     }
-    if not names:
+
+    # A retracted attempt without per-module peaks floors the closure it was
+    # building: any stale set that still contains all of its unfinished
+    # modules needs at least that run's observed peak.
+    closure_floor, closure_origin = 0.0, None
+    for row in failed_rows:
+        if row.get("outcome") != "retracted":
+            continue
+        members = set(str(module) for module in row.get("modules_failed") or [])
+        if members and members <= set(names) and _finite_positive(row.get("peak_rss_mib")):
+            peak = float(row["peak_rss_mib"]) / 1024.0
+            if peak > closure_floor:
+                closure_floor, closure_origin = peak, str(row.get("time"))
+
+    def finish(kind: str, need: float, source: str, unproven: bool = False) -> dict[str, Any]:
+        if closure_floor > need:
+            need = closure_floor
+            source += (
+                f"; retracted attempt at {closure_origin} floors this closure at "
+                f"{closure_floor:.2f} GiB"
+            )
+        result["closure_floor_gib"] = round(closure_floor, 2) if closure_floor else None
+        need = round(max(float(need), 0.1), 2)
         result.update({
-            "kind": "fresh", "peak_gib": 0.0, "estimate_gib": floor,
-            "source": "nothing is stale; the build elaborates no module and takes no hold",
+            "kind": kind,
+            "need_gib": need,
+            "estimate_gib": max(1, math.ceil(need)),
+            "unproven": unproven,
+            "source": source,
         })
         return result
+
+    if not names:
+        result.update({"peak_gib": 0.0})
+        return finish(
+            "fresh", 0.0, "nothing is stale; the build elaborates no module and takes no hold",
+        )
 
     def listed(items: list[str]) -> str:
         shown = ", ".join(items[:3])
@@ -2720,119 +2774,123 @@ def size_stale_set(
 
     if not unmeasured:
         peak, width, top = _model_peak(measured, graph, evidence)
-        result.update({
-            "kind": "measured",
-            "peak_gib": round(peak, 2),
-            "estimate_gib": max(floor, math.ceil(peak)),
-            "width": width,
-            "source": (
-                f"measured stale set: {len(names)} module(s) all measured; Lake overhead "
-                f"{evidence['overhead_gib']:.2f} GiB + {width} concurrent lean peak(s) "
-                f"{[round(value, 2) for value in top]} GiB = {peak:.2f} GiB, charged with "
-                "the measured admission margin"
-            ),
-        })
-        return result
+        result.update({"peak_gib": round(peak, 2), "width": width})
+        return finish(
+            "measured", peak,
+            f"measured stale set: {len(names)} module(s) all measured; Lake overhead "
+            f"{evidence['overhead_gib']:.2f} GiB + {width} concurrent lean peak(s) "
+            f"{[round(value, 2) for value in top]} GiB = {peak:.2f} GiB",
+        )
+
+    clause = (
+        _fallback_clause(evidence, fallback, fallback_build, fallback_floor, fallback_term_origin)
+        if has_fallback else ""
+    )
+    if not bare:
+        # Every module has peak evidence of some kind: price the `lean`-level
+        # floors with the concurrency model, bounded below by any tree floor.
+        modelled = {**measured, **lean_floors}
+        peak, width, top = (
+            _model_peak(modelled, graph, evidence) if modelled else (0.0, 0, [])
+        )
+        tree = max(tree_floors.values(), default=0.0)
+        need = max(peak, tree)
+        result.update({"peak_gib": round(need, 2), "width": width})
+        return finish(
+            "floor evidence", need,
+            f"floor evidence: {len(unmeasured)} of {len(names)} stale module(s) have no "
+            "exact measurement but each has a recorded peak floor; "
+            + (
+                f"Lake overhead {evidence['overhead_gib']:.2f} GiB + {width} concurrent "
+                f"peak(s) {[round(value, 2) for value in top]} GiB = {peak:.2f} GiB"
+                if modelled else "no lean-level peak"
+            )
+            + (f"; whole-build floor {tree:.2f} GiB" if tree else "")
+            + clause,
+        )
 
     measured_peak = 0.0
     if measured:
         measured_peak, _width, _top = _model_peak(measured, graph, evidence)
-    if len(names) <= limit and not heavy:
-        base = max(
-            floor, narrow_default,
-            math.ceil(measured_peak) + margin if measured else 0,
-        )
-        estimate = max(base, fallback_term)
-        clause = (
-            _fallback_clause(evidence, fallback, fallback_build, fallback_floor, fallback_term_origin)
-            if has_fallback and fallback_term > base else ""
-        )
-        result.update({
-            "kind": "narrow default",
-            "peak_gib": round(measured_peak, 2),
-            "estimate_gib": estimate,
-            "source": (
-                f"narrow default {narrow_default} GiB: {len(unmeasured)} of {len(names)} stale "
-                f"module(s) unmeasured ({listed(unmeasured)}) and none of them elaborated for "
-                f"{heavy_seconds:.0f}s or more in any measured rebuild"
-            ) + clause,
-        })
-        return result
-    if len(names) <= limit:
-        name, seconds = heavy[0]
-        base = max(
-            floor, int(default_gib),
-            math.ceil(measured_peak) + margin if measured else 0,
-        )
-        estimate = max(base, fallback_term)
-        clause = (
-            _fallback_clause(evidence, fallback, fallback_build, fallback_floor, fallback_term_origin)
-            if has_fallback and fallback_term > base else ""
-        )
-        result.update({
-            "kind": "heavy module",
-            "peak_gib": round(measured_peak, 2),
-            "estimate_gib": estimate,
-            "source": (
-                f"profile default (heavy module): {name} elaborated for {seconds:.0f}s in a "
-                f"broad rebuild but has no measurement of its own; {len(unmeasured)} of "
-                f"{len(names)} stale module(s) unmeasured"
-            ) + clause,
-        })
-        return result
-    context_rows = (
-        [row for row in rows if _exact_context_row(row, input_identity)]
-        if input_identity is not None else rows
+    # What the evidence that does exist already proves the need is at least.
+    known = {**measured, **lean_floors}
+    evidence_need = max(
+        _model_peak(known, graph, evidence)[0] if known else 0.0,
+        max(tree_floors.values(), default=0.0),
     )
-    covering = _covering_rows(context_rows, names, unmeasured, input_identity)
-    if covering:
-        tightest = min(covering, key=lambda row: float(row["peak_rss_mib"]))
-        cover_peak = float(tightest["peak_rss_mib"]) / 1024.0
-        peak = max(cover_peak, measured_peak, fallback_floor)
-        base = max(
-            floor,
-            math.ceil(cover_peak) + margin,
-            math.ceil(measured_peak) + margin if measured else 0,
+    result["peak_gib"] = round(evidence_need, 2)
+    if len(names) > limit:
+        context_rows = (
+            [row for row in rows if _exact_context_row(row, input_identity)]
+            if input_identity is not None else rows
         )
-        estimate = max(base, fallback_term)
-        clause = (
-            _fallback_clause(evidence, fallback, fallback_build, fallback_floor, fallback_term_origin)
-            if has_fallback and fallback_term > base else ""
-        )
-        result.update({
-            "kind": "broader rebuild",
-            "peak_gib": round(peak, 2),
-            "estimate_gib": estimate,
-            "covering_rows": len(covering),
-            "covering_time": str(tightest.get("time")),
-            "source": (
+        covering = _covering_rows(context_rows, names, unmeasured, input_identity)
+        if covering:
+            tightest = min(covering, key=lambda row: float(row["peak_rss_mib"]))
+            cover_peak = float(tightest["peak_rss_mib"]) / 1024.0
+            peak = max(cover_peak, evidence_need)
+            result.update({
+                "peak_gib": round(peak, 2),
+                "covering_rows": len(covering),
+                "covering_time": str(tightest.get("time")),
+            })
+            return finish(
+                "broader rebuild", peak,
                 f"broader rebuild: {len(unmeasured)} of {len(names)} stale module(s) unmeasured; "
                 f"the tightest of {len(covering)} successful rebuild(s) of at least {len(names)} "
                 f"modules that included them ({len(tightest.get('modules_rebuilt') or [])} modules "
-                f"at {str(tightest.get('time'))}) peaked at {peak:.2f} GiB; non-fallback "
-                f"evidence retains the {margin} GiB estimator margin"
-            ) + clause,
-        })
-        return result
-    base = max(
-        floor, int(default_gib), math.ceil(measured_peak) + margin if measured else 0,
+                f"at {str(tightest.get('time'))}) peaked at {peak:.2f} GiB" + clause,
+            )
+    # Some module has no peak evidence at all: the need is a conservative
+    # default and the unit is unproven until its own run measures it.
+    if len(names) <= limit and not heavy:
+        default, kind = narrow_default, "narrow default"
+        source = (
+            f"narrow default {narrow_default} GiB: {len(bare)} of {len(names)} stale "
+            f"module(s) have no peak evidence ({listed(bare)}) and none of them elaborated "
+            f"for {heavy_seconds:.0f}s or more in any measured rebuild"
+        )
+    elif len(names) <= limit:
+        name, seconds = heavy[0]
+        default, kind = int(default_gib), "heavy module"
+        source = (
+            f"profile default (heavy module): {name} elaborated for {seconds:.0f}s in a "
+            f"broad rebuild but has no measurement of its own; {len(bare)} of "
+            f"{len(names)} stale module(s) have no peak evidence"
+        )
+    else:
+        default, kind = int(default_gib), "profile default"
+        source = (
+            f"profile default: {len(bare)} of {len(names)} stale module(s) have no peak "
+            f"evidence ({listed(bare)}), the set is above the narrow limit of {limit}, and "
+            "no broader successful rebuild included them"
+        )
+    return finish(
+        kind, max(float(default), evidence_need),
+        source + (clause if has_fallback and evidence_need > default else "") + "; unproven",
+        unproven=True,
     )
-    estimate = max(base, fallback_term)
-    clause = (
-        _fallback_clause(evidence, fallback, fallback_build, fallback_floor, fallback_term_origin)
-        if has_fallback and fallback_term > base else ""
-    )
-    result.update({
+
+
+def _need_estimate(
+    peak_gib: float, default_gib: int, why: str, extra: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    """A need from a conservative, non-exact target peak, else an unproven default."""
+    if peak_gib > 0:
+        return max(1, math.ceil(peak_gib)), {
+            "kind": "target fallback",
+            "need_gib": round(peak_gib, 2),
+            "unproven": False,
+            "source": f"target fallback peak {peak_gib:.2f} GiB ({why})",
+            **extra,
+        }
+    return int(default_gib), {
         "kind": "profile default",
-        "peak_gib": round(measured_peak, 2),
-        "estimate_gib": estimate,
-        "source": (
-            f"profile default: {len(unmeasured)} of {len(names)} stale module(s) unmeasured "
-            f"({listed(unmeasured)}), the set is above the narrow limit of {limit}, and no "
-            "broader successful rebuild included them"
-        ) + clause,
-    })
-    return result
+        "need_gib": float(default_gib),
+        "unproven": True,
+        "source": f"profile default ({why}); unproven",
+        **extra,
+    }
 
 
 def _target_keyed_estimate(
@@ -2854,7 +2912,6 @@ def _target_keyed_estimate(
     measures a build that did no work.  A list with no row of its own is
     sized from the union of its members' rows.
     """
-    floor = int(settings["minimum_estimate_gib"])
     require_elaboration = stale_modules != 0
     rows, detail = _measured_rows(
         worktree, targets, *digests, settings, require_elaboration, members=True,
@@ -2878,17 +2935,15 @@ def _target_keyed_estimate(
         fallback_peak = max(
             (float(row["peak_rss_mib"]) for row in fallback_rows), default=0.0,
         ) / 1024.0
-        estimate = max(floor, default_gib, math.ceil(fallback_peak) + int(settings["estimate_margin_gib"]))
-        return estimate, {
-            "kind": "profile default",
-            "source": (
-                f"profile default (exact input identity unavailable: {identity_detail})"
-                + (f"; conservative target fallback peak {fallback_peak:.2f} GiB" if fallback_peak else "")
-            ),
-            "rows": len(fallback_rows),
-            "keyed_on_elaboration": require_elaboration,
-            "measured_peak_gib": round(fallback_peak, 2) if fallback_peak else None,
-        }
+        return _need_estimate(
+            fallback_peak, default_gib,
+            f"exact input identity unavailable: {identity_detail}",
+            {
+                "rows": len(fallback_rows),
+                "keyed_on_elaboration": require_elaboration,
+                "measured_peak_gib": round(fallback_peak, 2) if fallback_peak else None,
+            },
+        )
     if input_identity is not None:
         rows = [row for row in rows if _exact_context_row(row, input_identity)]
         if not rows:
@@ -2897,29 +2952,24 @@ def _target_keyed_estimate(
         fallback_peak = max(
             (float(row["peak_rss_mib"]) for row in fallback_rows), default=0.0,
         ) / 1024.0
-        estimate = max(floor, default_gib, math.ceil(fallback_peak) + int(settings["estimate_margin_gib"]))
-        return estimate, {
-            "kind": "profile default",
-            "source": (
-                f"profile default ({identity_detail or detail})"
-                + (
-                    f"; conservative target fallback peak {fallback_peak:.2f} GiB"
-                    if fallback_peak else ""
-                )
-            ),
-            "rows": 0,
-            "keyed_on_elaboration": require_elaboration,
-            "measured_peak_gib": round(fallback_peak, 2) if fallback_peak else None,
-            "estimate_gib": estimate,
-        }
+        return _need_estimate(
+            fallback_peak, default_gib, str(identity_detail or detail),
+            {
+                "rows": 0,
+                "keyed_on_elaboration": require_elaboration,
+                "measured_peak_gib": round(fallback_peak, 2) if fallback_peak else None,
+            },
+        )
     peak_gib = max(float(row["peak_rss_mib"]) for row in rows) / 1024.0
-    estimate = max(floor, math.ceil(peak_gib) + int(settings["estimate_margin_gib"]))
     exact = [row for row in rows if list(row.get("targets") or []) == list(targets)]
-    return estimate, {
+    return max(1, math.ceil(peak_gib)), {
         "kind": "target rows",
+        "need_gib": round(peak_gib, 2),
+        # The probe could not name what will elaborate: the target's own
+        # rows are the best evidence, but the closure behind them is unknown.
+        "unproven": require_elaboration,
         "source": (
-            f"target rows: max of {len(rows)} measured peak(s) ({peak_gib:.2f} GiB) "
-            f"plus {settings['estimate_margin_gib']} GiB"
+            f"target rows: max of {len(rows)} measured peak(s) ({peak_gib:.2f} GiB)"
             + (" from rows that elaborated" if require_elaboration else "")
             + ("" if len(exact) == len(rows) else f"; {len(rows) - len(exact)} from member targets")
         ),
@@ -2941,89 +2991,30 @@ def classify_contention(
     identity_detail: Optional[str] = None,
     threads: Optional[int] = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Choose a contention class from measurement, defaulting to `sensitive`.
+    """A derived build is `tolerant`; its evidence is carried by the need.
 
-    `tolerant` requires all three: a small stale set now, every module in it
-    measured on the same toolchain and Lake manifest, and a modelled peak
-    below the configured threshold.  The model is the one the estimate uses,
-    so the class and the estimate always describe the same stale set.  Any
-    missing, drifted, or unreadable evidence keeps the conservative class;
-    evidence can only ever relax scheduling, never a floor.
+    Under launch-and-watch, missing or drifted evidence no longer serializes
+    a build: it makes the need an unproven default, at most one unproven unit
+    runs at a time, and the watchdog retracts a unit that outgrows the host.
+    `sensitive` and `exclusive` remain for a caller who states them.  The
+    probe facts are returned so the refusal and ledger row can name them.
     """
-    evidence: dict[str, Any] = {}
+    del settings, digests, threads
     probe = stale if stale is not None else stale_evidence(worktree, targets, real_lake)
-    stale_count = probe["stale"]
-    evidence["resolved_roots"] = probe["roots"]
-    evidence["resolution"] = probe["resolution"]
-    evidence["stale_modules"] = stale_count
-    evidence["stale_detail"] = probe["detail"]
+    evidence: dict[str, Any] = {
+        "resolved_roots": probe["roots"],
+        "resolution": probe["resolution"],
+        "stale_modules": probe["stale"],
+        "stale_detail": probe["detail"],
+    }
     if input_identity is None and identity_detail is not None:
         evidence["reason"] = f"exact input identity unavailable: {identity_detail}"
-        return "sensitive", evidence
-    if probe["roots"] is None:
+    elif probe["roots"] is None:
         evidence["reason"] = probe["resolution"]
-        return "sensitive", evidence
-    limit = int(settings["tolerant_module_count"])
-    if stale_count is None or stale_count > limit:
-        evidence["reason"] = (
-            f"stale set is {stale_count if stale_count is not None else 'unmeasured'} "
-            f"(limit {limit})"
-        )
-        return "sensitive", evidence
-    threshold = float(settings["tolerant_peak_gib"])
-    stale_set = probe.get("stale_set")
-    if stale_set is None:
-        # The probe counted but did not name the modules: the target-keyed
-        # fallback is the only evidence there is.
-        rows, rows_detail = _measured_rows(
-            worktree, targets, *digests, settings, members=True,
-            input_identity=input_identity, threads=threads,
-        )
-        evidence["measurements"] = rows_detail
-        if not rows:
-            evidence["reason"] = rows_detail
-            return "sensitive", evidence
-        peak_gib = max(float(row["peak_rss_mib"]) for row in rows) / 1024.0
-        evidence["measured_peak_gib"] = round(peak_gib, 2)
-        if peak_gib >= threshold:
-            evidence["reason"] = f"measured peak {peak_gib:.2f} GiB is not below {threshold} GiB"
-            return "sensitive", evidence
-        evidence["reason"] = (
-            f"{stale_count} stale module(s) at or below {limit} and a measured peak of "
-            f"{peak_gib:.2f} GiB below {threshold} GiB on the pinned toolchain and manifest"
-        )
-        return "tolerant", evidence
-    if stale_count == 0:
+    elif probe["stale"] == 0:
         evidence["reason"] = "nothing is stale; the build elaborates no module and takes no hold"
-        evidence["measured_peak_gib"] = 0.0
-        return "tolerant", evidence
-    rows, rows_detail = _evidence_rows(worktree, *digests, input_identity, threads)
-    evidence["measurements"] = rows_detail
-    if not rows and rows_detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
-        evidence["reason"] = rows_detail
-        return "sensitive", evidence
-    sizing = size_stale_set(
-        list(stale_set), probe.get("graph"), rows, settings, 0, input_identity,
-    )
-    evidence["measured_peak_gib"] = sizing["peak_gib"]
-    evidence["sizing"] = sizing["kind"]
-    if sizing["unmeasured"]:
-        shown = ", ".join(sizing["unmeasured"][:3])
-        evidence["reason"] = (
-            f"{len(sizing['unmeasured'])} of {stale_count} stale module(s) unmeasured on the "
-            f"pinned inputs ({shown}{', …' if len(sizing['unmeasured']) > 3 else ''})"
-        )
-        return "sensitive", evidence
-    if sizing["peak_gib"] >= threshold:
-        evidence["reason"] = (
-            f"modelled peak {sizing['peak_gib']:.2f} GiB is not below {threshold} GiB"
-        )
-        return "sensitive", evidence
-    evidence["reason"] = (
-        f"{stale_count} stale module(s) at or below {limit}, all measured, and a modelled "
-        f"peak of {sizing['peak_gib']:.2f} GiB below {threshold} GiB on the pinned "
-        "toolchain and manifest"
-    )
+    else:
+        evidence["reason"] = "derived builds are tolerant; the need carries the evidence"
     return "tolerant", evidence
 
 
@@ -3039,7 +3030,11 @@ def derive_memory_gib(
     identity_detail: Optional[str] = None,
     threads: Optional[int] = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Propose a whole-GiB estimate from measurement, never below the floor.
+    """Propose the build's need from evidence, with no margin.
+
+    Returns ``(estimate_gib, evidence)``: the whole-GiB ceiling of the need,
+    and evidence carrying ``need_gib`` (the float the semaphore charges) and
+    ``unproven`` (true when the need is a default rather than evidence).
 
     ``stale`` is the probe's evidence for this build.  When it names the stale
     set, the estimate is sized from those modules' own measured cost, whatever
@@ -3048,7 +3043,6 @@ def derive_memory_gib(
     a caller stated the class and no probe ran — the target-keyed fallback
     applies, keyed on elaboration exactly as before.
     """
-    floor = int(settings["minimum_estimate_gib"])
     stale_set = stale.get("stale_set") if stale is not None else None
     if stale_set is None:
         count = stale["stale"] if stale is not None else stale_modules
@@ -3075,17 +3069,13 @@ def derive_memory_gib(
             list(stale_set), stale.get("graph"), rows, settings, default_gib, fallback_identity,
             failed_rows, digests[0],
         )
-        fallback_peak = float(fallback["fallback_peak_gib"] or fallback["peak_gib"])
-        estimate = max(
-            floor, default_gib, int(fallback["estimate_gib"]),
-            math.ceil(fallback_peak) + int(settings["estimate_margin_gib"])
-            if fallback_peak else 0,
-        )
-        return estimate, {
-            "kind": "profile default",
+        return int(fallback["estimate_gib"]), {
+            "kind": fallback["kind"],
+            "need_gib": fallback["need_gib"],
+            "unproven": fallback["unproven"],
             "source": (
-                f"profile default (exact input identity unavailable: {identity_detail}); "
-                f"compatibility fallback: {fallback['source']}"
+                f"exact input identity unavailable ({identity_detail}); "
+                f"repository-scoped evidence: {fallback['source']}"
             ),
             "rows": fallback["rows"],
             "keyed_on_elaboration": True,
@@ -3093,9 +3083,11 @@ def derive_memory_gib(
         }
     rows, detail = _evidence_rows(worktree, *digests, input_identity, threads)
     if not rows and detail in {"ledger unreadable", "worktree toolchain or manifest digest unavailable"}:
-        return max(floor, default_gib), {
+        return int(default_gib), {
             "kind": "profile default",
-            "source": f"profile default ({detail})",
+            "need_gib": float(default_gib),
+            "unproven": True,
+            "source": f"profile default ({detail}); unproven",
             "rows": 0,
             "keyed_on_elaboration": True,
         }
@@ -3108,6 +3100,8 @@ def derive_memory_gib(
     )
     return int(sizing["estimate_gib"]), {
         "kind": sizing["kind"],
+        "need_gib": sizing["need_gib"],
+        "unproven": sizing["unproven"],
         "source": sizing["source"],
         "rows": sizing["rows"],
         "keyed_on_elaboration": True,
@@ -3268,9 +3262,13 @@ def _terminate_process_group(proc: subprocess.Popen[str], timeout: float = 10.0)
 
 
 class RenewalThread(threading.Thread):
-    def __init__(self, goal: str, proc: subprocess.Popen[str], interval: int = RENEW_INTERVAL_SECONDS):
+    def __init__(
+        self, goal: str, proc: subprocess.Popen[str], interval: int = RENEW_INTERVAL_SECONDS,
+        watched: bool = False,
+    ):
         super().__init__(daemon=True)
         self.goal = goal
+        self.watched = watched
         self.proc = proc
         self.interval = interval
         self.stop_event = threading.Event()
@@ -3281,7 +3279,10 @@ class RenewalThread(threading.Thread):
     def run(self) -> None:
         while not self.stop_event.wait(self.interval):
             try:
-                ok, detail = semaphore.renew(self.goal, semaphore.ADAPTIVE_LEASE_SECONDS)
+                ok, detail = semaphore.renew(
+                    self.goal, semaphore.ADAPTIVE_LEASE_SECONDS,
+                    **({"watched": True} if self.watched else {}),
+                )
             except Exception as exc:
                 ok = False
                 detail = f"renewal raised {type(exc).__name__}"
@@ -3294,6 +3295,260 @@ class RenewalThread(threading.Thread):
     def stop(self) -> None:
         self.stop_event.set()
         self.join(timeout=2)
+
+
+def _reclaim_idle_workers(goal: str) -> str:
+    """Reclaim this goal's idle language-server workers through the scoped path."""
+    try:
+        completed = subprocess.run(
+            [os.sys.executable, "-m", "creme", "reclaim", "--idle-workers",
+             str(WATCHDOG_RECLAIM_IDLE_MINUTES), "--goal", goal],
+            cwd=str(semaphore.canonical_creme_root()), capture_output=True, text=True,
+            timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError, semaphore.SemaphoreError) as exc:
+        return f"reclaim unavailable: {type(exc).__name__}"
+    try:
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        return f"reclaim {report.get('status')}: {len(report.get('owned_targets') or [])} worker(s)"
+    except (IndexError, ValueError, AttributeError):
+        return f"reclaim exit {completed.returncode}"
+
+
+def watchdog_red(sample: Any, floor_gib: float) -> Optional[str]:
+    """Why the host is at the drain level now, or None.
+
+    Drain level is available memory below the floor, or an active
+    swap/compressor pressure cause: the watchdog reclaims idle
+    language-server workers, and admission stops starting heavy work, but
+    nothing running is retracted for it.  An unreadable sample is not red.
+    """
+    cause = semaphore._pressure_cause(sample)
+    if cause is not None:
+        return f"swap/compressor pressure: {cause}"
+    _free, available, _total = semaphore._headroom_values(sample, None)
+    if available is not None and available < floor_gib:
+        return f"available {available:.2f} GiB is below the {floor_gib:.2f} GiB floor"
+    return None
+
+
+def _pressure_level(sample: Any) -> Optional[int]:
+    data = getattr(sample, "data", None)
+    level = data.get("memory_pressure_level") if isinstance(data, dict) else None
+    return level if isinstance(level, int) and not isinstance(level, bool) else None
+
+
+def watchdog_critical(
+    sample: Any,
+    floor_gib: float,
+    swap_history: Optional[list[tuple[float, float]]] = None,
+    warning_seconds: Optional[float] = None,
+) -> Optional[str]:
+    """Why the host is at the retraction level now, or None; only this retracts.
+
+    Retraction level is the kernel's VM pressure level at warning or worse
+    (Darwin, >= `DARWIN_WARNING_PRESSURE_LEVEL`) held for
+    `DARWIN_WARNING_SUSTAINED_SECONDS` (``warning_seconds`` is how long it has
+    held), swap in use rising by `SWAP_GROWTH_CRITICAL_MIB` within
+    `SWAP_GROWTH_WINDOW_SECONDS` (``swap_history`` holds ``(time, MiB)``),
+    or, where availability is a direct measure (Linux `MemAvailable`),
+    availability below the floor or PSI memory "full" at
+    `PSI_FULL_CRITICAL_AVG10`.
+    """
+    if sample is None or getattr(sample, "status", None) != "OK" or not isinstance(sample.data, dict):
+        return None
+    data = sample.data
+    level = _pressure_level(sample)
+    if (
+        level is not None and level >= DARWIN_WARNING_PRESSURE_LEVEL
+        and warning_seconds is not None and warning_seconds >= DARWIN_WARNING_SUSTAINED_SECONDS
+    ):
+        return f"kernel memory pressure level {level} held {warning_seconds:.0f}s"
+    if swap_history:
+        latest_time, latest = swap_history[-1]
+        earliest = min(
+            (used for when, used in swap_history if latest_time - when <= SWAP_GROWTH_WINDOW_SECONDS),
+            default=latest,
+        )
+        if latest - earliest >= SWAP_GROWTH_CRITICAL_MIB:
+            return (
+                f"swap grew {(latest - earliest) / 1024:.2f} GiB within "
+                f"{SWAP_GROWTH_WINDOW_SECONDS:.0f}s"
+            )
+    if data.get("memory_available_direct") is True:
+        _free, available, _total = semaphore._headroom_values(sample, None)
+        if available is not None and available < floor_gib:
+            return f"available {available:.2f} GiB is below the {floor_gib:.2f} GiB floor"
+        psi = data.get("memory_psi_full_avg10")
+        if isinstance(psi, (int, float)) and not isinstance(psi, bool) and psi >= PSI_FULL_CRITICAL_AVG10:
+            return f"memory PSI full avg10 is {psi:.1f}%"
+    return None
+
+
+class Watchdog(threading.Thread):
+    """Launch-and-watch: answer memory pressure while Lake runs.
+
+    About once per ``interval`` it samples host headroom.  On the first
+    drain-level or critical sample of an episode it reclaims this goal's idle
+    language-server workers.  Only a critical signal (`watchdog_critical`)
+    retracts: if it persists ``grace`` seconds, the unit first in the
+    semaphore's retraction order (youngest unproven, then youngest proven)
+    terminates its process group; each later unit in that order waits
+    ``step`` seconds more.  The order is snapshotted when the critical spell
+    starts, so one retraction does not promote the next unit.
+    """
+
+    def __init__(
+        self,
+        goal: str,
+        proc: subprocess.Popen[str],
+        *,
+        floor_gib: float = semaphore.ADMISSION_FLOOR_GIB,
+        probe: Optional[Callable[[], Any]] = None,
+        reclaim: Optional[Callable[[str], str]] = None,
+        order: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        terminate: Optional[Callable[[subprocess.Popen[str]], bool]] = None,
+        interval: float = WATCHDOG_INTERVAL_SECONDS,
+        grace: float = WATCHDOG_GRACE_SECONDS,
+        step: float = WATCHDOG_STEP_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        reclaim_async: bool = True,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.reclaim_async = reclaim_async
+        self.goal = goal
+        self.proc = proc
+        self.floor_gib = float(floor_gib)
+        self.probe = probe or (lambda: get_adapter().memory_headroom())
+        self.reclaim = reclaim or _reclaim_idle_workers
+        self.order = order or semaphore.retraction_order
+        self.terminate = terminate or _terminate_process_group
+        self.interval = interval
+        self.grace = grace
+        self.step = step
+        self.clock = clock
+        self.stop_event = threading.Event()
+        self.events: list[str] = []
+        self.retracted = False
+        self.cleanup_proved = True
+        self.min_available_gib: Optional[float] = None
+        self._episode: Optional[float] = None
+        self._critical: Optional[float] = None
+        self._deadline: Optional[float] = None
+        self._swap: list[tuple[float, float]] = []
+        self._warning: Optional[float] = None
+
+    def _rank(self) -> tuple[int, int]:
+        try:
+            order = self.order()
+        except Exception as exc:  # the state being unreadable must not stop the build
+            self.events.append(f"order unavailable: {type(exc).__name__}")
+            return 0, 1
+        labels = [str(item.get("label")) for item in order]
+        return (labels.index(self.goal) if self.goal in labels else len(labels)), len(labels)
+
+    def _reclaim_in_background(self) -> None:
+        """Reclaim without delaying the next sample's retraction decision."""
+        def run() -> None:
+            try:
+                self.events.append(self.reclaim(self.goal))
+            except Exception as exc:
+                self.events.append(f"reclaim failed: {type(exc).__name__}")
+        if self.reclaim_async:
+            threading.Thread(target=run, daemon=True).start()
+        else:
+            run()
+
+    def check(self) -> bool:
+        """One sample; returns True once this unit has been retracted."""
+        poll = getattr(self.proc, "poll", None)
+        if callable(poll) and poll() is not None:
+            return False  # the build already exited: there is nothing to retract
+        try:
+            sample = self.probe()
+        except Exception:
+            return False
+        _free, available, _total = semaphore._headroom_values(sample, None)
+        if available is not None:
+            self.min_available_gib = (
+                available if self.min_available_gib is None
+                else min(self.min_available_gib, available)
+            )
+        now = self.clock()
+        data = getattr(sample, "data", None)
+        swap = data.get("swap_used_mib") if isinstance(data, dict) else None
+        if isinstance(swap, (int, float)) and not isinstance(swap, bool):
+            self._swap.append((now, float(swap)))
+            self._swap = [item for item in self._swap if now - item[0] <= SWAP_GROWTH_WINDOW_SECONDS]
+        level = _pressure_level(sample)
+        if level is not None and level >= DARWIN_WARNING_PRESSURE_LEVEL:
+            if self._warning is None:
+                self._warning = now
+        else:
+            self._warning = None
+        critical = watchdog_critical(
+            sample, self.floor_gib, self._swap,
+            None if self._warning is None else now - self._warning,
+        )
+        why = critical or watchdog_red(sample, self.floor_gib)
+        if why is None:
+            if self._episode is not None:
+                self.events.append(f"cleared after {now - self._episode:.1f}s")
+            self._episode = self._critical = self._deadline = None
+            return False
+        if self._episode is None:
+            self._episode = now
+            self.events.append(f"{'critical' if critical else 'drain'}: {why}")
+            self._reclaim_in_background()
+        if critical is None:
+            if self._critical is not None:
+                self.events.append(f"critical cleared after {now - self._critical:.1f}s")
+            self._critical = self._deadline = None
+            return False
+        if self._critical is None:
+            self._critical = now
+            rank, units = self._rank()
+            self._deadline = now + self.grace + self.step * rank
+            self.events.append(f"critical: {critical}; retraction rank {rank + 1} of {max(units, 1)}")
+            return False
+        if now < float(self._deadline or now):
+            return False
+        self.events.append(f"retract after {now - self._critical:.1f}s critical: {critical}")
+        if callable(poll) and poll() is not None:
+            return False
+        self.retracted = True
+        try:
+            semaphore.record_retraction(self.goal, critical)
+        except Exception:
+            pass
+        self.cleanup_proved = self.terminate(self.proc)
+        return True
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            if self.check():
+                return
+            self.stop_event.wait(self.interval)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.join(timeout=max(2.0, self.interval * 3))
+        if self.retracted and self.is_alive():
+            # Termination proof takes up to two signal timeouts.
+            self.join(timeout=30.0)
+
+
+@dataclass(frozen=True)
+class WatchdogConfig:
+    """Injectable watchdog settings; the defaults are the production ones."""
+
+    floor_gib: float = semaphore.ADMISSION_FLOOR_GIB
+    probe: Optional[Callable[[], Any]] = None
+    reclaim: Optional[Callable[[str], str]] = None
+    order: Optional[Callable[[], list[dict[str, Any]]]] = None
+    interval: float = WATCHDOG_INTERVAL_SECONDS
+    grace: float = WATCHDOG_GRACE_SECONDS
+    step: float = WATCHDOG_STEP_SECONDS
 
 
 # Refusals the walk answers: the whole closure does not fit now (LIGHT_ONLY)
@@ -3394,6 +3649,7 @@ def _walk_unit(
     wait_seconds: Optional[int],
     full_output: bool,
     output: TextIO,
+    min_need_gib: Optional[float] = None,
 ) -> dict[str, Any]:
     """Run one ordinary owned build and print one line about it.
 
@@ -3407,6 +3663,7 @@ def _walk_unit(
     code = run_lake_build(
         goal, unit_targets, threads=threads, wait_seconds=wait_seconds,
         stdout=buffer, full_output=full_output,
+        **({"min_need_gib": min_need_gib} if min_need_gib is not None else {}),
     )
     elapsed = round(time.monotonic() - started, 1)
     summary = _last_json(buffer.getvalue())
@@ -3423,6 +3680,10 @@ def _walk_unit(
         unit["failed"] = summary["failed"]
     if "target_verdicts" in summary:
         unit["target_verdicts"] = summary["target_verdicts"]
+    if isinstance(summary.get("peak_rss_mib"), (int, float)):
+        unit["peak_gib"] = round(float(summary["peak_rss_mib"]) / 1024.0, 2)
+    if code == RETRACTED_EXIT:
+        unit["retracted"] = True
     if code != 0:
         print(buffer.getvalue(), end="", file=output)
     build_text = f"{build_seconds:.1f}s" if isinstance(build_seconds, (int, float)) else "-"
@@ -3432,6 +3693,43 @@ def _walk_unit(
         file=output, flush=True,
     )
     return unit
+
+
+def _walk_unit_once_more(
+    goal: str,
+    unit_targets: list[str],
+    label: str,
+    *,
+    threads: int,
+    wait_seconds: Optional[int],
+    full_output: bool,
+    output: TextIO,
+) -> dict[str, Any]:
+    """Run a walk unit; re-queue it once, at its observed peak, if it was retracted.
+
+    The re-queued unit waits (``wait_seconds``, or `WALK_REQUEUE_WAIT_SECONDS`)
+    until a need of that peak fits.  A second retraction stops the walk.
+    """
+    unit = _walk_unit(
+        goal, unit_targets, label, threads=threads, wait_seconds=wait_seconds,
+        full_output=full_output, output=output,
+    )
+    if not unit.get("retracted"):
+        return unit
+    observed = unit.get("peak_gib")
+    print(
+        f"walk {label}: retracted at {observed if observed is not None else '?'} GiB; "
+        "re-queueing once, sized by that observed peak",
+        file=output, flush=True,
+    )
+    retry = _walk_unit(
+        goal, unit_targets, f"{label} (re-queued)", threads=threads,
+        wait_seconds=wait_seconds or WALK_REQUEUE_WAIT_SECONDS,
+        full_output=full_output, output=output,
+        min_need_gib=float(observed) if isinstance(observed, (int, float)) else None,
+    )
+    retry["requeued_after"] = unit
+    return retry
 
 
 def _walk_stale_set(
@@ -3448,8 +3746,9 @@ def _walk_stale_set(
     """Build a refused closure one stale module at a time, then the targets.
 
     Sequential by design: host memory is the constraint, so no unit runs
-    beside another.  The first unit that fails or is refused stops the walk;
-    everything above it would only fail again.
+    beside another.  A unit the watchdog retracts is re-queued once at its
+    observed peak; the first unit that fails, is refused, or retracts twice
+    stops the walk; everything above it would only fail again.
     """
     print(
         f"walk: the whole closure was refused ({whole_admission}); building "
@@ -3460,7 +3759,7 @@ def _walk_stale_set(
     stopped: Optional[dict[str, Any]] = None
     remaining: list[str] = []
     for index, module in enumerate(order):
-        unit = _walk_unit(
+        unit = _walk_unit_once_more(
             goal, [module], f"{index + 1}/{len(order)} {module}",
             threads=threads, wait_seconds=wait_seconds, full_output=full_output, output=output,
         )
@@ -3472,7 +3771,7 @@ def _walk_stale_set(
             break
     final: Optional[dict[str, Any]] = None
     if stopped is None:
-        final = _walk_unit(
+        final = _walk_unit_once_more(
             goal, list(targets), f"targets {' '.join(targets)}",
             threads=threads, wait_seconds=wait_seconds, full_output=full_output, output=output,
         )
@@ -3523,7 +3822,16 @@ def run_lake_build(
     stdout: Optional[TextIO] = None,
     full_output: bool = False,
     walk: bool = False,
+    min_need_gib: Optional[float] = None,
+    watchdog: bool = True,
+    watch: Optional[WatchdogConfig] = None,
 ) -> int:
+    """Run one owned Lake build: probe, size, admit, launch, watch, record.
+
+    ``watchdog`` False disables the launch-and-watch watchdog (tests only);
+    ``watch`` injects its settings.  ``min_need_gib`` floors the need, which
+    is how a walk re-queues a retracted unit at its observed peak.
+    """
     output = stdout or os.sys.stdout
     cwd = Path.cwd().resolve()
     _settings_cache: dict[str, int] = {}
@@ -3647,15 +3955,20 @@ def run_lake_build(
     # The estimate reuses the class's probe: the two answers describe one
     # stale set.
     measured_stale = probe_evidence["stale"] if probe_evidence is not None else None
+    need_gib: float
+    unproven = False
     if memory_gib is None:
         memory_gib, estimate_evidence = derive_memory_gib(
             worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale,
             probe_evidence, input_identity, identity_detail, threads,
         )
+        need_gib = float(estimate_evidence.get("need_gib") or memory_gib)
+        unproven = bool(estimate_evidence.get("unproven"))
     elif probe_evidence is not None:
+        need_gib = float(memory_gib)
         # An explicit estimate is honoured, but the reader is told what the
-        # evidence would have proposed: a larger one is charged 1.25x and can
-        # be passed over by every smaller request on a busy host.
+        # evidence would have proposed: a larger one is charged in full and
+        # can be passed over by every smaller request on a busy host.
         derived, derived_evidence = derive_memory_gib(
             worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB, measured_stale,
             probe_evidence, input_identity, identity_detail, threads,
@@ -3670,13 +3983,21 @@ def run_lake_build(
             print(
                 f"estimate: an explicit --memory-gib {memory_gib} exceeds the "
                 f"{derived} GiB this worktree's evidence supports "
-                f"({derived_evidence['source']}); it is charged "
-                f"{semaphore._charged_memory_gib(memory_gib)} GiB and can be passed over by "
-                "every smaller request while it waits",
+                f"({derived_evidence['source']}); it is charged in full and can be "
+                "passed over by every smaller request while it waits",
                 file=output,
             )
     else:
+        need_gib = float(memory_gib)
         estimate_evidence = {"source": "explicit", "explicit_gib": memory_gib}
+    if min_need_gib is not None and min_need_gib > 0:
+        # A re-queued retraction: its observed peak is evidence of at least
+        # this much, whatever the ledger-derived need said.
+        need_gib = max(need_gib, round(float(min_need_gib), 2))
+        memory_gib = max(int(memory_gib), math.ceil(need_gib))
+        unproven = False
+        estimate_evidence = dict(estimate_evidence, requeue_floor_gib=round(float(min_need_gib), 2))
+    estimate_evidence = dict(estimate_evidence, need_gib=round(need_gib, 2), unproven=unproven)
     stale_line = _stale_line(probe_evidence)
 
     lake_args = [str(real_lake), "build"]
@@ -3737,6 +4058,9 @@ def run_lake_build(
                 contention=contention,
                 wait_seconds=wait,
                 estimate_source=_estimate_note(estimate_evidence),
+                need_gib=need_gib,
+                unproven=unproven,
+                watched=watchdog,
                 **(
                     {
                         "poll_seconds": float(settings()["wait_poll_seconds"]),
@@ -3840,6 +4164,7 @@ def run_lake_build(
     proc: Optional[subprocess.Popen[str]] = None
     sampler: Optional[ProcessSampler] = None
     renewer: Optional[RenewalThread] = None
+    guard: Optional[Watchdog] = None
     lines: list[str] = []
     exit_code = 1
     interrupted = False
@@ -3876,7 +4201,16 @@ def run_lake_build(
         sampler.start()
         if not fresh:
             renewer = RenewalThread(goal, proc)
+            renewer.watched = watchdog
             renewer.start()
+            if watchdog:
+                config = watch or WatchdogConfig()
+                guard = Watchdog(
+                    goal, proc, floor_gib=config.floor_gib, probe=config.probe,
+                    reclaim=config.reclaim, order=config.order, interval=config.interval,
+                    grace=config.grace, step=config.step,
+                )
+                guard.start()
         assert proc.stdout is not None
         for line in proc.stdout:
             lines.append(line)
@@ -3891,7 +4225,14 @@ def run_lake_build(
             elif selector.keep(line):
                 printer.add(line)
         exit_code = proc.wait()
-        if renewer is not None and renewer.refused:
+        if guard is not None:
+            # A retraction ends Lake's output; wait for the watchdog to finish
+            # recording it before judging the exit.
+            guard.stop()
+        if guard is not None and guard.retracted:
+            exit_code = RETRACTED_EXIT
+            cleanup_proved = guard.cleanup_proved
+        elif renewer is not None and renewer.refused:
             exit_code = exit_code or 2
             cleanup_proved = renewer.cleanup_proved
     except KeyboardInterrupt:
@@ -3904,6 +4245,8 @@ def run_lake_build(
             sampler.stop()
         if renewer:
             renewer.stop()
+        if guard is not None:
+            guard.stop()
         if log_file is not None:
             try:
                 log_file.close()
@@ -3936,16 +4279,38 @@ def run_lake_build(
                 "source/configuration inputs changed during build; "
                 f"post-build identity unavailable or different ({post_detail})"
             )
-    module_peaks = (
-        {
-            module: round(value, 1)
-            for module, value in sorted(sampler.module_peak_mib.items())
-            if module in rebuilt
-        }
+    retracted = guard is not None and guard.retracted
+    sampled_peaks = (
+        dict(sampler.module_peak_mib)
         if sampler and getattr(sampler, "module_peak_mib", None) else {}
     )
+    in_flight: list[str] = []
+    if retracted:
+        # The modules Lake was elaborating when the watchdog stopped it: their
+        # partial peaks floor them next time, as a failed attempt's would.
+        in_flight = sorted(module for module in sampled_peaks if module not in rebuilt)
+        if not in_flight and probe_evidence is not None:
+            # No per-module attribution: the observed process peak floors the
+            # whole remaining stale set as a closure (see size_stale_set), so
+            # a retry of that set is never priced as before.
+            in_flight = sorted(set(probe_evidence.get("stale_set") or []) - set(rebuilt))
+        modules_failed = sorted(set(modules_failed) | set(in_flight))
+    module_peaks = {
+        module: round(value, 1)
+        for module, value in sorted(sampled_peaks.items())
+        if module in rebuilt or module in in_flight
+    }
     peak_mib = round(sampler.peak_rss_mib, 1) if sampler and sampler.samples else None
     hint = repeat_failure(worktree, targets, settings()) if exit_code == 1 else None
+    if retracted:
+        observed = f"{peak_mib / 1024.0:.2f} GiB" if peak_mib is not None else "unsampled"
+        hint = (
+            f"RETRACTED: the watchdog stopped this build under memory pressure "
+            f"({guard.events[-1] if guard and guard.events else 'red zone'}); its observed "
+            f"peak {observed} is now ledger evidence"
+            + (f" for {', '.join(in_flight)}" if in_flight else "")
+            + "; re-run with --wait (or --walk) to retry once that fits"
+        )
     restart_line = (
         (
             f"rebuilt {len(rebuilt)} module(s): {', '.join(rebuilt[:12])}"
@@ -3956,11 +4321,10 @@ def run_lake_build(
         )
         if rebuilt else None
     )
-    # The margin the estimate carried over what the build actually needed.
-    # Recording it per row makes the +1 GiB a measured quantity rather than a
-    # belief; the margin itself is unchanged.
+    # How far the build's peak exceeded the need it was admitted on: the
+    # watchdog's work, recorded per row as a measured quantity.
     under_cover = (
-        round(max(0.0, peak_mib / 1024.0 - float(memory_gib)), 2)
+        round(max(0.0, peak_mib / 1024.0 - float(need_gib)), 2)
         if peak_mib is not None else None
     )
     record = {
@@ -3983,7 +4347,13 @@ def run_lake_build(
         "evidence_contention": contention,
         "estimate_source": str(estimate_evidence.get("source", "explicit")),
         "estimate_gib": memory_gib,
+        "need_gib": round(float(need_gib), 2),
+        "unproven": unproven,
         "estimate_under_cover_gib": under_cover,
+        **({"min_available_gib": round(guard.min_available_gib, 2)}
+           if guard is not None and guard.min_available_gib is not None else {}),
+        **({"watchdog_events": [str(event) for event in guard.events]}
+           if guard is not None and guard.events else {}),
         **({"evidence_reason": str(evidence["reason"])} if evidence.get("reason") else {}),
         **({"resolved_roots": [str(root) for root in evidence["resolved_roots"]]}
            if isinstance(evidence.get("resolved_roots"), list) else {}),
@@ -3995,6 +4365,7 @@ def run_lake_build(
         **({"hint": hint} if hint else {}),
         **({"requested_contention": requested_contention} if requested_contention else {}),
         **({"outcome": "killed"} if interrupted else {}),
+        **({"outcome": "retracted"} if retracted else {}),
         **({"census": True, "dependency": str(dependency)} if census else {}),
         **({"dependency_rev": dependency_rev} if dependency_rev else {}),
         "identity_status": identity_status,
@@ -4017,7 +4388,9 @@ def run_lake_build(
         signal.signal(signum, handler)
     append_ledger(record)
     summary: dict[str, Any] = {
-        "status": "OK" if exit_code == 0 else "ERROR", "exit": exit_code,
+        "status": (
+            "OK" if exit_code == 0 else "RETRACTED" if retracted else "ERROR"
+        ), "exit": exit_code,
         "wall_seconds": round(wall, 3), "peak_rss_mib": round(sampler.peak_rss_mib, 1) if sampler and sampler.samples else None,
         "peak_lean_rss_mib": round(sampler.peak_lean_rss_mib, 1) if sampler and sampler.samples else None,
         "max_concurrent_lean": sampler.max_concurrent_lean if sampler and sampler.samples else None,
@@ -4038,6 +4411,7 @@ def run_lake_build(
         target: (
             "built" if exit_code == 0
             else "interrupted" if interrupted
+            else "retracted" if retracted
             else "failed" if target in failed
             else "not confirmed: the build failed"
         )
@@ -4045,6 +4419,10 @@ def run_lake_build(
     }
     if interrupted:
         summary["outcome"] = "killed"
+    if retracted:
+        summary["outcome"] = "retracted"
+        summary["retracted_modules"] = in_flight
+        summary["watchdog_events"] = list(guard.events) if guard else []
     if census:
         summary["dependency"] = dependency
         summary["dependency_rev"] = dependency_rev

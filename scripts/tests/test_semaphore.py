@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import multiprocessing
 import os
 import stat
@@ -57,7 +58,7 @@ def concurrent_admit_worker(state_directory, label, start, results):
     result = semaphore.adaptive_acquire(
         label,
         "concurrent large proof",
-        memory_gib=8,
+        memory_gib=10,
         adapter=HeadroomAdapter(free_percent=80, total_gib=24),
         policy={
             "task_memory_gib": 8,
@@ -248,10 +249,9 @@ class SemaphoreTest(unittest.TestCase):
         )
         self.assertEqual((note, memory_gib, contention), ("proof", 2, "tolerant"))
 
-    def test_measured_charge_survives_persistence_renewal_and_conversion(self):
-        source = "derived: measured stale set: 1 module(s) all measured"
+    def test_need_survives_persistence_renewal_and_conversion(self):
         ok, detail = semaphore.adaptive_acquire(
-            "goal", "measured proof", memory_gib=9, estimate_source=source,
+            "goal", "measured proof", memory_gib=9, need_gib=8.6,
         )
         self.assertTrue(ok, detail)
         hold = semaphore.snapshot()["soft"][0]
@@ -259,34 +259,19 @@ class SemaphoreTest(unittest.TestCase):
             hold["note"], 2,
         )
         self.assertEqual((note, memory_gib, contention), ("measured proof", 9, "tolerant"))
-        self.assertAlmostEqual(charged, 11.7)
-        self.assertAlmostEqual(semaphore._hold_reservation(hold, 2), 11.7)
+        self.assertAlmostEqual(charged, 8.6)
+        self.assertAlmostEqual(semaphore._hold_need(hold, 2), 8.6)
 
         renewed, renew_detail = semaphore.renew("goal")
         self.assertTrue(renewed, renew_detail)
-        self.assertAlmostEqual(
-            semaphore._hold_reservation(semaphore.snapshot()["soft"][0], 2), 11.7,
-        )
+        self.assertAlmostEqual(semaphore._hold_need(semaphore.snapshot()["soft"][0], 2), 8.6)
 
         converted, convert_detail = semaphore.acquire(
             "hard", "goal", "measured exclusive", memory_gib=9,
         )
         self.assertTrue(converted, convert_detail)
-        hard = semaphore.snapshot()["hard"]
-        self.assertAlmostEqual(semaphore._hold_reservation(hard, 2), 11.7)
-
-    def test_conversion_decision_and_hold_agree_at_the_four_gib_boundary(self):
-        source = "derived: measured stale set: 1 module(s) all measured"
-        ok, detail = semaphore.adaptive_acquire(
-            "goal", "measured proof", memory_gib=4, estimate_source=source,
-        )
-        self.assertTrue(ok, detail)
-        converted, convert_detail = semaphore.acquire(
-            "hard", "goal", "exclusive continuation", memory_gib=4,
-        )
-        self.assertTrue(converted, convert_detail)
-        self.assertIn("charged=5.2 GiB", convert_detail)
-        self.assertEqual(semaphore._hold_reservation(semaphore.snapshot()["hard"], 2), 5.2)
+        self.assertIn("need=8.6 GiB", convert_detail)
+        self.assertAlmostEqual(semaphore._hold_need(semaphore.snapshot()["hard"], 2), 8.6)
 
     def test_resized_conversion_rechecks_capacity_and_preserves_the_soft_hold(self):
         ok, detail = semaphore.adaptive_acquire("goal", "small", memory_gib=2)
@@ -298,32 +283,32 @@ class SemaphoreTest(unittest.TestCase):
         self.assertIn("NEVER_FITS", convert_detail)
         state = semaphore.snapshot()
         self.assertIsNone(state["hard"])
-        self.assertEqual([(hold["label"], semaphore._hold_reservation(hold, 2))
-                          for hold in state["soft"]], [("goal", 3)])
+        self.assertEqual([(hold["label"], semaphore._hold_need(hold, 2))
+                          for hold in state["soft"]], [("goal", 2.0)])
 
-    def test_largest_fitting_estimate_executes_the_charge_boundary(self):
-        for kind, estimate, charge in (
-            ("measured", 7, 9.1),
-            ("measured", 13, 16.9),
-            ("measured", 14, 18.2),
-        ):
-            with self.subTest(kind=kind, estimate=estimate):
-                self.assertEqual(semaphore._charged_memory_gib(estimate, kind), charge)
-                self.assertEqual(semaphore._largest_fitting_estimate_gib(charge, kind), estimate)
-                self.assertEqual(
-                    semaphore._largest_fitting_estimate_gib(charge - 0.001, kind),
-                    estimate - 1,
-                )
+    def test_fit_boundary_is_need_plus_admitted_plus_floor(self):
+        sample = HeadroomAdapter(free_percent=50, total_gib=32).memory_headroom()
+        # 16 GiB available: a 10 GiB need beside 4 GiB admitted fits exactly.
+        self.assertTrue(semaphore.fit_arithmetic(sample, self.policy, 10.0, 4.0)["fits"])
+        self.assertFalse(semaphore.fit_arithmetic(sample, self.policy, 10.01, 4.0)["fits"])
+        fit = semaphore.fit_arithmetic(sample, self.policy, 11.0, 4.0)
+        self.assertEqual(fit["needed_gib"], 17.0)
+        self.assertEqual(fit["largest_fitting_need_gib"], 10.0)
 
-    def test_legacy_admission_note_recharges_with_the_conservative_tier(self):
-        hold = semaphore._hold(
-            "legacy", "legacy proof", 600, memory_gib=9, contention="tolerant",
+    def test_margin_era_and_legacy_notes_are_read_without_recharging(self):
+        # A pre-launch-and-watch hold carries a margin-inflated charge; it is
+        # read as that unit's need, which only over-counts it.
+        margin_era = semaphore._hold(
+            "margin", "proof", 600, memory_gib=9, contention="tolerant", charged_gib=11.7,
         )
-        self.assertEqual(semaphore._hold_reservation(hold, 2), 12)
-        boundary = semaphore._hold(
-            "legacy-four", "legacy proof", 600, memory_gib=4, contention="tolerant",
+        self.assertEqual(semaphore._hold_need(margin_era, 2), 11.7)
+        self.assertEqual(
+            semaphore.hold_flags(margin_era), {"unproven": False, "watched": False},
         )
-        self.assertEqual(semaphore._hold_reservation(boundary, 2), 5.2)
+        legacy = semaphore._hold("legacy", "proof", 600, memory_gib=9, contention="tolerant")
+        self.assertEqual(semaphore._hold_need(legacy, 2), 9.0)
+        plain = semaphore._hold("plain", "no metadata", 600)
+        self.assertEqual(semaphore._hold_need(plain, 2), 2.0)
 
     def test_malformed_charge_or_extra_metadata_keeps_the_known_estimate(self):
         for metadata in (
@@ -343,9 +328,9 @@ class SemaphoreTest(unittest.TestCase):
                 )
                 expected_contention = "legacy" if metadata["contention"] == "future" else "tolerant"
                 self.assertEqual((note, memory, contention, charged), ("proof", 10, expected_contention, None))
-                self.assertEqual(semaphore._hold_reservation(hold, 2), 13)
+                self.assertEqual(semaphore._hold_need(hold, 2), 10.0)
 
-    def test_legacy_same_size_conversion_preserves_conservative_effective_charge(self):
+    def test_legacy_same_size_conversion_keeps_the_estimate_as_need(self):
         ok, detail = semaphore.adaptive_acquire("goal", "legacy", memory_gib=4)
         self.assertTrue(ok, detail)
         path = Path(self.tmp.name) / "state.json"
@@ -358,8 +343,8 @@ class SemaphoreTest(unittest.TestCase):
             "hard", "goal", "legacy conversion", memory_gib=4,
         )
         self.assertTrue(converted, convert_detail)
-        self.assertIn("charged=5.2 GiB", convert_detail)
-        self.assertEqual(semaphore._hold_reservation(semaphore.snapshot()["hard"], 2), 5.2)
+        self.assertIn("need=4.0 GiB", convert_detail)
+        self.assertEqual(semaphore._hold_need(semaphore.snapshot()["hard"], 2), 4.0)
 
     def test_contention_sensitive_work_chooses_hard(self):
         ok, detail = semaphore.adaptive_acquire(
@@ -397,20 +382,23 @@ class SemaphoreTest(unittest.TestCase):
         self.assertIn("run light work", detail)
         self.assertEqual([item["label"] for item in semaphore.snapshot()["soft"]], ["older"])
 
-    def test_parallel_peak_budget_promotes_second_large_task_to_deferred_hard(self):
+    def test_parallel_needs_admit_until_available_less_the_floor_is_used(self):
         policy = {**self.policy, "task_memory_gib": 8, "heavy_workers": 3, "physical_memory_gib": 24.0}
-        adapter = HeadroomAdapter(free_percent=80, total_gib=24)
-        self.assertTrue(semaphore.adaptive_acquire(
-            "first", "large proof", memory_gib=8, adapter=adapter, policy=policy
-        )[0])
+        adapter = HeadroomAdapter(free_percent=80, total_gib=24)   # 19.2 GiB available
+        for label in ("first", "second"):
+            ok, detail = semaphore.adaptive_acquire(
+                label, "large proof", memory_gib=8, adapter=adapter, policy=policy
+            )
+            self.assertTrue(ok, detail)
+            self.assertIn("ADMITTED_SOFT", detail)
 
         ok, detail = semaphore.adaptive_acquire(
-            "second", "large proof", memory_gib=8, adapter=adapter, policy=policy
+            "third", "large proof", memory_gib=8, adapter=adapter, policy=policy
         )
 
         self.assertFalse(ok)
         self.assertIn("DEFER_FOR_HARD", detail)
-        self.assertIn("peak reservations", detail)
+        self.assertIn("need 8.0 GiB + admitted 16.0 GiB + floor 2 GiB", detail)
 
     def test_cross_process_admission_race_is_atomic(self):
         context = multiprocessing.get_context("spawn")
@@ -523,22 +511,35 @@ class SemaphoreTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("YIELD_HEAVY", detail)
 
-    def test_renew_proactively_serializes_overcommitted_peak_reservations(self):
+    def test_renew_proactively_serializes_needs_above_physical_memory(self):
         permissive = {**self.policy, "physical_memory_gib": 64.0}
         strict = {**self.policy, "physical_memory_gib": 24.0}
         adapter = HeadroomAdapter(free_percent=80, total_gib=24)
         self.assertTrue(semaphore.adaptive_acquire(
-            "older", "large proof", memory_gib=8, policy=permissive
+            "older", "large proof", memory_gib=12, need_gib=11.5, policy=permissive
         )[0])
         self.assertTrue(semaphore.adaptive_acquire(
-            "newer", "large proof", memory_gib=8, policy=permissive
+            "newer", "large proof", memory_gib=12, need_gib=11.5, policy=permissive
         )[0])
 
         ok, detail = semaphore.renew("newer", adapter=adapter, policy=strict)
 
         self.assertFalse(ok)
         self.assertIn("YIELD_HEAVY", detail)
-        self.assertIn("peak reservations", detail)
+        self.assertIn("admitted needs exceed physical memory", detail)
+
+    def test_a_watched_hold_renews_through_pressure_its_watchdog_answers(self):
+        self.assertTrue(semaphore.adaptive_acquire(
+            "older", "proof", memory_gib=2, watched=True,
+        )[0])
+        self.assertTrue(semaphore.adaptive_acquire(
+            "newer", "proof", memory_gib=2, watched=True,
+        )[0])
+        drained = HeadroomAdapter(free_percent=10, total_gib=32)
+        self.assertIn("DRAIN_HEAVY", semaphore.renew("newer", adapter=drained)[1])
+        ok, detail = semaphore.renew("newer", adapter=drained, watched=True)
+        self.assertTrue(ok, detail)
+        self.assertIn("CONTINUE_WATCHED", detail)
 
     def test_expired_hold_does_not_take_renewal_priority_from_live_holder(self):
         self.assertTrue(semaphore.adaptive_acquire("expired", "proof")[0])
@@ -870,7 +871,7 @@ class QueueTest(unittest.TestCase):
 
         def wait() -> None:
             result.append(semaphore.adaptive_acquire(
-                "measured", "queued measured", memory_gib=9,
+                "measured", "queued measured", memory_gib=9, need_gib=8.6,
                 estimate_source="derived: measured stale set: one",
                 adapter=self.adapter, policy=self.policy,
                 wait_seconds=5, poll_seconds=0.02,
@@ -884,7 +885,7 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertTrue(result[0][0], result[0][1])
         hold = semaphore.snapshot()["soft"][0]
-        self.assertAlmostEqual(semaphore._hold_reservation(hold, 2), 11.7)
+        self.assertAlmostEqual(semaphore._hold_need(hold, 2), 8.6)
 
     # -- required controls -----------------------------------------------
     def test_a_waiter_whose_process_is_gone_never_blocks_the_queue(self):
@@ -897,9 +898,9 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(remaining, [])
 
     def test_a_large_waiter_refused_for_headroom_does_not_block_a_small_one(self):
-        # 15 GiB charges 19 GiB, which fits the 24 GiB budget but not the
-        # 25.6 GiB currently available once the usability reserve is kept.
-        self.seed_waiter("large", pid=os.getpid(), memory_gib=15, age=600.0)
+        # 24 GiB fits the 32 GiB host less the floor, but not the 25.6 GiB
+        # currently available less the floor.
+        self.seed_waiter("large", pid=os.getpid(), memory_gib=24, age=600.0)
         ok, detail = self.wait_acquire("small", seconds=3, memory_gib=2)
         self.assertTrue(ok, detail)
 
@@ -913,22 +914,21 @@ class QueueTest(unittest.TestCase):
         self.assertIn("manual human-session hold", detail)
         self.assertLess(time.monotonic() - started, 5)
 
-    def test_waiting_never_admits_below_the_drain_floor(self):
-        self.adapter.free_percent = 10
-        started = time.monotonic()
-        ok, detail = self.wait_acquire("drained", seconds=30)
+    def test_waiting_never_admits_below_the_floor(self):
+        self.adapter.free_percent = 10           # 3.2 GiB available of 32
+        ok, detail = self.wait_acquire("drained", seconds=1)
         self.assertFalse(ok)
+        self.assertIn("WAIT_TIMEOUT", detail)
         self.assertIn("LIGHT_ONLY", detail)
-        self.assertIn("10%", detail)
-        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("floor 2 GiB does not fit", detail)
         self.assertEqual(semaphore.snapshot()["soft"], [])
 
     def test_a_charged_peak_above_the_budget_refuses_immediately(self):
         started = time.monotonic()
-        ok, detail = self.wait_acquire("enormous", seconds=30, memory_gib=30)
+        ok, detail = self.wait_acquire("enormous", seconds=30, memory_gib=31)
         self.assertFalse(ok)
         self.assertIn("NEVER_FITS", detail)
-        self.assertIn("largest fitting estimate is 19 GiB", detail)
+        self.assertIn("largest fitting need is 30.0 GiB", detail)
         self.assertLess(time.monotonic() - started, 5)
 
     def test_a_ten_minute_wait_adds_two_log_rows(self):
@@ -1060,11 +1060,10 @@ class QueueVisibilityTest(QueueTest):
 
     # -- B1(a): status shows the live verdict and the arithmetic -----------
     def test_status_prints_the_would_be_verdict_and_arithmetic_for_a_waiter(self):
-        self.seed_waiter("large", pid=os.getpid(), memory_gib=15, age=600.0)
+        self.seed_waiter("large", pid=os.getpid(), memory_gib=24, age=600.0)
         text = semaphore.status_text(self.adapter)
         self.assertIn("would: LIGHT_ONLY", text)
-        self.assertIn("usability reserve", text)
-        self.assertIn("fit: estimate 15 GiB -> charged 19 GiB", text)
+        self.assertIn("fit: need 24.0 GiB + admitted 0.0 GiB + floor 2.0 GiB = 26.0 GiB", text)
         self.assertIn("does not fit now", text)
 
     def test_the_printed_verdict_is_the_one_the_queue_would_compute(self):
@@ -1139,7 +1138,7 @@ class QueueVisibilityTest(QueueTest):
     def test_an_admitted_waiter_names_the_older_waiters_it_passed(self):
         self.adapter.total_gib = 24
         self.policy = {**self.policy, "physical_memory_gib": 24.0}
-        self.seed_waiter("large", pid=os.getpid(), memory_gib=13, age=600.0)
+        self.seed_waiter("large", pid=os.getpid(), memory_gib=18, age=600.0)
         ok, detail = self.wait_acquire("small", seconds=3, memory_gib=2)
         self.assertTrue(ok, detail)
         self.assertIn("passed 1 older waiter(s): large(LIGHT_ONLY)", detail)
@@ -1156,7 +1155,7 @@ class QueueVisibilityTest(QueueTest):
             wait_seconds=1, poll_seconds=0.01, announce=announced.append,
         )
         self.assertTrue(announced)
-        self.assertIn("fit: estimate 2 GiB -> charged 3 GiB", announced[0])
+        self.assertIn("fit: need 2.0 GiB + admitted 0.0 GiB + floor 2.0 GiB", announced[0])
         self.assertIn("fits now", announced[0])
 
     def test_an_explicit_estimate_above_the_default_is_called_out(self):
@@ -1171,7 +1170,7 @@ class QueueVisibilityTest(QueueTest):
 
     def test_an_unschedulable_request_is_told_what_would_fit(self):
         announced: list[str] = []
-        self.adapter.free_percent = 50           # 16 GiB available of 32
+        self.adapter.free_percent = 40           # 12.8 GiB available of 32
         semaphore._waiting_admit(
             "queued", "waiting", 600, memory_gib=12, contention="sensitive",
             adapter=self.adapter, policy=self.policy,
@@ -1179,7 +1178,7 @@ class QueueVisibilityTest(QueueTest):
         )
         joined = "\n".join(announced)
         self.assertIn("does not fit now", joined)
-        self.assertIn("an estimate of at most", joined)
+        self.assertIn("a need of at most 10.8 GiB", joined)
 
     def test_no_fit_line_is_printed_without_wait(self):
         announced: list[str] = []
@@ -2659,13 +2658,13 @@ class MasterLeaseTest(unittest.TestCase):
         self.assertEqual(self.log_actions().count("master-renew"), 2)
 
 
-class NeverFitsAdmissionTest(unittest.TestCase):
-    """Only a physically impossible ask fails fast; live shortages can recover."""
+class LaunchAndWatchAdmissionTest(unittest.TestCase):
+    """Admission refuses only the obviously infeasible (need + admitted + floor)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.adapter = HeadroomAdapter(free_percent=81, total_gib=24)
+        self.adapter = HeadroomAdapter(free_percent=81, total_gib=24)   # 19.44 GiB
         self.policy = {
             "task_memory_gib": 2,
             "heavy_workers": 4,
@@ -2686,114 +2685,146 @@ class NeverFitsAdmissionTest(unittest.TestCase):
         policy_patcher.start()
         self.addCleanup(policy_patcher.stop)
 
-    def test_impossible_ask_reports_never_fits(self):
-        semaphore.status_text()
-        ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=15)
-
-        self.assertFalse(ok, detail)
-        self.assertIn("NEVER_FITS", detail)
-        self.assertIn("split or reduce", detail)
-
-    def test_never_fits_names_largest_fitting_estimate(self):
-        semaphore.status_text()
-        ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=15)
-
-        self.assertFalse(ok, detail)
-        self.assertIn("14 GiB", detail)
-
-    def test_never_fits_is_not_waitable(self):
-        semaphore.status_text()
-        sample = self.adapter.memory_headroom()
-        decision = semaphore._admission_decision(
-            {"hard": None, "soft": []}, "adaptive", "goal", 15, "tolerant",
-            self.adapter, self.policy, sample, tranquil_max_gib=19.44,
+    def decide(self, need, *, state=None, unproven=False, free=81):
+        adapter = HeadroomAdapter(free_percent=free, total_gib=24)
+        return semaphore._admission_decision(
+            state or {"hard": None, "soft": []}, "adaptive", "goal",
+            max(1, math.ceil(need)), "tolerant", adapter, self.policy,
+            adapter.memory_headroom(), need_gib=need, unproven=unproven,
         )
 
-        self.assertFalse(decision.admitted)
-        self.assertEqual(decision.verdict, "NEVER_FITS")
+    def test_admit_refuse_matrix(self):
+        admitted_8 = semaphore._hold(
+            "other", "proof", 600, memory_gib=8, contention="tolerant", charged_gib=7.5,
+        )
+        cases = (
+            # need, admitted holds, free%, verdict
+            (14.8, [], 81, "ADMITTED_SOFT"),      # the ledger's largest peak fits a calm host
+            (17.43, [], 81, "ADMITTED_SOFT"),     # just inside available less the floor
+            (17.45, [], 81, "LIGHT_ONLY"),        # a hair over: wait, never NEVER_FITS
+            (9.9, [admitted_8], 81, "ADMITTED_SOFT"),
+            (10.0, [admitted_8], 81, "DEFER_FOR_HARD"),
+            (22.0, [], 81, "LIGHT_ONLY"),         # physically possible: wait for it
+            (22.01, [], 100, "NEVER_FITS"),       # need alone exceeds RAM less the floor
+            (2.0, [], 20, "ADMITTED_SOFT"),       # 4.8 GiB free: small work still fits
+            (2.0, [], 12, "LIGHT_ONLY"),          # 2.88 GiB free: need + floor does not
+        )
+        for need, holds, free, verdict in cases:
+            with self.subTest(need=need, holds=len(holds), free=free):
+                decision = self.decide(need, state={"hard": None, "soft": list(holds)}, free=free)
+                self.assertEqual(decision.verdict, verdict, decision.detail)
+                self.assertEqual(decision.waitable, verdict != "NEVER_FITS")
+
+    def test_margins_no_longer_block_a_measured_peak_above_nine_gib(self):
+        # The old rule charged ceil(8.6)+1 = 10 GiB x1.30 plus a 6 GiB reserve:
+        # 19 GiB against 17.8 available.  The need alone is 8.6 GiB.
+        ok, detail = semaphore.adaptive_acquire(
+            "goal", "measured build", memory_gib=9, need_gib=8.6,
+            adapter=HeadroomAdapter(free_percent=74.17, total_gib=24),
+        )
+        self.assertTrue(ok, detail)
+        self.assertIn("need=8.6 GiB", detail)
+
+    def test_at_most_one_unproven_unit_runs_at_a_time(self):
+        self.assertTrue(semaphore.adaptive_acquire(
+            "first", "cold", memory_gib=4, unproven=True,
+        )[0])
+        ok, detail = semaphore.adaptive_acquire("second", "cold", memory_gib=4, unproven=True)
+        self.assertFalse(ok)
+        self.assertIn("DEFER_UNPROVEN", detail)
+        proven, detail = semaphore.adaptive_acquire("third", "measured", memory_gib=4)
+        self.assertTrue(proven, detail)
+        semaphore.adaptive_release("first")
+        ok, detail = semaphore.adaptive_acquire("second", "cold", memory_gib=4, unproven=True)
+        self.assertTrue(ok, detail)
+        self.assertIn("(unproven)", detail)
+
+    def test_the_one_unproven_rule_is_waitable_and_a_margin_era_hold_is_proven(self):
+        margin_era = semaphore._hold(
+            "old", "proof", 600, memory_gib=4, contention="tolerant", charged_gib=6.0,
+        )
+        decision = self.decide(4.0, state={"hard": None, "soft": [margin_era]}, unproven=True)
+        self.assertTrue(decision.admitted, decision.detail)
+        unproven = semaphore._hold(
+            "cold", "proof", 600, memory_gib=4, contention="tolerant", charged_gib=4.0,
+            unproven=True,
+        )
+        decision = self.decide(4.0, state={"hard": None, "soft": [unproven]}, unproven=True)
+        self.assertEqual(decision.verdict, "DEFER_UNPROVEN")
+        self.assertTrue(decision.waitable)
+
+    def test_a_stranded_unproven_hold_neither_blocks_nor_ranks(self):
+        dead = subprocess.Popen([os.sys.executable, "-c", "pass"])
+        dead.wait()
+        stranded = semaphore._hold(
+            "gone", "proof", 600, memory_gib=4, contention="tolerant", charged_gib=4.0,
+            unproven=True, watched=True,
+        )
+        stranded.update(pid=dead.pid, acquired_at=1.0, renewed_at=1.0)
+        decision = self.decide(4.0, state={"hard": None, "soft": [stranded]}, unproven=True)
+        self.assertTrue(decision.admitted, decision.detail)
+        # An expired hold whose process is still alive still blocks.
+        blocking = dict(stranded, pid=os.getpid())
+        decision = self.decide(4.0, state={"hard": None, "soft": [blocking]}, unproven=True)
+        self.assertEqual(decision.verdict, "DEFER_UNPROVEN")
+        # And the watchdog's order agrees with admission.
+        path = Path(self.tmp.name) / "state.json"
+        path.write_text(json.dumps({"schema_version": 1, "hard": None, "soft": [stranded]}))
+        self.assertEqual(semaphore.retraction_order(), [])
+        path.write_text(json.dumps({"schema_version": 1, "hard": None, "soft": [blocking]}))
+        self.assertEqual([item["label"] for item in semaphore.retraction_order()], ["gone"])
+
+    def test_a_retraction_row_is_a_valid_log_row(self):
+        from datetime import datetime, timezone
+
+        semaphore.record_retraction("goal", "available 1.20 GiB is below the 2.00 GiB floor")
+        rows, corrupt, status = semaphore.read_log(datetime(2000, 1, 1, tzinfo=timezone.utc))
+        self.assertEqual(corrupt, 0, status)
+        self.assertEqual([(row["action"], row["verdict"]) for row in rows], [("retract", "RETRACTED")])
+
+    def test_swap_pressure_still_drains_admission(self):
+        adapter = HeadroomAdapter(free_percent=81, total_gib=24)
+        sample = adapter.memory_headroom()
+        sample.data["memory_pressure_cause"] = "compressor occupies 9 of 24 GiB"
+        decision = semaphore._admission_decision(
+            {"hard": None, "soft": []}, "adaptive", "goal", 2, "tolerant",
+            adapter, self.policy, sample,
+        )
+        self.assertEqual(decision.verdict, "LIGHT_ONLY")
         self.assertFalse(decision.waitable)
 
-    def test_stale_baseline_falls_back_to_transient_wait(self):
-        root = Path(self.tmp.name)
-        (root / "queue.json").write_text(json.dumps({
-            "schema_version": semaphore.QUEUE_SCHEMA_VERSION,
-            "waiters": [], "activity": {}, "workers": {},
-            "tranquil_max_gib": 19.44,
-            "tranquil_max_at": 1.0,
-        }), encoding="utf-8")
-        ok, detail = semaphore.adaptive_acquire("goal", "broad build", memory_gib=13)
-
-        self.assertFalse(ok, detail)
-        self.assertIn("LIGHT_ONLY", detail)
-        self.assertNotIn("NEVER_FITS", detail)
-
-    def test_fresh_tranquil_max_is_advisory_for_a_physically_feasible_ask(self):
-        semaphore.status_text()
-        ok, detail = semaphore.adaptive_acquire("goal", "vault build", memory_gib=13)
-
-        self.assertFalse(ok, detail)
-        self.assertIn("LIGHT_ONLY", detail)
-        self.assertNotIn("NEVER_FITS", detail)
-
-    def test_tranquil_baseline_ratchets_up_only(self):
-        semaphore.status_text()
-        first = json.loads((Path(self.tmp.name) / "queue.json").read_text())["tranquil_max_gib"]
-        self.adapter.free_percent = 50
-        semaphore.status_text()
-        second = json.loads((Path(self.tmp.name) / "queue.json").read_text())["tranquil_max_gib"]
-        self.adapter.free_percent = 90
-        semaphore.status_text()
-        third = json.loads((Path(self.tmp.name) / "queue.json").read_text())["tranquil_max_gib"]
-
-        self.assertAlmostEqual(first, 19.44)
-        self.assertAlmostEqual(second, 19.44)
-        self.assertAlmostEqual(third, 21.6)
-
-
-class MeasuredTierChargeTest(unittest.TestCase):
-    """The e1e8bb8 single margin prices measured builds; every other kind keeps
-    today's charge. Provenance comes from estimate_source."""
-
-    def test_kind_parsing(self):
+    def test_retraction_order_is_unproven_youngest_first_then_proven_youngest_first(self):
+        clock = {"t": 1_000.0}
+        with mock.patch.object(semaphore, "_now", lambda: clock["t"]):
+            for label, unproven, watched in (
+                ("proven-old", False, True), ("unproven", True, True),
+                ("proven-young", False, True), ("lsp-loop", False, False),
+            ):
+                clock["t"] += 10
+                ok, detail = semaphore.adaptive_acquire(
+                    label, "unit", memory_gib=2, unproven=unproven, watched=watched,
+                )
+                self.assertTrue(ok, detail)
+            order = semaphore.retraction_order()
         self.assertEqual(
-            semaphore._estimate_kind("derived: measured stale set: 3 module(s) all measured"),
-            "measured",
+            [item["label"] for item in order], ["unproven", "proven-young", "proven-old"],
         )
-        self.assertEqual(semaphore._estimate_kind("derived: max of target rows"), "default")
-        self.assertEqual(semaphore._estimate_kind("derived: narrow default"), "default")
-        self.assertEqual(semaphore._estimate_kind("explicit --memory-gib"), "default")
-        self.assertEqual(semaphore._estimate_kind(None), "default")
 
-    def test_measured_charge_is_single_margin_unceiled(self):
-        self.assertAlmostEqual(semaphore._charged_memory_gib(9, "measured"), 11.7)
-        self.assertAlmostEqual(semaphore._charged_memory_gib(4, "measured"), 5.2)
 
-    def test_default_charge_unchanged(self):
-        self.assertEqual(semaphore._charged_memory_gib(9), 12)
-        self.assertEqual(semaphore._charged_memory_gib(9, None), 12)
-        self.assertEqual(semaphore._charged_memory_gib(9, "default"), 12)
-
-    def test_measured_tier_admits_where_uniform_refuses(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        adapter = HeadroomAdapter(free_percent=74.17, total_gib=24)
-        policy = {
-            "task_memory_gib": 2, "heavy_workers": 4, "light_workers": 4,
-            "physical_memory_gib": 24.0, "profile_status": "VALID",
+class WaiterCompatibilityTest(unittest.TestCase):
+    def test_launch_and_watch_waiter_fields_are_optional_and_typed(self):
+        entry = {
+            "id": "abc123", "label": "goal", "pid": 100, "uid": 1000,
+            "contention": "tolerant", "memory_gib": 9, "estimate_source": None,
+            "enqueued_at": 1000.0, "heartbeat_at": 1000.0,
         }
-        with mock.patch.dict(os.environ, {"CREME_SEMAPHORE_DIR": tmp.name}, clear=False), \
-                mock.patch("creme.semaphore.get_adapter", return_value=adapter), \
-                mock.patch("creme.semaphore._runtime_admission_policy", return_value=policy):
-            ok, detail = semaphore.adaptive_acquire(
-                "goal", "measured build", memory_gib=9,
-                estimate_source="derived: measured stale set: 3 module(s) all measured",
-            )
-            self.assertTrue(ok, detail)
-            self.assertIn("ADMITTED", detail)
-            semaphore.adaptive_release("goal")
-            refused, detail = semaphore.adaptive_acquire("goal", "blind build", memory_gib=9)
-            self.assertFalse(refused, detail)
-            self.assertIn("LIGHT_ONLY", detail)
+        self.assertTrue(semaphore._valid_waiter(entry))
+        self.assertTrue(semaphore._valid_waiter(
+            dict(entry, need_gib=8.6, unproven=False, watched=True)
+        ))
+        self.assertFalse(semaphore._valid_waiter(dict(entry, need_gib=-1)))
+        self.assertFalse(semaphore._valid_waiter(dict(entry, unproven="yes")))
+        self.assertEqual(semaphore._waiter_need(entry), 9.0)
 
     def test_legacy_waiter_without_source_stays_valid_and_uniform(self):
         entry = {

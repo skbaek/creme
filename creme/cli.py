@@ -821,6 +821,9 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
             memory_gib=arguments.memory_gib,
             contention=arguments.contention,
             wait_seconds=arguments.wait,
+            # Without --memory-gib the need is the host default, not evidence:
+            # at most one such unproven unit runs at a time.
+            unproven=arguments.memory_gib is None,
             # A queued request blocks the caller's turn, so the arithmetic that
             # decides it is printed before the wait begins, not after it fails.
             announce=(print if arguments.wait is not None else None),

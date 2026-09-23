@@ -8,6 +8,7 @@ import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Optional
 
 from .base import CapabilityResult
 from .native import NativeAdapter
@@ -110,8 +111,25 @@ class LinuxAdapter(NativeAdapter):
                 "swap_used_mib": (
                     swap_used_kib / 1024 if swap_used_kib is not None else None
                 ),
+                # MemAvailable is a direct measure: it falls as memory is used.
+                "memory_available_direct": True,
+                "memory_psi_full_avg10": self._psi_full_avg10(),
             },
         )
+
+    @staticmethod
+    def _psi_full_avg10() -> Optional[float]:
+        """PSI memory "full" avg10 (percent of time all tasks stalled), or None."""
+        try:
+            with open("/proc/pressure/memory", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("full"):
+                        for field in line.split():
+                            if field.startswith("avg10="):
+                                return float(field[len("avg10="):])
+        except (OSError, ValueError):
+            return None
+        return None
 
     def telemetry(self) -> CapabilityResult:
         headroom = self.memory_headroom()

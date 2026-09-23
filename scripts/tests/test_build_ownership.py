@@ -167,17 +167,6 @@ class BuildOwnershipTest(unittest.TestCase):
         self.assertIn("two other Lean files", skill)
         self.assertIn("LEAN_LSP_MAX_OPEN_FILES", skill)
 
-    def test_the_guide_states_the_fit_arithmetic_a_waiter_needs(self) -> None:
-        """B10: a reader can compute why a large estimate is unschedulable."""
-        joined = " ".join(
-            (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()
-        )
-        self.assertIn("currently fit", joined)
-        self.assertIn("ceil(1.25 x estimate)", joined)
-        self.assertIn("max(2 GiB, 25% of physical RAM)", joined)
-        self.assertIn("available >= charged + reserve", joined)
-        self.assertIn("10 GiB estimate needs 19.0 GiB", joined)
-
     def test_the_guide_forbids_a_sleep_loop_on_your_own_process_too(self) -> None:
         joined = " ".join(
             (ROOT / "docs" / "guides" / "execution.md").read_text(encoding="utf-8").split()
@@ -514,67 +503,69 @@ class BuildOwnershipTest(unittest.TestCase):
              "stale": stale, "detail": "fixture"},
         )
 
-    def test_a_warm_narrow_target_with_a_small_measured_peak_is_tolerant(self) -> None:
-        with _ledger_and_log() as (ledger, _):
-            self._measured(ledger, peak_mib=2048.0)
-            verdict, evidence = self._classify(3)
-        self.assertEqual(verdict, "tolerant")
-        self.assertEqual(evidence["measured_peak_gib"], 2.0)
+    def _derive(self, stale_modules=3):
+        return owned.derive_memory_gib(
+            Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8, stale_modules,
+        )
 
-    def test_a_cold_worktree_without_measurement_stays_sensitive(self) -> None:
+    def test_a_warm_narrow_target_is_charged_its_measured_peak(self) -> None:
+        with _ledger_and_log() as (ledger, _):
+            self._measured(ledger, peak_mib=2048.0, rebuilt=("A",))
+            self.assertEqual(self._classify(3)[0], "tolerant")
+            estimate, evidence = self._derive()
+        # The fixture probe counts but does not name the stale set, so the
+        # target's rows are the need and the unknown closure keeps it unproven.
+        self.assertEqual((estimate, evidence["need_gib"], evidence["unproven"]), (2, 2.0, True))
+
+    def test_a_cold_worktree_without_measurement_is_an_unproven_default(self) -> None:
         with _ledger_and_log() as (_ledger, _):
-            verdict, evidence = self._classify(3)
-        self.assertEqual(verdict, "sensitive")
-        self.assertIn("no successful measurement", evidence["reason"])
+            estimate, evidence = self._derive()
+        self.assertEqual((estimate, evidence["need_gib"], evidence["unproven"]), (8, 8.0, True))
+        self.assertIn("no successful measurement", evidence["source"])
 
     def test_a_changed_toolchain_or_manifest_digest_is_ignored_evidence(self) -> None:
-        with _ledger_and_log() as (ledger, _):
-            self._measured(ledger, peak_mib=2048.0, toolchain="other")
-            self.assertEqual(self._classify(3)[0], "sensitive")
-        with _ledger_and_log() as (ledger, _):
-            self._measured(ledger, peak_mib=2048.0, manifest="other")
-            self.assertEqual(self._classify(3)[0], "sensitive")
+        for field in ("toolchain", "manifest"):
+            with self.subTest(field=field), _ledger_and_log() as (ledger, _):
+                self._measured(ledger, peak_mib=2048.0, rebuilt=("A",), **{field: "other"})
+                self.assertTrue(self._derive()[1]["unproven"])
 
-    def test_a_stale_set_above_the_configured_count_stays_sensitive(self) -> None:
+    def test_classification_no_longer_serializes_a_broad_or_large_build(self) -> None:
+        # Breadth and size are carried by the need; only a stated class
+        # serializes.  The probe facts still reach the refusal and ledger.
         with _ledger_and_log() as (ledger, _):
-            self._measured(ledger, peak_mib=2048.0)
+            self._measured(ledger, peak_mib=9000.0, rebuilt=("A",))
             verdict, evidence = self._classify(9)
-        self.assertEqual(verdict, "sensitive")
-        self.assertIn("stale set is 9", evidence["reason"])
+            _estimate, sized = self._derive(2)
+        self.assertEqual(verdict, "tolerant")
+        self.assertEqual(evidence["stale_modules"], 9)
+        self.assertEqual(sized["need_gib"], 8.79)
 
-    def test_a_large_measured_peak_stays_sensitive(self) -> None:
+    def test_an_unmeasurable_stale_set_is_unproven(self) -> None:
         with _ledger_and_log() as (ledger, _):
-            self._measured(ledger, peak_mib=9000.0)
-            verdict, evidence = self._classify(2)
-        self.assertEqual(verdict, "sensitive")
-        self.assertIn("not below", evidence["reason"])
+            self._measured(ledger, peak_mib=2048.0)   # restored everything: no elaboration
+            self.assertTrue(self._derive(None)[1]["unproven"])
 
-    def test_an_unmeasurable_stale_set_stays_sensitive(self) -> None:
-        with _ledger_and_log() as (ledger, _):
-            self._measured(ledger, peak_mib=2048.0)
-            self.assertEqual(self._classify(None)[0], "sensitive")
-
-    def test_a_corrupt_ledger_stays_sensitive(self) -> None:
+    def test_a_corrupt_ledger_is_unproven(self) -> None:
         with _ledger_and_log() as (ledger, _):
             ledger.write_text("{not json\n", encoding="utf-8")
-            self.assertEqual(self._classify(1)[0], "sensitive")
+            self.assertTrue(self._derive(1)[1]["unproven"])
 
-    def test_a_full_target_with_no_readable_configuration_stays_sensitive(self) -> None:
+    def test_a_full_target_with_no_readable_configuration_names_the_failure(self) -> None:
         with _ledger_and_log() as (_ledger, _):
             verdict, evidence = owned.classify_contention(
                 Path("/w"), [], Path("/lake"), SETTINGS, ("tc", "mf")
             )
-        self.assertEqual(verdict, "sensitive")
+        self.assertEqual(verdict, "tolerant")
         self.assertIn("roots unresolved", evidence["reason"])
         self.assertIsNone(evidence["resolved_roots"])
 
-    def test_the_estimate_comes_from_measured_peaks_plus_a_margin(self) -> None:
+    def test_the_need_is_the_measured_peak_with_no_margin(self) -> None:
         with _ledger_and_log() as (ledger, _):
             self._measured(ledger, peak_mib=2560.0)
             estimate, evidence = owned.derive_memory_gib(
                 Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8, 0
             )
-        self.assertEqual(estimate, 4)          # ceil(2.5) + 1
+        self.assertEqual((estimate, evidence["need_gib"]), (3, 2.5))
         self.assertEqual(evidence["rows"], 1)
         self.assertEqual(evidence["measured_peak_gib"], 2.5)
 
@@ -585,14 +576,15 @@ class BuildOwnershipTest(unittest.TestCase):
             )
         self.assertEqual(estimate, 8)
         self.assertIn("profile default", evidence["source"])
+        self.assertTrue(evidence["unproven"])
 
-    def test_the_estimate_never_falls_below_the_floor(self) -> None:
+    def test_a_tiny_measured_peak_is_charged_as_measured(self) -> None:
         with _ledger_and_log() as (ledger, _):
             self._measured(ledger, peak_mib=100.0)
-            estimate, _ = owned.derive_memory_gib(
+            estimate, evidence = owned.derive_memory_gib(
                 Path("/w"), ["T"], SETTINGS, ("tc", "mf"), 8, 0
             )
-        self.assertEqual(estimate, 2)
+        self.assertEqual((estimate, evidence["need_gib"]), (1, 0.1))
 
     def test_the_stale_count_is_the_closure_not_the_probe_frontier(self) -> None:
         # Lake's --no-build probe stops at the first out-of-date module, so the
@@ -981,7 +973,7 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
      patch('creme.build_ownership.guard_bin', return_value=Path({str(fake_bin)!r})), \\
      patch('creme.build_ownership.semaphore.adaptive_acquire', return_value=(True, 'ADMITTED_HARD')), \\
      patch('creme.build_ownership.semaphore.adaptive_release', side_effect=release):
-    raise SystemExit(owned.run_lake_build('g', ['T'], contention='sensitive', memory_gib=8))
+    raise SystemExit(owned.run_lake_build('g', ['T'], contention='sensitive', memory_gib=8, watchdog=False))
 """
             env = os.environ.copy()
             env["CREME_BUILD_LEDGER"] = str(ledger)
@@ -1052,7 +1044,8 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
         ), patch("creme.build_ownership.append_ledger") as ledger:
             self.assertEqual(
                 owned.run_lake_build(
-                    "g", ["T"], contention="sensitive", memory_gib=8, stdout=output
+                    "g", ["T"], contention="sensitive", memory_gib=8, stdout=output,
+                    watchdog=False,
                 ),
                 2,
             )
@@ -1131,7 +1124,8 @@ with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(),
         ):
             self.assertEqual(
                 owned.run_lake_build(
-                    "g", ["T"], contention="sensitive", memory_gib=8, stdout=io.StringIO()
+                    "g", ["T"], contention="sensitive", memory_gib=8, stdout=io.StringIO(),
+                    watchdog=False,
                 ),
                 0,
             )
@@ -1263,23 +1257,30 @@ class TargetResolutionTest(unittest.TestCase):
             verdict, evidence = owned.classify_contention(
                 root, [], Path("/lake"), SETTINGS, ("tc", "mf")
             )
-        self.assertEqual(verdict, "sensitive")
+        self.assertEqual(verdict, "tolerant")
         self.assertIn("roots unresolved", evidence["reason"])
         self.assertIn("no lean_lib or lean_exe target", evidence["reason"])
 
-    def test_a_stale_dependency_in_the_frontier_stays_sensitive(self) -> None:
+    def test_a_stale_dependency_in_the_frontier_is_an_unproven_need(self) -> None:
         root = self.worktree(self.BLANC_SHAPED)
         with _ledger_and_log() as (ledger, _):
             self._row(ledger, root, [], 2048.0)
             with patch("creme.build_ownership.subprocess.run",
                        return_value=self.probe(["Mathlib.Order.Basic"])):
-                verdict, evidence = owned.classify_contention(
-                    root, [], Path("/lake"), SETTINGS, ("tc", "mf")
+                probe = owned.stale_evidence(root, [], Path("/lake"))
+                verdict, _evidence = owned.classify_contention(
+                    root, [], Path("/lake"), SETTINGS, ("tc", "mf"), probe,
                 )
-        self.assertEqual(verdict, "sensitive")
-        self.assertIn("unmeasured", evidence["reason"])
+                _estimate, sized = owned.derive_memory_gib(
+                    root, [], SETTINGS, ("tc", "mf"), 8, stale=probe,
+                )
+        self.assertEqual(verdict, "tolerant")
+        # The target's own row is the best evidence of the need, but the
+        # closure behind a stale dependency is unknown: unproven.
+        self.assertEqual((sized["kind"], sized["need_gib"]), ("target rows", 2.0))
+        self.assertTrue(sized["unproven"], sized)
 
-    def test_a_closure_above_the_limit_stays_sensitive(self) -> None:
+    def test_a_closure_above_the_limit_is_not_serialized_by_its_size(self) -> None:
         root = self.worktree(self.BLANC_SHAPED)
         with _ledger_and_log() as (ledger, _):
             self._row(ledger, root, [], 2048.0)
@@ -1294,8 +1295,8 @@ class TargetResolutionTest(unittest.TestCase):
                 verdict, evidence = owned.classify_contention(
                     root, [], Path("/lake"), narrow, ("tc", "mf")
                 )
-        self.assertEqual(verdict, "sensitive")
-        self.assertIn("stale set is 3", evidence["reason"])
+        self.assertEqual(verdict, "tolerant")
+        self.assertEqual(evidence["stale_modules"], 3)
 
     # -- B7: estimates are sized from elaboration --------------------------
     def test_a_zero_rebuild_row_does_not_size_a_build_with_a_stale_set(self) -> None:
@@ -1316,7 +1317,7 @@ class TargetResolutionTest(unittest.TestCase):
             estimate, evidence = owned.derive_memory_gib(
                 root, ["Lib.Top"], SETTINGS, ("tc", "mf"), 8, 0
             )
-        self.assertEqual(estimate, 2)
+        self.assertEqual((estimate, evidence["need_gib"]), (1, 0.63))
         self.assertFalse(evidence["keyed_on_elaboration"])
 
     def test_an_unmeasured_stale_set_is_keyed_on_elaboration(self) -> None:
@@ -1336,7 +1337,7 @@ class TargetResolutionTest(unittest.TestCase):
             estimate, evidence = owned.derive_memory_gib(
                 root, [], SETTINGS, ("tc", "mf"), 8, 2
             )
-        self.assertEqual(estimate, 4)
+        self.assertEqual((estimate, evidence["need_gib"]), (3, 2.5))
         self.assertEqual(evidence["rows"], 1)
 
 
@@ -1411,7 +1412,8 @@ class RowEvidenceTest(unittest.TestCase):
              patch("creme.build_ownership._swap_gib", return_value=1.0), \
              patch("creme.build_ownership.append_ledger", side_effect=captured.append):
             code = owned.run_lake_build(
-                "g", ["T"], contention=contention, memory_gib=memory_gib, stdout=output
+                "g", ["T"], contention=contention, memory_gib=memory_gib, stdout=output,
+                watchdog=False,
             )
         return code, captured[0], output.getvalue()
 
@@ -1760,7 +1762,7 @@ class BoundedOutputTest(unittest.TestCase):
         ):
             code = owned.run_lake_build(
                 "g", ["Pkg.Bad", "Pkg.Ok"], contention="sensitive", memory_gib=8,
-                stdout=output, **kwargs,
+                stdout=output, watchdog=False, **kwargs,
             )
             text = output.getvalue()
             summary = json.loads(text.splitlines()[-1])

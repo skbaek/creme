@@ -137,6 +137,7 @@ class DarwinAdapter(NativeAdapter):
             if used_mib is not None:
                 swap_detail = "swap sampled"
         cause = swap_compressor_pressure(total_bytes, total_mib, used_mib, compressor_bytes)
+        level = self._vm_pressure_level()
         data = {
             "memory_free_percent": free_pct,
             "memory_available_bytes": (
@@ -148,11 +149,24 @@ class DarwinAdapter(NativeAdapter):
             "swap_free_mib": free_mib,
             "compressor_bytes": compressor_bytes,
             "memory_pressure_cause": cause,
+            # The kernel's own VM pressure level: 1 normal, 2 warning,
+            # 4 critical.  Only critical retracts a running build.
+            "memory_pressure_level": level,
         }
         detail = f"Darwin aggregate memory headroom sampled; {swap_detail}"
         if cause:
             detail += f"; SWAP_PRESSURE: {cause}"
         return self.result("memory_headroom", "OK", detail, data)
+
+    def _vm_pressure_level(self) -> Optional[int]:
+        """`kern.memorystatus_vm_pressure_level`, or None when unreadable."""
+        try:
+            completed = self._run(["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"])
+            if completed.returncode:
+                return None
+            return int(str(completed.stdout).strip())
+        except Exception:  # an unreadable level adds no signal
+            return None
 
     def telemetry(self) -> CapabilityResult:
         headroom = self.memory_headroom()

@@ -146,6 +146,7 @@ class _FakeHost:
                 ("subprocess.Popen", self.popen),
                 ("ProcessSampler", FakeSampler),
                 ("RenewalThread", FakeRenewer),
+                ("Watchdog", self.watchdog_class()),
                 ("_process_group_alive", Mock(return_value=False)),
                 ("_module_hashes", Mock(return_value={})),
                 ("_swap_gib", Mock(return_value=1.0)),
@@ -154,6 +155,24 @@ class _FakeHost:
             ]:
                 stack.enter_context(patch(f"creme.build_ownership.{target}", value))
             return owned.run_lake_build("g", targets, stdout=self.output, **kwargs)
+
+    def watchdog_class(self):
+        """A watchdog that never sees pressure: the real one samples the real host."""
+
+        class QuietWatchdog:
+            def __init__(self, *_args, **_kwargs):
+                self.retracted = False
+                self.cleanup_proved = True
+                self.min_available_gib = None
+                self.events: list[str] = []
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        return QuietWatchdog
 
     def summary(self) -> dict:
         lines = [line for line in self.output.getvalue().splitlines() if line.startswith("{")]

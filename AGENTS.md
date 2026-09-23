@@ -59,10 +59,9 @@ recommendation.
 
 1. Confirm the client has the required sibling read/write access. Do not work
    around a real permission boundary.
-2. For substantial work read `docs/guides/execution.md` and the named goal or
-   the master's brief in full. A goal must have stable identity and status
-   `ready`; a brief names its objective, owned paths, gates, and report
-   location.
+2. Read the named goal or the master's brief in full. A goal must have stable
+   identity and status `ready`; a brief names its objective, owned paths,
+   gates, and report location.
 3. Use per-goal worktrees at `PATH/.worktrees/<goal>` for the repository at
    `PATH`, with `/.worktrees/` in its `.gitignore`. Shared main clones stay on
    their default branches.

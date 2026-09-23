@@ -1,48 +1,13 @@
-# Accountable execution
+# Lean work, builds, and evidence
 
-This guide is the shared lead method for substantial Jaune/Blanc work. The
-named goal defines product semantics; sibling `scripts/GATES.md` files define
-repository verification; Creme defines execution and evidence discipline. The
-layer above it — one master session that owns goals, workers, merges, and
-pushes on a host — is [the master guide](master.md).
-
-## Start and reconcile
-
-Read the goal and relevant authorities in full. Confirm stable goal identity,
-`ready` status, explicit completion criteria, current repository commits,
-dirty-tree ownership, and open user decisions. Create per-goal branches and
-worktrees; never repurpose shared main clones or overwrite unrelated changes.
-A worktree for the repository at `PATH` belongs in `PATH/.worktrees/<goal>`,
-ignored by that repository. Keeping it inside the repository it belongs to
-assumes nothing about the surrounding layout and needs no access beyond the
-repository already in use.
-
-Write a compact state brief for multi-session work. It should name exact
-commits, owned paths, last green evidence, active packets, open decisions, and
-the next coherent unit. State may live in any configured goal store; it never
-becomes a hidden dependency of the public workflow.
-
-Maintain that brief by replacement at checkpoints, following
-[compact continuity](master.md#compact-continuity). Keep detailed commands and
-verdicts in evidence and link them; retain all open obligations and qualifying
-failures. Do not prepend repeated historical status to current documents.
-
-Before launching the planned units, apply the [escalation procedure](escalation.md)
-to their access and capability needs as a group. Preserve the resulting coverage
-inventory in the state brief and update it when operations or policy change.
-
-## Delegate by ownership
-
-Delegate only bounded packets with disjoint file ownership, stated authority,
-resource class, required checks, and a clear return contract; under the master
-model each packet is a written brief, per [the briefs guide](briefs.md). The lead retains
-integration, conflict reconciliation, final verification, and user-only
-decisions. Parallel work is useful only when it leaves evidence that can be
-merged without overlapping authority. The tracked
-[generic worker brief](../../templates/master-runtime/worker-brief.md) lists
-the fields a packet may need; fill the ones that apply and leave general
-policy in the guides. A filled brief is private runtime state; the tracked
-template remains placeholders only.
+This is the contract for a session that elaborates Lean, builds, or runs a
+gate: how the host admits the work, how a build is owned and measured, how
+Lean work winds down, and what counts as evidence. The named goal or brief
+defines product semantics and sibling `scripts/GATES.md` files define
+repository verification; goals, briefs, workers, and merges are in
+[the master guide](master.md) and [the briefs guide](briefs.md). The
+single-lead sections this guide carried before the master role are archived
+in [`docs/archive/execution-pre-master.md`](../archive/execution-pre-master.md).
 
 ## Resource classes
 
@@ -99,10 +64,7 @@ room now; `LIGHT_ONLY` means the need does not fit what is available now;
 `DEFER_UNPROVEN` means another unit without peak evidence is already running.
 All three are waitable. Do not retry in a loop. Reorder independent light
 work, wait for an existing heavy unit to wind down, or split the planned work.
-The explicit `soft-acquire` and `hard-acquire` compatibility commands are also
-pressure-gated; they cannot bypass a low-memory refusal. `release` removes
-whichever hold kind adaptive admission selected. Explicit soft/hard releases
-remain available for compatibility.
+`release` removes whichever hold kind adaptive admission selected.
 
 ### Wait in one call; never poll by hand
 
@@ -136,8 +98,7 @@ reclaim as available and barely moves while a build allocates. Concurrent
 admitted needs are counted in full even though part of them is already out of
 "available" (conservative). There is no multiplier, no estimate margin, and no
 reserve: on this 24 GiB host a measured 14.8 GiB build is admitted whenever
-16.8 GiB is available. A larger estimate than the evidence supports still only
-makes a request harder to schedule, so state one only when you know it.
+16.8 GiB is available.
 
 While Lake runs, the owned-build wrapper samples the host about once a
 second, at two levels. At the **drain** level — the swap/compressor pressure
@@ -177,8 +138,7 @@ means the wrapper sized the build from the ledger's evidence about the modules
 that are stale right now, and the remedy is to narrow the stale set or to wait
 for the host, never to pass a smaller `--memory-gib`; **explicit** means you
 passed the number, and the line names the estimate the evidence supports
-instead. In B11 a session read a derived 12 GiB as "an explicit --memory-gib
-12" and escalated the wrong cause twice; the line now says which it is.
+instead.
 
 `semaphore status` prints, under every waiter, the verdict the queue would give
 it right now — computed by the same function the queue uses — with the same
@@ -272,6 +232,20 @@ phases. For your own holds the same fact makes `STRANDED` and `IDLE_HOLD`
 false positives when you acquire in one shell call and work in another; keep
 the acquiring process alive across the unit or use the wrapper, which does.
 
+### Renewal and pressure
+
+Renewal is both a lease heartbeat and an in-session pressure check. Call it
+before the next elaboration/build unit and at least every five minutes during
+an interactive MCP session. Under moderate pressure—or when the worker count
+or admitted needs are already above what the host holds—non-priority soft
+holders receive `YIELD_HEAVY`, leaving the oldest live coherent unit priority.
+At the drain threshold every holder receives `DRAIN_HEAVY`. A wrapper-owned
+build renews as `CONTINUE_WATCHED` instead: its watchdog, not renewal,
+answers memory pressure. In either case, launch no new
+heavy action: checkpoint, wind down, and move to light work. A long command
+that cannot reach a renewal boundary belongs in the sensitive class before it
+starts.
+
 `python3 -m creme memory-headroom` is a read-only planning sample. It can
 justify moving light packets ahead of heavy ones, but only `adaptive-acquire`
 re-samples under the mutex and authorizes a heavy start.
@@ -290,35 +264,6 @@ This is a report only: nothing is signalled. A language server is never
 admitted by the semaphore, so a heavy worker named there is its owner's to
 checkpoint and wind down.
 
-Renewal is both a lease heartbeat and an in-session pressure check. Call it
-before the next elaboration/build unit and at least every five minutes during
-an interactive MCP session. Under moderate pressure—or when the worker count
-or admitted needs are already above what the host holds—non-priority soft
-holders receive `YIELD_HEAVY`, leaving the oldest live coherent unit priority.
-At the drain threshold every holder receives `DRAIN_HEAVY`. A wrapper-owned
-build renews as `CONTINUE_WATCHED` instead: its watchdog, not renewal,
-answers memory pressure. In either case, launch no new
-heavy action: checkpoint, wind down, and move to light work. A long command
-that cannot reach a renewal boundary belongs in the sensitive class before it
-starts.
-
-The launcher is tracked in the canonical Creme checkout and is shared by Codex,
-Claude Code, other local agents, and humans. Always use the canonical launcher,
-not a copy inside a goal worktree; linked worktrees resolve back to its single
-ignored `.semaphore/state` directory.
-
-On an upgraded host, `migrate-state` copies validated live holds under the old
-and new mutexes, activates `.semaphore/state`, and leaves the legacy files
-untouched. Run it once from a trusted human shell after the neutral-semaphore
-change is deployed:
-
-```sh
-~/creme/.semaphore/semaphore migrate-state
-```
-
-Retire any pre-neutral delegate and legacy state only after every session
-launched before the cutover has wound down.
-
 On limited hosts, adaptive admission uses one hard heavy operation at a time
 and asks for frequent checkpoints. Missing full telemetry is not a pressure
 signal, and the aggregate headroom probe is intentionally independent of
@@ -327,7 +272,7 @@ optimistic soft hold. Never edit semaphore state or use a bare process kill.
 
 ## Wind down Lean work
 
-Before yielding to a requested pause or restart, handing off the execution, or
+Before yielding to a requested pause or restart, handing off the work, or
 reporting completion, every task that opened a Lean MCP server must use one
 wind-down operation:
 
@@ -357,22 +302,15 @@ state-write failure leaves the matching hold intact. The operation is
 idempotent when the goal already has no hold and its scoped process scan is
 clear.
 
-Ordinary `soft-release` and `hard-release` remain valid at intermediate
-boundaries where retaining an MCP cache is intentional. They are not evidence
+An ordinary `release` remains valid at an intermediate boundary where
+retaining an MCP cache is intentional. They are not evidence
 that a task is fully wound down. Do not report a Lean-using task safe, idle,
 transferred, or complete until wind-down returns structured `OK`. If reclaim is
 `UNAVAILABLE`, checkpoint and leave the hold intact while restarting the client
 as directed by the capability result; do not substitute a platform command or
 bare signal.
 
-## Edit and verify
-
-Choose the cheapest test that can falsify the current claim. Run from the
-worktree under test and record exact command, exit status, relevant terminal
-verdict, and commit. Do not weaken gates, baselines, manifests, budgets,
-timeouts, allowlists, or generated artifacts to obtain green.
-
-### One compilation owner
+## One compilation owner
 
 Every agent-started Lake build has one goal owner and starts through Creme.
 This is an enforced client/agent boundary, not a claim that an interactive
@@ -490,20 +428,6 @@ The server guard rewrites every `lake setup-file` to include `--no-build
 date` diagnostic. A refusal is a request for an owner to probe, classify, and
 run the wrapper, never permission for a tool to build automatically.
 
-Build artifacts and verdicts may be reused by identity rather than location
-when the identity covers every verdict-relevant input, the object is immutable
-once written, and reuse remains within one host, user, and toolchain. Symlinks
-to mutable state and remote or cross-host stores do not satisfy that trust
-boundary. The build ledger uses Lake input hashes only to measure duplicate
-elaboration; it is performance state and never gate evidence.
-
-When a repository's gate catalogue defines content-addressed verdict reuse, a
-checkpoint or merge candidate owes a **complete content-valid manifest**: each
-catalogue row is freshly green or is backed by successful evidence with an
-identical verdict-relevant identity. A routine draft push does not become an
-all-fresh campaign merely because it is a push. Use an explicitly fresh run
-when freshness itself is the subject under test or the named goal requires it.
-
 ### Build-measurement identity
 
 The host-local build ledger is performance evidence, not a verdict manifest.
@@ -549,6 +473,27 @@ checks one coherent Lean/Lake sysroot and the exact identity stores only a
 digest of its resolved paths; it assumes the host's managed toolchain store is
 immutable for the duration of a run. The ledger is not cross-host evidence.
 
+## Evidence and controls
+
+Choose the cheapest test that can falsify the current claim. Run from the
+worktree under test and record exact command, exit status, relevant terminal
+verdict, and commit. Do not weaken gates, baselines, manifests, budgets,
+timeouts, allowlists, or generated artifacts to obtain green.
+
+Build artifacts and verdicts may be reused by identity rather than location
+when the identity covers every verdict-relevant input, the object is immutable
+once written, and reuse remains within one host, user, and toolchain. Symlinks
+to mutable state and remote or cross-host stores do not satisfy that trust
+boundary. The build ledger uses Lake input hashes only to measure duplicate
+elaboration; it is performance state and never gate evidence.
+
+When a repository's gate catalogue defines content-addressed verdict reuse, a
+checkpoint or merge candidate owes a **complete content-valid manifest**: each
+catalogue row is freshly green or is backed by successful evidence with an
+identical verdict-relevant identity. A routine draft push does not become an
+all-fresh campaign merely because it is a push. Use an explicitly fresh run
+when freshness itself is the subject under test or the named goal requires it.
+
 For a non-vacuity or enforcement claim, show all three controls: the surrounding
 tree still works, the control fails at the intended boundary, and removing only
 that control restores green. Use disposable worktrees for destructive
@@ -584,22 +529,19 @@ rehearsal tree:
 It takes host exclusivity, keeps the dependency Git-pinned, and records the
 resolved revision on its ledger row.
 
+## Completion
+
 Inspect the full diff and status, stage only owned paths, commit coherent green
 checkpoints. Never force-push. A worker's return is its local commits; the
 master pushes branches at coordinated durability or integration checkpoints
 (a local commit is not an off-host backup), and default/protected branch
 merges belong to it under the merge policy in [the master guide](master.md).
 
-## Context and completion
-
-Handoff when crossing a clean expertise or self-hosting boundary, when a hard
-resource trigger requires restart, or when context no longer supports the next
-coherent unit. Record what was verified rather than relying on client memory.
-
 Completion is a condition-to-evidence proof on one exact candidate, not a
 completed task list. Re-run drift-prone checks, close independent review
 findings, account for compatibility paths, and report branch/worktree/push
 state. Where the repository supports it, the verification evidence is a
 complete content-valid manifest rather than a claim that every body happened
-to re-execute. If a user-owned publication or license gate remains, or the master has not
-yet merged the candidate under its policy, the goal remains open.
+to re-execute. A worker's summary that it is done is not evidence. If a
+user-owned publication or license gate remains, or the master has not yet
+merged the candidate under its policy, the goal remains open.

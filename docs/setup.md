@@ -534,8 +534,8 @@ Public goal-writing and execution methods are part of Creme:
 
 - [`docs/guides/goal.md`](guides/goal.md) is the authoritative method for
   authoring a goal document.
-- [`docs/guides/execution.md`](guides/execution.md) is the authoritative method
-  for executing it.
+- [`docs/guides/execution.md`](guides/execution.md) is the contract for Lean
+  work, builds, host admission, and evidence while executing it.
 - [`docs/guides/briefs.md`](guides/briefs.md) is the method for the worker
   briefs the master writes, including how a worker's model and effort are
   chosen.

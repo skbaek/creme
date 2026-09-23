@@ -4,7 +4,7 @@ Creme has three configuration tiers and one repository boundary.
 
 | Tier | Owns | Must not own |
 |---|---|---|
-| Shared | instructions, goal/lead method, evidence discipline, skills, capability calls | platform binaries, personal paths, live pressure values |
+| Shared | instructions, goal, master, and worker methods, evidence discipline, skills, capability calls | platform binaries, personal paths, live pressure values |
 | OS adapter | canonical platform/runtime identity, aggregate memory sampling, process discovery, telemetry, temporary/copy optimization, GUI-session checks | host thresholds disguised as universal facts |
 | Ignored host state | detected static facts, derived policy, explicit user overrides, workspace layout, measured machine hazards and local safe command paths | credentials, live pressure snapshots, repository doctrine or pass criteria |
 

@@ -239,7 +239,6 @@ class MasterTemplateTest(unittest.TestCase):
     def test_guides_link_the_tracked_template_and_all_new_links_resolve(self):
         reference = "../../templates/master-runtime/worker-brief.md"
         self.assertIn(reference, self.master)
-        self.assertIn(reference, self.execution)
         documents = (WORKER_TEMPLATE, LAYOUT_TEMPLATE, MASTER_GUIDE, EXECUTION_GUIDE)
         for document in documents:
             text = document.read_text(encoding="utf-8")

@@ -827,15 +827,6 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
     if action == "status":
         print(semaphore.status_text())
         return 0
-    if action in {"soft-acquire", "hard-acquire"}:
-        kind = action.split("-", 1)[0]
-        return _sem_result(*semaphore.acquire(
-            kind,
-            arguments.label,
-            arguments.note,
-            arguments.lease,
-            memory_gib=arguments.memory_gib,
-        ))
     if action == "adaptive-acquire":
         return _sem_result(*semaphore.adaptive_acquire(
             arguments.label,
@@ -851,9 +842,9 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
             # decides it is printed before the wait begins, not after it fails.
             announce=(print if arguments.wait is not None else None),
         ))
-    if action in {"soft-release", "hard-release"}:
-        kind = action.split("-", 1)[0]
-        return _sem_result(*semaphore.release(kind, arguments.label))
+    if action == "hard-release":
+        # Kept for the contained-workflow runtime's recovery path.
+        return _sem_result(*semaphore.release("hard", arguments.label))
     if action == "release":
         return _sem_result(*semaphore.adaptive_release(arguments.label))
     if action == "renew":
@@ -1398,16 +1389,6 @@ def parser() -> argparse.ArgumentParser:
     sem = commands.add_parser("semaphore", help="atomic cross-session host coordination")
     sem_commands = sem.add_subparsers(dest="action", required=True)
     sem_commands.add_parser("status")
-    for name in ("soft-acquire", "hard-acquire"):
-        item = sem_commands.add_parser(name)
-        item.add_argument("label")
-        item.add_argument("--note", required=True)
-        item.add_argument("--lease", type=int, default=semaphore.DEFAULT_LEASE_SECONDS)
-        item.add_argument(
-            "--memory-gib",
-            type=_positive,
-            help="conservative whole-GiB peak estimate; defaults to the host policy",
-        )
     adaptive = sem_commands.add_parser(
         "adaptive-acquire",
         help="atomically choose soft, hard, or deferred heavy work from live headroom",
@@ -1439,9 +1420,7 @@ def parser() -> argparse.ArgumentParser:
             "(WAIT_TIMEOUT), or on a verdict waiting cannot change; never poll by hand"
         ),
     )
-    for name in ("soft-release", "hard-release"):
-        item = sem_commands.add_parser(name)
-        item.add_argument("label")
+    sem_commands.add_parser("hard-release").add_argument("label")
     adaptive_release = sem_commands.add_parser(
         "release",
         help="release whichever hold kind adaptive acquisition selected",

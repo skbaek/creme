@@ -202,12 +202,12 @@ Do not alter the real client home or global settings during this control.
 | Trust and approvals explicitly recorded | OPEN; ignored-user-config plus an invocation-only trust override still exposed zero MCP tools | OPEN | PASS: trust user-config; first MCP tool call requests human approval (allow once/session/abort); no standing selective rule; headless parks without `--disable-approval` |
 
 Task identifiers, the two Codex configuration controls, and the later direct
-MCP task are recorded in `acceptance/self-hosting.md`. This table is
+MCP task are recorded in `docs/archive/acceptance/self-hosting.md`. This table is
 deliberately incomplete: direct liveness under inherited trust is not a fresh
 approval ceremony, the interrupted post-Proxy edit did not return a terminal
 MCP success or run its cheap gates, and the static Claude fixture is not a live
 Claude session. The resource-control disposition is recorded in
-`acceptance/macos.md`.
+`docs/archive/acceptance/macos.md`.
 
 Antigravity is recorded separately as retained experimental compatibility. It
 does not satisfy either required v0.1 client column until a dedicated live

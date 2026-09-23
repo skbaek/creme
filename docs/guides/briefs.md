@@ -62,7 +62,10 @@ too (decided 2026-09-23 from the capability-drift review):
   re-dispatch, never extend in place); refresh an uncommitted `STATE-BRIEF.md`
   at the worktree root at least every 30 minutes during a gate, without moving
   HEAD, so the master can tell stuck from slow by mtime; and hand off when the
-  context no longer supports the next coherent unit.
+  context no longer supports the next coherent unit. A Codex brief also opens
+  with one compaction-safe line naming the brief's own absolute path and the
+  worktree's `STATE-BRIEF.md`, which the worker re-reads after every
+  compaction before its next action.
 
 ## Sizing a worker
 

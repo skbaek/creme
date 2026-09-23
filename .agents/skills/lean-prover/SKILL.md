@@ -95,16 +95,9 @@ Apply the shortest maintainable fragment that represents a tested idea. Avoid
 batching unrelated or speculative steps, but do not force one file edit per
 tactic when a short sequence was validated together.
 
-Before each edit, ask whether it is trivial with very low failure probability,
-or will likely take many tries. Almost always it is the first: edit directly
-and go to step 4. Only when many iterations are genuinely expected — a repair
-with no known route, or a resource-boundary search — is a different loop worth
-building, and `../../../docs/guides/lean-edit-loops.md` carries the verdict-first
-workflow choice, its scoped break-even table, the fabrication and fidelity
-procedure, and the lifecycle rules; follow it there rather than restating it. Supporting tools
-live in `tools/` beside this file. Whatever the loop, the verdicts it produces
-are **candidates**: step 4 is discharged against the real file after the real
-edit, never against a scratch artifact.
+For a file the language server cannot hold, or a resource-boundary search,
+see `../../../docs/guides/lean-edit-loops.md` (tools in `tools/` beside this
+file); its verdicts are candidates, discharged in step 4 against the real file.
 
 ## 4. Recheck immediately
 

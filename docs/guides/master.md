@@ -331,10 +331,9 @@ to the [goal guide](goal.md) when the work has product semantics worth
 reviewing, or a short `master/briefs/<goal>.md` when it does not. It states the
 objective, the owned paths, the resource class, the gates that must be green on
 the candidate, the decisions the worker may make alone, and where its report
-goes. Instantiate the tracked
-[generic worker brief](../../templates/master-runtime/worker-brief.md) so
-starting refs, coordination, pause/reacquisition, checkpoints, evidence, and
-the bounded return contract are explicit. Choose each worker's model and
+goes. The tracked
+[generic worker brief](../../templates/master-runtime/worker-brief.md) lists
+the fields a packet may need; a brief states the ones that apply. Choose each worker's model and
 effort for its hardest non-delegable judgment, preferring the standard model
 and escalating effort within it before reaching for the frontier one, as
 [the briefs guide](briefs.md) describes; that guide holds the brief contract
@@ -353,13 +352,13 @@ the goal store, and never a merge or implicit publication. It never writes
 under `master/`. It reports twice: in files — commits on its branch, a state
 brief, a report, evidence — and in its return value to the master.
 
-The master watches liveness while a worker runs a long wait: session-log
-mtime, heartbeat `STATE-BRIEF.md` mtime, and worktree artifacts, at least
-every half hour. A worker silent past its brief's poll cap gets one status
-pulse; an unanswered pulse plus frozen artifacts is a stand-down, followed by
-a respawn whose brief carries a narrower scope and the bounded-wait clauses
-from [the briefs guide](briefs.md#liveness-bounded-waits-and-heartbeats).
-Never let a second hour of silence pass hoping the wait resolves.
+The master watches liveness through whatever its client reports: task
+notifications and failed-task reports in Claude Code; session-log,
+`STATE-BRIEF.md` and artifact mtimes (at least every half hour) in Codex and
+Muse, per [the briefs guide](briefs.md#liveness-bounded-waits-and-heartbeats).
+A worker gone silent gets one status pulse; an unanswered pulse plus frozen
+artifacts is a stand-down and a respawn with a narrower scope. Never let a
+second hour of silence pass hoping the wait resolves.
 
 The master accepts a worker's result only on evidence: the catalogue's
 verdict on the exact candidate commit, the diff, and the report's

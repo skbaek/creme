@@ -43,27 +43,26 @@ mechanism it offers; the guide does not restate a repository's catalogue.
 
 ### Liveness: bounded waits and heartbeats
 
-A worker that waits silently is indistinguishable from a dead one, and several
-sessions have burned hours on waits whose completion predicate never fired.
-Every brief that involves a wait longer than a single command therefore states
-all three:
+For every client: a long gate or build runs as one tracked command whose
+completion the client reports, with output going to a log file from the first
+attempt — never detached behind `sleep N; check` or `nohup`, whose wake
+conditions have repeatedly missed their event. How a master learns that a
+worker is alive differs by client, so the liveness clauses a brief carries do
+too (decided 2026-09-23 from the capability-drift review):
 
-- **One tracked handle.** A long gate or build runs as one command whose
-  completion the client itself reports, with its output going to a log file
-  from the first attempt: attached with a long yield in Codex, the Bash tool's
-  `run_in_background` in Claude Code (see
-  [execution](execution.md#sizing-the-wait-and-working-while-it-runs)). Never
-  detach it behind `sleep N; check` or `nohup`: a wait whose wake condition is
-  "the report changed" or "the process is gone" has repeatedly missed the
-  event it waited for.
-- **Bounded polls with a re-dispatch exit.** Any unavoidable poll names its
-  interval (at most 10 minutes), its round cap (at most 6), and what happens
-  at the cap: commit the checkpoint, write a state brief, and report back for
-  re-dispatch — never extend the wait in place.
-- **Heartbeat without moving HEAD.** While a gate runs, the worker refreshes
-  an uncommitted `STATE-BRIEF.md` at the worktree root at least every 30
-  minutes, so a live master can tell stuck from slow by file mtime. Commits
-  happen only at phase boundaries; nothing commits mid-verification.
+- **Claude Code.** The harness does the liveness work: `run_in_background`
+  and `Monitor` notify on completion, `sleep N; cmd` is blocked, contexts
+  auto-compact, and a stalled subagent returns as a failed task that a message
+  to the same agent resumes. A worker that idles on a background command
+  returns an interim result and is resumed by message. Briefs carry no poll
+  caps, heartbeat files or hand-off rule.
+- **Codex and Muse.** No notification channel reaches the master, so briefs
+  state all three: bound every poll (interval at most 10 minutes, at most 6
+  rounds; at the cap, checkpoint, write the state brief and report back for
+  re-dispatch, never extend in place); refresh an uncommitted `STATE-BRIEF.md`
+  at the worktree root at least every 30 minutes during a gate, without moving
+  HEAD, so the master can tell stuck from slow by mtime; and hand off when the
+  context no longer supports the next coherent unit.
 
 ## Sizing a worker
 

@@ -80,11 +80,8 @@ Use the `lean-inspector` skill for proof-state analysis and `lean-prover` when
 writing or repairing a proof; they carry the inner loop. There is one
 compilation owner: build only through
 `~/creme/scripts/creme lake-build GOAL -- <narrow-targets>`, never bare
-`lake build`. Omit `--contention` and `--memory-gib` and let the wrapper
-classify from measurement. A clean `lean_diagnostic_messages` pass on a file
-whose imports are current is loop evidence; build when a module is registered,
-an import changes, or a checkpoint is due. If MCP is unavailable or stale,
-repair it rather than editing blind.
+`lake build`; the wrapper sizes and admits the build. If MCP is unavailable or
+stale, repair it rather than editing blind.
 
 ## Verification and evidence
 

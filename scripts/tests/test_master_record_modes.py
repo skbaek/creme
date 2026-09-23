@@ -149,15 +149,6 @@ class MasterRecordModesTest(unittest.TestCase):
             master_runtime.read_record(self.root)
         self.assertEqual(caught.exception.violation.path, str(brief))
         self.assertEqual(caught.exception.violation.mode, 0o644)
-        from creme import master_migrate
-
-        with self.assertRaises(master_runtime.MasterModeError):
-            master_migrate._current_view(self.root)
-        with self.assertRaises(master_runtime.MasterModeError):
-            master_migrate._idempotent_plan(self.root)
-        plan = master_migrate.plan_migration(self.root)
-        self.assertEqual(plan.status, "REFUSED")
-        self.assertIn("has mode 0644", plan.detail)
 
     def test_foreign_owned_file_is_not_touched_and_still_refuses(self):
         brief, _ = self.widen()

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional
 from unittest import mock
 
-from creme import master_migrate, master_operations, master_runtime, semaphore
+from creme import master_operations, master_runtime, semaphore
 from creme.adapters.base import Adapter
 
 
@@ -191,12 +191,6 @@ class ReferenceModel:
             self.board_current = False
             self.publication_pending = True
             return "crash"
-        if action.operation == "migrate-record":
-            if self.record_encoding != "legacy" or not self._direct_renew(name):
-                return "refused"
-            self.record_encoding = "current"
-            self.board_current = True
-            return "ok"
         if action.operation == "advance":
             self.now += float(action.argument)
             return "ok"
@@ -617,19 +611,6 @@ class ConcreteWorld:
                     f"post-log crash boundary was not reached: exit {exit_code}"
                 )
             return "crash"
-        if action.operation == "migrate-record":
-            if self.record_encoding != "legacy":
-                return "refused"
-            result = master_migrate.migrate(
-                self.record_root,
-                apply=True,
-                renew=self._renew,
-                authority_transaction=self._authority_transaction,
-            )
-            if result.status == "OK":
-                self.record_encoding = "current"
-                return "ok"
-            return "refused"
         if action.operation == "advance":
             self.now += float(action.argument)
             return "ok"
@@ -787,13 +768,13 @@ class ConcreteWorld:
             ).exists():
                 actual_record_encoding = "legacy"
                 data = (self.record_root / "log.md").read_bytes()
-                translated, _rows, ambiguity = master_migrate._recognize_log(data)
+                # The synthetic legacy log holds the prior canonical rows.
                 events = tuple(
                     master_runtime.validate_event(
                         master_runtime._strict_json(row, "synthetic legacy row")
                     )
-                    for row in translated.splitlines(keepends=True)
-                ) if ambiguity is None else ()
+                    for row in data.splitlines(keepends=True)
+                )
             else:
                 actual_record_encoding = "malformed"
                 events = ()
@@ -985,8 +966,6 @@ def generated_recovery_traces(seed: int) -> list[tuple[str, list[Action]]]:
                 Action("legacy-record", "process-a"),
                 Action("digest", "anonymous"),
                 Action("event", "process-a"),
-                Action("migrate-record", "process-a"),
-                Action("digest", "anonymous"),
             ],
         ),
         (
@@ -1116,7 +1095,6 @@ class MasterTransitionModelTest(unittest.TestCase):
             "legacy-record",
             "malformed-record",
             "post-log-crash",
-            "migrate-record",
             "recover",
         }
         for seed in SEQUENTIAL_SEEDS:

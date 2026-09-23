@@ -249,6 +249,26 @@ def check_goal_store(workspace: Path, profile: Optional[dict[str, Any]]) -> list
         )]
 
     detail = f"{store} ({state}; master/ is ignored and untracked)"
+    if (store / "master-archive").exists():
+        # The archive of retired legacy-migration nodes is as private as the
+        # record it came from.
+        archive_tracked = _git(store, "ls-files", "--", "master-archive")
+        archive_ignored = _git(
+            store,
+            "check-ignore",
+            "-q",
+            "--no-index",
+            "--",
+            "master-archive/.creme-ignore-probe",
+        )
+        if archive_tracked.returncode or archive_tracked.stdout.strip() or archive_ignored.returncode:
+            return [Check(
+                "goal store",
+                STATUS_FAIL,
+                f"{store} ({state}; master-archive/ must be ignored and untracked; "
+                "add `/master-archive/` to the goal store's .gitignore)",
+            )]
+        detail = f"{store} ({state}; master/ and master-archive/ are ignored and untracked)"
     return [Check("goal store", STATUS_OK, detail)]
 
 

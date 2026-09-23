@@ -7,7 +7,7 @@ import threading
 import unittest
 from unittest import mock
 
-from creme import master_migrate, master_runtime, semaphore
+from creme import master_runtime, semaphore
 from scripts.tests.test_master_transition_model import (
     Action,
     ConcreteWorld,
@@ -161,22 +161,6 @@ class MasterAuthorityTransactionTest(unittest.TestCase):
             view = master_runtime.read_record(world.record_root)
             self.assertEqual(len(view.events), 1)
             self.assertTrue(view.board_current)
-
-    def test_successor_waits_for_explicit_migration(self):
-        with ConcreteWorld(0xA713) as world:
-            self.assertEqual(world.execute(Action("acquire", "process-a")), "ok")
-            self.assertEqual(world.execute(Action("legacy-record", "process-a")), "ok")
-            self._assert_successor_waits(
-                world,
-                lambda pause: master_migrate.migrate(
-                    world.record_root,
-                    apply=True,
-                    renew=world._renew,
-                    authority_transaction=world._authority_transaction,
-                    fault=pause,
-                ),
-            )
-            self.assertEqual(master_migrate.plan_migration(world.record_root).status, "CURRENT")
 
     def test_exception_releases_public_transaction_mutex(self):
         with ConcreteWorld(0xA714) as world:

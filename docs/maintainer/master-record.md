@@ -3,7 +3,7 @@
 Maintainer reference for Creme's master-record writer. An operating master does
 not need this to use the record; it is here for changing or debugging
 `creme/master_runtime.py`, `creme/master_operations.py`, and
-`creme/master_migrate.py`. The operating contract is in
+`creme/master_retire.py`. The operating contract is in
 [the master guide](../guides/master.md#durable-state).
 
 During one authorized publication, the writer may also create one empty
@@ -25,18 +25,15 @@ before that transaction and makes it refuse without a core write, or waits
 until the authorized transaction finishes. The cross-subsystem lock order is
 always private record serialization followed by the semaphore mutex.
 
-Explicit legacy migration also recognizes the optional root-level
-`observations.md` sidecar used by the manual workflow. Migration records its
-exact bytes, size, and SHA-256 in the verified backup and report, retains the
-obsolete root file, and seals it against later changes. Its prose never
-becomes board facts. After migration, ongoing workflow observations are
-`note` events in `events.jsonl`; `audits/` remains reserved for independent
-audit reports.
-
-A published backup directory contains exactly `manifest.json` and
-`originals/`; any other child makes both migration planning and ordinary
-record reads refuse unchanged. An interrupted staging backup is removable
-only after every remaining node is verified as an exact publication prefix of
-the current legacy snapshot. Cleanup removes that prefix in reverse
-publication order and syncs each parent, so repeated process deaths leave a
-smaller verified prefix that an authorized retry can continue.
+The pre-master legacy migrator (`creme/master_migrate.py`, last carried by
+Creme `1cc5c48`) is retired. The layout refuses its retained root nodes with a
+pointer to `master retire-migration`. Retirement takes the renewed lease and
+the exclusive record lock, re-checks the migration's own seals (complete
+report, backup manifest digest, every backup file, retained root files equal
+to their originals), reads the structured record with only those nodes
+admitted, copies them to a staging directory beside the archive, verifies the
+staging copy against its canonical manifest, renames it into place, and only
+then removes the nodes, `migration.json` last. A retry after a crash resumes
+from the verified archive; the `procedure` event is appended once, keyed by
+the manifest digest. Restore verifies the archive, copies with `O_EXCL`, and
+leaves the archive in place.

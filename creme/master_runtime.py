@@ -29,9 +29,18 @@ BOARD_NAME = "board.json"
 LOCK_NAME = ".record.lock"
 README_NAME = "README.md"
 PRIVATE_DIRECTORIES = ("intent", "briefs", "audits")
-MIGRATION_REPORT_NAME = "migration.json"
-MIGRATION_BACKUP_ROOT_NAME = "migration-backups"
-MIGRATION_RETAINED_ROOT_FILES = ("log.md", "board.md", "observations.md")
+# Root nodes a completed pre-master legacy migration left beside the record.
+# The migrator is retired; these nodes belong in the archive written by
+# ``master retire-migration`` and the record layout refuses them.
+LEGACY_MIGRATION_REPORT_NAME = "migration.json"
+LEGACY_MIGRATION_BACKUP_ROOT_NAME = "migration-backups"
+LEGACY_MIGRATION_ROOT_FILES = ("log.md", "board.md", "observations.md")
+LEGACY_MIGRATION_NODES = (
+    LEGACY_MIGRATION_REPORT_NAME,
+    LEGACY_MIGRATION_BACKUP_ROOT_NAME,
+    *LEGACY_MIGRATION_ROOT_FILES,
+)
+RETIRE_MIGRATION_COMMAND = "python3 -m creme master retire-migration --apply"
 
 _PUBLICATION_MARKER_PREFIX = ".record-transaction-v1."
 _PUBLICATION_MARKER = re.compile(
@@ -649,9 +658,6 @@ _KNOWN_ROOT_NODES = frozenset(
         LOCK_NAME,
         README_NAME,
         *PRIVATE_DIRECTORIES,
-        MIGRATION_REPORT_NAME,
-        MIGRATION_BACKUP_ROOT_NAME,
-        *MIGRATION_RETAINED_ROOT_FILES,
     }
 )
 
@@ -659,7 +665,7 @@ _KNOWN_ROOT_NODES = frozenset(
 def _private_nodes(root: Path) -> Iterator[tuple[Path, os.stat_result]]:
     """Yield the root and the recognized record nodes, never following a link.
 
-    Only the standard layout and migration artifacts are visited: an unknown
+    Only the standard layout is visited: an unknown
     root node is not part of the record, is never changed, and layout
     validation refuses it with its own diagnosis.  Directories not owned by
     the current user, and directories that cannot be listed, are yielded but
@@ -943,8 +949,8 @@ def _publication_transaction_from_inventory(
 def _validate_layout(
     root: Path,
     *,
-    migration_root_nodes: Optional[Sequence[str]] = None,
-) -> tuple[Path, bool, Optional[_PublicationTransaction]]:
+    legacy_nodes: Optional[Sequence[str]] = None,
+) -> tuple[Path, Optional[_PublicationTransaction]]:
     root = _normalized_root(root)
     _validate_owner_mode(root, 0o700, directory=True)
     required_files = (EVENTS_NAME, BOARD_NAME, LOCK_NAME, README_NAME)
@@ -961,29 +967,30 @@ def _validate_layout(
         root, extras
     )
     extras -= transaction_nodes
-    if migration_root_nodes is None:
-        allowed_migration = {
-            MIGRATION_REPORT_NAME,
-            MIGRATION_BACKUP_ROOT_NAME,
-            *MIGRATION_RETAINED_ROOT_FILES,
-        }
-        unknown = extras - allowed_migration
-        if unknown:
+    if legacy_nodes is None:
+        legacy = extras & set(LEGACY_MIGRATION_NODES)
+        if legacy:
             raise MasterRecordError(
-                f"unexpected private master root node: {sorted(unknown)[0]}"
+                "retained pre-master migration nodes remain in the record "
+                f"({', '.join(sorted(legacy))}); as master, archive them with "
+                f"`{RETIRE_MIGRATION_COMMAND}`"
             )
-        if extras and MIGRATION_REPORT_NAME not in extras:
+        if extras:
             raise MasterRecordError(
-                "migration root nodes require a verified migration report"
+                f"unexpected private master root node: {sorted(extras)[0]}"
             )
     else:
-        permitted = set(migration_root_nodes)
-        if extras != permitted:
-            unexpected = sorted(extras - permitted)
+        # Only the retirement command names legacy nodes, and only nodes it
+        # has just verified; everything else stays refused.
+        permitted = set(legacy_nodes)
+        if not permitted <= set(LEGACY_MIGRATION_NODES) or extras != permitted:
+            unexpected = sorted(extras - permitted) or sorted(
+                permitted - set(LEGACY_MIGRATION_NODES)
+            )
             missing = sorted(permitted - extras)
             detail = unexpected[0] if unexpected else missing[0]
             raise MasterRecordError(
-                f"migration root inventory changed at node: {detail}"
+                f"legacy root inventory changed at node: {detail}"
             )
 
     for name in required_files:
@@ -994,34 +1001,20 @@ def _validate_layout(
         _validate_private_tree(private)
     for name in sorted(extras):
         path = root / name
-        if name == MIGRATION_BACKUP_ROOT_NAME:
+        if name == LEGACY_MIGRATION_BACKUP_ROOT_NAME:
             _validate_owner_mode(path, 0o700, directory=True)
             _validate_private_tree(path)
         else:
             _validate_owner_mode(path, 0o600, directory=False)
-    return root, bool(extras), transaction
+    return root, transaction
 
 
 def _validated_layout(
     root: Path,
     *,
-    migration_root_nodes: Optional[Sequence[str]] = None,
+    legacy_nodes: Optional[Sequence[str]] = None,
 ) -> tuple[Path, Optional[_PublicationTransaction]]:
-    root, has_migration_nodes, transaction = _validate_layout(
-        root,
-        migration_root_nodes=migration_root_nodes,
-    )
-    if has_migration_nodes and migration_root_nodes is None:
-        # Import lazily: migration owns the report/backup interpretation while
-        # this module owns the record layout used during that interpretation.
-        from . import master_migrate
-
-        migration = master_migrate.plan_migration(root)
-        if migration.status != "CURRENT":
-            raise MasterRecordError(
-                f"migration root nodes are not verified current: {migration.detail}"
-            )
-    return root, transaction
+    return _validate_layout(root, legacy_nodes=legacy_nodes)
 
 
 def _write_new_file(path: Path, data: bytes) -> None:
@@ -1231,11 +1224,9 @@ def _verify_publication_transaction(
 def _read_record_unlocked(
     root: Path,
     *,
-    _migration_root_nodes: Optional[Sequence[str]] = None,
+    _legacy_nodes: Optional[Sequence[str]] = None,
 ) -> RecordView:
-    root, transaction = _validated_layout(
-        root, migration_root_nodes=_migration_root_nodes
-    )
+    root, transaction = _validated_layout(root, legacy_nodes=_legacy_nodes)
     events, log_bytes = _load_events(root / EVENTS_NAME)
     expected = reduce_events(events)
     board_path = root / BOARD_NAME
@@ -1299,13 +1290,10 @@ def _record_lock(root: Path, *, exclusive: bool) -> Iterator[Path]:
 def read_record(
     root: Path,
     *,
-    _migration_root_nodes: Optional[Sequence[str]] = None,
+    _legacy_nodes: Optional[Sequence[str]] = None,
 ) -> RecordView:
     with _record_lock(root, exclusive=False) as locked_root:
-        return _read_record_unlocked(
-            locked_root,
-            _migration_root_nodes=_migration_root_nodes,
-        )
+        return _read_record_unlocked(locked_root, _legacy_nodes=_legacy_nodes)
 
 
 @contextlib.contextmanager

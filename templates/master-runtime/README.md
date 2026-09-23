@@ -25,11 +25,9 @@ master/
   tracked [generic worker brief](worker-brief.md), then store the filled copy
   only in the ignored runtime.
 - `audits/` contains independently owned reports and findings.
-- `migration.json` and `migration-backups/` appear only after explicit legacy
-  migration. They bind the verified conversion and byte-identical originals.
-- An optional legacy `observations.md` is retained and sealed by that report;
-  its prose is never interpreted. New observations use structured `note`
-  events, while `audits/` remains independently owned.
+- Observations use structured `note` events, while `audits/` remains
+  independently owned. Nodes left by the retired pre-master migration belong
+  in `master-archive/` beside this directory (see `master retire-migration`).
 - One empty `.record-transaction-v1.*` description and one matching
   `*.record-tmp` file may exist transiently during an authorized publication.
   The description binds source and target digests so readers can project a

@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Union
 
-from . import master_migrate, master_reconcile, master_runtime, semaphore
+from . import master_reconcile, master_runtime, semaphore
 from .adapters import Adapter, get_adapter
 from .doctor import STATUS_FAIL, check_goal_store
 from .profile import DEFAULT_RELATIVE_PROFILE, load as load_profile
@@ -18,6 +18,8 @@ DIGEST_SCHEMA_VERSION = 1
 DEFAULT_DIGEST_LIMIT = 20
 MAX_DIGEST_LIMIT = 100
 HUMAN_PREVIEW_CHARS = 160
+# Last Creme main commit that carries `creme/master_migrate.py`.
+LEGACY_MIGRATOR_COMMIT = "1cc5c48"
 
 _DIGEST_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,127}")
 _GOAL_PRIORITY = {
@@ -206,25 +208,6 @@ def plan_initialization(location: RuntimeLocation) -> InitPlan:
         detail = "existing master root must be an owner-only non-symlink directory"
         return InitPlan("REFUSED", str(root), detail, _standard_actions("refuse", detail))
 
-    if (root / master_migrate.MIGRATION_REPORT_NAME).exists():
-        migration = master_migrate.plan_migration(root)
-        if migration.status == "FINALIZE":
-            detail = "prepared legacy migration requires explicit `master init --migrate --apply`"
-            return InitPlan(
-                "MIGRATION_REQUIRED",
-                str(root),
-                detail,
-                _standard_actions("refuse", "prepared migration is not yet authoritative"),
-            )
-        if migration.status != "CURRENT":
-            detail = f"legacy migration is not verified: {migration.detail}"
-            return InitPlan(
-                "REFUSED",
-                str(root),
-                detail,
-                _standard_actions("refuse", "migration evidence requires explicit recovery"),
-            )
-
     if all(path.exists() for path in core):
         try:
             master_runtime.read_record(root)
@@ -251,7 +234,12 @@ def plan_initialization(location: RuntimeLocation) -> InitPlan:
     if any(path.exists() for path in core):
         detail = "partial structured record is unsafe and is not a legacy migration input"
         return InitPlan("REFUSED", str(root), detail, _standard_actions("refuse", detail))
-    detail = "legacy or unknown master record requires explicit `master init --migrate`"
+    detail = (
+        "legacy or unknown master record: this Creme no longer carries the "
+        "pre-master migrator; migrate with a Creme checkout that does "
+        f"(`master init --migrate`, e.g. {LEGACY_MIGRATOR_COMMIT}), then run "
+        "`master retire-migration --apply`"
+    )
     return InitPlan(
         "MIGRATION_REQUIRED",
         str(root),

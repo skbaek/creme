@@ -45,7 +45,6 @@ local. The record contains:
 | `master/intent/` | one statement per programme of what the user wants, in the user's words | **the user** |
 | `master/briefs/` | worker briefs the master writes when a full goal document is not worth it | master |
 | `master/audits/` | independent audit reports and the findings register | auditor; master may mark a finding addressed |
-| `master/migration.json`, `master/migration-backups/` | optional report and byte-identical originals from an explicit legacy migration | authenticated master through Creme |
 
 The event log is the source of truth and the board is derived from it. Creme
 commits the log first, then rewrites the board under the same record lock. A
@@ -64,7 +63,18 @@ foreign-owned node) and lists them in `modes_normalized`, while read-only
 commands refuse with the offending path, its mode, and the `chmod` that
 fixes it.
 
-Transaction, lock-order, and legacy-migration internals of the record writer are
+The one-time pre-master legacy migration is retired. A record that still
+holds its `migration.json`, `migration-backups/`, `board.md`, `log.md`, or
+`observations.md` refuses every read and names the fix:
+`python3 -m creme master retire-migration --apply`, run as master, verifies
+those nodes, copies them into `$GOAL_STORE/master-archive/legacy-migration-DATE/`
+(ignored, `0700`/`0600`, with a SHA-256 manifest), removes them from the
+record, and records a `procedure` event binding the manifest digest.
+`master restore-migration NAME --apply` copies them back byte for byte; a
+restored record is readable only by a Creme checkout that still carries the
+migrator (`1cc5c48` or earlier).
+
+Transaction and lock-order internals of the record writer are
 in [the record internals](../maintainer/master-record.md); an operating master
 needs only the supported commands above and their refusals.
 

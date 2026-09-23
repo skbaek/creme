@@ -50,6 +50,12 @@ authorizes restarting a process that may still be live. How a master learns
 that a worker is alive differs by client, so the liveness clauses a brief
 carries do too:
 
+When a worker appears stalled, inspect its actual live command or task handle;
+frozen artifacts and an unanswered status pulse do not establish that it ended.
+Use supported controls to stop or interrupt a genuinely stalled owned worker,
+then confirm terminal status and cleanup before assigning replacement
+ownership. An observation timeout alone never authorizes a restart.
+
 - **Claude Code.** The harness does the liveness work: `run_in_background`
   and `Monitor` notify on completion, `sleep N; cmd` is blocked, contexts
   auto-compact, and a stalled subagent returns as a failed task that a message

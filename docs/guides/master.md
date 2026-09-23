@@ -377,9 +377,10 @@ Master liveness monitoring follows the client-specific protocol in
 [the briefs guide](briefs.md#liveness-bounded-waits-and-heartbeats). Use native
 worker or task notifications when the active client exposes them; use bounded
 status and artifact checks when the harness is quiet or lacks a notification
-channel. If a worker appears stalled, send one status pulse; an unanswered
-pulse plus frozen artifacts is a stand-down and a respawn with a narrower
-scope. Never let a second hour of silence pass hoping the wait resolves.
+channel. Before replacing a stalled worker, inspect its live handle and follow
+the stop, terminal-status, and cleanup rule in the [briefs
+guide](briefs.md#liveness-bounded-waits-and-heartbeats); a timeout or frozen
+artifacts alone do not establish termination.
 
 The master accepts a worker's result only on evidence: the catalogue's
 verdict on the exact candidate commit, the diff, and the report's

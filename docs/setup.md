@@ -260,8 +260,9 @@ On a fresh installation this creates private runtime state under the ignored
 edit the state files directly. Adaptive acquisition may grant soft, grant hard,
 or direct the agent to run light work until memory/other holds recover. Agents
 renew between heavy units; `YIELD_HEAVY` and `DRAIN_HEAVY` mean checkpoint and
-wind down rather than beginning another Lean action. See the execution guide
-for classification and peak-estimation rules.
+wind down rather than beginning another Lean action. See the
+[execution guide](guides/execution.md#resource-classes) for classification and
+[build admission](maintainer/build-admission.md) for peak estimation.
 
 An upgraded installation with legacy state deliberately continues using it
 until an explicit cutover. After deploying the neutral launcher, preserve the

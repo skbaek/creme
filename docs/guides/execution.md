@@ -221,8 +221,9 @@ never gate evidence.
 Capture control evidence as each command or tool call completes: the exact
 submitted source or mutation, the request, and the unnormalized result, bound
 to the source candidate — the positive run, the intended rejection, the exact
-restoration, and the restored green, including LSP controls and cleanup
-receipts. Save each raw result once in the goal's evidence directory and link
+restoration, and the restored green (for a script or data control, byte
+identity with the green baseline, not a rerun), including LSP controls and
+cleanup receipts. Save each raw result once in the goal's evidence directory and link
 it from the report. If an original result was not retained, record the gap;
 never reconstruct a transcript from memory, and schedule a replacement control
 with the next validation unit.

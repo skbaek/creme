@@ -184,8 +184,25 @@ def plan_initialization(location: RuntimeLocation) -> InitPlan:
         not stat.S_ISDIR(info.st_mode)
         or stat.S_ISLNK(info.st_mode)
         or info.st_uid != os.geteuid()
-        or stat.S_IMODE(info.st_mode) != 0o700
     ):
+        detail = "existing master root must be an owner-only non-symlink directory"
+        return InitPlan("REFUSED", str(root), detail, _standard_actions("refuse", detail))
+    core = [
+        root / master_runtime.EVENTS_NAME,
+        root / master_runtime.BOARD_NAME,
+        root / master_runtime.LOCK_NAME,
+    ]
+    if all(path.exists() for path in core):
+        # A structured record with a widened mode is a mode problem, not a
+        # migration or corruption problem: name the paths and the repair.
+        try:
+            violations = master_runtime.mode_violations(root)
+        except master_runtime.MasterRecordError as exc:
+            return InitPlan("REFUSED", str(root), str(exc), _standard_actions("refuse", str(exc)))
+        if violations:
+            detail = master_runtime.mode_violation_detail(violations)
+            return InitPlan("REFUSED", str(root), detail, _standard_actions("refuse", detail))
+    elif stat.S_IMODE(info.st_mode) != 0o700:
         detail = "existing master root must be an owner-only non-symlink directory"
         return InitPlan("REFUSED", str(root), detail, _standard_actions("refuse", detail))
 
@@ -208,14 +225,12 @@ def plan_initialization(location: RuntimeLocation) -> InitPlan:
                 _standard_actions("refuse", "migration evidence requires explicit recovery"),
             )
 
-    core = [
-        root / master_runtime.EVENTS_NAME,
-        root / master_runtime.BOARD_NAME,
-        root / master_runtime.LOCK_NAME,
-    ]
     if all(path.exists() for path in core):
         try:
             master_runtime.read_record(root)
+        except master_runtime.MasterModeError as exc:
+            detail = str(exc)
+            return InitPlan("REFUSED", str(root), detail, _standard_actions("refuse", detail))
         except master_runtime.MasterRecordError as exc:
             detail = f"malformed current record refuses initialization: {exc}"
             return InitPlan("REFUSED", str(root), detail, _standard_actions("refuse", detail))

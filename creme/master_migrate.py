@@ -954,6 +954,9 @@ def _current_view(
         return None
     try:
         return _read_migration_record(root, orphan_temps)
+    except master_runtime.MasterModeError:
+        # A widened mode is not evidence about migration; report it as itself.
+        raise
     except master_runtime.MasterRecordError:
         return None
 
@@ -970,6 +973,8 @@ def _idempotent_plan(
             # writers, backup namespaces, and temporary-looking files cannot
             # be hidden by the migration-only inventory override.
             master_runtime._read_record_unlocked(root)
+        except master_runtime.MasterModeError:
+            raise
         except master_runtime.MasterRecordError:
             return None
         return MigrationPlan(

@@ -39,6 +39,16 @@ record the canonical entry point, required paths, resource class, available
 capability, and any observed approval restriction. Unknown is a valid finding;
 it is not evidence of permission or of denial.
 
+For an approval-gated operation, name the task that will request it and check
+whether that task retains the applicable request, prior answers, goal and
+intent. If a worker fork drops relevant context, preserve it through supported
+dispatch or assign the authorized launch to the master from the outset. Cite
+the existing authorization in the concrete approval request; do not ask again
+for each routine gate it covers. A brief or goal remains task evidence, but
+its presence alone does not establish what an automatic reviewer saw. If a
+reviewer denies the operation, the no-rerouting rule above still applies:
+continue only with a materially safer path or obtain the needed user decision.
+
 Use doctor and host guidance for the installed capability facts. Inspect the
 client's effective policy when that information is available; a config file is
 only one input and does not prove the running configuration. Keep these facts

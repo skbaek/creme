@@ -154,6 +154,17 @@ and specify both axes when the brief's sizing decision chooses them. With the
 parent settings. Follow another interface's actual contract rather than copying
 these parameter names blindly.
 
+Before assigning a Codex worker an operation likely to need sandbox
+escalation, check what task authorization its context will retain. For a
+model/effort override, prefer a finite fork that includes the applicable user
+instructions when available, and verify what the worker inherited; do not
+assume a `fork_turns="none"` brief carries the parent's conversation. If that
+context cannot be preserved, plan for the master to launch the authorized
+escalation-prone unit from its own task from the outset, while the worker owns
+candidate preparation and analysis. This is a dispatch choice before any
+denial, not a route around one. Existing authorization may cover the whole
+task; no separate worker or per-gate user grant is implied.
+
 Keep dispatch availability separate from fit evidence. A `no data` cell means
 no verified observation, not an unavailable setting. Conversely, a table row
 does not establish that a current client can launch that option. Check supported

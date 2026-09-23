@@ -35,7 +35,6 @@ except ImportError:  # invoked as scripts.tests.test_admission_accuracy
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SETTINGS = dict(ADMISSION_DEFAULTS)
-LIVE_STATE = Path("/Users/agent/creme/.semaphore/state")
 HOST_POLICY = {
     "task_memory_gib": 8, "heavy_workers": 2, "light_workers": 5,
     "physical_memory_gib": 24.0, "profile_status": "VALID",
@@ -1754,25 +1753,73 @@ class FitLineProvenanceTest(_SignalBase):
         self.assertTrue(any("derived, not explicit" in line for line in announced), announced)
 
 
-class LiveStateCompatibilityTest(unittest.TestCase):
-    """The on-disk schema of the live semaphore state is unchanged.
+def _state_fixture(now: float, *, old: bool) -> dict[str, dict]:
+    """On-disk semaphore state as one writer generation leaves it.
 
-    Reads copies of the live files only; the live directory is never opened
-    by the code under test.
+    ``old`` is what code from before launch-and-watch and the process witness
+    still writes on a host running mixed checkouts: a queue carrying the
+    retired tranquil-baseline keys and a waiter with none of the
+    launch-and-watch fields, and a schema-3 master lease.  The new form is what
+    the candidate's own writers produce.  Both are fixtures so the test never
+    reads the host's live, concurrently written state directory.
+    """
+    pid, uid = os.getpid(), os.getuid()
+    hold = semaphore._hold("fixture-goal", "proof loop", 600, memory_gib=6, contention="sensitive")
+    waiter = {
+        "id": "w1", "label": "fixture-waiter", "pid": pid, "uid": uid,
+        "contention": "sensitive", "memory_gib": 6,
+        "enqueued_at": now - 5, "heartbeat_at": now,
+    }
+    lease = {
+        "acquired_at": now - 600, "client": "claude", "client_pid": pid,
+        "direct_activity_at": now - 10, "heartbeat_launch_digest": None,
+        "heartbeat_launch_expires_at": None, "heartbeat_renewals": 0,
+        "lease_id": "c7c249839f1544ad8a6cb00c3fb13943", "lease_seconds": 1800,
+        "legacy_unbound": False, "liveness_digest": None, "note": "fixture master",
+        "pid": pid, "renewed_at": now - 10, "session_digest": None, "uid": uid,
+    }
+    if old:
+        queue = {
+            "schema_version": 2, "waiters": [{**waiter, "estimate_source": "ledger"}],
+            "activity": {"fixture-goal": now - 30}, "workers": {},
+            "tranquil_max_gib": 11.5, "tranquil_max_at": now - 3600,
+        }
+        master = {"schema_version": 3, "lease": lease}
+    else:
+        queue = {
+            "schema_version": semaphore.QUEUE_SCHEMA_VERSION,
+            "waiters": [{**waiter, "estimate_source": "ledger", "need_gib": 6.0,
+                         "unproven": False, "watched": False}],
+            "activity": {"fixture-goal": now - 30}, "workers": {},
+        }
+        master = {"schema_version": semaphore.MASTER_SCHEMA_VERSION,
+                  "lease": {**lease, "process_witness": None}}
+    return {
+        "state.json": {"schema_version": 1, "hard": None, "soft": [hold]},
+        "queue.json": queue,
+        "master.json": master,
+    }
+
+
+class LiveStateCompatibilityTest(unittest.TestCase):
+    """The on-disk schema the semaphore reads is unchanged across writer generations.
+
+    Hermetic: the state comes from fixtures of both the old and the current
+    writers, never from the host's live directory, which other processes
+    (possibly running older code) rewrite concurrently.
     """
 
     NAMES = ("state.json", "queue.json", "master.json")
+    OLD = False
 
     def setUp(self) -> None:
-        if not all((LIVE_STATE / name).is_file() for name in self.NAMES):
-            self.skipTest("no live semaphore state on this host")
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        self.raw = _state_fixture(semaphore._now(), old=self.OLD)
         for name in self.NAMES:
-            shutil.copyfile(LIVE_STATE / name, self.root / name)
+            (self.root / name).write_text(json.dumps(self.raw[name]), encoding="utf-8")
         (self.root / "log.jsonl").touch()
-        self.raw = {name: json.loads((self.root / name).read_text(encoding="utf-8")) for name in self.NAMES}
         self.adapter = ProcessAdapter(free_percent=80, total_gib=24, processes=[], workers=[])
         self.policy = dict(HOST_POLICY)
         for patcher in (
@@ -1823,6 +1870,12 @@ class LiveStateCompatibilityTest(unittest.TestCase):
         note, gib, contention = semaphore._decode_admission_note(hold["note"], 8)
         self.assertEqual((note, gib, contention), ("note", 4, "tolerant"))
         self.assertEqual(set(semaphore._empty_queue()), {"schema_version", "waiters", "activity", "workers"})
+
+
+class OldWriterStateCompatibilityTest(LiveStateCompatibilityTest):
+    """The same checks over state left by pre-launch-and-watch writers."""
+
+    OLD = True
 
 
 if __name__ == "__main__":

@@ -123,9 +123,12 @@ another; keep the acquiring process alive across the unit, or use the wrapper.
 
 ## Renewal and pressure
 
-Renew before the next elaboration or build unit and at least every five
-minutes during an interactive MCP session; renewal is the lease heartbeat and
-the pressure check.
+Renew before the next elaboration or build unit, and during an interactive
+MCP session at least every five minutes or by passing `--heartbeat SECS
+--detach` to `adaptive-acquire`: one renewer per hold, bound to the agent
+client, that stops by itself on release, on the client's exit, or on a
+`YIELD_HEAVY`/`DRAIN_HEAVY` verdict, which it logs without killing anything.
+Renewal is the lease heartbeat and the pressure check.
 
 | renewal verdict | do |
 |---|---|

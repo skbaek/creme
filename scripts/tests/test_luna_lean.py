@@ -581,6 +581,37 @@ class LeanBrokerSessionTest(LeanBrokerHarness):
         record = self.settle(reply["session"], states=("tripped",))
         self.assertEqual(record["lean"]["wind_down"]["verdict"], "OK")
 
+    def test_tripped_is_published_only_after_the_wind_down_is_recorded(self):
+        # The tripwire's own stop owns the terminal state: a reader that sees
+        # "tripped" must also see the wind-down verdict and the tripwire.
+        self.scenario["thread_notifications"] = [startup("lean-lsp-mcp", "ready"), startup("node_repl", "ready")]
+        self.write_scenario()
+        self.wind_down_gate.clear()
+
+        class StopFirst(threading.Thread):
+            # Force the adverse interleaving: the tripwire's stop thread runs
+            # until it has closed the session (it then blocks in the gated
+            # wind-down) before the tripping thread continues.
+            def start(self):
+                super().start()
+                target = getattr(self, "_target", None)
+                owner = getattr(target, "__self__", None)
+                if isinstance(owner, B.BrokerSession) and target.__name__ == "stop":
+                    deadline = time.monotonic() + 10
+                    while not owner.closed and time.monotonic() < deadline:
+                        time.sleep(0.01)
+
+        with mock.patch.object(B.threading, "Thread", StopFirst):
+            reply = self.open()
+        self.assertEqual(reply["code"], L.EXIT_ATTRIBUTION_FAILED, reply)
+        session = self.session(reply)
+        self.assertTrue(session.closed)
+        self.assertTrue(L.tripwire_path(self.state).exists())
+        self.assertNotIn(self.record(reply["session"])["state"], B.TERMINAL_STATES)
+        self.wind_down_gate.set()
+        record = self.settle(reply["session"], states=("tripped",))
+        self.assertEqual(record["lean"]["wind_down"]["verdict"], "OK")
+
     def test_lean_server_that_never_becomes_ready_refuses_and_winds_down(self):
         self.scenario["thread_notifications"] = [startup("lean-lsp-mcp", "starting")]
         self.write_scenario()

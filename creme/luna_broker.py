@@ -954,8 +954,10 @@ class BrokerSession:
             self.closed = True
             self.server.close()
             self.lean_wind_down("app-server lost")
-            self.set_state("tripped", failures[0])
+            # The tripwire is recorded before the terminal state is visible, so
+            # a reader that sees "tripped" also sees the tripwire.
             self.broker.trip_all(self, failures)
+            self.set_state("tripped", failures[0])
         else:
             self.closed = True
             self.server.close()
@@ -1007,6 +1009,10 @@ class BrokerSession:
             failed = stop_audit["verdict"] != "PASS"
             unclean = wind_down is not None and wind_down.get("verdict") != "OK"
             final = "tripped" if (self.guard_tripped or failed) else "unclean" if unclean else "stopped"
+            if failed:
+                # Recorded while still "stopping", before the terminal state.
+                self.guard_tripped = True
+                self.broker.trip_all(self, stop_audit["failures"])
             with self.data_lock:
                 self.record["stop_audit"] = {"verdict": stop_audit["verdict"],
                                              "failures": stop_audit["failures"][:10]}
@@ -1015,9 +1021,6 @@ class BrokerSession:
                 self.persist()
             self.emit("attention", "stopped", f"{final} ({reason}) stop_audit={stop_audit['verdict']}"
                       + (f" wind_down={wind_down.get('verdict')}" if wind_down is not None else ""))
-        if failed:
-            self.guard_tripped = True
-            self.broker.trip_all(self, stop_audit["failures"])
         code = L.EXIT_ATTRIBUTION_FAILED if final == "tripped" else L.EXIT_CODEX_FAILED if final == "unclean" \
             else L.EXIT_OK
         result = {"verdict": final.upper(), "state": final, "stop_audit": stop_audit["verdict"]}
@@ -1249,7 +1252,11 @@ class Broker:
             if session is not offender:
                 session.emit("attention", "billing-alarm", "stopping: the attribution failure tripwire is recorded")
             threading.Thread(target=session.stop, kwargs={"reason": "tripwire"}, daemon=True).start()
-        if offender is not None and not offender.is_open() and offender.state not in TERMINAL_STATES:
+        # An offender this call is stopping, or one already inside its own
+        # stop, reaches "tripped" only when that stop has recorded its
+        # wind-down; marking it here would publish a terminal state first.
+        if offender is not None and offender not in sessions \
+                and offender.state not in TERMINAL_STATES + ("stopping",):
             offender.set_state("tripped")
 
     # -- requests -------------------------------------------------------

@@ -2247,6 +2247,7 @@ def _measured_rows(
 def module_cost_evidence(
     rows: list[dict[str, Any]], settings: dict[str, int],
     input_identity: Optional[dict[str, Any]] = None,
+    toolchain_digest: Optional[str] = None,
 ) -> dict[str, Any]:
     """Per-module cost from the ledger: what each module's `lean` process peaked at.
 
@@ -2266,6 +2267,16 @@ def module_cost_evidence(
     does any narrow row without a recorded peak.  ``fallback_origin``
     records, for each fallback module, which row and which kind of evidence
     set its floor, so the estimate can name it.
+
+    Toolchain scope, when ``toolchain_digest`` names the current toolchain:
+    a whole-build aggregate floors a module only when its row ran on that
+    toolchain, because the aggregate prices a process tree the old toolchain
+    built.  A module's own peak (or narrow-row bound) from another toolchain
+    remains a conservative cross-toolchain floor only while the module has
+    no fallback evidence from the current toolchain; once it has, that newer
+    evidence supersedes the other toolchain's instead of being max'ed with
+    it.  Exact evidence is unaffected: its input context already binds the
+    toolchain.
     """
     narrow = int(settings["tolerant_module_count"])
     sample = int(settings["estimate_sample_rows"])
@@ -2276,6 +2287,7 @@ def module_cost_evidence(
     fallback_kinds: dict[str, list[str]] = {}
     fallback_build_origins: dict[str, list[str]] = {}
     fallback_build_kinds: dict[str, list[str]] = {}
+    fallback_current: dict[str, list[bool]] = {}
     exact_seconds: dict[str, float] = {}
     fallback_seconds: dict[str, float] = {}
     overheads: list[float] = []
@@ -2300,6 +2312,9 @@ def module_cost_evidence(
         # conservative lower bound if current evidence is absent.  It never
         # makes `unmeasured` disappear or relaxes the contention class.
         row_time = str(row.get("time"))
+        current_toolchain = (
+            toolchain_digest is None or row.get("toolchain_digest") == toolchain_digest
+        )
         for module in rebuilt:
             # A source-drifted narrow measurement cannot prove the current
             # module cheap, but its complete process/Lake aggregate is still
@@ -2315,7 +2330,7 @@ def module_cost_evidence(
             # has no siblings, so its aggregate stays the floor there, as
             # does any narrow row without a recorded peak for the module.
             value = recorded.get(module) if isinstance(recorded, dict) else None
-            if input_identity is not None and len(rebuilt) <= narrow:
+            if input_identity is not None and len(rebuilt) <= narrow and current_toolchain:
                 if len(rebuilt) == 1 or not _finite_positive(value):
                     fallback_build_peaks.setdefault(module, []).append(peak_gib)
                     fallback_build_origins.setdefault(module, []).append(row_time)
@@ -2336,12 +2351,14 @@ def module_cost_evidence(
                 fallback_peaks.setdefault(module, []).append(float(value) / 1024.0)
                 fallback_origins.setdefault(module, []).append(row_time)
                 fallback_kinds.setdefault(module, []).append("module peak")
+                fallback_current.setdefault(module, []).append(current_toolchain)
             elif len(rebuilt) <= narrow:
                 fallback_peaks.setdefault(module, []).append(
                     lean_gib if lean_gib is not None else peak_gib
                 )
                 fallback_origins.setdefault(module, []).append(row_time)
                 fallback_kinds.setdefault(module, []).append("narrow-row bound")
+                fallback_current.setdefault(module, []).append(current_toolchain)
         if input_identity is not None and not _exact_context_row(row, input_identity):
             continue
         context_rows += 1
@@ -2361,6 +2378,14 @@ def module_cost_evidence(
             else:
                 continue
             peaks.setdefault(module, []).append(cost)
+    # Current-toolchain supersession: drop another toolchain's direct floors
+    # for any module the current toolchain has already measured.
+    for module, flags in fallback_current.items():
+        if any(flags) and not all(flags):
+            keep = [index for index, flag in enumerate(flags) if flag]
+            fallback_peaks[module] = [fallback_peaks[module][index] for index in keep]
+            fallback_kinds[module] = [fallback_kinds[module][index] for index in keep]
+            fallback_origins[module] = [fallback_origins[module][index] for index in keep]
     # Which row and which kind of evidence set each module's fallback floor:
     # the sampled maximum across both fallback lists.  Ties prefer the more
     # specific kind, then the earliest sampled row.
@@ -2561,6 +2586,7 @@ def size_stale_set(
     default_gib: int,
     input_identity: Optional[dict[str, Any]] = None,
     failed_rows: Iterable[dict[str, Any]] = (),
+    toolchain_digest: Optional[str] = None,
 ) -> dict[str, Any]:
     """Size a build from the modules it will elaborate, never from a target's name.
 
@@ -2576,16 +2602,21 @@ def size_stale_set(
     sets the ask, the source names the module, peak, and row it came from.
 
     An unmeasured module whose elaboration failed in ``failed_rows`` is
-    floored by that failed run's whole process peak.  The peak is the
-    closure's, not the module's own, so it is uncertain and only ever raises
-    the ask; it never counts as a measurement.
+    floored by that failed run: by the module's own recorded peak when the
+    row has one, otherwise by the run's whole process peak only when it is
+    the row's sole failed module.  A row with several failed modules and no
+    per-module peak cannot say which of them the peak belongs to, so it
+    floors none of them; they fall through to the other rules.  The floor is
+    uncertain and only ever raises the ask; it never counts as a measurement.
+    ``toolchain_digest`` scopes fallback evidence as ``module_cost_evidence``
+    describes.
     """
     floor = int(settings["minimum_estimate_gib"])
     margin = int(settings["estimate_margin_gib"])
     limit = int(settings["tolerant_module_count"])
     narrow_default = int(settings["narrow_default_gib"])
     heavy_seconds = float(settings["heavy_module_seconds"])
-    evidence = module_cost_evidence(rows, settings, input_identity)
+    evidence = module_cost_evidence(rows, settings, input_identity, toolchain_digest)
     names = sorted(set(stale))
     measured = {name: evidence["lean_peak_gib"][name] for name in names if name in evidence["lean_peak_gib"]}
     unmeasured = [name for name in names if name not in measured]
@@ -2599,12 +2630,26 @@ def size_stale_set(
     }
     failed_floor: dict[str, dict[str, Any]] = {}
     for row in failed_rows:
-        peak_gib = float(row["peak_rss_mib"]) / 1024.0
-        for module in row.get("modules_failed") or []:
-            if module in unmeasured and peak_gib > failed_floor.get(module, {}).get("peak_gib", 0.0):
+        failed_modules = [str(module) for module in row.get("modules_failed") or []]
+        recorded = row.get("module_peak_mib")
+        recorded = recorded if isinstance(recorded, dict) else {}
+        for module in failed_modules:
+            if module not in unmeasured:
+                continue
+            own = recorded.get(module)
+            if _finite_positive(own):
+                peak_gib = float(own) / 1024.0
+                kind = "failed attempt: module's own peak, uncertain"
+            elif len(failed_modules) == 1:
+                peak_gib = float(row["peak_rss_mib"]) / 1024.0
+                kind = "failed attempt: closure process peak, sole failed module, uncertain"
+            else:
+                # Several failures share one whole-process peak: attributing
+                # it to each of them would over-charge every one.
+                continue
+            if peak_gib > failed_floor.get(module, {}).get("peak_gib", 0.0):
                 failed_floor[module] = {
-                    "peak_gib": peak_gib, "row_time": str(row.get("time")),
-                    "kind": "failed attempt: closure process peak, uncertain",
+                    "peak_gib": peak_gib, "row_time": str(row.get("time")), "kind": kind,
                 }
     fallback_floor = max(
         [*fallback.values(), *fallback_build.values(),
@@ -3028,7 +3073,7 @@ def derive_memory_gib(
         )
         fallback = size_stale_set(
             list(stale_set), stale.get("graph"), rows, settings, default_gib, fallback_identity,
-            failed_rows,
+            failed_rows, digests[0],
         )
         fallback_peak = float(fallback["fallback_peak_gib"] or fallback["peak_gib"])
         estimate = max(
@@ -3059,7 +3104,7 @@ def derive_memory_gib(
     )
     sizing = size_stale_set(
         list(stale_set), stale.get("graph"), rows, settings, default_gib, input_identity,
-        failed_rows,
+        failed_rows, digests[0],
     )
     return int(sizing["estimate_gib"]), {
         "kind": sizing["kind"],

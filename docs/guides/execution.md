@@ -525,7 +525,11 @@ peaks and durations may remain conservative fallback floors; otherwise they
 are excluded from cross-worktree selection. Fallback can keep a known costly
 module expensive, but it cannot make a stale set `tolerant` or override a
 newer exact cohort. New exact reuse begins only with newly recorded applicable
-measurements.
+measurements. A whole-build aggregate floors a module only when its row ran on
+the current toolchain; another toolchain's direct module peak remains a floor
+only until the current toolchain has measured that module. A failed build
+floors a failed module by its own recorded peak, or by the run's whole peak
+only when it was the run's sole failed module.
 
 A legacy row can avoid the estimator's additional whole-GiB margin only for a
 single requested stale module when the selector revalidates its Git repository,

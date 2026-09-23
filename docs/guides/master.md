@@ -14,8 +14,9 @@ that state and taking the lease; the previous one stops being the master by
 writing its state and releasing the lease. Exactly one holds the lease at a
 time, and the launcher enforces that.
 
-The named goal, the sibling gate catalogues, and this guide's parent
-[execution guide](execution.md) keep their authority. This guide adds the
+The named goal, the sibling gate catalogues, and the
+[execution guide](execution.md) (the Lean, build, and evidence contract) keep
+their authority. This guide adds the
 layer above them: who may act without asking, what must be written down, and
 how the work is checked when nobody is reading reports.
 
@@ -364,7 +365,7 @@ The master accepts a worker's result only on evidence: the catalogue's
 verdict on the exact candidate commit, the diff, and the report's
 condition-to-evidence table. A worker's summary that it is done is not
 evidence, and neither is a green signal whose failure mode was never shown
-to bite. This is the [execution guide's](execution.md) completion rule, and
+to bite. This is the [execution guide's](execution.md#completion) completion rule, and
 it is the only reviewer left once the user stops reading reports.
 
 Run workers in parallel when their file ownership is disjoint **and** their

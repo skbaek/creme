@@ -279,13 +279,28 @@ class SemaphorePressureTest(unittest.TestCase):
         text = semaphore.status_text()
         self.assertIn("SWAP_PRESSURE: swap/compressor pressure: swap nearly exhausted", text)
 
-    def test_the_incident_is_red_for_the_build_watchdog(self):
+    def test_the_compressor_incident_drains_but_does_not_retract(self):
         from creme import build_ownership
 
         sample = darwin_headroom((pressure_output(60, 11.7), swap_output(3072.0, 1699.81)))
         self.assertIsNotNone(sample.data["memory_pressure_cause"])
-        # 60% free is far above the floor; the pressure cause alone makes it red.
+        # 60% free is far above the floor; the pressure cause alone is drain level.
         self.assertIn("swap/compressor pressure", build_ownership.watchdog_red(sample, 2.0))
+        # The kernel level was not sampled (fixture): nothing here is critical.
+        self.assertIsNone(build_ownership.watchdog_critical(sample, 2.0))
+
+    def test_the_kernel_critical_level_is_read_and_is_critical(self):
+        from creme import build_ownership
+
+        runs = [
+            subprocess.CompletedProcess(["memory_pressure"], 0, stdout=pressure_output(60, 1.0)),
+            subprocess.CompletedProcess(["sysctl"], 0, stdout=swap_output(3072.0, 100.0)),
+            subprocess.CompletedProcess(["sysctl"], 0, stdout="4\n"),
+        ]
+        with mock.patch.object(DarwinAdapter, "_run", side_effect=runs):
+            sample = DarwinAdapter().memory_headroom()
+        self.assertEqual(sample.data["memory_pressure_level"], 4)
+        self.assertIn("critical", build_ownership.watchdog_critical(sample, 2.0))
 
     # (b) a healthy sample keeps today's verdict
     def test_healthy_sample_is_admitted_unchanged(self):

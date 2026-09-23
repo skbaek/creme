@@ -135,18 +135,26 @@ at most one unproven unit (a default, not evidence) runs at a time
 
 "Available" is the platform adapter's figure. On macOS it is
 `memory_pressure`'s free percentage, which counts memory the compressor could
-reclaim as available and barely moves while a build allocates; there, the
-swap/compressor pressure cause is what turns the watchdog red. There is no
-multiplier, no estimate margin, and no reserve: on this 24 GiB host a measured 14.8 GiB build is admitted whenever
+reclaim as available and barely moves while a build allocates. Concurrent
+admitted needs are counted in full even though part of them is already out of
+"available" (conservative). There is no multiplier, no estimate margin, and no
+reserve: on this 24 GiB host a measured 14.8 GiB build is admitted whenever
 16.8 GiB is available. A larger estimate than the evidence supports still only
 makes a request harder to schedule, so state one only when you know it.
 
 While Lake runs, the owned-build wrapper samples the host about once a
-second. When available memory falls below the floor, or swap/compressor
-pressure appears, it first reclaims the goal's own idle language-server
-workers; if the host is still red three seconds later, the youngest unproven
-admitted build retracts — its process group is terminated through the normal
-interruption path — and if the pressure persists, older builds follow,
+second, at two levels. At the **drain** level — the swap/compressor pressure
+cause, or available memory below the floor — it reclaims the goal's own idle
+language-server workers and nothing more; admission already refuses new heavy
+work there, and builds of 14.2–14.8 GiB completed under exactly that signal.
+Only a **critical** signal retracts: the kernel's critical VM pressure level
+(`kern.memorystatus_vm_pressure_level` = 4, macOS), swap in use rising by
+1 GiB within 10 s, or on Linux `MemAvailable` below the floor or PSI memory
+"full" avg10 at 10% or more. On macOS the live retraction signals are
+therefore the kernel level and swap growth; the free percentage never gets
+there first. If a critical signal persists three seconds, the youngest
+unproven admitted build retracts — its process group is terminated through
+the normal interruption path — and if it persists, older builds follow,
 youngest first, five seconds apart. A retracted build exits **75** with JSON
 `"status": "RETRACTED"`, a `hint`, and a ledger row (`outcome: retracted`)
 whose observed peak floors the in-flight module next time, so the retry is

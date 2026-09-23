@@ -490,8 +490,11 @@ n{other}
         self.assertEqual(result.data["memory_free_percent"], 19)
         self.assertEqual(result.data["physical_memory_bytes"], 25769803776)
         self.assertIsNone(result.data["swap_used_mib"])
-        self.assertEqual(run.call_count, 2)
-        self.assertNotIn("ps", " ".join(run.call_args_list[-1].args[0]))
+        # memory_pressure, swap, and the kernel pressure level: no process scan.
+        self.assertEqual(run.call_count, 3)
+        self.assertIsNone(result.data["memory_pressure_level"])
+        for call in run.call_args_list:
+            self.assertNotIn("ps", call.args[0])
 
     @mock.patch("creme.adapters.linux.LinuxAdapter._meminfo")
     def test_linux_headroom_uses_proc_memory_without_process_scan(self, meminfo):

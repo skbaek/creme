@@ -25,13 +25,24 @@ ROOT = Path(__file__).resolve().parents[2]
 SETTINGS = dict(ADMISSION_DEFAULTS)
 
 
-def _sample(available_gib: float, total_gib: float = 24.0, cause=None):
-    return SimpleNamespace(status="OK", detail="fixture", data={
+def _sample(available_gib: float, total_gib: float = 24.0, cause=None, *,
+            level=None, swap_mib=None, direct=False, psi=None):
+    data = {
         "memory_free_percent": int(100 * available_gib / total_gib),
         "memory_available_bytes": int(available_gib * 1024 ** 3),
         "physical_memory_bytes": int(total_gib * 1024 ** 3),
         "memory_pressure_cause": cause,
-    })
+        "memory_pressure_level": level,
+        "swap_used_mib": swap_mib,
+    }
+    if direct:
+        data["memory_available_direct"] = True
+        data["memory_psi_full_avg10"] = psi
+    return SimpleNamespace(status="OK", detail="fixture", data=data)
+
+
+def _critical(available_gib: float = 12.0):
+    return _sample(available_gib, level=owned.DARWIN_CRITICAL_PRESSURE_LEVEL)
 
 
 class _Clock:
@@ -85,23 +96,60 @@ class WatchdogUnitTest(unittest.TestCase):
         return None
 
     def test_reclaim_comes_first_and_retraction_only_after_the_grace(self) -> None:
-        dog, clock, calls = self.make([_sample(1.5)] * 10)
+        dog, clock, calls = self.make([_critical()] * 10)
         self.assertEqual(self.run_until(dog, clock, 9), 3)
         self.assertEqual(calls, ["reclaim g", "terminate"])
         self.assertTrue(dog.retracted)
-        self.assertIn("retract after 3.0s red", dog.events[-1])
+        self.assertIn("retract after 3.0s critical", dog.events[-1])
+
+    def test_drain_level_pressure_reclaims_but_never_retracts(self) -> None:
+        # The 2026-09-19 shape: a saturated compressor at a healthy free
+        # percentage, held for the whole window.  Builds completed under it.
+        for sample in (
+            _sample(12.0, cause="compressor occupies 11.5 of 24 GiB physical (48%)"),
+            _sample(1.5),                    # Darwin free-% availability below the floor
+        ):
+            with self.subTest(sample=sample.data):
+                dog, clock, calls = self.make([sample] * 30)
+                self.assertIsNone(self.run_until(dog, clock, 29))
+                self.assertEqual(calls, ["reclaim g"])
+                self.assertFalse(dog.retracted)
+                self.assertTrue(dog.events[0].startswith("drain: "))
+
+    def test_drain_then_critical_retracts_grace_after_the_critical_signal(self) -> None:
+        drain = _sample(12.0, cause="compressor occupies 11.5 of 24 GiB physical (48%)")
+        dog, clock, calls = self.make([drain] * 5 + [_critical()] * 10)
+        self.assertEqual(self.run_until(dog, clock, 14), 8)
+        self.assertEqual(calls, ["reclaim g", "terminate"])
+
+    def test_each_critical_signal_retracts(self) -> None:
+        swap = [_sample(12.0, swap_mib=1000.0 + 150.0 * second) for second in range(15)]
+        cases = {
+            "kernel critical level": [_critical()] * 15,
+            "swap growth": swap,
+            "direct availability below the floor": [_sample(1.5, direct=True)] * 15,
+            "PSI full": [_sample(8.0, direct=True, psi=25.0)] * 15,
+        }
+        for name, samples in cases.items():
+            with self.subTest(name=name):
+                dog, clock, calls = self.make(samples)
+                self.assertIsNotNone(self.run_until(dog, clock, 14), dog.events)
+                self.assertIn("terminate", calls)
+
+    def test_slow_swap_growth_and_a_warning_level_are_not_critical(self) -> None:
+        slow = [_sample(12.0, swap_mib=1000.0 + 50.0 * second) for second in range(30)]
+        warning = [_sample(12.0, level=2)] * 30
+        for samples in (slow, warning):
+            dog, clock, calls = self.make(samples)
+            self.assertIsNone(self.run_until(dog, clock, 29))
+            self.assertNotIn("terminate", calls)
 
     def test_pressure_that_clears_within_the_grace_retracts_nothing(self) -> None:
-        dog, clock, calls = self.make([_sample(1.5), _sample(1.5), _sample(6.0)] + [_sample(6.0)] * 8)
+        dog, clock, calls = self.make([_critical(), _critical(), _sample(6.0)] + [_sample(6.0)] * 8)
         self.assertIsNone(self.run_until(dog, clock, 9))
         self.assertEqual(calls, ["reclaim g"])
         self.assertIn("cleared after 2.0s", dog.events)
-        self.assertEqual(dog.min_available_gib, 1.5)
-
-    def test_a_swap_or_compressor_cause_is_red_at_any_free_level(self) -> None:
-        dog, clock, calls = self.make([_sample(12.0, cause="compressor occupies 9 GiB")] * 10)
-        self.assertEqual(self.run_until(dog, clock, 9), 3)
-        self.assertIn("swap/compressor pressure", dog.events[0])
+        self.assertEqual(dog.min_available_gib, 6.0)
 
     def test_an_unreadable_sample_is_never_red(self) -> None:
         unreadable = SimpleNamespace(status="UNAVAILABLE", detail="denied", data=None)
@@ -117,15 +165,15 @@ class WatchdogUnitTest(unittest.TestCase):
         ]
         retracted = {}
         for rank, item in enumerate(order):
-            dog, clock, _calls = self.make([_sample(1.0)] * 20, goal=item["label"], order=lambda: order)
+            dog, clock, _calls = self.make([_critical()] * 20, goal=item["label"], order=lambda: order)
             retracted[item["label"]] = self.run_until(dog, clock, 19)
-            self.assertIn(f"retraction rank {rank + 1} of 3", dog.events[0])
+            self.assertIn(f"retraction rank {rank + 1} of 3", " ".join(dog.events))
         self.assertEqual(retracted, {"young-unproven": 3, "young-proven": 8, "old-proven": 13})
 
     def test_an_older_unit_survives_when_the_first_retraction_relieves_the_host(self) -> None:
         order = [{"label": "young", "unproven": True}, {"label": "old", "unproven": False}]
-        # Red for four seconds (the young unit goes at 3 s), then green.
-        samples = [_sample(1.0)] * 4 + [_sample(8.0)] * 16
+        # Critical for four seconds (the young unit goes at 3 s), then green.
+        samples = [_critical()] * 4 + [_sample(8.0)] * 16
         dog, clock, calls = self.make(samples, goal="old", order=lambda: order)
         self.assertIsNone(self.run_until(dog, clock, 19))
         self.assertNotIn("terminate", calls)
@@ -311,6 +359,7 @@ def direct_probe():
     sample = get_adapter().memory_headroom()
     data = dict(sample.data or {{}})
     data["memory_available_bytes"] = direct_available_bytes()
+    data["memory_available_direct"] = True   # below the floor is then critical
     return SimpleNamespace(status=sample.status, detail=sample.detail, data=data)
 '''
 

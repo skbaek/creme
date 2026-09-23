@@ -182,14 +182,19 @@ agent holders yield on their next renewal. Explicit soft/hard acquisition
 passes through the same live check and is not an escape hatch.
 
 The owned build wrapper then watches the build: about once a second it
-samples headroom, and in the red zone (availability below the floor, or a
-pressure cause) it reclaims the goal's idle language-server workers, then
-retracts the youngest unproven watched build after a short grace and older
-ones in turn if pressure persists, recording the outcome `retracted` (exit
-75) with its observed peak as evidence. On Darwin the availability figure is
-the free percentage, which counts compressible memory as free and barely
-moves while a build allocates, so there the pressure cause is the operative
-trigger.
+samples headroom. At the drain level (availability below the floor, or a
+pressure cause) it only reclaims the goal's idle language-server workers. On
+a critical signal — Darwin's `kern.memorystatus_vm_pressure_level` of 4
+(carried as `memory_pressure_level`), swap in use rising by 1 GiB within
+10 s, or on Linux `MemAvailable` below the floor or PSI memory "full" avg10
+at 10% (`memory_available_direct`, `memory_psi_full_avg10`) — it retracts the
+youngest unproven watched build after a short grace and older ones in turn if
+the signal persists, recording the outcome `retracted` (exit 75) with its
+observed peak as evidence. Admitted needs are summed in full even though
+running units already reduce availability; that is deliberately
+conservative. On Darwin the availability figure is the free percentage, which
+counts compressible memory as free and barely moves while a build allocates,
+so the kernel level and swap growth are the live retraction signals there.
 
 Renewal re-samples headroom. Below 30% with multiple soft holders—or whenever
 the recorded worker count or admitted needs already exceed what the host

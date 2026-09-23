@@ -37,6 +37,13 @@ RETRACTED_EXIT = 75
 WATCHDOG_INTERVAL_SECONDS = 1.0
 WATCHDOG_GRACE_SECONDS = 3.0
 WATCHDOG_STEP_SECONDS = 5.0
+# Critical signals, the only ones that retract a running build (decision
+# 2026-09-23: builds of 14.2-14.8 GiB completed under the drain-level
+# compressor signal and must not be retracted by it).
+DARWIN_CRITICAL_PRESSURE_LEVEL = 4        # kern.memorystatus_vm_pressure_level
+SWAP_GROWTH_CRITICAL_MIB = 1024.0         # swap in use rising by 1 GiB ...
+SWAP_GROWTH_WINDOW_SECONDS = 10.0         # ... within 10 seconds
+PSI_FULL_CRITICAL_AVG10 = 10.0            # Linux: all tasks stalled 10% of the last 10 s
 # A walk re-queues a retracted unit once; without --wait it waits this long.
 WALK_REQUEUE_WAIT_SECONDS = 3600
 RUNTIME_RELATIVE = Path(".creme/lean-build-ownership")
@@ -3284,11 +3291,12 @@ def _reclaim_idle_workers(goal: str) -> str:
 
 
 def watchdog_red(sample: Any, floor_gib: float) -> Optional[str]:
-    """Why the host is in the red zone now, or None.
+    """Why the host is at the drain level now, or None.
 
-    Red is available memory below the floor, or an active swap/compressor
-    pressure cause.  An unreadable sample is not red: the watchdog never
-    retracts on missing evidence.
+    Drain level is available memory below the floor, or an active
+    swap/compressor pressure cause: the watchdog reclaims idle
+    language-server workers, and admission stops starting heavy work, but
+    nothing running is retracted for it.  An unreadable sample is not red.
     """
     cause = semaphore._pressure_cause(sample)
     if cause is not None:
@@ -3299,16 +3307,58 @@ def watchdog_red(sample: Any, floor_gib: float) -> Optional[str]:
     return None
 
 
+def watchdog_critical(
+    sample: Any,
+    floor_gib: float,
+    swap_history: Optional[list[tuple[float, float]]] = None,
+) -> Optional[str]:
+    """Why the host is at the critical level now, or None; only this retracts.
+
+    Critical is the kernel's own critical VM pressure level (Darwin), swap in
+    use rising by `SWAP_GROWTH_CRITICAL_MIB` within
+    `SWAP_GROWTH_WINDOW_SECONDS` (``swap_history`` holds ``(time, MiB)``),
+    or, where availability is a direct measure (Linux `MemAvailable`),
+    availability below the floor or PSI memory "full" at
+    `PSI_FULL_CRITICAL_AVG10`.
+    """
+    if sample is None or getattr(sample, "status", None) != "OK" or not isinstance(sample.data, dict):
+        return None
+    data = sample.data
+    level = data.get("memory_pressure_level")
+    if isinstance(level, int) and not isinstance(level, bool) and level >= DARWIN_CRITICAL_PRESSURE_LEVEL:
+        return f"kernel memory pressure level is critical ({level})"
+    if swap_history:
+        latest_time, latest = swap_history[-1]
+        earliest = min(
+            (used for when, used in swap_history if latest_time - when <= SWAP_GROWTH_WINDOW_SECONDS),
+            default=latest,
+        )
+        if latest - earliest >= SWAP_GROWTH_CRITICAL_MIB:
+            return (
+                f"swap grew {(latest - earliest) / 1024:.2f} GiB within "
+                f"{SWAP_GROWTH_WINDOW_SECONDS:.0f}s"
+            )
+    if data.get("memory_available_direct") is True:
+        _free, available, _total = semaphore._headroom_values(sample, None)
+        if available is not None and available < floor_gib:
+            return f"available {available:.2f} GiB is below the {floor_gib:.2f} GiB floor"
+        psi = data.get("memory_psi_full_avg10")
+        if isinstance(psi, (int, float)) and not isinstance(psi, bool) and psi >= PSI_FULL_CRITICAL_AVG10:
+            return f"memory PSI full avg10 is {psi:.1f}%"
+    return None
+
+
 class Watchdog(threading.Thread):
     """Launch-and-watch: answer memory pressure while Lake runs.
 
-    About once per ``interval`` it samples host headroom.  On the first red
-    sample of an episode it reclaims this goal's idle language-server
-    workers.  If the host is still red ``grace`` seconds into the episode,
-    the unit first in the semaphore's retraction order (youngest unproven,
-    then youngest proven) terminates its process group; each later unit in
-    that order waits ``step`` seconds more.  The order is snapshotted when
-    the episode starts, so one retraction does not promote the next unit.
+    About once per ``interval`` it samples host headroom.  On the first
+    drain-level or critical sample of an episode it reclaims this goal's idle
+    language-server workers.  Only a critical signal (`watchdog_critical`)
+    retracts: if it persists ``grace`` seconds, the unit first in the
+    semaphore's retraction order (youngest unproven, then youngest proven)
+    terminates its process group; each later unit in that order waits
+    ``step`` seconds more.  The order is snapshotted when the critical spell
+    starts, so one retraction does not promote the next unit.
     """
 
     def __init__(
@@ -3344,7 +3394,9 @@ class Watchdog(threading.Thread):
         self.cleanup_proved = True
         self.min_available_gib: Optional[float] = None
         self._episode: Optional[float] = None
+        self._critical: Optional[float] = None
         self._deadline: Optional[float] = None
+        self._swap: list[tuple[float, float]] = []
 
     def _rank(self) -> tuple[int, int]:
         try:
@@ -3367,26 +3419,40 @@ class Watchdog(threading.Thread):
                 available if self.min_available_gib is None
                 else min(self.min_available_gib, available)
             )
-        why = watchdog_red(sample, self.floor_gib)
         now = self.clock()
+        data = getattr(sample, "data", None)
+        swap = data.get("swap_used_mib") if isinstance(data, dict) else None
+        if isinstance(swap, (int, float)) and not isinstance(swap, bool):
+            self._swap.append((now, float(swap)))
+            self._swap = [item for item in self._swap if now - item[0] <= SWAP_GROWTH_WINDOW_SECONDS]
+        critical = watchdog_critical(sample, self.floor_gib, self._swap)
+        why = critical or watchdog_red(sample, self.floor_gib)
         if why is None:
             if self._episode is not None:
                 self.events.append(f"cleared after {now - self._episode:.1f}s")
-            self._episode = self._deadline = None
+            self._episode = self._critical = self._deadline = None
             return False
         if self._episode is None:
             self._episode = now
+            self.events.append(f"{'critical' if critical else 'drain'}: {why}")
+            self.events.append(self.reclaim(self.goal))
+        if critical is None:
+            if self._critical is not None:
+                self.events.append(f"critical cleared after {now - self._critical:.1f}s")
+            self._critical = self._deadline = None
+            return False
+        if self._critical is None:
+            self._critical = now
             rank, units = self._rank()
             self._deadline = now + self.grace + self.step * rank
-            self.events.append(f"red: {why}; retraction rank {rank + 1} of {max(units, 1)}")
-            self.events.append(self.reclaim(self.goal))
+            self.events.append(f"critical: {critical}; retraction rank {rank + 1} of {max(units, 1)}")
             return False
         if now < float(self._deadline or now):
             return False
-        self.events.append(f"retract after {now - self._episode:.1f}s red: {why}")
+        self.events.append(f"retract after {now - self._critical:.1f}s critical: {critical}")
         self.retracted = True
         try:
-            semaphore.record_retraction(self.goal, why)
+            semaphore.record_retraction(self.goal, critical)
         except Exception:
             pass
         self.cleanup_proved = self.terminate(self.proc)

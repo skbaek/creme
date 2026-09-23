@@ -43,12 +43,12 @@ mechanism it offers; the guide does not restate a repository's catalogue.
 
 ### Liveness: bounded waits and heartbeats
 
-For every client: a long gate or build runs as one tracked command whose
-completion the client reports, with output going to a log file from the first
-attempt — never detached behind `sleep N; check` or `nohup`, whose wake
-conditions have repeatedly missed their event. How a master learns that a
-worker is alive differs by client, so the liveness clauses a brief carries do
-too (decided 2026-09-23 from the capability-drift review):
+For every client: a long gate or build runs as one tracked command, with output
+going to a log file from the first attempt — never detached behind a
+`sleep N; check` loop or `nohup`. A timeout is not completion and never
+authorizes restarting a process that may still be live. How a master learns
+that a worker is alive differs by client, so the liveness clauses a brief
+carries do too:
 
 - **Claude Code.** The harness does the liveness work: `run_in_background`
   and `Monitor` notify on completion, `sleep N; cmd` is blocked, contexts
@@ -56,16 +56,25 @@ too (decided 2026-09-23 from the capability-drift review):
   to the same agent resumes. A worker that idles on a background command
   returns an interim result and is resumed by message. Briefs carry no poll
   caps, heartbeat files or hand-off rule.
-- **Codex and Muse.** No notification channel reaches the master, so briefs
-  state all three: bound every poll (interval at most 10 minutes, at most 6
-  rounds; at the cap, checkpoint, write the state brief and report back for
-  re-dispatch, never extend in place); refresh an uncommitted `STATE-BRIEF.md`
-  at the worktree root at least every 30 minutes during a gate, without moving
-  HEAD, so the master can tell stuck from slow by mtime; and hand off when the
-  context no longer supports the next coherent unit. A Codex brief also opens
-  with one compaction-safe line naming the brief's own absolute path and the
-  worktree's `STATE-BRIEF.md`, which the worker re-reads after every
-  compaction before its next action.
+- **Codex.** Native collaboration messages and worker-completion delivery
+  reach the master. For a healthy tracked worker, briefs do not require
+  periodic master polling, heartbeat-file churn, or a fixed poll cap that
+  forces checkpoint and re-dispatch. Use the notifications the active harness
+  actually exposes; if it is quiet or lacks them, use bounded status checks
+  and escalate only when the worker appears stalled. A long command still runs
+  as one tracked operation with a durable log, and a timeout never means that
+  the process ended. A Codex brief opens with one compaction-safe line naming
+  the brief's own absolute path and the worktree's `STATE-BRIEF.md`; re-read
+  those after every compaction before the next action. Keep durable green
+  checkpoints and hand off when the context no longer supports the next
+  coherent unit.
+- **Muse.** No notification channel reaches the master, so briefs state all
+  three: bound every poll (interval at most 10 minutes, at most 6 rounds; at
+  the cap, checkpoint, write the state brief and report back for re-dispatch,
+  never extend in place); refresh an uncommitted `STATE-BRIEF.md` at the
+  worktree root at least every 30 minutes during a gate, without moving HEAD,
+  so the master can tell stuck from slow by mtime; and hand off when the
+  context no longer supports the next coherent unit.
 
 ## Sizing a worker
 

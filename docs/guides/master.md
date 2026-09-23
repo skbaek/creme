@@ -373,13 +373,13 @@ the goal store, and never a merge or implicit publication. It never writes
 under `master/`. It reports twice: in files — commits on its branch, a state
 brief, a report, evidence — and in its return value to the master.
 
-The master watches liveness through whatever its client reports: task
-notifications and failed-task reports in Claude Code; session-log,
-`STATE-BRIEF.md` and artifact mtimes (at least every half hour) in Codex and
-Muse, per [the briefs guide](briefs.md#liveness-bounded-waits-and-heartbeats).
-A worker gone silent gets one status pulse; an unanswered pulse plus frozen
-artifacts is a stand-down and a respawn with a narrower scope. Never let a
-second hour of silence pass hoping the wait resolves.
+Master liveness monitoring follows the client-specific protocol in
+[the briefs guide](briefs.md#liveness-bounded-waits-and-heartbeats). Use native
+worker or task notifications when the active client exposes them; use bounded
+status and artifact checks when the harness is quiet or lacks a notification
+channel. If a worker appears stalled, send one status pulse; an unanswered
+pulse plus frozen artifacts is a stand-down and a respawn with a narrower
+scope. Never let a second hour of silence pass hoping the wait resolves.
 
 The master accepts a worker's result only on evidence: the catalogue's
 verdict on the exact candidate commit, the diff, and the report's

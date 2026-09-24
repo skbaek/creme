@@ -222,6 +222,16 @@ def cmd_antigravity_status(arguments: argparse.Namespace) -> int:
 
 
 def cmd_antigravity_run(arguments: argparse.Namespace) -> int:
+    if (arguments.allow_command or arguments.lean_goal) and not arguments.write:
+        summary = {
+            "verdict": "REFUSED", "exit": antigravity.EXIT_USAGE,
+            "run": "-", "reasons": ["--allow-command and --lean-goal require --write"],
+        }
+        if arguments.json:
+            _json(summary)
+        else:
+            print(antigravity.format_summary(summary))
+        return antigravity.EXIT_USAGE
     if arguments.brief == "-":
         brief = sys.stdin.read()
     else:
@@ -243,6 +253,9 @@ def cmd_antigravity_run(arguments: argparse.Namespace) -> int:
         model=arguments.model,
         effort=arguments.effort,
         timeout_seconds=arguments.timeout_seconds,
+        write=arguments.write,
+        allow_commands=arguments.allow_command,
+        lean_goal=arguments.lean_goal,
     )
     if arguments.json:
         _json(summary)
@@ -1817,7 +1830,7 @@ def parser() -> argparse.ArgumentParser:
     fit_policy.set_defaults(func=cmd_model_fit_policy)
 
     antigravity_parser = commands.add_parser(
-        "antigravity", help="read-only Antigravity (agy) pseudo-subagent runs",
+        "antigravity", help="bounded Antigravity (agy) pseudo-subagent runs",
     )
     antigravity_commands = antigravity_parser.add_subparsers(dest="antigravity_action", required=True)
     antigravity_status = antigravity_commands.add_parser("status", help="zero-token quota and admission read")
@@ -1825,12 +1838,15 @@ def parser() -> argparse.ArgumentParser:
     antigravity_status.add_argument("--effort", choices=("low", "medium", "high"), default=antigravity.DEFAULT_EFFORT)
     antigravity_status.add_argument("--json", action="store_true", help="print the full JSON record")
     antigravity_status.set_defaults(func=cmd_antigravity_status)
-    antigravity_run = antigravity_commands.add_parser("run", help="run one bounded read-only brief")
+    antigravity_run = antigravity_commands.add_parser("run", help="run one bounded brief")
     antigravity_run.add_argument("--brief", required=True, help="brief file, or - for stdin")
     antigravity_run.add_argument("--target", required=True, help="directory the brief is about")
     antigravity_run.add_argument("--model", default=antigravity.DEFAULT_FAMILY)
     antigravity_run.add_argument("--effort", choices=("low", "medium", "high"), default=antigravity.DEFAULT_EFFORT)
     antigravity_run.add_argument("--timeout-seconds", type=_positive, default=1800)
+    antigravity_run.add_argument("--write", action="store_true", help="enable guarded writes and commands")
+    antigravity_run.add_argument("--allow-command", action="append", default=[], metavar="REGEX")
+    antigravity_run.add_argument("--lean-goal", metavar="GOAL")
     antigravity_run.add_argument("--json", action="store_true", help="print the full JSON record")
     antigravity_run.set_defaults(func=cmd_antigravity_run)
 

@@ -129,7 +129,7 @@ A missing capability is not permission to run another OS's command; see
 
 Luna reserve pseudo-subagents are used only when the user instructs it,
 through `python3 -m creme luna-reserve`; read
-[the Luna reserve guide](docs/guides/luna-reserve.md) first. Read-only Antigravity (`agy`) pseudo-subagents follow the same rule,
+[the Luna reserve guide](docs/guides/luna-reserve.md) first. Antigravity (`agy`) pseudo-subagents follow the same rule,
 through `python3 -m creme antigravity` ([guide](docs/guides/antigravity.md)).
 
 ## Git and completion

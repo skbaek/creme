@@ -9,15 +9,16 @@ user instructs it, and a result is a worker summary, not evidence.
 ## Commands
 
 ```sh
-python3 -m creme antigravity status [--model M] [--json]
+python3 -m creme antigravity status [--model M] [--effort low|medium|high] [--json]
 python3 -m creme antigravity run --brief FILE|- --target DIR [--model M] \
     [--effort low|medium|high] [--timeout-seconds N] [--json]
 ```
 
-Real workloads use the default, `gemini-3.8-flash-high` at `--effort high`
-(user decision 2026-09-25: it dominates the other Gemini models on quality,
-speed and cost). Name another model only for a deliberate comparison, or use
-`gemini-3.6-flash-low` for a plumbing check whose answer does not matter.
+The model is 3.8 Flash (user decision 2026-09-25). `--model` takes the family
+and `--effort` picks the level; the CLI builds the slug. A conflicting full
+slug is refused, as `agy` itself refuses it. The default effort is provisional
+(`medium`) until the effort-ladder experiment decides. Record runs in the goal
+store's `model-fit/antigravity.md`.
 
 `status` reads `agy -p /usage` and `/credits`, both zero-token, plus
 `useG1Credits` from `~/.gemini/antigravity-cli/settings.json`. `agy models` lists
@@ -34,8 +35,9 @@ a weekly window.
   as a second `--add-dir`. Its `.agents/hooks.json` installs a PreToolUse guard.
   The guard allows only `view_file`, `list_dir`, `grep_search`, `find_by_name`
   and `finish`, and denies every tool when the payload's `modelName` differs from
-  `--model`, so a silent model fallback cannot act. A deny holds in headless
-  mode. The target repository and the shared `~/.gemini/config` are not touched.
+  `--model`, so a silent model fallback cannot act. Reads outside the target
+  are denied by the guard. A deny holds in headless mode. The target repository
+  and the shared `~/.gemini/config` are not touched.
 - **Verdict.** `PASS` requires all of: exit 0, result `SUCCESS`, `init.model`
   equal to `--model`, every guarded payload on that model, and, for a Git target,
   an unchanged `HEAD` and porcelain status (ignored files included, the run

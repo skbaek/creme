@@ -19,9 +19,9 @@ EXIT_PREFLIGHT_REFUSED = 10
 EXIT_USAGE = 2
 DEFAULT_MIN_REMAINING_FRACTION = 0.05
 DEFAULT_FLOOR = DEFAULT_MIN_REMAINING_FRACTION
-# User decision 2026-09-25: real workloads run on Gemini 3.8 Flash at high.
-DEFAULT_MODEL = "gemini-3.8-flash-high"
-DEFAULT_EFFORT = "high"
+DEFAULT_FAMILY = "gemini-3.8-flash"
+# Provisional until the effort-ladder experiment (goal store reports/antigravity-effort-ladder-20260925.md) decides; user does not assume high is optimal.
+DEFAULT_EFFORT = "medium"
 DEFAULT_BINARY = Path("~/.local/bin/agy")
 SETTINGS_ENV = "CREME_AGY_SETTINGS"
 BINARY_ENV = "CREME_AGY_BIN"
@@ -29,6 +29,18 @@ BINARY_ENV = "CREME_AGY_BIN"
 
 class AntigravityError(RuntimeError):
     """A quota, record, or process failure that prevents a trustworthy run."""
+
+
+def resolve_model(model: str, effort: str) -> str:
+    for suffix in ("-low", "-medium", "-high"):
+        if model.endswith(suffix):
+            selected = suffix[1:]
+            if selected != effort:
+                raise ValueError(
+                    f"model {model!r} has effort {selected!r}, conflicting with effort {effort!r}"
+                )
+            return model
+    return f"{model}-{effort}"
 
 
 def pool_for_model(model: str) -> str:
@@ -158,7 +170,47 @@ def admission(quota: dict, model: str, floor: float) -> list[str]:
     return reasons
 
 
-def guard_decision(payload: dict, pinned_model: str) -> dict:
+def _guard_paths(tool_call: dict) -> list[str]:
+    path_keys = {
+        "AbsolutePath", "DirectoryPath", "SearchPath", "SearchDirectory", "Path",
+        "Directory", "File", "FilePath",
+    }
+    args = tool_call.get("args")
+    found: list[str] = []
+
+    def collect(value: Any, key: Optional[str] = None) -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                collect(child, child_key if isinstance(child_key, str) else None)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child, key)
+        elif isinstance(value, str) and (key in path_keys or value.startswith(("/", "~/"))):
+            found.append(value)
+
+    collect(args)
+    return found
+
+
+def _outside_guard_roots(path: str, roots: tuple[str, ...] | list[str]) -> Optional[str]:
+    if not roots:
+        return None
+    expanded = os.path.expanduser(path)
+    # agy resolves a relative tool path against the workspace, i.e. the target (first root).
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(os.path.expanduser(roots[0]), expanded)
+    candidate = os.path.realpath(expanded)
+    resolved_roots = [os.path.realpath(os.path.expanduser(root)) for root in roots]
+    for root in resolved_roots:
+        try:
+            if os.path.commonpath((candidate, root)) == root:
+                return None
+        except ValueError:
+            continue
+    return candidate
+
+
+def guard_decision(payload: dict, pinned_model: str, roots: tuple[str, ...] | list[str] = ()) -> dict:
     model = payload.get("modelName")
     if model != pinned_model:
         return {
@@ -168,18 +220,32 @@ def guard_decision(payload: dict, pinned_model: str) -> dict:
     tool_call = payload.get("toolCall")
     name = tool_call.get("name") if isinstance(tool_call, dict) else None
     if name in READ_ONLY_TOOLS:
+        for path in _guard_paths(tool_call):
+            outside = _outside_guard_roots(path, roots)
+            if outside is not None:
+                return {
+                    "decision": "deny",
+                    "reason": f"creme read-only run: {name} path outside target: {outside}",
+                }
         return {"decision": "allow", "reason": f"creme read-only run: {name} allowed"}
     return {"decision": "deny", "reason": f"creme read-only run: {name} denied"}
 
 
 GUARD_SCRIPT = r'''#!/usr/bin/env python3
 import json
+import os
 from pathlib import Path
 import sys
 
 READ_ONLY_TOOLS = ("view_file", "list_dir", "grep_search", "find_by_name", "finish")
+PATH_KEYS = {
+    "AbsolutePath", "DirectoryPath", "SearchPath", "SearchDirectory", "Path",
+    "Directory", "File", "FilePath",
+}
 here = Path(__file__).resolve().parent
-pinned_model = json.loads((here / "guard.json").read_text(encoding="utf-8"))["pinned_model"]
+guard = json.loads((here / "guard.json").read_text(encoding="utf-8"))
+pinned_model = guard["pinned_model"]
+roots = guard.get("roots", [])
 payload = json.load(sys.stdin)
 model = payload.get("modelName")
 if model != pinned_model:
@@ -188,7 +254,39 @@ else:
     tool_call = payload.get("toolCall")
     name = tool_call.get("name") if isinstance(tool_call, dict) else None
     if name in READ_ONLY_TOOLS:
-        decision = {"decision": "allow", "reason": f"creme read-only run: {name} allowed"}
+        args = tool_call.get("args")
+        paths = []
+        def collect(value, key=None):
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    collect(child, child_key if isinstance(child_key, str) else None)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child, key)
+            elif isinstance(value, str) and (key in PATH_KEYS or value.startswith(("/", "~/"))):
+                paths.append(value)
+        collect(args)
+        outside = None
+        if roots:
+            for path in paths:
+                expanded = os.path.expanduser(path)
+                if not os.path.isabs(expanded):
+                    expanded = os.path.join(os.path.expanduser(roots[0]), expanded)
+                candidate = os.path.realpath(expanded)
+                for root in roots:
+                    root_path = os.path.realpath(os.path.expanduser(root))
+                    try:
+                        if os.path.commonpath((candidate, root_path)) == root_path:
+                            break
+                    except ValueError:
+                        pass
+                else:
+                    outside = candidate
+                    break
+        if outside is not None:
+            decision = {"decision": "deny", "reason": f"creme read-only run: {name} path outside target: {outside}"}
+        else:
+            decision = {"decision": "allow", "reason": f"creme read-only run: {name} allowed"}
     else:
         decision = {"decision": "deny", "reason": f"creme read-only run: {name} denied"}
 with (here.parent / "payloads.jsonl").open("a", encoding="utf-8") as stream:
@@ -213,12 +311,18 @@ def _run_id() -> str:
 
 
 def _base_summary(model: str, effort: str, pool: str) -> dict:
+    family = model
+    for suffix in ("-low", "-medium", "-high"):
+        if model.endswith(suffix):
+            family = model[:-len(suffix)]
+            break
     return {
         "verdict": "FAIL",
         "exit": EXIT_FAILED,
         "run": None,
         "run_dir": None,
         "model": model,
+        "family": family,
         "init_model": None,
         "effort": effort,
         "conversation_id": None,
@@ -280,13 +384,20 @@ def run(
 ) -> tuple[int, dict]:
     target_path = Path(target).expanduser()
     try:
-        pool = pool_for_model(model)
+        resolved_model = resolve_model(model, effort)
     except ValueError as exc:
         summary = _base_summary(model, effort, "unknown")
         summary["reasons"].append(str(exc))
         summary["exit"] = EXIT_USAGE
         return EXIT_USAGE, summary
-    summary = _base_summary(model, effort, pool)
+    try:
+        pool = pool_for_model(resolved_model)
+    except ValueError as exc:
+        summary = _base_summary(model, effort, "unknown")
+        summary["reasons"].append(str(exc))
+        summary["exit"] = EXIT_USAGE
+        return EXIT_USAGE, summary
+    summary = _base_summary(resolved_model, effort, pool)
     if not target_path.is_dir() or effort not in ("low", "medium", "high") or timeout_seconds < 1:
         reasons = []
         if not target_path.is_dir():
@@ -305,7 +416,7 @@ def run(
         summary["reasons"].append(str(exc))
         return EXIT_FAILED, summary
     summary["pool_before"] = _fractions(quota_before, pool)
-    reasons = admission(quota_before, model, floor)
+    reasons = admission(quota_before, resolved_model, floor)
     if reasons:
         summary["verdict"] = "REFUSED"
         summary["exit"] = EXIT_PREFLIGHT_REFUSED
@@ -322,7 +433,7 @@ def run(
     (run_dir / "brief.md").write_text(brief, encoding="utf-8")
     (agents / "guard.py").write_text(GUARD_SCRIPT, encoding="utf-8")
     (agents / "guard.py").chmod(0o700)
-    _write_json(agents / "guard.json", {"pinned_model": model})
+    _write_json(agents / "guard.json", {"pinned_model": resolved_model, "roots": [str(target_path)]})
     hooks = {
         "creme-run-guard": {
             "PreToolUse": [{
@@ -339,7 +450,7 @@ def run(
 
     command = [
         str(binary), "-p", brief, "--add-dir", str(target_path), "--add-dir", str(run_dir),
-        "--model", model, "--effort", effort, "--disable-slash-commands",
+        "--model", resolved_model, "--effort", effort, "--disable-slash-commands",
         "--output-format", "stream-json", "--print-timeout", f"{timeout_seconds}s",
     ]
     stdout = ""
@@ -409,8 +520,8 @@ def run(
     summary["denied"] = sum(1 for record in payload_lines if (record.get("decision") or {}).get("decision") == "deny")
     for record in payload_lines:
         payload = record.get("payload")
-        if not isinstance(payload, dict) or payload.get("modelName") != model:
-            summary["reasons"].append(f"payload modelName is not pinned to {model}")
+        if not isinstance(payload, dict) or payload.get("modelName") != resolved_model:
+            summary["reasons"].append(f"payload modelName is not pinned to {resolved_model}")
     try:
         quota_after = read_quota(binary)
         _write_json(run_dir / "usage-after.json", quota_after)
@@ -428,8 +539,8 @@ def run(
         summary["reasons"].append(f"result status was {result_data.get('status')}")
     if init_event is None:
         summary["reasons"].append("missing init event")
-    elif init_model != model:
-        summary["reasons"].append(f"init model {init_model!r} does not match {model!r}")
+    elif init_model != resolved_model:
+        summary["reasons"].append(f"init model {init_model!r} does not match {resolved_model!r}")
     if not summary["reasons"]:
         summary["verdict"] = "PASS"
         summary["exit"] = EXIT_OK

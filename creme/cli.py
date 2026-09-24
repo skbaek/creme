@@ -200,7 +200,10 @@ def cmd_antigravity_status(arguments: argparse.Namespace) -> int:
     reasons = []
     if arguments.model:
         try:
-            reasons = antigravity.admission(quota, arguments.model, antigravity.DEFAULT_MIN_REMAINING_FRACTION)
+            selected_model = arguments.model
+            if not any(arguments.model.endswith(f"-{effort}") for effort in ("low", "medium", "high")):
+                selected_model = antigravity.resolve_model(arguments.model, arguments.effort)
+            reasons = antigravity.admission(quota, selected_model, antigravity.DEFAULT_MIN_REMAINING_FRACTION)
         except ValueError as exc:
             reasons = [str(exc)]
         report["admission"] = "ADMITTED" if not reasons else "REFUSED"
@@ -1720,13 +1723,14 @@ def parser() -> argparse.ArgumentParser:
     )
     antigravity_commands = antigravity_parser.add_subparsers(dest="antigravity_action", required=True)
     antigravity_status = antigravity_commands.add_parser("status", help="zero-token quota and admission read")
-    antigravity_status.add_argument("--model", default=antigravity.DEFAULT_MODEL)
+    antigravity_status.add_argument("--model", default=antigravity.DEFAULT_FAMILY)
+    antigravity_status.add_argument("--effort", choices=("low", "medium", "high"), default=antigravity.DEFAULT_EFFORT)
     antigravity_status.add_argument("--json", action="store_true", help="print the full JSON record")
     antigravity_status.set_defaults(func=cmd_antigravity_status)
     antigravity_run = antigravity_commands.add_parser("run", help="run one bounded read-only brief")
     antigravity_run.add_argument("--brief", required=True, help="brief file, or - for stdin")
     antigravity_run.add_argument("--target", required=True, help="directory the brief is about")
-    antigravity_run.add_argument("--model", default=antigravity.DEFAULT_MODEL)
+    antigravity_run.add_argument("--model", default=antigravity.DEFAULT_FAMILY)
     antigravity_run.add_argument("--effort", choices=("low", "medium", "high"), default=antigravity.DEFAULT_EFFORT)
     antigravity_run.add_argument("--timeout-seconds", type=_positive, default=1800)
     antigravity_run.add_argument("--json", action="store_true", help="print the full JSON record")

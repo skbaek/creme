@@ -92,6 +92,15 @@ CLIENTS: dict[str, Client] = {
             "muse-session": "a separate Muse session launched at the named route",
         },
     ),
+    "antigravity": Client(
+        name="antigravity",
+        prefix="ag",
+        title="Antigravity",
+        families={"gemini-3.8-flash": ("low", "medium", "high")},
+        routes={
+            "antigravity-run": "read-only one-shot `creme antigravity run`, any master",
+        },
+    ),
 }
 
 FAILURE_MODES_SHOWN = 3

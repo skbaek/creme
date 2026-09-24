@@ -98,6 +98,12 @@ else:
         with self.assertRaises(ValueError):
             antigravity.pool_for_model("mystery-model")
 
+    def test_resolve_model_combines_family_and_effort(self) -> None:
+        self.assertEqual(antigravity.resolve_model("gemini-3.8-flash", "medium"), "gemini-3.8-flash-medium")
+        self.assertEqual(antigravity.resolve_model("gemini-3.8-flash-high", "high"), "gemini-3.8-flash-high")
+        with self.assertRaisesRegex(ValueError, "gemini-3.8-flash-high.*medium"):
+            antigravity.resolve_model("gemini-3.8-flash-high", "medium")
+
     def test_admission_credits_requires_explicit_false(self) -> None:
         quota = {"pools": {"gemini": {"5h": {"remaining_fraction": .8}, "weekly": {"remaining_fraction": .8}}},
                  "remaining_credits": 2, "use_g1_credits": None}
@@ -126,13 +132,31 @@ else:
         self.assertIn("other", mismatch["reason"])
         self.assertIn("gemini-model", mismatch["reason"])
 
+    def test_guard_relative_path_resolves_against_target(self) -> None:
+        roots = [str(self.target)]
+        inside = {"modelName": "m", "toolCall": {"name": "view_file", "args": {"Path": "sub/file.lean"}}}
+        escape = {"modelName": "m", "toolCall": {"name": "view_file", "args": {"Path": "../outside.txt"}}}
+        self.assertEqual(antigravity.guard_decision(inside, "m", roots)["decision"], "allow")
+        self.assertEqual(antigravity.guard_decision(escape, "m", roots)["decision"], "deny")
+
     def test_guard_script_agrees_with_function(self) -> None:
         agents = self.root / "agents"
         agents.mkdir()
         (agents / "guard.py").write_text(antigravity.GUARD_SCRIPT, encoding="utf-8")
-        (agents / "guard.json").write_text(json.dumps({"pinned_model": "gemini-model"}), encoding="utf-8")
+        outside = self.root / "outside.txt"
+        outside.write_text("outside", encoding="utf-8")
+        link = self.target / "outside-link"
+        link.symlink_to(outside)
+        root = str(self.target.resolve())
+        (agents / "guard.json").write_text(
+            json.dumps({"pinned_model": "gemini-model", "roots": [root]}), encoding="utf-8"
+        )
         payloads = [
-            {"modelName": "gemini-model", "toolCall": {"name": "view_file"}},
+            {"modelName": "gemini-model", "toolCall": {"name": "view_file", "args": {"AbsolutePath": str(self.target / "inside")}}},
+            {"modelName": "gemini-model", "toolCall": {"name": "view_file", "args": {"AbsolutePath": "/etc/hosts"}}},
+            {"modelName": "gemini-model", "toolCall": {"name": "view_file", "args": {"Path": "~/outside"}}},
+            {"modelName": "gemini-model", "toolCall": {"name": "view_file", "args": {"FilePath": str(link)}}},
+            {"modelName": "gemini-model", "toolCall": {"name": "grep_search", "args": {"SearchPath": "/etc"}}},
             {"modelName": "gemini-model", "toolCall": {"name": "run_command"}},
             {"modelName": "gemini-model", "toolCall": {"name": "write_to_file"}},
             {"modelName": "other", "toolCall": {"name": "view_file"}},
@@ -142,17 +166,21 @@ else:
                 [sys.executable, "./guard.py"], cwd=agents, input=json.dumps(payload),
                 text=True, check=True, stdout=subprocess.PIPE,
             )
-            self.assertEqual(json.loads(result.stdout), antigravity.guard_decision(payload, "gemini-model"))
+            self.assertEqual(
+                json.loads(result.stdout), antigravity.guard_decision(payload, "gemini-model", (root,))
+            )
 
     def test_run_pass_records_and_counts_guard_events(self) -> None:
         self._scenario(payloads=[
-            {"modelName": "gemini-model", "toolCall": {"name": "view_file"}},
-            {"modelName": "gemini-model", "toolCall": {"name": "run_command"}},
+            {"modelName": "gemini-model-medium", "toolCall": {"name": "view_file"}},
+            {"modelName": "gemini-model-medium", "toolCall": {"name": "run_command"}},
         ])
         code, summary = antigravity.run("inspect", self.target, "gemini-model", "medium", 10,
                                        runs_root=self.root / "runs")
         self.assertEqual(code, antigravity.EXIT_OK)
         self.assertEqual(summary["verdict"], "PASS")
+        self.assertEqual(summary["family"], "gemini-model")
+        self.assertEqual(summary["model"], "gemini-model-medium")
         self.assertEqual(summary["tool_calls"], 2)
         self.assertEqual(summary["denied"], 1)
         run_dir = Path(summary["run_dir"])

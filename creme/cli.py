@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 from . import __version__
 from .adapters import get_adapter
+from . import antigravity
 from .doctor import exit_code as doctor_exit_code
 from .doctor import run_doctor
 from .guidance import default_path as default_guidance_path
@@ -177,6 +178,72 @@ def cmd_luna_reserve_status(arguments: argparse.Namespace) -> int:
         _json(report)
     else:
         print(luna_reserve.format_status(report))
+    return code
+
+
+def cmd_antigravity_status(arguments: argparse.Namespace) -> int:
+    try:
+        quota = antigravity.read_quota(antigravity.resolve_binary())
+    except antigravity.AntigravityError as exc:
+        report = {"verdict": "FAILED", "exit": antigravity.EXIT_FAILED, "reasons": [str(exc)]}
+        if arguments.json:
+            _json(report)
+        else:
+            print(f"verdict=FAILED exit={antigravity.EXIT_FAILED}")
+            print(f"reason: {exc}")
+        return antigravity.EXIT_FAILED
+    report = {
+        "pools": quota["pools"],
+        "remaining_credits": quota["remaining_credits"],
+        "useG1Credits": quota["use_g1_credits"],
+    }
+    reasons = []
+    if arguments.model:
+        try:
+            reasons = antigravity.admission(quota, arguments.model, antigravity.DEFAULT_MIN_REMAINING_FRACTION)
+        except ValueError as exc:
+            reasons = [str(exc)]
+        report["admission"] = "ADMITTED" if not reasons else "REFUSED"
+        report["admission_reasons"] = reasons
+    if arguments.json:
+        _json(report)
+    else:
+        print(f"quota={json.dumps(report['pools'], sort_keys=True)}")
+        print(f"credits={report['remaining_credits']} useG1Credits={report['useG1Credits']}")
+        if arguments.model:
+            print(f"admission={report['admission']}")
+            for reason in reasons:
+                print(f"refused: {reason}")
+    return antigravity.EXIT_PREFLIGHT_REFUSED if reasons else antigravity.EXIT_OK
+
+
+def cmd_antigravity_run(arguments: argparse.Namespace) -> int:
+    if arguments.brief == "-":
+        brief = sys.stdin.read()
+    else:
+        try:
+            brief = Path(arguments.brief).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            summary = {
+                "verdict": "REFUSED", "exit": antigravity.EXIT_USAGE,
+                "run": "-", "reasons": [f"cannot read brief: {exc}"],
+            }
+            if arguments.json:
+                _json(summary)
+            else:
+                print(antigravity.format_summary(summary))
+            return antigravity.EXIT_USAGE
+    code, summary = antigravity.run(
+        brief=brief,
+        target=arguments.target,
+        model=arguments.model,
+        effort=arguments.effort,
+        timeout_seconds=arguments.timeout_seconds,
+    )
+    if arguments.json:
+        _json(summary)
+    else:
+        print(antigravity.format_summary(summary))
     return code
 
 
@@ -1647,6 +1714,23 @@ def parser() -> argparse.ArgumentParser:
     for key in model_fit.FIELDS:
         fit_add.add_argument("--" + key.replace("_", "-"), dest=key)
     fit_add.set_defaults(func=cmd_model_fit_add)
+
+    antigravity_parser = commands.add_parser(
+        "antigravity", help="read-only Antigravity (agy) pseudo-subagent runs",
+    )
+    antigravity_commands = antigravity_parser.add_subparsers(dest="antigravity_action", required=True)
+    antigravity_status = antigravity_commands.add_parser("status", help="zero-token quota and admission read")
+    antigravity_status.add_argument("--model")
+    antigravity_status.add_argument("--json", action="store_true", help="print the full JSON record")
+    antigravity_status.set_defaults(func=cmd_antigravity_status)
+    antigravity_run = antigravity_commands.add_parser("run", help="run one bounded read-only brief")
+    antigravity_run.add_argument("--brief", required=True, help="brief file, or - for stdin")
+    antigravity_run.add_argument("--target", required=True, help="directory the brief is about")
+    antigravity_run.add_argument("--model", required=True)
+    antigravity_run.add_argument("--effort", choices=("low", "medium", "high"), default="medium")
+    antigravity_run.add_argument("--timeout-seconds", type=_positive, default=1800)
+    antigravity_run.add_argument("--json", action="store_true", help="print the full JSON record")
+    antigravity_run.set_defaults(func=cmd_antigravity_run)
 
     luna = commands.add_parser(
         "luna-reserve",

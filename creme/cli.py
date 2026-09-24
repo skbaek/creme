@@ -29,6 +29,7 @@ from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import idle_workers
 from . import luna_broker, luna_reserve
 from . import model_fit
+from . import model_fit_policy
 from . import master_operations
 from . import master_reconcile
 from . import master_retire
@@ -1356,6 +1357,71 @@ def cmd_model_fit_add(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _policy_error(exc: Exception) -> int:
+    print(f"model-fit: {exc}", file=sys.stderr)
+    return 2
+
+
+def cmd_model_fit_recommend(arguments: argparse.Namespace) -> int:
+    try:
+        result = model_fit_policy.recommend(
+            _model_fit_dir(arguments), arguments.client, arguments.task_type,
+            arguments.default, arguments.now,
+        )
+    except (model_fit_policy.PolicyError, model_fit.ModelFitError) as exc:
+        return _policy_error(exc)
+    if arguments.json:
+        _json(result)
+    else:
+        print(f"use={result['option']} probe={'yes' if result['probe'] else 'no'} dispatch={result['dispatch_id']}")
+        print(f"reason: {result['reason']}")
+    return 0
+
+
+def cmd_model_fit_outcome(arguments: argparse.Namespace) -> int:
+    try:
+        result = model_fit_policy.outcome(
+            _model_fit_dir(arguments), arguments.client, arguments.dispatch_id,
+            arguments.verdict, arguments.tokens, arguments.now,
+        )
+    except (model_fit_policy.PolicyError, model_fit.ModelFitError) as exc:
+        return _policy_error(exc)
+    if arguments.json:
+        _json(result)
+    else:
+        print(f"event={result['event']} recommended={result['recommended']}")
+        if result["record_observation"]:
+            print(
+                "record: python3 -m creme model-fit add "
+                f"<model-fit-file> --task-type {result['task_type']} "
+                f"--option {result['option']} --verdict {result['verdict']}"
+            )
+    return 0
+
+
+def cmd_model_fit_set(arguments: argparse.Namespace) -> int:
+    try:
+        result = model_fit_policy.set_recommendation(
+            _model_fit_dir(arguments), arguments.client, arguments.task_type, arguments.option,
+        )
+    except (model_fit_policy.PolicyError, model_fit.ModelFitError) as exc:
+        return _policy_error(exc)
+    if arguments.json:
+        _json(result)
+    else:
+        print(f"recommended={result['recommended']} task_type={result['task_type']}")
+    return 0
+
+
+def cmd_model_fit_policy(arguments: argparse.Namespace) -> int:
+    try:
+        table = model_fit_policy.policy_table(_model_fit_dir(arguments), arguments.client)
+    except (model_fit_policy.PolicyError, model_fit.ModelFitError) as exc:
+        return _policy_error(exc)
+    print(table)
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="python3 -m creme")
     root.add_argument("--version", action="version", version=__version__)
@@ -1717,6 +1783,38 @@ def parser() -> argparse.ArgumentParser:
     for key in model_fit.FIELDS:
         fit_add.add_argument("--" + key.replace("_", "-"), dest=key)
     fit_add.set_defaults(func=cmd_model_fit_add)
+
+    fit_recommend = fit_commands.add_parser("recommend", help="recommend a model/effort and create a dispatch")
+    fit_recommend.add_argument("client")
+    fit_recommend.add_argument("task_type")
+    fit_recommend.add_argument("--default")
+    fit_recommend.add_argument("--dir")
+    fit_recommend.add_argument("--json", action="store_true")
+    fit_recommend.add_argument("--now", help=argparse.SUPPRESS)
+    fit_recommend.set_defaults(func=cmd_model_fit_recommend)
+
+    fit_outcome = fit_commands.add_parser("outcome", help="record the verified outcome of a dispatch")
+    fit_outcome.add_argument("client")
+    fit_outcome.add_argument("dispatch_id")
+    fit_outcome.add_argument("verdict", choices=("pass", "fail"))
+    fit_outcome.add_argument("--tokens", type=_nonnegative)
+    fit_outcome.add_argument("--dir")
+    fit_outcome.add_argument("--json", action="store_true")
+    fit_outcome.add_argument("--now", help=argparse.SUPPRESS)
+    fit_outcome.set_defaults(func=cmd_model_fit_outcome)
+
+    fit_set = fit_commands.add_parser("set", help="set a master recommendation override")
+    fit_set.add_argument("client")
+    fit_set.add_argument("task_type")
+    fit_set.add_argument("option")
+    fit_set.add_argument("--dir")
+    fit_set.add_argument("--json", action="store_true")
+    fit_set.set_defaults(func=cmd_model_fit_set)
+
+    fit_policy = fit_commands.add_parser("policy", help="show adaptive policy state")
+    fit_policy.add_argument("client")
+    fit_policy.add_argument("--dir")
+    fit_policy.set_defaults(func=cmd_model_fit_policy)
 
     antigravity_parser = commands.add_parser(
         "antigravity", help="read-only Antigravity (agy) pseudo-subagent runs",

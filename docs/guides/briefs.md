@@ -88,8 +88,10 @@ Choose each worker's model and effort for the **hardest non-delegable judgment**
 in its brief, not for the total volume of mechanical work. Volume is what more
 workers are for; only judgment justifies a higher rung.
 
-**Consult the model fit tables first.** Read the summary grid of your
-client's file in the goal store (`$GOAL_STORE/model-fit/<client>.md`). A cell
+**Consult the model fit tables first.** Run `python3 -m creme model-fit
+recommend CLIENT TASK_TYPE` before dispatch and `model-fit outcome` after the
+master verifies the result; the summary grid in the client's goal-store file
+(`$GOAL_STORE/model-fit/<client>.md`) remains useful for drill-down. A cell
 with at least three master-verified runs for the brief's task type informs the
 choice; otherwise the rules below decide. Record only the exceptions
 [the model fit guide](model-fit.md) lists.

@@ -171,9 +171,10 @@ benchmark. Controlled comparisons, where they exist, are cited from `notes`.
 
 ## Selection rule
 
-Before sizing a worker, read the summary grid of your client's file (the block
-between the summary markers), not its observations; open a cell's observations
-only when that cell decides the choice.
+Before sizing a worker, run `python3 -m creme model-fit recommend CLIENT
+TASK_TYPE`; it replaces reading the grid for the initial choice. The summary
+grid remains useful for drill-down when a recommendation needs explanation or
+review, and open a cell's observations only when that cell decides the choice.
 
 - A cell marked `guides` (at least three verified runs) for the brief's task
   type informs the choice: prefer an option whose verified runs pass, avoid
@@ -197,6 +198,36 @@ A run that went as its sizing expected is not recorded. Batch recordings and
 commit them with the verification they cite at a real checkpoint, not as a
 transaction per run. The per-run rule this replaces cost more reading and
 bookkeeping than its uncontrolled evidence was worth.
+
+## Adaptive recommendation
+
+The policy treats each family/effort pairing as a cell and keeps one
+recommended incumbent for each task type. Each cheaper cell has an N and is
+probed when it is due. A failed probe multiplies its N by 16, a passing probe
+halves N, and a pass at N = 1 promotes that cell; N is capped at 256. The
+probe schedule allows at most one probe in four dispatches of a task type. In
+the worst case, when every cheaper setting fails, the 256 cap makes probes
+about 5% of dispatches.
+
+Costs start with the family and effort priors above. After three measured
+outcomes, the policy uses the median of the last five measured costs in the
+same units as those priors. Once a per-token calibration exists, those units
+will be replaced by weekly-limit percentages. The incumbent is demoted after
+two failures in its last three ordinary outcomes, returning to the last known
+good cell when possible.
+
+Before a dispatch, run:
+
+```sh
+python3 -m creme model-fit recommend CLIENT TASK_TYPE
+```
+
+Use the returned family/effort setting. After the master verifies the result,
+run `python3 -m creme model-fit outcome CLIENT DISPATCH_ID pass|fail --tokens N`.
+Write an observation for every probe and every failure, subject to the
+existing exceptions rule above. A cold task type needs an explicit
+`--default OPTION`, chosen by the briefs guide's sizing rules, on its first
+recommendation.
 
 ## Validation
 

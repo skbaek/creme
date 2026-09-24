@@ -359,9 +359,11 @@ effort for its hardest non-delegable judgment, preferring the standard model
 and escalating effort within it before reaching for the frontier one, as
 [the briefs guide](briefs.md) describes; that guide holds the brief contract
 and the model-and-effort ladder the goal document no longer carries.
-The client's model fit table (`$GOAL_STORE/model-fit/<client>.md`) informs
-sizing and records only the exceptions [the model fit guide](model-fit.md)
-lists; a worker never records its own observation.
+The client's model fit table (`$GOAL_STORE/model-fit/<client>.md`) is used via
+`model-fit recommend` before dispatch and `model-fit outcome` after verification,
+with the grid available for drill-down; it records only the exceptions [the
+model fit guide](model-fit.md) lists, and a worker never records its own
+observation.
 
 A worker dies with the master. It therefore checkpoints to Git and its state
 brief at every green boundary, so that a successor master can respawn it from

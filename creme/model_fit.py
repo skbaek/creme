@@ -103,6 +103,40 @@ CLIENTS: dict[str, Client] = {
     ),
 }
 
+
+def default_weights(client: Any) -> dict[str, Any]:
+    """Return the initial cost priors for a client and its available options."""
+    selected = CLIENTS[client] if isinstance(client, str) else client
+    family_weights = {
+        "sonnet": 1.0,
+        "opus": 1.7,
+        "fable": 5.0,
+        "astra": 4.0,
+        "sol": 2.0,
+        "luna": 1.0,
+        "luna-reserve": 0.2,
+        "muse-spark": 1.0,
+        "gemini-3.8-flash": 1.0,
+    }
+    effort_weights = {
+        "none": 0.25,
+        "minimal": 0.35,
+        "low": 0.5,
+        "medium": 1.0,
+        "high": 2.0,
+        "xhigh": 3.0,
+        "max": 5.0,
+    }
+    return {
+        "family": {family: family_weights[family] for family in selected.families},
+        "effort": {
+            effort: effort_weights[effort]
+            for efforts in selected.families.values()
+            for effort in efforts
+        },
+        "tokens_ref": 100000,
+    }
+
 FAILURE_MODES_SHOWN = 3
 VERDICTS = ("pass", "partial", "fail", "unknown")
 TOKEN_KEYS = ("uncached_input", "cache_read", "cache_write", "output", "reasoning")

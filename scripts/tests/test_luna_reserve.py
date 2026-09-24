@@ -262,6 +262,22 @@ class AdmissionTest(unittest.TestCase):
         slugs = set(re.findall(r"gpt-[0-9a-z.\-]+", source))
         self.assertEqual(slugs, {"gpt-reserve"})
 
+    def test_bucket_model_slug_missing_from_snapshot_is_optional(self):
+        value = limits()
+        del value["rateLimitsByLimitId"]["base_model_inference"]["normalModelSlug"]
+        reserve, regular = L.classify_buckets(value)
+        self.assertIsNone(reserve.model_slug)
+        report = {
+            "admitted": True,
+            "reserve": reserve.to_dict(),
+            "regular": regular.to_dict(),
+        }
+        self.assertNotIn("model=", L.format_status(report))
+
+    def test_bucket_model_slug_round_trips(self):
+        reserve, _ = L.classify_buckets(limits())
+        b = reserve
+        self.assertEqual(L.Bucket.from_dict(b.to_dict()).model_slug, b.model_slug)
 
 
     def test_only_the_reserve_slug_appears_in_the_capability(self):
@@ -805,8 +821,10 @@ class FakeAppServerRunTest(unittest.TestCase):
         code, report = L.status(L.Policy(), environ=self.environ)
         self.assertEqual(code, L.EXIT_OK, report)
         self.assertEqual(report["reserve"]["limit_id"], "base_model_inference")
+        self.assertEqual(report["reserve"]["model_slug"], "gpt-5.6-luna")
         self.assertNotIn("someone@example.invalid", json.dumps(report))
         self.assertIn("ADMITTED", L.format_status(report))
+        self.assertIn("model=gpt-5.6-luna", L.format_status(report))
         self.assertEqual(self.entries("request", "thread/start"), [])
 
 

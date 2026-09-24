@@ -22,7 +22,8 @@ The tables are in the goal store by default, at
 `luna-reserve` is a separate column group because it is a different route to
 the Luna model (the `gpt-reserve` allowance through the Creme broker, usually
 driven by a non-Codex master), and its fit need not equal that of a Luna
-worker under a Codex master. The option list is the one
+worker under a Codex master. It can also serve an older release than
+regular Luna (`luna-reserve status` prints the model); the header says which. The option list is the one
 `creme/model_fit.py` fixes; when a client adds, renames, or retires a
 selectable model or effort, change that list and this table together.
 

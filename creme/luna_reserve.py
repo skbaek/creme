@@ -198,6 +198,7 @@ class Bucket:
     credits: Any
     reached: Optional[str]
     spend_control_reached: Any
+    model_slug: Optional[str] = None
 
     @property
     def remaining_percent(self) -> float:
@@ -216,6 +217,7 @@ class Bucket:
             "credits": self.credits,
             "reached": self.reached,
             "spend_control_reached": self.spend_control_reached,
+            "model_slug": self.model_slug,
         }
 
     @classmethod
@@ -229,6 +231,7 @@ class Bucket:
             credits=data.get("credits"),
             reached=data.get("reached"),
             spend_control_reached=data.get("spend_control_reached"),
+            model_slug=data.get("model_slug"),
         )
 
 
@@ -245,6 +248,9 @@ def _bucket(limit_id: str, snapshot: dict) -> Bucket:
         credits=snapshot.get("credits"),
         reached=snapshot.get("rateLimitReachedType"),
         spend_control_reached=snapshot.get("spendControlReached"),
+        model_slug=(snapshot.get("normalModelSlug")
+                    if isinstance(snapshot.get("normalModelSlug"), str) and snapshot.get("normalModelSlug")
+                    else None),
     )
 
 
@@ -1132,8 +1138,9 @@ def format_status(report: dict) -> str:
     for name in ("reserve", "regular"):
         bucket = report.get(name)
         if bucket:
+            model = f" model={bucket['model_slug']}" if bucket.get("model_slug") is not None else ""
             lines.append(
-                f"  {name}: id={bucket['limit_id']} used={bucket['used_percent']:g}% "
+                f"  {name}: id={bucket['limit_id']}{model} used={bucket['used_percent']:g}% "
                 f"reached={bucket['reached']} credits={json.dumps(bucket['credits'])} "
                 f"resets={bucket['resets_at_local']} ({bucket['resets_at_utc']})"
             )

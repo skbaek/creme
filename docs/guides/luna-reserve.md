@@ -54,15 +54,20 @@ whether a run would be admitted.
 `run` sends one brief as one turn on a new thread and follows it to completion.
 Effort is `low`, `medium` (default), `high`, `xhigh`, or `max`: every level
 the `gpt-reserve` catalogue lists, and admission re-checks the live catalogue.
-Effort guidance for the current Luna release (GPT-6 Luna since 2026-09-23) is
-not yet measured: record each run in the goal store's model fit tables
-(`$GOAL_STORE/model-fit/codex.md`, `luna-reserve` columns; see the
-[model fit guide](model-fit.md)) and let them decide once a cell guides. Until
-then start write and Lean runs at `high` and read-only runs at `medium`, and on
-a Lean proof failure retry the same thread at `xhigh` (`stop`, then `resume
-THREAD --effort xhigh`) before re-routing. GPT-5.6 Luna's calibration is
-archived at `$GOAL_STORE/model-fit/archive/luna-reserve-guide-gpt-5.6.md`. What
-carried over from it is about briefs and verification, not effort: the
+The reserve serves its own Luna release, which can lag the regular `luna`
+model: `status` prints it as `model=` on the reserve line (the bucket's
+`normalModelSlug`; `gpt-5.6-luna` as of 2026-09-25, while regular Luna is
+GPT-6). Effort guidance comes from the goal store's model fit tables
+(`$GOAL_STORE/model-fit/codex.md`, `luna-reserve` columns, which denote that
+reserve release; see the [model fit guide](model-fit.md)): read the summary
+grid, and record only the exceptions that guide asks for. When `status` shows
+a new reserve model, archive the `luna-reserve` observations and restart the
+cells. Where no cell guides, start write and Lean runs at `high` and read-only
+runs at `medium`, and on a Lean proof failure retry the same thread at `xhigh`
+(`stop`, then `resume THREAD --effort xhigh`) before re-routing. The prose
+calibration of GPT-5.6 Luna is archived at
+`$GOAL_STORE/model-fit/archive/luna-reserve-guide-gpt-5.6.md`. What it says
+about briefs and verification holds regardless of release: the
 failures seen were scope and verification failures, the pattern that paid most
 was a designer freezing statements, Luna elaborating, and the master checking
 headers at each build approval (`approve-builds --header-base`), and these rules

@@ -170,31 +170,31 @@ On the user's direction to start as master, the session runs:
 3. Try to take the lease:
 
    ```sh
-   ~/creme/.semaphore/semaphore master-acquire --client codex --note "why this session"
+   python3 -m creme master start --client CLIENT --model MODEL --effort EFFORT --note "why this session"
    ```
 
-   - `OK` with `master lease acquired`: this session is a new **master**. Start the heartbeat detached
-     (`master-renew --heartbeat 1500 --detach`; verify its renewal in the log,
-     since some managed tool sandboxes also reap detached children), append a `master` event
-     naming the client, model, and effort, rewrite the board's lease line,
-     and say in the reply to the direction that this session is the master.
-   - `OK` with `master lease already held by this session`: this is an
-     authenticated re-entry into the existing acquisition. Run the canonical
-     `master-renew`, reconcile the board with active work, and continue with the
-     recorded acquisition identity. Do not start a second detached heartbeat or
-     append another acquisition event.
-   - `REFUSED` because the lease is **live**: this session is a **reader**.
-     Say so in the reply, naming the client and process that hold the
-     lease, so the user never mistakes a reader for the master. A reader keeps
-     the limits above. If the user wants this session to be the master, they
-     end the other one first.
-   - `REFUSED` because the lease is **lapsed** or **stranded**: run the same
-     command with `--take-over`. The previous master is gone or has stopped
-     renewing; the take-over is logged with its identity, and this session is
-     the master.
+   It acquires the lease, appends the `master` event with the live
+   reconciliation, and on a new acquisition starts the one detached heartbeat
+   itself; do not start another. Verify a renewal in
+   `.semaphore/state/log.jsonl`, since some managed tool sandboxes reap
+   detached children.
+   - `status: master`, `mode: acquired` or `taken-over`: this session is a
+     new **master**. Say so in the reply to the direction.
+   - `status: master`, `mode: resumed`: an authenticated re-entry into the
+     existing acquisition, whose heartbeat is already running. Continue with
+     the recorded acquisition identity.
+   - `status: reader`: the lease is **live** elsewhere. Say so in the reply,
+     naming the client and process that hold the lease, so the user never
+     mistakes a reader for the master. A reader keeps the limits above. If
+     the user wants this session to be the master, they end the other one
+     first.
+   - `status: lapsed` or `stranded`: the previous master is gone or has
+     stopped renewing. Run the same command with `--take-over`; the take-over
+     is logged with its identity, and this session is the master.
 4. Reconcile the board with reality before starting anything: semaphore
    status, live worktrees, branches ahead of main, uncommitted trees, and the
-   build ledger. Record every discrepancy as a `note` event. A previous
+   build ledger. `master start` records what it observes; record any further
+   discrepancy as a `note` event. A previous
    master's workers did not survive it; the board says what each was doing,
    and this session respawns them from their briefs and worktrees.
 

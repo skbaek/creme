@@ -10,9 +10,14 @@ user instructs it, and a result is a worker summary, not evidence.
 
 ```sh
 python3 -m creme antigravity status [--model M] [--json]
-python3 -m creme antigravity run --brief FILE|- --target DIR --model M \
+python3 -m creme antigravity run --brief FILE|- --target DIR [--model M] \
     [--effort low|medium|high] [--timeout-seconds N] [--json]
 ```
+
+Real workloads use the default, `gemini-3.8-flash-high` at `--effort high`
+(user decision 2026-09-25: it dominates the other Gemini models on quality,
+speed and cost). Name another model only for a deliberate comparison, or use
+`gemini-3.6-flash-low` for a plumbing check whose answer does not matter.
 
 `status` reads `agy -p /usage` and `/credits`, both zero-token, plus
 `useG1Credits` from `~/.gemini/antigravity-cli/settings.json`. `agy models` lists

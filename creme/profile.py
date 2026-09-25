@@ -46,6 +46,13 @@ ADMISSION_RANGES = {
     "narrow_default_gib": (1, 32),
     "heavy_module_seconds": (1, 86400),
 }
+# The language-server worker watchdog (`creme lean-mcp`) stops an owned
+# `lean --worker` whose footprint passes a ceiling.  The profile may set it in
+# an optional `lsp_watchdog` object; omitted, it is two thirds of physical
+# memory (16 GiB on a 24 GiB host), since a worker past that pushes the host
+# into swap whatever else runs.
+LSP_WATCHDOG_RANGES = {"worker_ceiling_gib": (2, 1024)}
+LSP_WORKER_CEILING_FALLBACK_GIB = 16
 
 
 @dataclass(frozen=True)
@@ -123,7 +130,7 @@ def validate_data(
     if not isinstance(data, dict):
         return ProfileValidation("INVALID", "profile root must be an object")
     required = {"schema_version", "fingerprint", "facts", "workspace", "policy", "overrides"}
-    optional = {"admission"}
+    optional = {"admission", "lsp_watchdog"}
     if set(data) - optional != required:
         missing = sorted(required - set(data))
         extra = sorted(set(data) - required - optional)
@@ -142,6 +149,19 @@ def validate_data(
             if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
                 return ProfileValidation(
                     "INVALID", f"admission.{key} must be an integer in {low}..{high}"
+                )
+    lsp_watchdog = data.get("lsp_watchdog")
+    if lsp_watchdog is not None:
+        if not isinstance(lsp_watchdog, dict):
+            return ProfileValidation("INVALID", "lsp_watchdog must be an object")
+        unknown = sorted(set(lsp_watchdog) - set(LSP_WATCHDOG_RANGES))
+        if unknown:
+            return ProfileValidation("INVALID", f"unknown lsp_watchdog settings: {unknown}")
+        for key, value in lsp_watchdog.items():
+            low, high = LSP_WATCHDOG_RANGES[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                return ProfileValidation(
+                    "INVALID", f"lsp_watchdog.{key} must be an integer in {low}..{high}"
                 )
     if data.get("schema_version") != SCHEMA_VERSION:
         return ProfileValidation("INVALID", f"unsupported schema_version: {data.get('schema_version')!r}")
@@ -276,3 +296,41 @@ def load_admission_settings(
         # in-code defaults are the conservative values.
         return dict(ADMISSION_DEFAULTS)
     return admission_settings(checked.profile)
+
+
+def lsp_worker_ceiling_gib(
+    profile: Optional[dict[str, Any]],
+    physical_memory_bytes: Optional[int],
+) -> int:
+    """The footprint above which the lean-mcp watchdog stops an owned worker.
+
+    A configured in-range value wins; otherwise two thirds of physical memory,
+    and without a memory fact the fixed fallback.
+    """
+    configured = ((profile or {}).get("lsp_watchdog") or {}).get("worker_ceiling_gib")
+    low, high = LSP_WATCHDOG_RANGES["worker_ceiling_gib"]
+    if isinstance(configured, int) and not isinstance(configured, bool) and low <= configured <= high:
+        return configured
+    if _is_positive_int(physical_memory_bytes):
+        return max(low, int(physical_memory_bytes * 2 // 3 // 1024 ** 3))
+    return LSP_WORKER_CEILING_FALLBACK_GIB
+
+
+def load_lsp_worker_ceiling(
+    creme_root: Optional[Path] = None,
+    adapter: Optional[Adapter] = None,
+) -> int:
+    from . import semaphore
+
+    selected = adapter or get_adapter()
+    try:
+        root = creme_root or semaphore.canonical_creme_root()
+        checked = load(root / DEFAULT_RELATIVE_PROFILE, selected)
+        profile = checked.profile
+        facts = selected.static_facts()
+        memory = (facts.data or {}).get("physical_memory_bytes") if facts.status == "OK" else None
+    except Exception:
+        # The watchdog must start whatever the profile says; the fallback
+        # ceiling still stops a runaway worker.
+        return LSP_WORKER_CEILING_FALLBACK_GIB
+    return lsp_worker_ceiling_gib(profile, memory)

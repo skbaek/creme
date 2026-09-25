@@ -27,6 +27,7 @@ from .host_wrappers import (
 )
 from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import idle_workers
+from . import lsp_watchdog
 from . import luna_broker, luna_reserve
 from . import model_fit
 from . import model_fit_policy
@@ -1198,7 +1199,9 @@ def cmd_lean_mcp(arguments: argparse.Namespace) -> int:
         _json({"status": "REFUSED", "detail": str(exc)})
         return 2
     command[0] = str(runner)
-    os.execve(runner, command, env)
+    # A child rather than an exec: the launcher stays to watch the file
+    # workers the server starts (lsp_watchdog), on the same stdio.
+    return lsp_watchdog.supervise(command, env)
 
 
 def cmd_lake_build(arguments: argparse.Namespace) -> int:

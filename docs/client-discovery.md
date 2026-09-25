@@ -32,7 +32,9 @@ launchers then bind the resolved running interpreter by identity. The nested
 `uvx` runner is likewise resolved only from reviewed non-writable installation
 paths, never from client or project `PATH`. The launcher prepends a Creme-owned
 `lake` guard without relying on either client's variable expansion or PATH
-ordering. The guard delegates `serve` to the toolchain Lake selected by Elan.
+ordering. The guard delegates `serve` to the toolchain Lake selected by Elan. The
+launcher then stays as the server's parent to run the language-server worker
+watchdog ([execution](guides/execution.md#language-server-worker-watchdog)).
 It supplies Lake with an ignored toolchain facade whose `lean` proxy changes
 only the final server environment: `LAKE` points to the guard while the real
 Lean executable and sysroot are restored. Lake's own workspace environment,

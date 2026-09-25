@@ -239,7 +239,7 @@ def _valid_ledger_row(row: Any) -> bool:
     except ValueError:
         return False
     kind = row.get("kind")
-    if kind not in {"build", "guard", "guard_refusal"}:
+    if kind not in {"build", "guard", "guard_refusal", "lsp_worker"}:
         return False
     common = (
         isinstance(row.get("worktree"), str)
@@ -251,6 +251,10 @@ def _valid_ledger_row(row: Any) -> bool:
     )
     if not common:
         return False
+    if kind == "lsp_worker":
+        # A file worker the lean-mcp watchdog stopped: `exit` is the negated
+        # signal, `peak_rss_mib` the footprint that decided it.
+        return isinstance(row.get("reason"), str) and _number_or_none(row.get("peak_rss_mib"))
     if kind != "build":
         return (
             isinstance(row.get("rewritten"), bool)

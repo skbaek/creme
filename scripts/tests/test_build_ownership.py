@@ -808,16 +808,16 @@ class BuildOwnershipTest(unittest.TestCase):
             with patch.dict(os.environ, {"PATH": str(root)}):
                 self.assertEqual(owned.trusted_uvx([trusted]), trusted.resolve())
 
-    def test_mcp_launcher_execs_identity_bound_uvx(self) -> None:
+    def test_mcp_launcher_supervises_identity_bound_uvx(self) -> None:
         runner = Path("/reviewed/uvx")
         with patch("creme.cli.trusted_uvx", return_value=runner), patch(
             "creme.cli.guarded_mcp_env", return_value={"PATH": "/guard"}
-        ), patch("creme.cli.os.execve", side_effect=RuntimeError("captured")) as execve:
-            with self.assertRaisesRegex(RuntimeError, "captured"):
-                cmd_lean_mcp(SimpleNamespace(mcp_command=["--", "uvx", "lean-lsp-mcp==0.26.1"]))
-        executable, argv, env = execve.call_args.args
-        self.assertEqual(executable, runner)
-        self.assertEqual(argv[0], str(runner))
+        ), patch("creme.cli.lsp_watchdog.supervise", return_value=0) as supervise:
+            self.assertEqual(
+                cmd_lean_mcp(SimpleNamespace(mcp_command=["--", "uvx", "lean-lsp-mcp==0.26.1"])), 0,
+            )
+        argv, env = supervise.call_args.args
+        self.assertEqual(argv, [str(runner), "lean-lsp-mcp==0.26.1"])
         self.assertEqual(env["PATH"], "/guard")
 
     def test_terminate_process_group_leaves_no_owned_child(self) -> None:

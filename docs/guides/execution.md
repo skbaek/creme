@@ -143,6 +143,38 @@ planning sample; only `adaptive-acquire` authorizes a heavy start. The
 language server is never admitted by the semaphore, so a heavy file worker is
 its owner's to checkpoint and wind down.
 
+### Language-server worker watchdog
+
+`python3 -m creme lean-mcp` runs the MCP server as its child, on the same
+stdio, and watches the `lean --worker` processes in that child's process tree.
+Those workers are the only processes it signals. Other sessions' workers, the
+`lean --server` and `lake serve` above them, and everything outside the tree
+are never touched. It stops one owned worker (SIGTERM, then SIGKILL five
+seconds later) in either of two cases:
+
+- **Ceiling.** The worker's footprint (the larger of RSS and the physical
+  footprint, which counts the compressed pages RSS omits) passes the
+  ceiling. The ceiling is `lsp_watchdog.worker_ceiling_gib` in the host
+  profile (an integer, 2–1024). By default it is two thirds of physical
+  memory, which is 16 GiB on a 24 GiB host.
+- **Pressure.** The owned-build watchdog's critical signal holds for three
+  seconds: kernel pressure at warning or worse for 10 s, or swap growing by
+  1 GiB within 10 s. The worker stopped is the largest owned one at or above
+  the heavy-worker size (8 GiB). A smaller worker is left alone. After a
+  pressure stop, the watchdog waits 30 s before judging another worker.
+
+A stop writes an `lsp_worker` row to the build ledger (`exit` is the negated
+signal, `peak_rss_mib` the footprint that decided it). It also writes one
+`creme lean-mcp: stopped …` line to the server's stderr.
+
+The Lean server starts a fresh worker when the file is next used, so a stop
+is a restart. The elaboration it interrupted is lost, and the MCP call that
+was waiting on it can return empty diagnostics, so a clean result after a
+stop is not evidence. A worker the watchdog stops is a file that does not fit
+the server: split the heavy check or verify it through a narrow wrapper
+build, as in host guidance. The watchdog neither reads nor writes semaphore
+state, and admission is unchanged.
+
 ## Wind down Lean work
 
 Before yielding to a requested pause or restart, handing off the work, or

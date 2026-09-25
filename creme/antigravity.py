@@ -764,11 +764,12 @@ def run(
             continue
         name = tool_call.get("name")
         if write and name in WRITE_TOOLS:
-            edited_paths.extend(_guard_paths(tool_call))
+            edited_paths.extend(_guard_named_paths(tool_call))
         if write and name == "run_command":
             command = _guard_argument(tool_call, "CommandLine")
             if command is not None:
                 commands_run.append(command.strip())
+    edited_paths = list(dict.fromkeys(edited_paths))  # named path arguments only, once each
     summary["edited_paths"] = edited_paths
     summary["commands_run"] = commands_run
     if write:

@@ -337,9 +337,10 @@ else:
         self._git_target()
         edited = self.target / "edited.txt"
         payload = {"modelName": "gemini-model-medium", "toolCall": {
-            "name": "write_to_file", "args": {"TargetFile": str(edited)},
+            "name": "write_to_file", "args": {"TargetFile": str(edited), "CodeContent": "/-! content, not a path -/"},
         }}
-        self._scenario(payloads=[payload], write_payload=True)
+        # Two edits of the same file with content that starts with "/": recorded once, content never listed.
+        self._scenario(payloads=[payload, payload], write_payload=True)
         code, summary = antigravity.run(
             "edit", self.target, "gemini-model", "medium", 10,
             runs_root=self.root / "runs", write=True,

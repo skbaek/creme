@@ -607,6 +607,7 @@ class BuildApprovalRuleTest(unittest.TestCase):
         for command in (
             "/bin/zsh -lc '~/creme/scripts/creme lake-build goal -- Module.Name'",
             "/bin/zsh -lc '~/creme/scripts/creme lake-build goal --wait 900 -- Module.Name'",
+            f"/bin/zsh -lc '{Path.home()}/creme/scripts/creme lake-build goal -- Module.Name'",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(B.build_approval_failure(
@@ -621,6 +622,7 @@ class BuildApprovalRuleTest(unittest.TestCase):
             "~/creme/scripts/creme lake-build goal --memory-gib 4 -- Module.Name",
             "~/creme/scripts/creme lake-build goal --contention sensitive -- Module.Name",
             "~/creme/scripts/creme lake-build goal --probe -- Module.Name",
+            "/tmp/creme/scripts/creme lake-build goal -- Module.Name",
         ]
         for inner in commands:
             with self.subTest(inner=inner):

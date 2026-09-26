@@ -362,8 +362,10 @@ def build_approval_failure(record: dict, approval: dict, header_base: Optional[s
     if wrapped is None:
         return "command is not the exact /bin/zsh -lc build form"
     inner = wrapped.group(1)
+    # The model sometimes spells the launcher with the expanded home directory.
+    launcher = f"(?:~/creme/scripts/creme|{re.escape(str(Path.home() / 'creme/scripts/creme'))})"
     pattern = re.compile(
-        rf"^~/creme/scripts/creme lake-build {re.escape(goal)}"
+        rf"^{launcher} lake-build {re.escape(goal)}"
         rf"(?: --wait ([0-9]+))? -- ({_MODULE_NAME}(?: {_MODULE_NAME})*)$"
     )
     parsed = pattern.fullmatch(inner)

@@ -138,20 +138,21 @@ the account is not a ChatGPT login; `gpt-reserve` is absent from the model
 catalogue or defaults to a non-default service tier; no bucket is named
 `gpt-reserve` (the reserve is identified by that limit name, never by a
 hard-coded id); the reserve is reached, under a spend control, below the
-remaining-share floor (default 1%), or about to reset; the reserve and regular
+remaining-share floor (none by default; `--min-remaining-percent` sets one per run), or about to reset; the reserve and regular
 reset times are too close to tell apart; an earlier attribution failure is
 recorded; or any model, profile, configuration, provider, service-tier, or
 sandbox override is attempted on the command line. `OPENAI_*` and `CODEX_*`
-variables other than `CODEX_HOME` are removed from the Codex environment. The remaining-share floor exists because admission is checked only
-before a turn, while one turn can consume several percent (a Lean write
-session on 2026-09-26 took the reserve from 90% to 94–95% used), and the
-behaviour when the reserve reaches 100% mid-turn is not certified (see the
-attribution verification below). The exposure is bounded: credits are off on
-this account, and the per-turn regular-bucket comparison and tripwire stop a run
-whose turn moves the regular bucket. The reserve expires unused at each reset,
-so a turn cut short still beats no turn: the default was lowered from 10% to
-1% on user direction (2026-09-27). `--min-remaining-percent` overrides it per
-run. An
+variables other than `CODEX_HOME` are removed from the Codex environment. **No floor by default (user direction, 2026-09-27).** Admission is checked only before a
+turn, and the behaviour when the reserve reaches 100% mid-turn is not certified (see the
+attribution verification below), but the exposure is bounded: credits are off on this
+account, and the per-turn regular-bucket comparison and tripwire stop a run whose turn
+moves the regular bucket. The reserve expires unused at each reset and the user does not
+use it by hand, so a turn cut short beats no turn: only a *reached* bucket is refused.
+(History: 10% from the first draft, 2026-09-17; 1% then 0% on 2026-09-27.)
+**Near exhaustion, brief for streamed value:** when a run may be cut off by the limit,
+give it work whose output lands incrementally in files as it goes (one row, finding or
+lemma committed or appended at a time, most valuable first), never one final message
+that is lost if the turn dies. An
 *available* regular bucket is **not** a refusal: it is reported in the bucket
 table, and attribution is what decides the run (see
 [Attribution with an available regular bucket](#attribution-with-an-available-regular-bucket)).

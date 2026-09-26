@@ -199,8 +199,12 @@ class AdmissionTest(unittest.TestCase):
         self.assertRefused(self.decide(read(limits(reserve_reached="rate_limit_reached"))), "is reached")
         self.assertRefused(self.decide(read(limits(reserve_used=100))), "is reached")
 
-    def test_reserve_below_floor_is_refused(self):
-        self.assertRefused(self.decide(read(limits(reserve_used=99.5))), "below the 1% floor")
+    def test_default_has_no_floor(self):
+        self.assertTrue(self.decide(read(limits(reserve_used=99.5)))["admitted"])
+
+    def test_reserve_below_an_explicit_floor_is_refused(self):
+        policy = L.Policy(min_remaining_percent=1.0)
+        self.assertRefused(self.decide(read(limits(reserve_used=99.5)), policy), "below the 1% floor")
 
     def test_indistinguishable_reset_times_are_refused(self):
         value = limits(reserve_reset=REGULAR_RESET + 60)
@@ -240,7 +244,7 @@ class AdmissionTest(unittest.TestCase):
         # bucket is available.
         available = dict(regular_used=3, regular_reached=None, ordinary=True,
                          regular_reset=RESERVE_RESET + 86400 * 3)
-        self.assertRefused(self.decide(read(limits(reserve_used=99.5, **available))), "below the 1% floor")
+        self.assertRefused(self.decide(read(limits(reserve_used=99.5, **available)), L.Policy(min_remaining_percent=1.0)), "below the 1% floor")
         self.assertRefused(self.decide(read(limits(reserve_used=100, **available))), "is reached")
         close = dict(available, regular_reset=RESERVE_RESET + 60)
         self.assertRefused(self.decide(read(limits(**close))), "cannot be discriminated")

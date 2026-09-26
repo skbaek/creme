@@ -142,7 +142,15 @@ remaining-share floor (default 10%), or about to reset; the reserve and regular
 reset times are too close to tell apart; an earlier attribution failure is
 recorded; or any model, profile, configuration, provider, service-tier, or
 sandbox override is attempted on the command line. `OPENAI_*` and `CODEX_*`
-variables other than `CODEX_HOME` are removed from the Codex environment. An
+variables other than `CODEX_HOME` are removed from the Codex environment. The remaining-share floor exists because admission is checked only
+before a turn, while one turn can consume several percent (a Lean write
+session on 2026-09-26 took the reserve from 90% to 94–95% used), and the
+behaviour when the reserve reaches 100% mid-turn is not certified (see the
+attribution verification below): the floor keeps every admitted turn far from
+that edge. The 10% default was a worker-chosen value (goal
+`creme-luna-reserve-v1`, 2026-09-17) whose rationale was only recorded here on
+2026-09-27; light read-only turns have cost well under 1%, so it is
+conservative. It has no command-line override. An
 *available* regular bucket is **not** a refusal: it is reported in the bucket
 table, and attribution is what decides the run (see
 [Attribution with an available regular bucket](#attribution-with-an-available-regular-bucket)).

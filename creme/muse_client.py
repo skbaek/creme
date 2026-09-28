@@ -336,6 +336,18 @@ class MuseGuard:
         return self.command("approval/decide", {"approvalId": params["approvalId"], "choiceId": choice,
                                                 "requirementId": params["currentRequirementId"]}, timeout=30)
 
+    def reopen(self, turn_id: str, tokens: Optional[dict] = None, models: Optional[dict] = None) -> TurnOutcome:
+        """Make ``turn_id`` the active turn again (Muse is still running it); counts carry over."""
+        if self.active_turn is not None:
+            raise PinViolation("reopen while another turn is active")
+        self.active_turn = turn_id
+        self.outcome = TurnOutcome(turn_id=turn_id)
+        for key, value in (tokens or {}).items():
+            if key in self.outcome.tokens and isinstance(value, int):
+                self.outcome.tokens[key] = value
+        self.outcome.models = dict(models or {})
+        return self.outcome
+
     def finish_turn(self) -> Optional[TurnOutcome]:
         outcome, self.outcome, self.active_turn = self.outcome, None, None
         return outcome
@@ -390,7 +402,7 @@ class MuseGuard:
                 return self.fail(f"a native subagent was started ({item.get('agentPath') or item.get('role')})")
             if kind == "toolCall":
                 tool = str(item.get("tool") or "")
-                if method == "item/started" and outcome is not None:
+                if method == "item/started" and outcome is not None and item.get("turnId") == outcome.turn_id:
                     outcome.tool_calls += 1
                 if tool in FORBIDDEN_TOOLS:
                     return self.fail(f"forbidden tool {tool} was called")
@@ -400,7 +412,7 @@ class MuseGuard:
                             or lean_tool in luna_lean.FORBIDDEN_TOOLS:
                         return self.fail(f"MCP tool {tool} ran outside what this session allows")
             if kind == "userMessage" and item.get("steered") and outcome is not None \
-                    and method == "item/completed":
+                    and method == "item/completed" and item.get("turnId") == outcome.turn_id:
                 outcome.steer_items.append(item.get("itemId"))
             if kind == "agentMessage" and method == "item/completed" and outcome is not None \
                     and item.get("turnId") == outcome.turn_id and item.get("text") is not None:

@@ -104,6 +104,19 @@ class ModelPinGuardTest(unittest.TestCase):
             "sessionId": "s-1", "item": {"kind": "toolCall", "tool": "mcp__lean_lsp_mcp__lean_goal",
                                           "status": "completed"}}}), [])
 
+    def test_events_of_another_turn_never_touch_the_current_turn(self):
+        g = guard()
+        g.outcome = C.TurnOutcome(turn_id="t2")
+        g.observe({"method": "turn/completed", "params": {"sessionId": "s-1", "turnId": "t1", "terminal": "failed"}})
+        g.observe({"method": "item/completed", "params": {"sessionId": "s-1", "item": {
+            "kind": "agentMessage", "turnId": "t1", "text": "old"}}})
+        g.observe({"method": "item/started", "params": {"sessionId": "s-1", "item": {
+            "kind": "toolCall", "tool": "bash", "turnId": "t1"}}})
+        g.observe({"method": "session/tokenUsage", "params": {"sessionId": "s-1", "turnId": "t1",
+                                                             "modelId": C.PINNED_MODEL, "promptTokens": 5}})
+        self.assertEqual((g.outcome.status, g.outcome.final_message, g.outcome.tool_calls, g.outcome.tokens["prompt"]),
+                         (None, None, 0, 0))
+
     def test_session_log_audit_rejects_any_other_model(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "session.jsonl"
@@ -441,6 +454,52 @@ class BrokerTest(FakeMuseHarness):
         self.write_scenario()
         code, record = RunTest.run_brief(self)
         self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+
+    def test_a_folded_incomplete_terminal_does_not_end_the_running_turn(self):
+        # view/page read mid-turn folds the running turn as failed/"incomplete" (measured on Muse 1.4.0).
+        self.reconciling("1")
+        self.scenario["turn"].update(fold_incomplete=True, sleep=4)
+        self.write_scenario()
+        session = self.start()
+        time.sleep(2.5)
+        record = MB.load_record(self.state, session)
+        self.assertEqual((record["state"], record["turns"][0]["verdict"]), ("running", None))
+        code, lines, record = self.wait(session)
+        self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)
+        self.assertGreater(len([c for c in self.calls() if (c.get("in") or {}).get("method") == "view/page"]), 1)
+
+    def test_a_resumed_session_ignores_an_earlier_turns_terminal(self):
+        self.reconciling("1")
+        first = self.start()
+        self.wait(first)
+        MB.cmd_simple(ROOT, self.environ, "stop", first)
+        muse_session = MB.load_record(self.state, first)["muse_session"]
+        self.scenario["turn"].update(sleep=3)
+        self.write_scenario()
+        code, lines, answer = MB.cmd_resume(ROOT, self.environ, muse_session, None, False, None, "silent", 60)
+        self.assertEqual(code, 0, lines)
+        second = answer["session"]
+        MB.cmd_simple(ROOT, self.environ, "send", second, text="again")
+        time.sleep(2)   # several reconciles run while the view log holds the earlier turn's terminal
+        record = MB.load_record(self.state, second)
+        self.assertEqual((record["state"], record["turns"][0]["verdict"]), ("running", None))
+        code, lines, record = self.wait(second)
+        self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)
+
+    def test_a_turn_wrongly_ended_while_muse_runs_is_reopened_and_completes(self):
+        self.reconciling("1")
+        self.scenario["turn"].update(false_terminal=True, sleep=4)
+        self.write_scenario()
+        session = self.start()
+        deadline = time.time() + 10
+        while time.time() < deadline and not (MB.load_record(self.state, session)["turns"][0].get("reopened")):
+            time.sleep(0.2)
+        turn = MB.load_record(self.state, session)["turns"][0]
+        self.assertTrue(turn.get("reopened"), turn)
+        self.assertEqual(turn["reopened"][0]["verdict"], "FAILED")
+        code, lines, record = self.wait(session)
+        self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)
+        self.assertEqual(len(record["turns"]), 1)
 
     def test_send_starts_a_new_turn_when_idle_and_steer_refuses(self):
         session = self.start()

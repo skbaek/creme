@@ -449,6 +449,33 @@ def replay_view(host: "MuseHost", tracker: ViewTracker) -> list[dict]:
     return messages
 
 
+def split_terminals(messages: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Replayed events without their ``turn/completed`` terminals, and the terminals.
+
+    Measured on Muse 1.4.0 (2026-09-28): a ``view/page`` read while a turn is
+    still running folds that turn as ``turn/completed`` ``failed`` with reason
+    ``incomplete`` and the running turn's own id, although the turn goes on
+    (and the live stream never pushes that event). A replayed terminal is
+    therefore applied only after ``session/read`` shows the turn is over.
+    """
+    others = [message for message in messages if message.get("method") != "turn/completed"]
+    return others, [message for message in messages if message.get("method") == "turn/completed"]
+
+
+def turn_over(current: dict, turn_id: str) -> bool:
+    """Muse's own view: the session is idle, or runs another turn."""
+    return current.get("status") == "idle" or bool(current.get("active_turn") and current["active_turn"] != turn_id)
+
+
+def find_terminal(host: "MuseHost", turn_id: str, limit: int = 200) -> Optional[dict]:
+    """The latest durable ``turn/completed`` for ``turn_id`` near the view head, or None."""
+    page = host.guard.request("view/page", {"sessionId": host.session_id, "limit": limit,
+                                            "direction": "backward"}, timeout=60) or {}
+    found = [event for event in page.get("events") or [] if isinstance(event, dict)
+             and event.get("method") == "turn/completed" and (event.get("params") or {}).get("turnId") == turn_id]
+    return found[-1] if found else None
+
+
 def pending_approvals(host: "MuseHost") -> list[dict]:
     listing = host.guard.request("approval/listPending", {"sessionId": host.session_id}, timeout=60) or {}
     return [item for item in listing.get("approvals") or [] if isinstance(item, dict)]
@@ -717,20 +744,25 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
         def reconcile() -> None:
             tracker.last_reconcile = time.monotonic()
             try:
-                for message in replay_view(host, tracker):
+                others, terminals = split_terminals(replay_view(host, tracker))
+                for message in others:
                     process(message)
                 for params in pending_approvals(host):
                     handle_approval(host, params, turn, emit, master_available=False)
                 if outcome.status is None:
                     current = session_status(host)
-                    if current["status"] == "idle" and current["active_turn"] != outcome.turn_id:
-                        time.sleep(0.5)
-                        for message in replay_view(host, tracker):   # the terminal may have just landed
+                    if turn_over(current, outcome.turn_id):
+                        time.sleep(0.5)   # the terminal may have just landed
+                        more, late = split_terminals(replay_view(host, tracker))
+                        for message in more:
                             process(message)
-                    if current["status"] == "idle" and current["active_turn"] != outcome.turn_id \
-                            and outcome.status is None:
-                        errors.append("Muse ended the turn but its terminal event was not observed")
-                        outcome.status = "lost"
+                        mine = [t for t in terminals + late if (t.get("params") or {}).get("turnId") == outcome.turn_id]
+                        terminal = mine[-1] if mine else find_terminal(host, outcome.turn_id)
+                        if terminal is not None:
+                            process(terminal)
+                        if outcome.status is None and current.get("status") == "idle":
+                            errors.append("Muse ended the turn but its terminal event was not observed")
+                            outcome.status = "lost"
                 if tracker.unhealthy:
                     failure = resubscribe(host, tracker)
                     emit("live", "view", "view/subscribe " + ("failed: " + failure if failure else "re-attached"))

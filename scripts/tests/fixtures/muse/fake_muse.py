@@ -93,8 +93,19 @@ def note(method, params, durable=True):
                                             **params}}
     if durable:
         state["events"].append(message)
+        with open(events_path(state["session"]), "a") as handle:
+            handle.write(json.dumps(message) + "\n")
     if not state["lost"]:
         send(message)
+
+
+def events_path(session_id):
+    return HOME / "sessions" / session_id / "view.jsonl"
+
+
+def load_events(session_id):
+    path = events_path(session_id)
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
 def lose_projection():
@@ -151,6 +162,8 @@ def run_turn(turn_id, text):
                                        "status": "inProgress", "turnId": turn_id, "revision": 1}})
         note("item/completed", {"item": {"itemId": f"tool-{tool}", "kind": "toolCall", "tool": tool,
                                          "status": "completed", "turnId": turn_id, "revision": 2}})
+    if turn.get("false_terminal"):
+        note("turn/completed", {"turnId": turn_id, "terminal": "failed", "reason": "incomplete"})
     if turn.get("lose_before_end"):
         lose_projection()
     if turn.get("wait_for_steer"):
@@ -221,6 +234,8 @@ for line in sys.stdin:
     elif method == "session/resume":
         state["session"] = params["sessionId"]
         state["model"] = SCENARIO.get("initial_model", "muse-spark-1.3-contributor")
+        state["events"] = load_events(state["session"])
+        state["cursor"] = len(state["events"])
         respond(message, {"session": session_object(), "viewCursor": f"v:{state['cursor']}", "history": {"mode": "none"},
                           "pendingRequests": []})
     elif method == "session/setModel":
@@ -240,9 +255,17 @@ for line in sys.stdin:
         after = params.get("cursor")
         events = state["events"]
         if after:
-            index = next((i for i, e in enumerate(events) if e["params"]["viewCursor"] == after), -1)
-            events = events[index + 1:]
+            index = next((i for i, e in enumerate(events) if e["params"]["viewCursor"] == after), None)
+            events = events if after == "v:0" else ([] if index is None else events[index + 1:])
+        if params.get("direction") == "backward":
+            events = events[-params.get("limit", 100):]
         page = events[:params.get("limit", 100)]
+        if (SCENARIO.get("turn") or {}).get("fold_incomplete") and state["turn"] and params.get("direction") != "backward":
+            # Measured on Muse 1.4.0: a page read while a turn runs folds it as failed/"incomplete".
+            state["cursor"] += 1
+            page = page + [{"method": "turn/completed", "params": {
+                "sessionId": state["session"], "turnId": state["turn"], "terminal": "failed", "reason": "incomplete",
+                "viewCursor": f"v:{state['cursor']}", "sourceRange": {"first": state["cursor"]}}}]
         log_call({"page_after": after, "methods": [e["method"] + "@" + e["params"]["viewCursor"] for e in page]})
         respond(message, {"events": page, "nextCursor": page[-1]["params"]["viewCursor"] if page else None})
     elif method == "view/subscribe":

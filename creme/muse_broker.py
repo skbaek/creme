@@ -451,7 +451,8 @@ class MuseSession(PB.SessionRecord):
             tracker.last_reconcile = time.monotonic()
             try:
                 replayed = M.replay_view(self.host, tracker)
-                for message in replayed:
+                others, terminals = M.split_terminals(replayed)
+                for message in others:
                     self.process(message)
                 recovered = 0
                 if self.state == "running":
@@ -461,19 +462,27 @@ class MuseSession(PB.SessionRecord):
                         recovered += len(self.pending) - before
                 outcome = self.guard.outcome if self.guard is not None else None
                 ended = False
+                reopened = False
                 if outcome is not None and outcome.status is None:
                     current = M.session_status(self.host)
-                    if current["status"] == "idle" and current["active_turn"] != outcome.turn_id:
-                        # The terminal may have landed after the first replay: page once more.
-                        time.sleep(0.5)
-                        for message in M.replay_view(self.host, tracker):
+                    if M.turn_over(current, outcome.turn_id):
+                        time.sleep(0.5)   # the terminal may have landed after the first replay
+                        more, late = M.split_terminals(M.replay_view(self.host, tracker))
+                        for message in more:
                             self.process(message)
-                    if current["status"] == "idle" and current["active_turn"] != outcome.turn_id \
-                            and self.guard.outcome is outcome and outcome.status is None:
-                        outcome.status = "lost"
-                        if self.turn is not None:
-                            self.turn.errors.append("Muse ended the turn but its terminal event was not observed")
-                        ended = True
+                        mine = [t for t in terminals + late
+                                if (t.get("params") or {}).get("turnId") == outcome.turn_id]
+                        terminal = mine[-1] if mine else M.find_terminal(self.host, outcome.turn_id)
+                        if terminal is not None and self.guard.outcome is outcome:
+                            self.process(terminal)       # ends the turn through the live path
+                        if self.guard.outcome is outcome and outcome.status is None \
+                                and current.get("status") == "idle":
+                            outcome.status = "lost"
+                            if self.turn is not None:
+                                self.turn.errors.append("Muse ended the turn but its terminal event was not observed")
+                            ended = True
+                elif outcome is None and self.state == "idle":
+                    reopened = self.reopen_if_running()
                 note = None
                 if tracker.unhealthy:
                     failure = M.resubscribe(self.host, tracker)
@@ -482,18 +491,48 @@ class MuseSession(PB.SessionRecord):
             except (AppServerError, PinViolation) as exc:
                 self.emit("attention", "error", f"reconcile ({reason}) failed: {exc}")
                 return
-            if replayed or recovered or ended or note:
-                self.emit("live" if not (recovered or ended) else "attention", "reconcile",
+            if replayed or recovered or ended or note or reopened:
+                self.emit("live" if not (recovered or ended or reopened) else "attention", "reconcile",
                           f"{reason}: replayed={len(replayed)} approvals_recovered={recovered} "
-                          f"turn_ended_unobserved={ended}" + (f"; {note}" if note else ""))
+                          f"turn_ended_unobserved={ended} reopened={reopened}" + (f"; {note}" if note else ""))
             if ended:
                 self.end_turn()
 
+    def reopen_if_running(self) -> bool:
+        """Called under the lock on an idle session: reopen the last turn if Muse is still running it.
+
+        A turn this broker ended as failed or lost (a wrongly applied terminal,
+        or a lost stream) while Muse went on is put back to running, keeping the
+        tokens and models already counted, so its genuine terminal is recorded.
+        """
+        turns = self.record.get("turns") or []
+        last = turns[-1] if turns else None
+        if not last or last.get("verdict") != "FAILED" or last.get("status") not in ("failed", "lost") \
+                or not last.get("turn_id") or self.guard is None:
+            return False
+        current = M.session_status(self.host)
+        if current.get("status") != "running" or current.get("active_turn") != last["turn_id"]:
+            return False
+        outcome = self.guard.reopen(last["turn_id"], last.get("tokens"), last.get("models"))
+        with self.data_lock:
+            last.setdefault("reopened", []).append({"at": PB.now_iso(), "status": last.get("status"),
+                                                    "verdict": last.get("verdict")})
+            last.update({"status": None, "verdict": None, "completed": None})
+            self.record["state"] = "running"
+            self.turn_ended.clear()
+            self.turn_deadline = time.monotonic() + float(self.record["turn_timeout_seconds"])
+            self.persist()
+        self.turn = M.TurnState()
+        self.emit("attention", "turn", f"turn {last['n']} reopened: Muse is still running {outcome.turn_id}")
+        return True
+
     def periodic(self, now: float) -> None:
         broker = self.broker
-        if self.state == "running" and self.tracker is not None \
+        recheck = self.state == "idle" and (self.record.get("turns") or [{}])[-1].get("verdict") == "FAILED" \
+            and (self.record.get("turns") or [{}])[-1].get("status") in ("failed", "lost")
+        if (self.state == "running" or recheck) and self.tracker is not None \
                 and now - self.tracker.last_reconcile > broker.reconcile_seconds:
-            self.reconcile("periodic")
+            self.reconcile("periodic" if not recheck else "recheck")
         if M.tripwire_path(broker.state).exists() and not broker.tripped:
             broker.trip_all(None, ["a model-pin failure tripwire was recorded by another run"])
             return

@@ -205,9 +205,17 @@ every `send` or `steer`:
    allowlist, and one left to the master appears as an `approval` line that
    `approve` answers (replayed approval events are skipped, so a resolved one is
    never re-decided);
-3. `session/read`: when Muse reports the session idle and the turn's terminal
-   was still not found after a second page, the turn ends as `lost` (verdict
-   FAILED), so `send` starts a new turn instead of steering a finished one;
+3. `session/read`: a replayed `turn/completed` is applied only when Muse
+   reports the turn over (session idle, or running another turn), and only to
+   the turn it names. A `view/page` read while a turn runs folds that turn as
+   `failed` with reason `incomplete` although it goes on (measured
+   2026-09-28, the regression of commit `7562211`), so a replayed terminal is
+   never trusted alone. When Muse reports the session idle and the turn's
+   terminal is still not found (a second page, then a backward page from the
+   head), the turn ends as `lost` (verdict FAILED), so `send` starts a new
+   turn instead of steering a finished one. If a turn the broker ended as
+   failed or lost is still running in Muse, the next reconcile reopens it
+   (keeping its counted tokens) and records its genuine terminal;
 4. `view/subscribe` after the cursor, to try to re-attach the live stream.
 
 A reconcile that recovered an approval or ended a turn prints a `reconcile`

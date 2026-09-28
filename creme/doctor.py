@@ -439,6 +439,25 @@ def check_client_surface(root: Path) -> list[Check]:
     return checks
 
 
+def check_muse_pseudo_subagent(root: Path, environ: Optional[dict] = None) -> list[Check]:
+    """Cheap prerequisites of `creme muse` (no Muse process is started; `muse status` is the live read)."""
+    from . import muse
+
+    issues, warnings = [], []
+    binary = muse.resolve_binary(environ)
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        warnings.append(f"Muse binary {binary} is not an executable file")
+    for relative in (muse.PREAMBLE_RELATIVE, muse.LEAN_PREAMBLE_RELATIVE):
+        if not (root / relative).is_file():
+            issues.append(f"{relative} missing")
+    state = muse.state_root(root, environ)
+    if muse.tripwire_path(state).exists():
+        issues.append(f"model-pin failure tripwire present: {muse.tripwire_path(state)}")
+    status = STATUS_FAIL if issues else STATUS_WARN if warnings else STATUS_OK
+    detail = "; ".join(issues + warnings) if issues or warnings else f"{binary}; pin {muse.PINNED_MODEL}"
+    return [Check("client: Muse pseudo-subagent", status, detail)]
+
+
 def check_neutral_semaphore(root: Path) -> list[Check]:
     launcher = root / ".semaphore" / "semaphore"
     readme = root / ".semaphore" / "README.md"
@@ -594,6 +613,7 @@ def run_doctor(
     checks.extend(check_client_surface(root))
     checks.extend(Check(*row) for row in approval_checks(root))
     checks.extend(check_neutral_semaphore(root))
+    checks.extend(check_muse_pseudo_subagent(root))
     checks.extend(check_host_wrappers(shared_root))
     checks.extend(check_public_runtime_boundary(root))
     facts = selected.static_facts()

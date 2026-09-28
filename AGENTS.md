@@ -130,7 +130,8 @@ A missing capability is not permission to run another OS's command; see
 Luna reserve pseudo-subagents are used only when the user instructs it,
 through `python3 -m creme luna-reserve`; read
 [the Luna reserve guide](docs/guides/luna-reserve.md) first. Antigravity (`agy`) pseudo-subagents follow the same rule,
-through `python3 -m creme antigravity` ([guide](docs/guides/antigravity.md)).
+through `python3 -m creme antigravity` ([guide](docs/guides/antigravity.md)), and so do Muse
+pseudo-subagents, through `python3 -m creme muse` ([guide](docs/guides/muse.md)).
 
 ## Git and completion
 

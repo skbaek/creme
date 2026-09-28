@@ -90,6 +90,8 @@ CLIENTS: dict[str, Client] = {
         routes={
             "muse-worker": "worker inheriting its Muse master's session route",
             "muse-session": "a separate Muse session launched at the named route",
+            "muse-broker": "Muse pseudo-subagent through the Creme broker (start/send), any master",
+            "muse-run": "Muse pseudo-subagent through one-shot `creme muse run`, any master",
         },
     ),
     "antigravity": Client(
@@ -795,6 +797,48 @@ def luna_session_usage(session_dir: Path) -> dict[str, Any]:
         "effort": session.get("effort"),
         "date": (session.get("created") or "")[:10] or None,
         "resumed_from": resumed,
+    }
+
+
+def muse_session_usage(session_dir: Path) -> dict[str, Any]:
+    """Tokens, wall time, turns, and effort of a Muse pseudo-subagent session or one-shot run record.
+
+    Token counts are per turn from ``session/tokenUsage`` (``promptTokens`` is
+    counted once under the provider's cache convention), so a resumed session
+    is recorded net of the session it resumed without subtraction.
+    """
+    session_file = session_dir / "session.json"
+    if session_file.is_file():
+        record = json.loads(session_file.read_text(encoding="utf-8"))
+        turns = record.get("turns") or []
+        date = (record.get("created") or "")[:10] or None
+    else:
+        record = json.loads((session_dir / "verdict.json").read_text(encoding="utf-8"))
+        turns = [record] if record.get("tokens") is not None else []
+        name = session_dir.name
+        date = f"{name[0:4]}-{name[4:6]}-{name[6:8]}" if re.match(r"^\d{8}T", name) else None
+    totals = {"prompt": 0, "cached": 0, "output": 0, "reasoning": 0}
+    seen = False
+    wall = 0.0
+    for turn in turns:
+        tokens = turn.get("tokens") or {}
+        if tokens:
+            seen = True
+            for key in totals:
+                totals[key] += int(tokens.get(key) or 0)
+        wall += float(turn.get("wall_seconds") or 0)
+    if seen:
+        tokens_text = (f"uncached_input={totals['prompt'] - totals['cached']} cache_read={totals['cached']} "
+                       f"cache_write=n/a output={totals['output']} reasoning={totals['reasoning']}")
+    else:
+        tokens_text = " ".join(f"{k}=n/a" for k in TOKEN_KEYS)
+    return {
+        "tokens": tokens_text,
+        "wall_time": f"{int(wall)}s" if turns else "n/a",
+        "turns": str(len(turns)),
+        "effort": record.get("effort"),
+        "date": date,
+        "resumed_from": record.get("resumed_from"),
     }
 
 

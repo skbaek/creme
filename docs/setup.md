@@ -366,6 +366,11 @@ function musec --description 'Muse master session from ~/creme'
 end
 ```
 
+Muse *pseudo-subagents* (`python3 -m creme muse`, see
+[the Muse guide](guides/muse.md)) do not use this launcher: each of their
+`muse serve` hosts chooses its sandbox posture per process from the session's
+mode, and never relies on saved Muse state.
+
 POSIX `sh` (`~/.profile` or equivalent):
 
 ```sh

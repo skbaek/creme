@@ -29,6 +29,7 @@ from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
 from . import idle_workers
 from . import lsp_watchdog
 from . import luna_broker, luna_reserve
+from . import muse_cli
 from . import model_fit
 from . import model_fit_policy
 from . import master_operations
@@ -1341,6 +1342,11 @@ def cmd_model_fit_add(arguments: argparse.Namespace) -> int:
             extracted = model_fit.luna_session_usage(path)
             fields["source"] = str(path)
             fields["run"] = path.name
+        elif arguments.from_muse_session:
+            path = Path(arguments.from_muse_session).expanduser()
+            extracted = model_fit.muse_session_usage(path)
+            fields["source"] = str(path)
+            fields["run"] = path.name
         elif arguments.from_codex_rollout:
             path = Path(arguments.from_codex_rollout).expanduser()
             extracted = model_fit.codex_rollout_usage(path)
@@ -1794,6 +1800,8 @@ def parser() -> argparse.ArgumentParser:
     record.add_argument("--from-claude-transcript", metavar="JSONL")
     record.add_argument("--from-luna-session", metavar="DIR")
     record.add_argument("--from-codex-rollout", metavar="JSONL")
+    record.add_argument("--from-muse-session", metavar="DIR",
+                        help="a `creme muse` session directory or one-shot run directory")
     fit_add.add_argument("--since", metavar="ISO", help="Claude transcript: count only entries at or after this time")
     fit_add.add_argument("--until", metavar="ISO", help="Claude transcript: count only entries at or before this time")
     for key in model_fit.FIELDS:
@@ -1996,6 +2004,8 @@ def parser() -> argparse.ArgumentParser:
     luna_serve = luna_commands.add_parser("broker-serve", help="internal: run the broker (started by clients)")
     luna_serve.add_argument("--instance", required=True)
     luna_serve.set_defaults(func=cmd_luna_reserve_broker_serve)
+
+    muse_cli.register(commands)
     return root
 
 

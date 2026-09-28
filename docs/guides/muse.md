@@ -1,0 +1,256 @@
+# Muse pseudo-subagents
+
+`python3 -m creme muse` hands a bounded brief to Muse (Meta's coding agent,
+`~/.local/bin/muse`, override `CREME_MUSE_BIN`) and keeps the run bounded,
+model-pinned, and steerable. It drives `muse serve` over the Muse Session
+Protocol (MSP, JSON-RPC over stdio) through the same broker plumbing as the
+[Luna reserve](luna-reserve.md) broker (`creme/pseudo_broker.py`), so a master
+uses one recipe for both.
+
+## Policy
+
+- **On user instruction, like Luna reserve and Antigravity.** The user
+  instructed use on 2026-09-28: for model-fit calibration and to save Claude
+  tokens. It is not a fallback when another client is busy.
+- **One model: `muse-spark-1.3`.** Every session is pinned to it explicitly.
+  A model id containing `contributor` is never selected, and the server's
+  catalogue default *is* the contributor variant (its content may be used for
+  product improvement), so an omitted model anywhere is a bug. Any served-model
+  evidence of another model (`session/modelChanged`, `session/tokenUsage`,
+  `session/modelRouteUnserved`, the durable session log) fails the turn closed,
+  records the `MODEL_PIN_FAILURE` tripwire, and stops every session. Only the
+  user clears the tripwire, after reviewing the run.
+- **A result is a worker summary, not evidence.** Verify every claim that
+  matters on the files, commands, and gates themselves.
+- **Never modify the user's Muse configuration**, auth, or trust files. Nothing
+  here writes, copies, or links them; the Lean-mode check reads
+  `settings.json` only.
+
+## Task fit
+
+Good fits: inventories and searches, summarising logs or diffs, mechanical
+edits whose result is easy to check, first-pass checks, and mechanical Lean
+work in a Lean-mode session (a named edit, a diagnostics sweep, a narrow
+build). Poor fits: anything needing the network, hard proof strategy, or work
+whose correctness the master cannot cheaply confirm. Effort guidance comes from
+`$GOAL_STORE/model-fit/muse.md` (routes `muse-broker`, `muse-run`); where no
+cell guides, start read-only work at `low` or `medium` and write or Lean work at
+`high`.
+
+## Commands
+
+```sh
+python3 -m creme muse status [--json]
+python3 -m creme muse run --brief FILE|- --target DIR [--write] \
+    [--effort minimal|low|medium|high|xhigh|max] [--timeout-seconds N] [--json]
+python3 -m creme muse start --brief FILE|- --target DIR [--write | --lean GOAL] \
+    [--effort E] [--detail silent|summary|live] [--timeout-seconds N]
+python3 -m creme muse send SESSION (--text TEXT | --brief FILE|-)
+python3 -m creme muse steer SESSION (--text TEXT | --brief FILE|-)
+python3 -m creme muse interrupt SESSION
+python3 -m creme muse wait SESSION [--timeout SECONDS]
+python3 -m creme muse events SESSION [--follow] [--last N] [--since SEQ]
+python3 -m creme muse read SESSION [--lines N]
+python3 -m creme muse approve SESSION APPROVAL accept|decline
+python3 -m creme muse detail SESSION silent|summary|live
+python3 -m creme muse sessions [--limit N]          # alias: list
+python3 -m creme muse stop SESSION
+python3 -m creme muse resume MUSE_SESSION_ID [--effort E]
+python3 -m creme muse shutdown
+```
+
+The names and semantics are Luna's: `send` starts a new turn on an idle session
+and steers a running one, `steer` only steers, `wait` blocks until idle, an
+approval is pending, or the session ended, and every command prints a few
+bounded lines (`--json` prints the full record). `resume` attaches a new broker
+session to a Muse session this state directory recorded, with the same target,
+mode (its permission profile was fixed at bootstrap), and pins; `--effort`
+may change the effort. `run` is one turn with no master to ask and has no
+Lean mode.
+
+Exit codes: `0` pass, `10` refused before any model call, `11` Muse failure
+(turn failed, timed out, host lost, or a read-only target changed), `12`
+model-pin failure (tripwire recorded: stop and tell the user), and for `wait`
+also `20` (approval pending), `21` (interrupted), `124` (timeout).
+
+`status` spends no model tokens: binary and version, `model/list` (the pin
+present with every effort, and which row is the catalogue default, never used),
+`usage/read`, the Lean MCP definition check, and the fixed posture of each mode.
+
+## How a session is built
+
+Measured on the first host (Muse 1.4.0, 2026-09-28; the probes are in the goal
+store report `reports/creme-muse-pseudo-v1.md`):
+
+1. **Bootstrap with the echo provider.** `muse serve` composes a new session's
+   permission profile from the user's saved `permissions.default_profile`. That
+   is `:auto-review` for the user's interactive sessions, and a serve host
+   refuses it ("the automated reviewer is unavailable on this host") in every
+   approval mode. A Creme-owned config root (`XDG_CONFIG_HOME`) starts sessions
+   but has no credentials (`authRequired`), and copying or linking `auth.json`
+   is out of bounds. So the session is created by
+   `muse exec --json --provider echo --session-id UUIDv7 --permission-profile P
+   --no-foreign-personal-context --disable-web-tools --workspace TARGET`: the
+   echo provider makes no model call, and the session's permission bootstrap is
+   durable, so `session/resume` on a serve host reuses it.
+2. **Attach and pin.** A `muse serve` host with the mode's sandbox flags
+   resumes the session. The guard then sends `session/setModel`
+   (`muse-spark-1.3`, provider `meta`), `session/setApprovalMode`
+   (`promptUnmatched`), and `session/setReasoningEffort`, and reads them back:
+   `model/list` for the session must show exactly the pin active and offering
+   the effort, and `session/read` must report the pin and the approval mode.
+   Only then may a turn start. `turn/start` and `turn/steer` carry the effort
+   explicitly (MSP turns carry no model field; the model is the session's).
+3. **Environment.** The Muse child's environment drops `MUSE_*` (including
+   `MUSE_MODEL`), `TBH_*`, `META_*`, and other providers' keys, and sets
+   `MUSE_NO_AUTO_UPDATE=1` so the launcher never swaps the binary under a
+   session.
+
+The pseudo-subagent never uses the user's `musec` launcher and never relies on
+saved Muse state for its sandbox: each serve host's posture is chosen per
+process from the mode.
+
+## Sandbox and approvals
+
+| mode | profile | `muse serve` flags | what the sandbox allows |
+|---|---|---|---|
+| read-only | `:read-only` | `--disable-write --sandbox-network restricted` | shell reads anywhere; no writes; no network; no `os.nice` |
+| write | `:ask-me` | `--sandbox-network restricted` | writes in the workspace and temporary directories only; no network |
+| lean | `:ask-me` | `--disable-sandbox` | unsandboxed shell; file tools still confined to the workspace |
+
+Every session uses approval mode `promptUnmatched`, so every shell command, MCP
+tool call, and unmatched access reaches the broker, which decides it from a
+fixed allowlist (`creme/muse_client.py` `decide_approval`). It is never an LLM
+approval judge and never `:auto-review`, and it only ever picks a one-shot
+choice (`scope: once`): session-wide and `localPersistent` choices (which
+would write standing rules) are never taken.
+
+- read-only and write: a shell command is approved once (the sandbox is the
+  control); every MCP tool, network, file-access, protected-write, subagent, or
+  unknown subject is aborted.
+- lean: approved once are the exact owned build
+  `~/creme/scripts/creme lake-build GOAL [--wait N] -- MODULES` (N 1–900, no
+  sizing flags, no shell metacharacters, workspace = target), a narrow set of
+  read-only commands (`git status|diff|log|show|...`, `rg`, `ls`, `cat`, `wc`,
+  `head`, `tail`; every pipeline stage must qualify), and the `lean-lsp-mcp`
+  tools except the network-reaching search tools and `lean_build`/
+  `lean_profile_proof`. Semaphore, reclaim, and wind-down commands are aborted
+  (the Luna Lean guard, reused). Anything else waits for the master:
+  `approve SESSION aN accept|decline`.
+
+Why Lean mode is unsandboxed: the owned build's priority launcher calls
+`os.nice(10)`, which Muse's sandbox denies in both profiles (measured:
+`PermissionError: [Errno 1] Operation not permitted`), exactly as Codex's does.
+With `--disable-sandbox`, `os.nice` works, the network is reachable from the
+shell, and a shell command can write outside the target; each shell command
+still raises an approval, so the allowlist is what bounds the session. The file
+tools refuse paths outside the workspace in every mode. MCP servers run outside
+Muse's sandbox in every mode (measured: a search tool reached the network under
+`:read-only`), which is why MCP tools are aborted outside Lean mode.
+
+Reading `~/creme/.semaphore` works in every mode; writing it (and the build
+ledger) needs the unsandboxed Lean host.
+
+## Guards and verdict
+
+Besides the pins above, the guard fails the turn closed on: a notification or
+token usage naming another model or none; `session/modelRouteUnserved`; a
+native subagent; a forbidden native tool (`web_fetch`, `web_search`,
+`add_memory`, `edit_memory`, `cron_create`, `cron_delete`, `workflow`); or an
+MCP tool that ran outside what the mode allows. After a guard failure only
+`turn/interrupt` may be sent. Each turn ends with an audit of the durable
+session log: every model id recorded after the attach point must be the pin
+(the reminder agents' `same-as-main` is accepted as that literal).
+
+`PASS` requires the turn to complete, every observed model to be the pin with
+at least one attributed model call, the session-log audit to pass, no guard
+failure or error, and, in read-only mode, an unchanged `HEAD` and
+`git status --porcelain --ignored` for a Git target.
+
+**Usage admission.** A start or turn is refused when `usage/read` shows the
+5-hour window or the weekly block at or above 99% used (the user wants the
+allowance used, not left idle). A fresh serve host reports no usage until its
+first model call, so admission falls back to the last observation of an
+earlier host while its window has not reset (`usage-last.json`), and records
+`unobserved` otherwise. Usage is recorded before and after every turn.
+
+## Records
+
+Under the canonical checkout's `.creme/muse/` (override `CREME_MUSE_STATE`),
+all private to the user:
+
+- `runs/<id>/` for `run`: `brief.md`, `bootstrap.json`, `transcript.jsonl` (the
+  MSP wire), `events.jsonl`, `approvals.json`, `usage-before.json`,
+  `usage-after.json`, `audit.json`, `last-message.md`, `verdict.json`, and
+  `git-before.txt`/`git-after.txt` for a Git target.
+- `sessions/<id>/` for the broker: `session.json` (the registry record, with
+  the Muse session id and the session-log path), `events.jsonl`,
+  `transcript.jsonl`, `bootstrap.json`, `stop-audit.json`, `wind-down.json`
+  (Lean), and `turns/<n>/` with `brief.md`, `steer-<k>.md`,
+  `usage-before.json`, `usage-after.json`, `audit.json`, `approvals.json`, and
+  `last-message.md`. Token usage per turn (`session/tokenUsage`) is in
+  `session.json`.
+- `broker/` (socket, info, log), `usage-last.json`, and the tripwire.
+
+Muse's own session log stays where Muse keeps it
+(`~/.local/share/muse/sessions/...`, path recorded).
+
+## Steering
+
+Steering is `turn/steer` naming the running turn (`expectedTurnId`), so a steer
+can never land in a later turn. Demonstrated live on 2026-09-28 (session
+`ms-20260928-010324-4ec352`): the brief ran `sleep 30` and was to report
+codeword ALPHA; a `steer` sent while the command ran was absorbed mid-turn
+(`userMessage` item with `steered: true`), and the final message reported
+BRAVO. A steer that arrives after the turn ends is refused; use `send`, which
+starts a new turn on the same session.
+
+## Lean work
+
+`start --lean GOAL` requires the target to be exactly the goal's worktree
+`<jaune|blanc>/.worktrees/GOAL` (or a sanctioned `-control`/`-mutation`/
+`-rehearsal` tree), refuses when host headroom or the semaphore would not admit
+heavy work or a `lean`/`lake` process already runs in the target, holds at most
+two live Lean sessions with distinct goal labels (`CREME_MUSE_MAX_LEAN_SESSIONS`
+1–4), and runs `python3 -m creme reclaim --wind-down GOAL` on every end of the
+session (stop, idle close, shutdown, tripwire, refusal or failure after the host
+opened, a lost host, and crash recovery by a successor broker), recording
+`wind_down=OK` only when wind-down reports `OK` and no in-target `lean`/`lake`
+process remains. These are Luna's Lean-mode rules and code (`creme/luna_lean.py`).
+
+The Lean MCP server is the user's Muse `lean-lsp-mcp` definition, which must
+keep Creme's guarded launcher (`/usr/bin/python3 -m creme lean-mcp -- uvx
+lean-lsp-mcp==PIN`, `LEAN_MCP_DISABLED_TOOLS` covering `lean_build` and
+`lean_profile_proof`, `LEAN_LSP_MAX_OPEN_FILES=2`); a drift refuses the start.
+Brief a Lean session as the Luna guide says, and verify the build from the
+wrapper's own records (the ledger row and a `FRESH` probe), not the transcript.
+
+## Calling it
+
+From **Claude Code**: `start` returns in seconds; run `wait SESSION --timeout
+3600` in the background (or the Monitor tool on `events SESSION --follow` after
+`detail SESSION live`), steer or follow up with `send`, answer an `approval`
+line with `approve`, read with `read SESSION` only when a command cannot settle
+the question, and finish with `stop SESSION` (check `stop_audit=PASS`, and
+`wind_down=OK` for Lean). A `run` longer than a few minutes goes in the
+background. From **Codex** or a **Muse** master, run the same commands through
+the shell from the Creme checkout.
+
+## Not isolated
+
+- The user's global Muse MCP server (`lean-lsp-mcp`) is started in every session,
+  including read-only and write ones: a session-level MCP override cannot
+  replace a host server (`session_mcp_name_conflict`). Its tools are refused by
+  the allowlist and the guard outside Lean mode.
+- Bundled Muse skills and one plugin skill are listed to the model; no
+  foreign-scope (Claude or Codex) skill or rule was observed, but the
+  durability of `--no-foreign-personal-context` across resume was not proven
+  separately.
+- Web tools reappear in an unsandboxed (Lean) host although the bootstrap
+  disabled them; the guard fails the turn if one is called.
+- Write mode may write the temporary directories as well as the target.
+- Reminder agents (verify, skill, todo reminders) run as child sessions on
+  `same-as-main`; their tokens ride the parent's items and are not in the
+  per-turn token totals.
+- Memory tools (`add_memory`, `edit_memory`) and scheduling tools are listed
+  to the model; the guard fails a turn that calls one.

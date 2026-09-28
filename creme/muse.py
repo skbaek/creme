@@ -43,6 +43,7 @@ from typing import Any, Callable, Optional
 from . import luna_lean
 from . import pseudo_broker as PB
 from .codex_app_server import AppServerError, PinViolation
+from .muse_log import DurableLog
 from .muse_client import (
     EFFORTS, PINNED_MODEL, ApprovalDecision, MuseGuard, MuseServeProcess, TurnOutcome, audit_session_log,
     decide_approval, describe_approval, log_length, model_failures, receipt_handler, uuid7,
@@ -311,6 +312,7 @@ class MuseHost:
         self.log_path: Optional[Path] = None
         self.log_start = 0
         self.view_cursor: Optional[str] = None   # the last durable view cursor this client has processed
+        self.durable = DurableLog(None)
         self.server_info: dict = {}
         self._transcript = None
         self._stderr = None
@@ -371,6 +373,7 @@ class MuseHost:
             refusals.append(f"session workspace {session.get('workspaceRoot')!r} is not the target {self.target}")
         refusals += self.guard.pin()
         self.log_start = log_length(self.log_path)
+        self.durable = DurableLog(self.log_path, self.log_start)
         return refusals
 
     def view_head(self) -> Optional[str]:
@@ -432,6 +435,7 @@ class ViewTracker:
         self.cursor = cursor
         self.seen: set[str] = set()
         self.unhealthy = False
+        self.degraded = False        # a projection call failed: reconcile more often, from the durable log
         self.last_reconcile = time.monotonic()
 
     def admit(self, message: dict) -> bool:
@@ -542,6 +546,10 @@ def resubscribe(host: "MuseHost", tracker: ViewTracker) -> Optional[str]:
     return None
 
 
+def short_error(exc: Exception) -> str:
+    return " ".join(str(exc).split())[:160]
+
+
 def reconcile_seconds(environ: dict) -> float:
     try:
         value = float(environ.get(RECONCILE_ENV, RECONCILE_SECONDS))
@@ -558,44 +566,87 @@ def reconcile_seconds(environ: dict) -> float:
 class TurnState:
     """Everything one turn's message handler decided, for records and verdicts."""
 
-    approvals: list = field(default_factory=list)       # decided by the allowlist
+    approvals: list = field(default_factory=list)       # every stage decision, by rule or by the master
     master: dict = field(default_factory=dict)          # approvalId -> params waiting for the master
     errors: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)        # e.g. a failed reconcile source; never fails a turn
+    stage_policy: dict = field(default_factory=dict)    # approvalId -> the decision every stage gets
+
+
+_BENIGN_DECIDE = ("approvalAlreadyResolved", "already resolved", "approvalRequirementStale", "requirement is stale",
+                  "-32053", "-32051")
+
+
+def once_choice(params: dict, decision: str) -> str:
+    """The one-shot choice id for ``approved`` or ``abort`` (Muse's ids when the params list none)."""
+    for choice in params.get("availableChoices") or []:
+        if isinstance(choice, dict) and choice.get("decision") == decision and choice.get("scope") == "once":
+            return choice.get("choiceId")
+    return "allow_once" if decision == "approved" else "abort"
+
+
+def decide_stages(host: "MuseHost", params: dict, decision: str, reason: str, turn: TurnState,
+                  emit: Callable[[str, str, str], None]) -> None:
+    """Answer the approval's current stage and every later stage of the same approval with one decision.
+
+    A compound shell command is approved stage by stage: ``approval/decide``
+    answers ``terminal: false`` and the next stage has the next ``sourceIndex``.
+    The decision (by the allowlist or the master) covers the whole command, so
+    the remaining stages get the same one-shot choice; each stage decision is
+    recorded. A stale requirement stops the loop, and the stage then arrives
+    again (notification, listPending, or the durable log) and is answered
+    from ``stage_policy``.
+    """
+    approval_id = params.get("approvalId")
+    requirement = dict(params.get("currentRequirementId") or {"approvalId": approval_id, "sourceIndex": 0})
+    choice = once_choice(params, decision)
+    turn.stage_policy[approval_id] = {"decision": decision, "reason": reason, "summary": describe_approval(params)}
+    summary = describe_approval(params)
+    for _ in range(64):
+        entry = {"approval_id": approval_id, "requirement": dict(requirement), "summary": summary,
+                 "action": "approve" if decision == "approved" else "abort", "reason": reason, "choice": choice,
+                 "at": PB.now_iso(), "tool": params.get("toolName"),
+                 "source": "durable-log" if params.get("fromDurableLog") else "msp"}
+        answer = None
+        try:
+            answer = host.guard.decide({"approvalId": approval_id, "currentRequirementId": requirement}, choice)
+            entry["answer"] = answer
+        except (AppServerError, PinViolation) as exc:
+            entry["error"] = str(exc)[:300]
+            if not any(marker in str(exc) for marker in _BENIGN_DECIDE):
+                turn.errors.append(f"approval/decide failed: {exc}")
+        turn.approvals.append(entry)
+        if not isinstance(answer, dict) or answer.get("terminal") is not False:
+            break
+        requirement = {"approvalId": approval_id, "sourceIndex": int(requirement.get("sourceIndex") or 0) + 1}
+    emit("live" if decision == "approved" else "attention", "approval",
+         f"{entry['action']} ({reason}) stages={sum(1 for e in turn.approvals if e.get('approval_id') == approval_id)}: "
+         f"{summary}")
 
 
 def handle_approval(host: MuseHost, params: dict, turn: TurnState, emit: Callable[[str, str, str], None],
                     master_available: bool) -> Optional[dict]:
-    """Decide one ``approval/requested`` by the allowlist; return the params when the master must decide."""
+    """Decide one approval stage by the allowlist (or an earlier stage's decision); return params for the master."""
     if any(entry.get("approval_id") == params.get("approvalId") and entry.get("requirement")
-           == params.get("currentRequirementId") for entry in turn.approvals):
+           == params.get("currentRequirementId") for entry in turn.approvals if entry.get("action") != "master"):
+        return None
+    policy = turn.stage_policy.get(params.get("approvalId"))
+    if policy is not None:
+        decide_stages(host, params, policy["decision"], policy["reason"] + "; same decision for every stage", turn, emit)
         return None
     decision: ApprovalDecision = decide_approval(params, host.mode, host.lean_goal, host.target)
-    summary = describe_approval(params)
     if decision.action == "master" and not master_available:
         decision = ApprovalDecision("abort", decision.reason + "; a one-shot run has no master to ask",
-                                    next((c.get("choiceId") for c in params.get("availableChoices") or []
-                                          if c.get("decision") == "abort" and c.get("scope") == "once"), None))
-    entry = {"approval_id": params.get("approvalId"), "requirement": params.get("currentRequirementId"),
-             "summary": summary, "action": decision.action, "reason": decision.reason,
-             "choice": decision.choice, "at": PB.now_iso(), "tool": params.get("toolName")}
+                                    once_choice(params, "abort"))
     if decision.action == "master":
-        turn.approvals.append(entry)
+        if not any(entry.get("approval_id") == params.get("approvalId") and entry.get("action") == "master"
+                   for entry in turn.approvals):
+            turn.approvals.append({"approval_id": params.get("approvalId"),
+                                   "requirement": params.get("currentRequirementId"),
+                                   "summary": describe_approval(params), "action": "master",
+                                   "reason": decision.reason, "at": PB.now_iso(), "tool": params.get("toolName")})
         return params
-    if decision.choice is None:
-        entry["error"] = "no choice to send"
-        turn.approvals.append(entry)
-        return None
-    try:
-        answer = host.guard.decide(params, decision.choice)
-        entry["answer"] = answer
-    except (AppServerError, PinViolation) as exc:
-        entry["error"] = str(exc)[:300]
-        # An approval that the host already resolved (denyUnmatched, a race) is not an error.
-        if "approvalAlreadyResolved" not in str(exc) and "already resolved" not in str(exc):
-            turn.errors.append(f"approval/decide failed: {exc}")
-    turn.approvals.append(entry)
-    emit("live" if decision.action == "approve" else "attention", "approval",
-         f"{decision.action} ({decision.reason}): {summary}")
+    decide_stages(host, params, "approved" if decision.action == "approve" else "abort", decision.reason, turn, emit)
     return None
 
 
@@ -790,32 +841,70 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
 
         def reconcile() -> None:
             tracker.last_reconcile = time.monotonic()
+            host.durable.poll()
+
+            def failed(source: str, exc: Exception) -> None:
+                # A failing projection call is a warning, never a run failure; the durable log stands in.
+                tracker.degraded = True
+                turn.warnings.append(f"{source} failed ({short_error(exc)}); durable log used")
+
+            terminals: list = []
             try:
                 others, terminals = split_terminals(replay_view(host, tracker, outcome.turn_id))
                 for message in others:
                     process(message)
-                for params in pending_approvals(host):
-                    handle_approval(host, params, turn, emit, master_available=False)
-                if outcome.status is None:
-                    current = session_status(host)
-                    if turn_over(current, outcome.turn_id):
+            except (AppServerError, PinViolation) as exc:
+                failed("view/page", exc)
+            try:
+                approvals = pending_approvals(host)
+            except (AppServerError, PinViolation) as exc:
+                failed("approval/listPending", exc)
+                approvals = host.durable.pending(host.session_id, host.target, outcome.turn_id)
+            for params in approvals:
+                handle_approval(host, params, turn, emit, master_available=False)
+            if outcome.status is None:
+                logged = host.durable.terminal(outcome.turn_id)
+                if logged is not None:
+                    outcome.status = logged.get("terminal") or "failed"
+                    outcome.completed = outcome.completed or time.time()
+                    if outcome.final_message is None:
+                        outcome.final_message = host.durable.messages.get(outcome.turn_id)
+                    if logged.get("terminal") != "completed" and logged.get("reason"):
+                        turn.warnings.append(f"Muse run terminal {logged.get('terminal')}: {logged.get('reason')}")
+                else:
+                    try:
+                        current = session_status(host)
+                    except (AppServerError, PinViolation) as exc:
+                        failed("session/read", exc)
+                        current = None
+                    if current is not None and turn_over(current, outcome.turn_id):
                         time.sleep(0.5)   # the terminal may have just landed
-                        more, late = split_terminals(replay_view(host, tracker, outcome.turn_id))
-                        for message in more:
-                            process(message)
+                        late: list = []
+                        try:
+                            more, late = split_terminals(replay_view(host, tracker, outcome.turn_id))
+                            for message in more:
+                                process(message)
+                        except (AppServerError, PinViolation) as exc:
+                            failed("view/page", exc)
                         mine = [t for t in terminals + late if (t.get("params") or {}).get("turnId") == outcome.turn_id]
-                        terminal = mine[-1] if mine else find_terminal(host, outcome.turn_id)
+                        terminal = mine[-1] if mine else None
+                        if terminal is None:
+                            try:
+                                terminal = find_terminal(host, outcome.turn_id)
+                            except (AppServerError, PinViolation) as exc:
+                                failed("view/page", exc)
                         if terminal is not None:
                             process(terminal)
-                        if outcome.status is None and current.get("status") == "idle":
+                        host.durable.poll()
+                        if outcome.status is None and host.durable.terminal(outcome.turn_id) is None \
+                                and current.get("status") == "idle":
                             errors.append("Muse ended the turn but its terminal event was not observed")
                             outcome.status = "lost"
-                if tracker.unhealthy:
-                    failure = resubscribe(host, tracker)
-                    emit("live", "view", "view/subscribe " + ("failed: " + failure if failure else "re-attached"))
-                    tracker.unhealthy = False
-            except (AppServerError, PinViolation) as exc:
-                errors.append(f"reconcile failed: {exc}")
+            if tracker.unhealthy:
+                failure = resubscribe(host, tracker)
+                emit("live", "view", "view/subscribe " + ("failed: " + failure[:80] if failure else "re-attached"))
+                tracker.unhealthy = False
+
         deadline = time.monotonic() + request.timeout_seconds
         interrupt_deadline: Optional[float] = None
         while outcome.status is None:
@@ -831,7 +920,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
             if interrupt_deadline is not None and now > interrupt_deadline:
                 errors.append("no turn completion after interrupt")
                 break
-            if tracker.unhealthy or now - tracker.last_reconcile > every:
+            if tracker.unhealthy or now - tracker.last_reconcile > (min(5.0, every) if tracker.degraded else every):
                 reconcile()
                 if outcome.status is not None:
                     break
@@ -882,7 +971,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
         "guard_failures": guard_failures, "errors": errors, "git_failure": git_failure,
         "session_log": str(host.log_path) if host.log_path else None, "session_log_audit": audit.get("verdict"),
         "usage_before": usage_before, "usage_after": usage_after,
-        "approvals": len(turn.approvals),
+        "approvals": len(turn.approvals), "warnings": turn.warnings[:20],
         "last_message": str(run_dir / "last-message.md") if (run_dir / "last-message.md").exists() else None,
     }
     PB.write_private_json(run_dir / "verdict.json", record)

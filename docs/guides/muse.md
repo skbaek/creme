@@ -242,6 +242,30 @@ every `send` or `steer`:
 A reconcile that recovered an approval or ended a turn prints a `reconcile`
 attention event.
 
+**When the projection itself is gone.** Once Muse's materialized view is
+unavailable, `approval/listPending`, `session/read`, and `view/page` can all
+fail (`-32603 ... materialized session view is unavailable`, measured
+2026-09-28), while Muse's durable session log keeps every record and
+`approval/decide` still works. Each reconcile source is then tried on its own,
+and a failing one falls back to tailing the durable log
+(`creme/muse_log.py`): an `approval` `requested` record with no
+`decision_applied` becomes a pending approval (at its first unresolved stage)
+that goes through the same allowlist and master queue and is answered with
+`approval/decide`; the run's `terminal` record (run id = turn id) ends the
+turn, with the last `assistant_message_committed` text as its final message.
+The durable run terminal is authoritative whenever it is present. After a
+source fails, reconciles run every 5 seconds. A failing reconcile source is
+recorded as a turn **warning** and never by itself fails a turn or a `run`.
+
+**Multi-stage approvals.** Muse approves a compound shell command
+(`a; b | c`) stage by stage: `approval/decide` answers `terminal: false` and
+the next stage has the next `sourceIndex`. One decision covers the whole
+command: after the allowlist or the master decides the first stage, the
+remaining stages of the same approval are answered with the same one-shot
+choice at once (and any stage that arrives later is answered from that
+decision), so the master sees one `aN` per command. Every stage decision is
+recorded in the turn's `approvals.json`.
+
 ## Clearing the tripwire
 
 ```sh

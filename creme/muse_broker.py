@@ -297,6 +297,7 @@ class MuseSession(PB.SessionRecord):
             turn_dir = self.dir / "turns" / str(number)
             state = self.turn or M.TurnState()
             errors = list(state.errors)
+            warnings = list(state.warnings)
             try:
                 usage_after = self.host.usage()
                 M.remember_usage(self.broker.state, usage_after)
@@ -320,7 +321,7 @@ class MuseSession(PB.SessionRecord):
             with self.data_lock:
                 turn.update({
                     "status": outcome.status, "verdict": verdict, "completed": PB.now_iso(),
-                    "timed_out": self.timed_out, "errors": errors, "failures": failures,
+                    "timed_out": self.timed_out, "errors": errors, "failures": failures, "warnings": warnings[:20],
                     "git_failure": git_failure, "tokens": outcome.tokens, "models": outcome.models,
                     "tool_calls": outcome.tool_calls, "duration_ms": outcome.duration_ms,
                     "wall_seconds": round((outcome.completed or time.time()) - outcome.started, 1),
@@ -382,19 +383,23 @@ class MuseSession(PB.SessionRecord):
                 self.persist()
             params = entry["params"]
             wanted = "approved" if decision == "accept" else "abort"
-            choice = next((c.get("choiceId") for c in params.get("availableChoices") or []
-                           if c.get("decision") == wanted and c.get("scope") == "once"), None)
-            if choice is None:
-                return M.EXIT_MUSE_FAILED, {"verdict": "FAILED", "errors": [f"no one-shot {wanted} choice offered"]}
-            try:
-                self.guard.decide(params, choice)
-            except (AppServerError, PinViolation) as exc:
-                return M.EXIT_MUSE_FAILED, {"verdict": "FAILED", "errors": [str(exc)]}
-            if self.turn is not None:
-                self.turn.approvals.append({"approval_id": params.get("approvalId"), "action": wanted,
-                                            "reason": f"master {decision}", "summary": M.describe_approval(params),
-                                            "at": PB.now_iso()})
-            self.emit("live", "approval", f"{key} answered {decision} by the master")
+            if self.turn is None:
+                self.turn = M.TurnState()
+            errors_before = len(self.turn.errors)
+            # One master decision covers every stage of this approval (and any other queued stage of it).
+            M.decide_stages(self.host, params, wanted, f"master {decision}", self.turn, self.emit)
+            with self.data_lock:
+                same = [other for other, item in self.pending.items()
+                        if item["params"].get("approvalId") == params.get("approvalId")]
+                for other in same:
+                    self.pending.pop(other, None)
+                self.record["pending_approvals"] = [item for item in self.record.get("pending_approvals") or []
+                                                    if item.get("id") not in same]
+                self.persist()
+            failures = self.turn.errors[errors_before:]
+            if failures:
+                return M.EXIT_MUSE_FAILED, {"verdict": "FAILED", "errors": failures}
+            self.emit("live", "approval", f"{key} answered {decision} by the master (all stages)")
             return M.EXIT_OK, {"verdict": "ANSWERED", "approval": key, "decision": decision}
 
     # -- pump -----------------------------------------------------------
@@ -449,54 +454,98 @@ class MuseSession(PB.SessionRecord):
                 return
             tracker = self.tracker
             tracker.last_reconcile = time.monotonic()
+            durable = self.host.durable
+            durable.poll()
+            notes: list[str] = []
+
+            def failed(source: str, exc: Exception) -> None:
+                # A failing projection call is a note, never a turn failure; the durable log stands in.
+                tracker.degraded = True
+                notes.append(f"{source} failed ({M.short_error(exc)}); durable log used")
+                if self.turn is not None and len(self.turn.warnings) < 50:
+                    self.turn.warnings.append(notes[-1])
+
+            outcome = self.guard.outcome if self.guard is not None else None
+            active = outcome.turn_id if outcome is not None else None
+            replayed: list = []
+            terminals: list = []
             try:
-                active = self.guard.outcome.turn_id if self.guard is not None and self.guard.outcome else None
                 replayed = M.replay_view(self.host, tracker, active)
-                others, terminals = M.split_terminals(replayed)
-                for message in others:
-                    self.process(message)
-                recovered = 0
-                if self.state == "running":
-                    for params in M.pending_approvals(self.host):
-                        before = len(self.pending)
-                        self.on_approval(params)
-                        recovered += len(self.pending) - before
-                outcome = self.guard.outcome if self.guard is not None else None
-                ended = False
-                reopened = False
-                if outcome is not None and outcome.status is None:
-                    current = M.session_status(self.host)
-                    if M.turn_over(current, outcome.turn_id):
+            except (AppServerError, PinViolation) as exc:
+                failed("view/page", exc)
+            others, terminals = M.split_terminals(replayed)
+            for message in others:
+                self.process(message)
+            recovered = 0
+            if self.state == "running":
+                try:
+                    approvals = M.pending_approvals(self.host)
+                except (AppServerError, PinViolation) as exc:
+                    failed("approval/listPending", exc)
+                    approvals = durable.pending(self.host.session_id, self.host.target, active)
+                for params in approvals:
+                    before = len(self.pending)
+                    self.on_approval(params)
+                    recovered += len(self.pending) - before
+            outcome = self.guard.outcome if self.guard is not None else None
+            ended = False
+            by_log = False
+            reopened = False
+            if outcome is not None and outcome.status is None:
+                logged = durable.terminal(outcome.turn_id)
+                if logged is not None:
+                    # Muse's durable run terminal is authoritative, whatever the projection says.
+                    outcome.status = logged.get("terminal") or "failed"
+                    outcome.completed = outcome.completed or time.time()
+                    if outcome.final_message is None:
+                        outcome.final_message = durable.messages.get(outcome.turn_id)
+                    if logged.get("terminal") != "completed" and logged.get("reason") and self.turn is not None:
+                        self.turn.warnings.append(f"Muse run terminal {logged.get('terminal')}: {logged.get('reason')}")
+                    ended = by_log = True
+                else:
+                    try:
+                        current = M.session_status(self.host)
+                    except (AppServerError, PinViolation) as exc:
+                        failed("session/read", exc)
+                        current = None
+                    if current is not None and M.turn_over(current, outcome.turn_id):
                         time.sleep(0.5)   # the terminal may have landed after the first replay
-                        more, late = M.split_terminals(M.replay_view(self.host, tracker, outcome.turn_id))
-                        for message in more:
-                            self.process(message)
+                        late: list = []
+                        try:
+                            more, late = M.split_terminals(M.replay_view(self.host, tracker, outcome.turn_id))
+                            for message in more:
+                                self.process(message)
+                        except (AppServerError, PinViolation) as exc:
+                            failed("view/page", exc)
                         mine = [t for t in terminals + late
                                 if (t.get("params") or {}).get("turnId") == outcome.turn_id]
-                        terminal = mine[-1] if mine else M.find_terminal(self.host, outcome.turn_id)
+                        terminal = mine[-1] if mine else None
+                        if terminal is None:
+                            try:
+                                terminal = M.find_terminal(self.host, outcome.turn_id)
+                            except (AppServerError, PinViolation) as exc:
+                                failed("view/page", exc)
                         if terminal is not None and self.guard.outcome is outcome:
                             self.process(terminal)       # ends the turn through the live path
+                        durable.poll()
                         if self.guard.outcome is outcome and outcome.status is None \
-                                and current.get("status") == "idle":
+                                and durable.terminal(outcome.turn_id) is None and current.get("status") == "idle":
                             outcome.status = "lost"
                             if self.turn is not None:
                                 self.turn.errors.append("Muse ended the turn but its terminal event was not observed")
                             ended = True
-                elif outcome is None and self.state == "idle":
-                    reopened = self.reopen_if_running()
-                note = None
-                if tracker.unhealthy:
-                    failure = M.resubscribe(self.host, tracker)
-                    note = "view/subscribe " + ("failed: " + failure if failure else "re-attached")
-                    tracker.unhealthy = False
-            except (AppServerError, PinViolation) as exc:
-                self.emit("attention", "error", f"reconcile ({reason}) failed: {exc}")
-                return
-            if replayed or recovered or ended or note or reopened:
+            elif outcome is None and self.state == "idle":
+                reopened = self.reopen_if_running()
+            if tracker.unhealthy:
+                failure = M.resubscribe(self.host, tracker)
+                notes.append("view/subscribe " + ("failed: " + failure[:80] if failure else "re-attached"))
+                tracker.unhealthy = False
+            if replayed or recovered or ended or notes or reopened:
                 self.emit("live" if not (recovered or ended or reopened) else "attention", "reconcile",
                           f"{reason}: replayed={len(replayed)} approvals_recovered={recovered} "
-                          f"turn_ended_unobserved={ended} reopened={reopened}" + (f"; {note}" if note else ""))
-            if ended:
+                          f"turn_ended={'durable-log' if by_log else ended} reopened={reopened}"
+                          + (f"; {'; '.join(notes)}" if notes else ""))
+            if ended and self.guard.outcome is outcome:
                 self.end_turn()
 
     def reopen_if_running(self) -> bool:
@@ -511,8 +560,14 @@ class MuseSession(PB.SessionRecord):
         if not last or last.get("verdict") != "FAILED" or last.get("status") not in ("failed", "lost") \
                 or not last.get("turn_id") or self.guard is None:
             return False
-        current = M.session_status(self.host)
-        if current.get("status") != "running" or current.get("active_turn") != last["turn_id"]:
+        self.host.durable.poll()
+        if self.host.durable.terminal(last["turn_id"]) is not None:
+            return False                      # Muse recorded the run's terminal: it really ended
+        try:
+            current = M.session_status(self.host)
+        except (AppServerError, PinViolation):
+            current = None                    # projection gone: no terminal in the durable log means running
+        if current is not None and (current.get("status") != "running" or current.get("active_turn") != last["turn_id"]):
             return False
         outcome = self.guard.reopen(last["turn_id"], last.get("tokens"), last.get("models"))
         with self.data_lock:
@@ -531,8 +586,10 @@ class MuseSession(PB.SessionRecord):
         broker = self.broker
         recheck = self.state == "idle" and (self.record.get("turns") or [{}])[-1].get("verdict") == "FAILED" \
             and (self.record.get("turns") or [{}])[-1].get("status") in ("failed", "lost")
+        interval = min(5.0, broker.reconcile_seconds) if self.tracker is not None and self.tracker.degraded \
+            else broker.reconcile_seconds
         if (self.state == "running" or recheck) and self.tracker is not None \
-                and now - self.tracker.last_reconcile > broker.reconcile_seconds:
+                and now - self.tracker.last_reconcile > interval:
             self.reconcile("periodic" if not recheck else "recheck")
         if M.tripwire_path(broker.state).exists() and not broker.tripped:
             broker.trip_all(None, ["a model-pin failure tripwire was recorded by another run"])

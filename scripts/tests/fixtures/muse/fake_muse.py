@@ -87,7 +87,7 @@ if not args or args[0] != "serve":
 log_call({"argv": args})
 write_lock = threading.Lock()
 state = {"session": None, "model": None, "mode": "onRequest", "effort": None, "turn": None, "steers": [],
-         "decisions": {}, "interrupted": False, "cursor": 0, "events": [], "lost": False, "pending": {},
+         "decisions": {}, "stage": {}, "stage_decisions": [], "interrupted": False, "cursor": 0, "events": [], "lost": False, "pending": {},
          "subscribes": 0}
 steered = threading.Event()
 decided = threading.Condition()
@@ -158,7 +158,19 @@ def run_turn(turn_id, text):
                   "turnId": turn_id}
         if turn.get("lose_before_approval"):
             lose_projection()
+        stages = subject.get("stages") or []
+        state["stage"][approval_id] = {"index": 0, "total": max(1, len(stages)), "params": params}
         state["pending"][approval_id] = params
+        durable_subject = ({"kind": "shell_command", "raw_command": subject.get("command"),
+                            "stages": [{"requirement_id": {"pending_action_id": approval_id, "source_index": i},
+                                        "argv": stage.get("argv"), "argv_complete": True}
+                                       for i, stage in enumerate(stages)]}
+                           if subject.get("kind") == "shell" else
+                           {"kind": "tool_action", "tool_name": subject.get("toolName")})
+        append_log(state["session"], {"payload_type": "runtime.session", "payload": {
+            "kind": "approval", "run_id": turn_id, "event": {
+                "kind": "requested", "pending_action_id": approval_id, "tool_name": params["toolName"],
+                "approval_subject": durable_subject}}})
         if not state["lost"]:
             send({"id": f"srv-{index}", "method": "approval/request", "params": params})
         note("approval/requested", params)
@@ -180,6 +192,9 @@ def run_turn(turn_id, text):
     while time.time() < deadline and not state["interrupted"]:
         time.sleep(0.05)
     if state["interrupted"]:
+        append_log(state["session"], {"payload_type": "runtime.session", "payload": {
+            "kind": "run", "run_id": turn_id, "event": {"kind": "terminal", "terminal": "cancelled",
+                                                        "reason": "interrupted"}}})
         note("turn/completed", {"turnId": turn_id, "terminal": "cancelled"})
         state["turn"] = None
         return
@@ -209,6 +224,11 @@ def run_turn(turn_id, text):
                                      "status": "completed", "revision": 2, "text": final}})
     if turn.get("touch"):
         Path(turn["touch"]).write_text("written by the fake\n")
+    append_log(state["session"], {"payload_type": "runtime.session", "payload": {
+        "kind": "run", "run_id": turn_id, "event": {"kind": "assistant_message_committed", "text": final}}})
+    if not turn.get("drop_terminal"):
+        append_log(state["session"], {"payload_type": "runtime.session", "payload": {
+            "kind": "run", "run_id": turn_id, "event": {"kind": "terminal", "terminal": "completed", "reason": None}}})
     # Muse records the durable terminal before the session reads idle.
     note("turn/completed", {"turnId": turn_id, "terminal": "completed", "durationMs": 12},
          durable=not turn.get("drop_terminal"))
@@ -271,8 +291,18 @@ for line in sys.stdin:
         state["effort"] = params["reasoningEffort"]
         respond(message, {"commandId": params["commandId"], "status": "accepted"})
     elif method == "approval/listPending":
+        if state["lost"] and (SCENARIO.get("turn") or {}).get("projection_fails"):
+            respond(message, error={"code": -32603, "message": "internal error: loaded pending projection "
+                                    "unavailable: materialized session view is unavailable",
+                                    "data": {"kind": "internal", "retryable": True}})
+            continue
         respond(message, {"approvals": list(state["pending"].values()), "userInputs": []})
     elif method == "view/page":
+        if state["lost"] and (SCENARIO.get("turn") or {}).get("projection_fails"):
+            respond(message, error={"code": -32603, "message": "internal error: loaded pending projection "
+                                    "unavailable: materialized session view is unavailable",
+                                    "data": {"kind": "internal", "retryable": True}})
+            continue
         after = params.get("cursor")
         events = state["events"]
         if after:
@@ -295,6 +325,11 @@ for line in sys.stdin:
             state["lost"] = False
         respond(message, {"viewCursor": f"v:{state['cursor']}"})
     elif method == "session/read":
+        if state["lost"] and (SCENARIO.get("turn") or {}).get("projection_fails"):
+            respond(message, error={"code": -32603, "message": "internal error: loaded pending projection "
+                                    "unavailable: materialized session view is unavailable",
+                                    "data": {"kind": "internal", "retryable": True}})
+            continue
         session = session_object()
         session["modelId"] = served()
         session["status"] = "running" if state["turn"] else "idle"
@@ -330,10 +365,38 @@ for line in sys.stdin:
             decided.notify_all()
         respond(message, {"commandId": params["commandId"], "status": "accepted"})
     elif method == "approval/decide":
-        with decided:
-            state["decisions"][params["approvalId"]] = params["choiceId"]
-            decided.notify_all()
-        respond(message, {"approvalId": params["approvalId"], "commandId": params["commandId"],
-                          "status": "accepted", "terminal": True})
+        approval_id = params["approvalId"]
+        stage = state["stage"].get(approval_id)
+        index = (params.get("requirementId") or {}).get("sourceIndex")
+        if stage is None or approval_id in state["decisions"]:
+            respond(message, error={"code": -32051, "message": "approvalAlreadyResolved"})
+            continue
+        if index != stage["index"]:
+            respond(message, error={"code": -32053, "message": "approvalRequirementStale"})
+            continue
+        state["stage_decisions"].append([approval_id, index, params["choiceId"]])
+        log_call({"stage_decision": [approval_id, index, params["choiceId"]]})
+        append_log(state["session"], {"payload_type": "runtime.session", "payload": {
+            "kind": "approval", "run_id": state["turn"], "event": {
+                "kind": "stage_requirement_resolved", "pending_action_id": approval_id,
+                "requirement_id": {"pending_action_id": approval_id, "source_index": index},
+                "choice_id": params["choiceId"]}}})
+        last = params["choiceId"] == "abort" or index + 1 >= stage["total"]
+        respond(message, {"approvalId": approval_id, "commandId": params["commandId"], "status": "accepted",
+                          "terminal": last})
+        if last:
+            append_log(state["session"], {"payload_type": "runtime.session", "payload": {
+                "kind": "approval", "run_id": state["turn"], "event": {
+                    "kind": "decision_applied", "pending_action_id": approval_id}}})
+            with decided:
+                state["decisions"][approval_id] = params["choiceId"]
+                decided.notify_all()
+        else:
+            stage["index"] += 1
+            nxt = dict(stage["params"])
+            nxt["currentRequirementId"] = {"approvalId": approval_id, "sourceIndex": stage["index"]}
+            state["pending"][approval_id] = nxt
+            if not state["lost"]:
+                note("approval/updated", {**nxt, "change": {"kind": "stageAdvanced"}})
     else:
         respond(message, error={"code": -32601, "message": f"fake: {method}"})

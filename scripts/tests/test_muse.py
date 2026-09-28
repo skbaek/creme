@@ -366,6 +366,17 @@ class RunTest(FakeMuseHarness):
         self.assertEqual((record["run"], record["cleared"]["reason"]),
                          ("r1", "false alarm: echo bootstrap usage, see report"))
 
+    def test_run_falls_back_to_the_durable_log_and_does_not_fail_on_reconcile_errors(self):
+        self.environ[M.RECONCILE_ENV] = "1"
+        self.scenario["turn"].update(lose_before_approval=True, projection_fails=True,
+                                     approvals=[{"kind": "shell", "command": "ls"}], text="STATUS: DONE run")
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+        self.assertEqual(record["errors"], [])
+        self.assertTrue(any("durable log used" in warning for warning in record["warnings"]), record)
+        self.assertIn("STATUS: DONE run", Path(record["last_message"]).read_text())
+
     def test_read_only_run_that_changes_the_target_fails(self):
         self.scenario["turn"]["touch"] = str(self.target / "stray.txt")
         self.write_scenario()
@@ -583,6 +594,59 @@ class BrokerTest(FakeMuseHarness):
         code, lines, record = self.wait(answer["session"])
         self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)
         self.assertFalse(M.tripwire_path(self.state).exists())
+
+    def stage_decisions(self) -> list:
+        return [call["stage_decision"] for call in self.calls() if "stage_decision" in call]
+
+    def test_projection_failure_falls_back_to_the_durable_log(self):
+        # listPending, session/read and view/page all fail once the view is gone (measured 2026-09-28);
+        # the durable log carries the approval request and then the run terminal.
+        self.reconciling("1")
+        self.scenario["turn"].update(lose_before_approval=True, projection_fails=True,
+                                     approvals=[{"kind": "shell", "command": "ls"}], text="STATUS: DONE durable")
+        self.write_scenario()
+        session = self.start()
+        code, lines, record = self.wait(session, timeout=30)
+        self.assertEqual(code, 0, lines)
+        turn = record["turns"][0]
+        self.assertEqual((turn["status"], turn["verdict"]), ("completed", "PASS"), turn)
+        self.assertEqual(self.stage_decisions(), [["ap-0", 0, "allow_once"]])
+        self.assertIn("STATUS: DONE durable", Path(turn["last_message"]).read_text())
+        self.assertTrue(any("durable log used" in warning for warning in turn["warnings"]), turn)
+        self.assertEqual(turn["errors"], [])
+        approvals = json.loads((PB.sessions_dir(self.state) / session / "turns/1/approvals.json").read_text())
+        self.assertEqual(approvals[0]["source"], "durable-log")
+
+    def test_one_master_decision_covers_every_stage(self):
+        # `git diff --stat; echo ---; git status --short | head -n 50` is approved stage by stage.
+        stages = [{"argv": ["git", "diff", "--stat"], "argvComplete": True}, {"argv": ["echo", "---"], "argvComplete": True},
+                  {"argv": ["git", "status", "--short"], "argvComplete": True},
+                  {"argv": ["head", "-n", "50"], "argvComplete": True}]
+        self.scenario["turn"]["approvals"] = [{"kind": "shell", "command": "git diff --stat; echo ---; git status "
+                                               "--short | head -n 50", "stages": stages, "no_abort": True}]
+        self.write_scenario()
+        session = self.start()
+        code, lines, record = self.wait(session)
+        self.assertEqual(code, PB.EXIT_ATTENTION, lines)
+        self.assertEqual([item["id"] for item in record["pending_approvals"]], ["a1"])
+        code, lines, _ = MB.cmd_simple(ROOT, self.environ, "approve", session, approval="a1", decision="accept")
+        self.assertEqual(code, 0, lines)
+        code, lines, record = self.wait(session)
+        self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)
+        self.assertEqual(self.stage_decisions(), [["ap-0", i, "allow_once"] for i in range(4)])
+        self.assertEqual(record["pending_approvals"], [])
+        approvals = json.loads((PB.sessions_dir(self.state) / session / "turns/1/approvals.json").read_text())
+        decided = [entry for entry in approvals if entry["action"] == "approve"]
+        self.assertEqual([entry["requirement"]["sourceIndex"] for entry in decided], [0, 1, 2, 3])
+
+    def test_an_allowlisted_compound_command_is_decided_once_for_all_stages(self):
+        stages = [{"argv": ["ls"], "argvComplete": True}, {"argv": ["head", "-3"], "argvComplete": True}]
+        self.scenario["turn"]["approvals"] = [{"kind": "shell", "command": "ls | head -3", "stages": stages}]
+        self.write_scenario()
+        session = self.start()
+        code, lines, record = self.wait(session)
+        self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)
+        self.assertEqual(self.stage_decisions(), [["ap-0", 0, "allow_once"], ["ap-0", 1, "allow_once"]])
 
     def test_send_starts_a_new_turn_when_idle_and_steer_refuses(self):
         session = self.start()

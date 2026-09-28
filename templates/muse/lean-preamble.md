@@ -36,12 +36,12 @@ Rules:
      `~/creme/scripts/creme lake-build {goal} --wait 900 -- <narrow module targets>`.
      Name the edited module or the narrowest consumer that reaches it. Never
      pass `--memory-gib` or `--contention`, and never name a full target (a
-     bare `--`, `Blanc`, or `jaune`). Every shell command is checked against
-     the broker's allowlist before it runs; this exact build form, simple
-     read-only commands (`git status|diff|log|show`, `rg`, `ls`, `cat`, `wc`,
-     `head`, `tail`), and the non-network Lean tools pass. Anything else waits
-     for the master, who may refuse it; accept a refusal without working
-     around it.
+     bare `--`, `Blanc`, or `jaune`). Every shell command is checked by the
+     broker before it runs: this exact build form is the only shell command
+     approved by rule. Read and search files with your own file tools
+     (`read_file`, `search`), which stay inside the workspace, not with shell
+     commands. Any other shell command waits for the master, who may refuse
+     it; accept a refusal without working around it.
    - End every opened namespace or section and run
      `scripts/check-proof-duplication.sh` and `scripts/check-trust-surface.sh`
      after a module-creating build (they wait for the master's approval).

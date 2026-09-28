@@ -104,6 +104,9 @@ def served():
 def run_turn(turn_id, text):
     turn = SCENARIO.get("turn") or {}
     note("turn/started", {"turnId": turn_id, "commandId": turn_id})
+    if turn.get("die"):
+        time.sleep(0.3)
+        os._exit(9)   # the host is lost mid-turn
     for index, subject in enumerate(turn.get("approvals") or []):
         approval_id = f"ap-{index}"
         choices = [{"choiceId": "allow_once", "decision": "approved", "scope": "once", "label": "once"},

@@ -109,35 +109,13 @@ class MuseServeProcess(AppServerProcess):
 # Approval allowlist
 
 
-# Read-only commands a Lean session (whose host runs unsandboxed so that the
-# owned build can lower its priority) may run without the master's decision.
-READ_ONLY_COMMANDS = frozenset({"ls", "cat", "head", "tail", "wc", "rg", "grep", "pwd", "stat", "file"})
-READ_ONLY_GIT = frozenset({"status", "diff", "log", "show", "rev-parse", "ls-files", "grep", "blame"})
+# A Lean session's host runs unsandboxed (the owned build must lower its
+# priority), so no general shell command is approved by rule: only the exact
+# owned build. Reading goes through Muse's workspace-rooted file tools; any
+# other command waits for the master.
 _SHELL_META = re.compile(r"[;&|<>`$(){}\\\n\r]")
 _BUILD = re.compile(r"^(?P<launcher>\S+) lake-build (?P<goal>\S+)(?: --wait (?P<wait>[0-9]+))? -- "
                     r"(?P<modules>[A-Za-z0-9_.]+(?: [A-Za-z0-9_.]+)*)$")
-
-
-def _stages(subject: dict) -> list[list[str]]:
-    stages = []
-    for stage in subject.get("stages") or []:
-        if not isinstance(stage, dict) or not stage.get("argvComplete"):
-            return []
-        argv = stage.get("argv")
-        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
-            return []
-        stages.append(argv)
-    return stages
-
-
-def _read_only_argv(argv: list[str]) -> bool:
-    name = PurePosixPath(argv[0]).name
-    if any(_SHELL_META.search(item) for item in argv):
-        return False
-    if name == "git":
-        rest = [item for item in argv[1:] if not item.startswith("-")]
-        return bool(rest) and rest[0] in READ_ONLY_GIT and "--output" not in " ".join(argv)
-    return name in READ_ONLY_COMMANDS
 
 
 def build_command_failure(command: str, goal: str, workspace: Optional[str], target: Path) -> Optional[str]:
@@ -183,10 +161,10 @@ def decide_approval(params: dict, mode: str, lean_goal: Optional[str], target: P
       (read-only, or writes confined to the workspace and temporary
       directories, no network), so a shell command is approved once and the
       sandbox is the control;
-    * a Lean session's host is unsandboxed: only the exact owned build, a
-      narrow read-only command set, and the non-open-world Lean tools are
-      approved; the semaphore and reclamation commands are aborted; any other
-      command goes to the master;
+    * a Lean session's host is unsandboxed: of shell commands only the exact
+      owned build is approved; the semaphore and reclamation commands are
+      aborted; any other command goes to the master. The non-open-world Lean
+      tools are approved;
     * every other subject (MCP outside Lean mode, network, file access outside
       the workspace, protected writes, unknown kinds) is aborted.
     """
@@ -223,12 +201,11 @@ def decide_approval(params: dict, mode: str, lean_goal: Optional[str], target: P
     reason = luna_lean.forbidden_command(command)
     if reason is not None:
         return denied(reason)
-    if build_command_failure(command, lean_goal, subject.get("workspaceRoot"), target) is None:
+    failure = build_command_failure(command, lean_goal, subject.get("workspaceRoot"), target)
+    if failure is None:
         return ApprovalDecision("approve", "the owned narrow build", approve)
-    stages = _stages(subject)
-    if stages and all(_read_only_argv(argv) for argv in stages):
-        return ApprovalDecision("approve", "read-only command", approve)
-    return ApprovalDecision("master", "unsandboxed command outside the Lean allowlist")
+    return ApprovalDecision("master", f"unsandboxed command; only the exact owned build is approved by rule "
+                                      f"({failure})")
 
 
 # ---------------------------------------------------------------------------

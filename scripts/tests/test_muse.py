@@ -161,8 +161,6 @@ class ApprovalAllowlistTest(unittest.TestCase):
                                      "lean", "g").action, "abort")
         self.assertEqual(self.decide(approval("shell", command="python3 -m creme reclaim --wind-down g"),
                                      "lean", "g").action, "abort")
-        read = approval("shell", command="git diff", stages=[{"argv": ["git", "diff"], "argvComplete": True}])
-        self.assertEqual(self.decide(read, "lean", "g").action, "approve")
         piped = approval("shell", command="git diff | sh", stages=[{"argv": ["git", "diff"], "argvComplete": True},
                                                                  {"argv": ["sh"], "argvComplete": True}])
         self.assertEqual(self.decide(piped, "lean", "g").action, "master")
@@ -171,6 +169,45 @@ class ApprovalAllowlistTest(unittest.TestCase):
         for tool in ("lean_leansearch", "lean_build", "lean_loogle"):
             self.assertEqual(self.decide(approval("tool", toolName="mcp__lean_lsp_mcp__" + tool), "lean", "g").action,
                              "abort", tool)
+
+
+class LeanShellBypassTest(unittest.TestCase):
+    """The Lean host is unsandboxed: no shell command but the exact owned build is approved by rule.
+
+    Each case was auto-approved by the 0340d04 read-only allowlist (review of 2026-09-28).
+    """
+
+    BYPASSES = (
+        ["git", "diff", "-o", "/tmp/x"],                  # writes anywhere (short form of --output)
+        ["git", "log", "--output=/tmp/x"],
+        ["git", "--exec-path=/tmp", "status"],            # runs /tmp/git-status
+        ["git", "-c", "core.pager=/tmp/p", "log"],        # any git global option
+        ["git", "-C", "/Users/agent/other", "status"],    # reads outside the target
+        ["git", "-C/Users/agent/other", "status"],        # the same, joined form
+        ["rg", "--pre", "/bin/sh", "x", "file.lean"],     # runs an arbitrary preprocessor
+        ["rg", "--pre-glob", "*", "--pre", "/tmp/p", "x"],
+        ["rg", "-z", "x"],
+        ["cat", str(Path.home() / ".ssh/id_rsa")],        # unconfined read
+        ["ls", "/"],
+        ["git", "status"],                                # even a benign read goes to the master
+    )
+
+    def test_every_bypass_goes_to_the_master(self):
+        target = Path(tempfile.mkdtemp()).resolve()
+        for argv in self.BYPASSES:
+            params = approval("shell", command=C.shell_join(argv), workspaceRoot=str(target),
+                              stages=[{"argv": argv, "argvComplete": True}])
+            with self.subTest(argv=" ".join(argv)):
+                decision = C.decide_approval(params, "lean", "g", target)
+                self.assertEqual(decision.action, "master", argv)
+                self.assertIsNone(decision.choice, argv)
+
+    def test_sandboxed_modes_still_approve_shell_once(self):
+        # read-only and write hosts are sandboxed (no writes outside, no network), so the sandbox is the control.
+        target = Path(tempfile.mkdtemp()).resolve()
+        params = approval("shell", command="git diff -o /tmp/x",
+                          stages=[{"argv": ["git", "diff", "-o", "/tmp/x"], "argvComplete": True}])
+        self.assertEqual(C.decide_approval(params, "read-only", None, target).action, "approve")
 
 
 class FakeMuseHarness(unittest.TestCase):
@@ -327,6 +364,17 @@ class BrokerTest(FakeMuseHarness):
         steer = self.sent("turn/steer")[0]
         self.assertEqual(steer["expectedTurnId"], turn["turn_id"])
         self.assertEqual(steer["reasoningEffort"], "low")
+
+    def test_a_host_lost_mid_turn_ends_the_session_and_wait_exits_11(self):
+        self.scenario["turn"]["die"] = True
+        self.write_scenario()
+        session = self.start()
+        started = time.monotonic()
+        code, lines, record = self.wait(session, timeout=20)
+        self.assertLess(time.monotonic() - started, 15, lines)
+        self.assertEqual(code, M.EXIT_MUSE_FAILED, lines)
+        self.assertEqual(record["state"], "failed")
+        self.assertEqual((record["turns"][0]["status"], record["turns"][0]["verdict"]), ("lost", "FAILED"))
 
     def test_send_starts_a_new_turn_when_idle_and_steer_refuses(self):
         session = self.start()

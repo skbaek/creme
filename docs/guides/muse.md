@@ -128,23 +128,36 @@ would write standing rules) are never taken.
 - read-only and write: a shell command is approved once (the sandbox is the
   control); every MCP tool, network, file-access, protected-write, subagent, or
   unknown subject is aborted.
-- lean: approved once are the exact owned build
+- lean: the only shell command approved by rule is the exact owned build
   `~/creme/scripts/creme lake-build GOAL [--wait N] -- MODULES` (N 1–900, no
-  sizing flags, no shell metacharacters, workspace = target), a narrow set of
-  read-only commands (`git status|diff|log|show|...`, `rg`, `ls`, `cat`, `wc`,
-  `head`, `tail`; every pipeline stage must qualify), and the `lean-lsp-mcp`
-  tools except the network-reaching search tools and `lean_build`/
-  `lean_profile_proof`. Semaphore, reclaim, and wind-down commands are aborted
-  (the Luna Lean guard, reused). Anything else waits for the master:
-  `approve SESSION aN accept|decline`.
+  sizing flags, no shell metacharacters, workspace = target). Semaphore,
+  reclaim, and wind-down commands are aborted (the Luna Lean guard, reused).
+  **Every other shell command, including plain reads such as `git status`,
+  waits for the master** (`approve SESSION aN accept|decline`): the host is
+  unsandboxed, and an argv allowlist of "read-only" commands was shown to be
+  bypassable (`git diff -o FILE` writes anywhere, `git --exec-path=DIR` and
+  `rg --pre CMD` run programs, `cat`/`git -C` read outside the target; review
+  of 2026-09-28). Reading and searching go through Muse's own file tools,
+  which stay confined to the workspace on the unsandboxed host too (see
+  below). The `lean-lsp-mcp` tools are approved once except the
+  network-reaching search tools and `lean_build`/`lean_profile_proof`.
+  Answer a master approval only after reading the whole command: it runs
+  unsandboxed with the user's privileges.
 
 Why Lean mode is unsandboxed: the owned build's priority launcher calls
 `os.nice(10)`, which Muse's sandbox denies in both profiles (measured:
 `PermissionError: [Errno 1] Operation not permitted`), exactly as Codex's does.
 With `--disable-sandbox`, `os.nice` works, the network is reachable from the
 shell, and a shell command can write outside the target; each shell command
-still raises an approval, so the allowlist is what bounds the session. The file
-tools refuse paths outside the workspace in every mode. MCP servers run outside
+still raises an approval, so the allowlist (the exact build only) and the
+master's decisions are what bound the session's shell. The file tools refuse
+paths outside the workspace in every mode, the unsandboxed Lean host included
+(measured: writes and reads; see the report). What the allowlist does not
+bound: Lean elaboration itself. A file the model writes in the target can run
+`#eval` with `IO` when the language server or the owned build elaborates it,
+and `lean_run_code` elaborates arbitrary code; this is inherent to Lean work
+(Luna's Lean mode has the same exposure), so review the diff before any build
+you approve by hand. MCP servers run outside
 Muse's sandbox in every mode (measured: a search tool reached the network under
 `:read-only`), which is why MCP tools are aborted outside Lean mode.
 

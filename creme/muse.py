@@ -290,6 +290,7 @@ class MuseHost:
         self.guard: Optional[MuseGuard] = None
         self.log_path: Optional[Path] = None
         self.log_start = 0
+        self.view_cursor: Optional[str] = None   # the last durable view cursor this client has processed
         self.server_info: dict = {}
         self._transcript = None
         self._stderr = None
@@ -341,6 +342,7 @@ class MuseHost:
             return [f"muse serve host is {result.get('sessionDurability')}; resume needs durable sessions"]
         self.guard = MuseGuard(self.process, str(self.session_id), self.effort, self.mode, self.lean_goal)
         resumed = self.guard.command("session/resume", {"excludeItems": True}, timeout=120) or {}
+        self.view_cursor = resumed.get("viewCursor")
         session = resumed.get("session") or {}
         path = session.get("path")
         self.log_path = Path(path) if path else None
@@ -366,6 +368,116 @@ class MuseHost:
                     handle.close()
             except OSError:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation: the live view stream is best-effort
+#
+# Measured 2026-09-28 (first real use): a long turn can get one
+# ``session/viewHealthChanged`` {"health": "unavailable", "noneReason":
+# "projectionUnavailable"}, after which the host pushes no further view
+# notifications (items, approvals, turn/completed) although the session runs
+# on. ``view/page`` (durable-sourced) and ``approval/listPending`` (a log fold)
+# still answer, so a client reconciles from them on that notification, on
+# ``view/gap``, and periodically while a turn runs.
+
+RECONCILE_SECONDS = 20.0
+RECONCILE_ENV = "CREME_MUSE_RECONCILE_SECONDS"
+UNHEALTHY_METHODS = ("session/viewHealthChanged", "view/gap")
+MAX_REPLAY_PAGES = 20
+
+
+def durable_cursor(message: dict) -> Optional[str]:
+    """The view cursor of a durable-sourced view notification (ephemeral ones carry no sourceRange)."""
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    if params.get("sourceRange") and isinstance(params.get("viewCursor"), str):
+        return params["viewCursor"]
+    return None
+
+
+class ViewTracker:
+    """Which durable view events a client has processed, so a replay never processes one twice."""
+
+    def __init__(self, cursor: Optional[str]) -> None:
+        self.cursor = cursor
+        self.seen: set[str] = set()
+        self.unhealthy = False
+        self.last_reconcile = time.monotonic()
+
+    def admit(self, message: dict) -> bool:
+        """Record a message's durable cursor; False when it was already processed."""
+        cursor = durable_cursor(message)
+        if cursor is None:
+            return True
+        if cursor in self.seen:
+            return False
+        self.seen.add(cursor)
+        self.cursor = cursor
+        return True
+
+
+def replay_view(host: "MuseHost", tracker: ViewTracker) -> list[dict]:
+    """Durable view events after the tracker's cursor that were not processed yet (approval events excluded).
+
+    The events are returned unadmitted: the caller passes each through the same
+    ``process`` path as a live notification, which records it as seen.
+
+    Approvals are reconciled from ``approval/listPending`` instead, which lists
+    only what is still pending, so a replay never re-decides a resolved one.
+    """
+    messages: list[dict] = []
+    cursor = tracker.cursor
+    for _ in range(MAX_REPLAY_PAGES):
+        params: dict = {"sessionId": host.session_id, "limit": 500}
+        if cursor:
+            params["cursor"] = cursor
+        page = host.guard.request("view/page", params, timeout=60) or {}
+        for event in page.get("events") or []:
+            if not isinstance(event, dict) or event.get("method", "").startswith("approval/"):
+                durable = durable_cursor(event)
+                if durable:
+                    tracker.seen.add(durable)
+                    tracker.cursor = durable
+                continue
+            durable = durable_cursor(event)
+            if durable is None or durable not in tracker.seen:
+                messages.append(event)   # the caller's process() admits it
+        following = page.get("nextCursor")
+        if not following or following == cursor:
+            break
+        cursor = following
+    return messages
+
+
+def pending_approvals(host: "MuseHost") -> list[dict]:
+    listing = host.guard.request("approval/listPending", {"sessionId": host.session_id}, timeout=60) or {}
+    return [item for item in listing.get("approvals") or [] if isinstance(item, dict)]
+
+
+def session_status(host: "MuseHost") -> dict:
+    read = host.guard.request("session/read", {"sessionId": host.session_id}, timeout=60) or {}
+    session = read.get("session") or {}
+    return {"status": session.get("status"), "active_turn": session.get("activeTurnId")}
+
+
+def resubscribe(host: "MuseHost", tracker: ViewTracker) -> Optional[str]:
+    """Try to re-attach the live view after the tracker's cursor; returns an error text or None."""
+    params: dict = {"sessionId": host.session_id}
+    if tracker.cursor:
+        params["after"] = tracker.cursor
+    try:
+        host.guard.request("view/subscribe", params, timeout=60)
+    except AppServerError as exc:
+        return str(exc)[:200]
+    return None
+
+
+def reconcile_seconds(environ: dict) -> float:
+    try:
+        value = float(environ.get(RECONCILE_ENV, RECONCILE_SECONDS))
+    except (TypeError, ValueError):
+        return RECONCILE_SECONDS
+    return value if value > 0 else RECONCILE_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +701,42 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
         text = first_turn_text(module_root, target, request.mode, None, request.brief)
         outcome = host.guard.begin_turn(text)
         emit("live", "turn", f"turn started {outcome.turn_id}")
+        tracker = ViewTracker(host.view_cursor)
+        every = reconcile_seconds(environ)
+
+        def process(message: dict) -> None:
+            if not tracker.admit(message):
+                return
+            host.guard.observe(message)
+            if message.get("method") in ("approval/requested", "approval/updated"):
+                handle_approval(host, message.get("params") or {}, turn, emit, master_available=False)
+            if message.get("method") in UNHEALTHY_METHODS:
+                tracker.unhealthy = True
+                emit("attention", "view", f"{message.get('method')}: {json.dumps(message.get('params'))[:160]}")
+
+        def reconcile() -> None:
+            tracker.last_reconcile = time.monotonic()
+            try:
+                for message in replay_view(host, tracker):
+                    process(message)
+                for params in pending_approvals(host):
+                    handle_approval(host, params, turn, emit, master_available=False)
+                if outcome.status is None:
+                    current = session_status(host)
+                    if current["status"] == "idle" and current["active_turn"] != outcome.turn_id:
+                        time.sleep(0.5)
+                        for message in replay_view(host, tracker):   # the terminal may have just landed
+                            process(message)
+                    if current["status"] == "idle" and current["active_turn"] != outcome.turn_id \
+                            and outcome.status is None:
+                        errors.append("Muse ended the turn but its terminal event was not observed")
+                        outcome.status = "lost"
+                if tracker.unhealthy:
+                    failure = resubscribe(host, tracker)
+                    emit("live", "view", "view/subscribe " + ("failed: " + failure if failure else "re-attached"))
+                    tracker.unhealthy = False
+            except (AppServerError, PinViolation) as exc:
+                errors.append(f"reconcile failed: {exc}")
         deadline = time.monotonic() + request.timeout_seconds
         interrupt_deadline: Optional[float] = None
         while outcome.status is None:
@@ -604,6 +752,10 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
             if interrupt_deadline is not None and now > interrupt_deadline:
                 errors.append("no turn completion after interrupt")
                 break
+            if tracker.unhealthy or now - tracker.last_reconcile > every:
+                reconcile()
+                if outcome.status is not None:
+                    break
             message = host.process.next_notification(0.5)
             if message is None:
                 continue
@@ -611,9 +763,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
                 errors.append("muse serve closed during the turn")
                 outcome.status = outcome.status or "lost"
                 break
-            host.guard.observe(message)
-            if message.get("method") in ("approval/requested", "approval/updated"):
-                handle_approval(host, message.get("params") or {}, turn, emit, master_available=False)
+            process(message)
         errors += turn.errors
         usage_after = host.usage()
         remember_usage(state, usage_after)

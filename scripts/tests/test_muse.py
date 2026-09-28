@@ -376,6 +376,72 @@ class BrokerTest(FakeMuseHarness):
         self.assertEqual(record["state"], "failed")
         self.assertEqual((record["turns"][0]["status"], record["turns"][0]["verdict"]), ("lost", "FAILED"))
 
+    def reconciling(self, seconds: str) -> None:
+        self.environ[M.RECONCILE_ENV] = seconds
+        MB.cmd_shutdown(ROOT, self.environ)   # a broker reads the interval at start
+
+    def test_an_approval_visible_only_through_list_pending_reaches_the_master(self):
+        # Projection lost before the approval: no approval/request, no approval/requested is pushed.
+        self.reconciling("1")
+        self.scenario["turn"].update(lose_before_approval=True,
+                                     approvals=[{"kind": "shell", "command": "ls", "no_abort": True}])
+        self.write_scenario()
+        session = self.start()
+        code, lines, record = self.wait(session)
+        self.assertEqual(code, PB.EXIT_ATTENTION, lines)
+        self.assertEqual(len(record["pending_approvals"]), 1, lines)
+        self.assertIn("shell `ls`", record["pending_approvals"][0]["summary"])
+        code, lines, _ = MB.cmd_simple(ROOT, self.environ, "approve", session, approval="a1", decision="accept")
+        self.assertEqual(code, 0, lines)
+        code, lines, record = self.wait(session)
+        self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)   # recovered by view/page
+        events: list[str] = []
+        MB.cmd_events(ROOT, self.environ, session, False, 50, 0, events.append)
+        self.assertTrue(any("viewHealthChanged" in line for line in events), events)
+        self.assertTrue(any("approvals_recovered=1" in line for line in events), events)
+
+    def test_an_allowlisted_approval_seen_only_by_polling_is_decided_by_the_allowlist(self):
+        self.reconciling("1")
+        self.scenario["turn"].update(lose_before_approval=True, approvals=[{"kind": "shell", "command": "ls"}])
+        self.write_scenario()
+        session = self.start()
+        code, lines, record = self.wait(session)
+        self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)
+        self.assertEqual([p["choiceId"] for p in self.sent("approval/decide")], ["allow_once"])
+
+    def test_a_turn_that_ends_while_notifications_are_lost_is_not_steered(self):
+        self.reconciling("600")          # only `send` reconciles here
+        self.scenario["turn"].update(lose_before_end=True, silent_loss=True)
+        self.write_scenario()
+        session = self.start()
+        time.sleep(1.5)                  # the fake has ended the turn; the broker saw nothing
+        self.assertEqual(MB.load_record(self.state, session)["state"], "running")
+        self.scenario["turn"] = {"text": "STATUS: DONE"}
+        self.write_scenario()
+        code, lines, answer = MB.cmd_simple(ROOT, self.environ, "send", session, text="next order")
+        self.assertEqual((code, answer.get("verdict")), (0, "STARTED"), lines)
+        self.assertEqual(self.sent("turn/steer"), [])
+        record = MB.load_record(self.state, session)
+        self.assertEqual(record["turns"][0]["verdict"], "PASS")   # its terminal was replayed from view/page
+
+    def test_a_turn_whose_terminal_is_never_seen_ends_when_muse_reports_idle(self):
+        self.reconciling("1")
+        self.scenario["turn"].update(lose_before_end=True, drop_terminal=True)
+        self.write_scenario()
+        session = self.start()
+        code, lines, record = self.wait(session)
+        self.assertEqual(code, M.EXIT_MUSE_FAILED, lines)
+        turn = record["turns"][0]
+        self.assertEqual((turn["status"], turn["verdict"]), ("lost", "FAILED"))
+        self.assertIn("terminal event was not observed", " ".join(turn["errors"]))
+
+    def test_run_reconciles_a_lost_view(self):
+        self.environ[M.RECONCILE_ENV] = "1"
+        self.scenario["turn"].update(lose_before_approval=True, approvals=[{"kind": "shell", "command": "ls"}])
+        self.write_scenario()
+        code, record = RunTest.run_brief(self)
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+
     def test_send_starts_a_new_turn_when_idle_and_steer_refuses(self):
         session = self.start()
         self.wait(session)

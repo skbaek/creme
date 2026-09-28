@@ -23,6 +23,7 @@ one recipe for both. Layout under the Muse state directory::
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import re
 import secrets
@@ -106,6 +107,7 @@ class MuseSession(PB.SessionRecord):
         self.git_before: Optional[dict] = None
         self.last_activity = time.monotonic()
         self.pump_thread: Optional[threading.Thread] = None
+        self.tracker: Optional[M.ViewTracker] = None
 
     def is_open(self) -> bool:
         return not self.closed and self.host is not None
@@ -148,6 +150,7 @@ class MuseSession(PB.SessionRecord):
             self.set_state("failed", str(exc)[:400])
             self.emit("attention", "failed", f"muse failed while opening: {exc}")
             return M.EXIT_MUSE_FAILED, {"verdict": "FAILED", "errors": [str(exc)]}
+        self.tracker = M.ViewTracker(host.view_cursor)
         self.set_state("idle")
         self.emit("attention" if not brief else "live", "opened",
                   f"muse session {host.session_id} {'resumed' if resume else 'started'} model={PINNED_MODEL} "
@@ -223,9 +226,11 @@ class MuseSession(PB.SessionRecord):
             self.emit("live", "turn", f"turn {number} started ({outcome.turn_id})")
             return M.EXIT_OK, {"verdict": "STARTED", "turn": number}
 
-    def steer(self, text: str) -> tuple[int, dict]:
+    def steer(self, text: str, reconciled: bool = False) -> tuple[int, dict]:
         with self.lock:
             self.last_activity = time.monotonic()
+            if not reconciled and self.state == "running":
+                self.reconcile("steer")
             if self.state != "running" or self.guard is None or not self.guard.active_turn:
                 return M.EXIT_PREFLIGHT_REFUSED, {"verdict": "REFUSED", "refusals": [
                     f"session is {self.state}; only a running turn can be steered"]}
@@ -249,8 +254,16 @@ class MuseSession(PB.SessionRecord):
 
     def send(self, text: str) -> tuple[int, dict]:
         with self.lock:
+            if self.state == "running":
+                self.reconcile("send")   # a turn Muse already ended is not steered
             if self.state == "running" and self.guard is not None and self.guard.active_turn:
-                return self.steer(text)
+                code, result = self.steer(text, reconciled=True)
+                if code != M.EXIT_MUSE_FAILED or "already_terminal" not in " ".join(result.get("errors") or []):
+                    return code, result
+                # Muse ended the turn between the reconcile and the steer: catch up, then start a turn.
+                self.reconcile("steer rejected: already terminal")
+                if self.state == "running":
+                    return code, result
             return self.begin_turn(text)
 
     def request_interrupt(self) -> None:
@@ -400,19 +413,87 @@ class MuseSession(PB.SessionRecord):
                 self.on_lost()
                 return
             with self.lock:
-                failures = self.guard.observe(message)
-                self.describe(message)
-                if message.get("method") in ("approval/requested", "approval/updated"):
-                    self.on_approval(message.get("params") or {})
-                if failures:
-                    self.on_guard_failure(failures)
-                if message.get("method") == "turn/completed":
-                    outcome = self.guard.outcome
-                    if outcome is not None and outcome.status is not None:
-                        self.end_turn()
+                self.process(message)
+            if self.tracker is not None and self.tracker.unhealthy:
+                self.reconcile("view unavailable")
+
+    def process(self, message: dict) -> None:
+        """One view notification, live or replayed; a durable event is processed at most once."""
+        if self.tracker is not None and not self.tracker.admit(message):
+            return
+        method = message.get("method")
+        failures = self.guard.observe(message)
+        self.describe(message)
+        if method in ("approval/requested", "approval/updated"):
+            self.on_approval(message.get("params") or {})
+        if method in M.UNHEALTHY_METHODS and self.tracker is not None:
+            self.tracker.unhealthy = True
+            self.emit("attention", "view", f"{method}: {json.dumps(message.get('params'))[:160]}; reconciling")
+        if failures:
+            self.on_guard_failure(failures)
+        if method == "turn/completed":
+            outcome = self.guard.outcome
+            if outcome is not None and outcome.status is not None:
+                self.end_turn()
+
+    def reconcile(self, reason: str) -> None:
+        """Catch up from the server when the live stream may have dropped events.
+
+        Replays durable view events (``view/page``) through ``process``, decides
+        still-pending approvals (``approval/listPending``) through the same
+        allowlist and master queue, ends the turn if Muse reports the session
+        idle without a terminal event, and re-attaches the view stream.
+        """
+        with self.lock:
+            if not self.is_open() or self.tracker is None:
+                return
+            tracker = self.tracker
+            tracker.last_reconcile = time.monotonic()
+            try:
+                replayed = M.replay_view(self.host, tracker)
+                for message in replayed:
+                    self.process(message)
+                recovered = 0
+                if self.state == "running":
+                    for params in M.pending_approvals(self.host):
+                        before = len(self.pending)
+                        self.on_approval(params)
+                        recovered += len(self.pending) - before
+                outcome = self.guard.outcome if self.guard is not None else None
+                ended = False
+                if outcome is not None and outcome.status is None:
+                    current = M.session_status(self.host)
+                    if current["status"] == "idle" and current["active_turn"] != outcome.turn_id:
+                        # The terminal may have landed after the first replay: page once more.
+                        time.sleep(0.5)
+                        for message in M.replay_view(self.host, tracker):
+                            self.process(message)
+                    if current["status"] == "idle" and current["active_turn"] != outcome.turn_id \
+                            and self.guard.outcome is outcome and outcome.status is None:
+                        outcome.status = "lost"
+                        if self.turn is not None:
+                            self.turn.errors.append("Muse ended the turn but its terminal event was not observed")
+                        ended = True
+                note = None
+                if tracker.unhealthy:
+                    failure = M.resubscribe(self.host, tracker)
+                    note = "view/subscribe " + ("failed: " + failure if failure else "re-attached")
+                    tracker.unhealthy = False
+            except (AppServerError, PinViolation) as exc:
+                self.emit("attention", "error", f"reconcile ({reason}) failed: {exc}")
+                return
+            if replayed or recovered or ended or note:
+                self.emit("live" if not (recovered or ended) else "attention", "reconcile",
+                          f"{reason}: replayed={len(replayed)} approvals_recovered={recovered} "
+                          f"turn_ended_unobserved={ended}" + (f"; {note}" if note else ""))
+            if ended:
+                self.end_turn()
 
     def periodic(self, now: float) -> None:
         broker = self.broker
+        if self.state == "running" and self.tracker is not None \
+                and now - self.tracker.last_reconcile > broker.reconcile_seconds:
+            self.reconcile("periodic")
         if M.tripwire_path(broker.state).exists() and not broker.tripped:
             broker.trip_all(None, ["a model-pin failure tripwire was recorded by another run"])
             return
@@ -568,6 +649,7 @@ class Broker:
         self.environ = dict(environ)
         self.idle_seconds = idle_seconds
         self.session_idle_seconds = session_idle_seconds
+        self.reconcile_seconds = M.reconcile_seconds(self.environ)
         self.peer_uid_function = peer_uid_function
         self.sessions: dict[str, MuseSession] = {}
         self.lock = threading.RLock()

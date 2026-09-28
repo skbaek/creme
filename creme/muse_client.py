@@ -59,7 +59,9 @@ FORBIDDEN_TOOLS = frozenset({
 })
 LEAN_TOOL_PREFIX = "mcp__lean_lsp_mcp__"
 
-READ_ONLY_METHODS = frozenset({"model/list", "usage/read", "session/read", "approval/listPending"})
+# Lease-free reads, plus the view re-attach: none of them selects a model or starts work.
+READ_ONLY_METHODS = frozenset({"model/list", "usage/read", "session/read", "approval/listPending",
+                               "view/page", "view/subscribe"})
 
 _CONTRIBUTOR = re.compile(r"contributor", re.IGNORECASE)
 

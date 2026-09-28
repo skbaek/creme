@@ -72,7 +72,8 @@ if not args or args[0] != "serve":
 log_call({"argv": args})
 write_lock = threading.Lock()
 state = {"session": None, "model": None, "mode": "onRequest", "effort": None, "turn": None, "steers": [],
-         "decisions": {}, "interrupted": False, "cursor": 0}
+         "decisions": {}, "interrupted": False, "cursor": 0, "events": [], "lost": False, "pending": {},
+         "subscribes": 0}
 steered = threading.Event()
 decided = threading.Condition()
 
@@ -84,9 +85,25 @@ def send(message):
         sys.stdout.flush()
 
 
-def note(method, params):
+def note(method, params, durable=True):
+    """A view notification; while the projection is lost it is recorded (for view/page) but never pushed."""
     state["cursor"] += 1
-    send({"method": method, "params": {"sessionId": state["session"], "viewCursor": f"v:{state['cursor']}", **params}})
+    message = {"method": method, "params": {"sessionId": state["session"], "viewCursor": f"v:{state['cursor']}",
+                                            **({"sourceRange": {"first": state["cursor"]}} if durable else {}),
+                                            **params}}
+    if durable:
+        state["events"].append(message)
+    if not state["lost"]:
+        send(message)
+
+
+def lose_projection():
+    # The schema calls the health push best-effort: `silent_loss` drops it too.
+    if not (SCENARIO.get("turn") or {}).get("silent_loss"):
+        send({"method": "session/viewHealthChanged", "params": {"sessionId": state["session"],
+                                                                "health": "unavailable",
+                                                                "noneReason": "projectionUnavailable"}})
+    state["lost"] = True
 
 
 def session_object():
@@ -113,20 +130,29 @@ def run_turn(turn_id, text):
                    {"choiceId": "allow_prefix", "decision": "approvedPolicyAmendment", "scope": "localPersistent",
                     "label": "always"},
                    {"choiceId": "abort", "decision": "abort", "scope": "once", "label": "abort"}]
+        if subject.get("no_abort"):
+            choices = [choice for choice in choices if choice["decision"] != "abort"]
         params = {"approvalId": approval_id, "availableChoices": choices,
                   "currentRequirementId": {"approvalId": approval_id, "sourceIndex": 0}, "itemId": f"it-{index}",
                   "judgeEscalated": False, "protectedWrite": False, "rawArgs": "{}", "sessionId": state["session"],
                   "subject": subject, "taskId": "t", "toolCallId": "c", "toolName": subject.get("toolName", "bash"),
-                  "turnId": turn_id, "viewCursor": "v"}
-        send({"id": f"srv-{index}", "method": "approval/request", "params": params})
+                  "turnId": turn_id}
+        if turn.get("lose_before_approval"):
+            lose_projection()
+        state["pending"][approval_id] = params
+        if not state["lost"]:
+            send({"id": f"srv-{index}", "method": "approval/request", "params": params})
         note("approval/requested", params)
         with decided:
             decided.wait_for(lambda: approval_id in state["decisions"] or state["interrupted"], timeout=30)
+        state["pending"].pop(approval_id, None)
     for tool in turn.get("tools") or []:
         note("item/started", {"item": {"itemId": f"tool-{tool}", "kind": "toolCall", "tool": tool,
                                        "status": "inProgress", "turnId": turn_id, "revision": 1}})
         note("item/completed", {"item": {"itemId": f"tool-{tool}", "kind": "toolCall", "tool": tool,
                                          "status": "completed", "turnId": turn_id, "revision": 2}})
+    if turn.get("lose_before_end"):
+        lose_projection()
     if turn.get("wait_for_steer"):
         steered.wait(timeout=30)
     deadline = time.time() + float(turn.get("sleep") or 0)
@@ -153,8 +179,10 @@ def run_turn(turn_id, text):
                                      "status": "completed", "revision": 2, "text": final}})
     if turn.get("touch"):
         Path(turn["touch"]).write_text("written by the fake\n")
+    # Muse records the durable terminal before the session reads idle.
+    note("turn/completed", {"turnId": turn_id, "terminal": "completed", "durationMs": 12},
+         durable=not turn.get("drop_terminal"))
     state["turn"] = None
-    note("turn/completed", {"turnId": turn_id, "terminal": "completed", "durationMs": 12})
 
 
 def respond(message, result=None, error=None):
@@ -193,7 +221,7 @@ for line in sys.stdin:
     elif method == "session/resume":
         state["session"] = params["sessionId"]
         state["model"] = SCENARIO.get("initial_model", "muse-spark-1.3-contributor")
-        respond(message, {"session": session_object(), "viewCursor": "v:0", "history": {"mode": "none"},
+        respond(message, {"session": session_object(), "viewCursor": f"v:{state['cursor']}", "history": {"mode": "none"},
                           "pendingRequests": []})
     elif method == "session/setModel":
         state["model"] = params["model"]["modelId"]
@@ -206,9 +234,26 @@ for line in sys.stdin:
     elif method == "session/setReasoningEffort":
         state["effort"] = params["reasoningEffort"]
         respond(message, {"commandId": params["commandId"], "status": "accepted"})
+    elif method == "approval/listPending":
+        respond(message, {"approvals": list(state["pending"].values()), "userInputs": []})
+    elif method == "view/page":
+        after = params.get("cursor")
+        events = state["events"]
+        if after:
+            index = next((i for i, e in enumerate(events) if e["params"]["viewCursor"] == after), -1)
+            events = events[index + 1:]
+        page = events[:params.get("limit", 100)]
+        log_call({"page_after": after, "methods": [e["method"] + "@" + e["params"]["viewCursor"] for e in page]})
+        respond(message, {"events": page, "nextCursor": page[-1]["params"]["viewCursor"] if page else None})
+    elif method == "view/subscribe":
+        state["subscribes"] += 1
+        if SCENARIO.get("subscribe_restores"):
+            state["lost"] = False
+        respond(message, {"viewCursor": f"v:{state['cursor']}"})
     elif method == "session/read":
         session = session_object()
         session["modelId"] = served()
+        session["status"] = "running" if state["turn"] else "idle"
         respond(message, {"session": session, "history": {"mode": "none"}, "pendingRequests": [], "viewCursor": "v"})
     elif method == "turn/start":
         if state["turn"] is not None:

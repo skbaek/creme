@@ -187,6 +187,32 @@ first model call, so admission falls back to the last observation of an
 earlier host while its window has not reset (`usage-last.json`), and records
 `unobserved` otherwise. Usage is recorded before and after every turn.
 
+## When the live view is lost
+
+The live view stream is best-effort. On first real use (2026-09-28), six
+sessions each got one `session/viewHealthChanged` (`unavailable`,
+`projectionUnavailable`) two to five minutes into a turn, and the host pushed
+nothing after it: no items, no approvals, no `turn/completed`, although Muse
+kept running and waited on an approval nobody saw. The broker (and `run`)
+therefore reconciles from the server on that notification, on `view/gap`,
+every `CREME_MUSE_RECONCILE_SECONDS` (default 20) while a turn runs, and before
+every `send` or `steer`:
+
+1. `view/page` from the last durable view cursor processed: every missed
+   durable event goes through the same path as a live one (guard, records,
+   turn completion), and a durable event is never processed twice;
+2. `approval/listPending`: every still-pending approval goes through the same
+   allowlist, and one left to the master appears as an `approval` line that
+   `approve` answers (replayed approval events are skipped, so a resolved one is
+   never re-decided);
+3. `session/read`: when Muse reports the session idle and the turn's terminal
+   was still not found after a second page, the turn ends as `lost` (verdict
+   FAILED), so `send` starts a new turn instead of steering a finished one;
+4. `view/subscribe` after the cursor, to try to re-attach the live stream.
+
+A reconcile that recovered an approval or ended a turn prints a `reconcile`
+attention event.
+
 ## Records
 
 Under the canonical checkout's `.creme/muse/` (override `CREME_MUSE_STATE`),

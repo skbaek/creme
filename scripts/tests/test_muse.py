@@ -419,6 +419,43 @@ class RunTest(FakeMuseHarness):
         self.assertEqual(report["pinned_model"], C.PINNED_MODEL)
         self.assertEqual(self.sent("turn/start"), [])
 
+    def test_stream_idle_timeout_default_reaches_every_child(self):
+        code, record = self.run_brief()
+        self.assertEqual(code, 0, record)
+        self.assertEqual(record["stream_idle_timeout_secs"], M.DEFAULT_STREAM_IDLE_TIMEOUT_SECS)
+        exec_call = next(call for call in self.calls() if call.get("argv", [None])[0] == "exec")
+        self.assertEqual(exec_call["stream_idle"], str(M.DEFAULT_STREAM_IDLE_TIMEOUT_SECS))
+        serve = next(call for call in self.calls() if call.get("argv", [None])[0] == "serve")
+        self.assertEqual(serve["stream_idle"], str(M.DEFAULT_STREAM_IDLE_TIMEOUT_SECS))
+        code, report = M.status(ROOT, self.environ)
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["stream_idle_timeout_secs"], M.DEFAULT_STREAM_IDLE_TIMEOUT_SECS)
+        self.assertIn("stream_idle_timeout_secs=", M.format_status(report))
+
+    def test_stream_idle_timeout_override_reaches_every_child(self):
+        self.environ[M.STREAM_IDLE_ENV] = "1800"
+        code, record = self.run_brief()
+        self.assertEqual(code, 0, record)
+        self.assertEqual(record["stream_idle_timeout_secs"], 1800)
+        exec_call = next(call for call in self.calls() if call.get("argv", [None])[0] == "exec")
+        self.assertEqual(exec_call["stream_idle"], "1800")
+        serve = next(call for call in self.calls() if call.get("argv", [None])[0] == "serve")
+        self.assertEqual(serve["stream_idle"], "1800")
+        code, report = M.status(ROOT, self.environ)
+        self.assertEqual(report["stream_idle_timeout_secs"], 1800)
+
+    def test_bad_stream_idle_timeout_is_refused(self):
+        for bad in ("nope", "0", "-5", "1.5"):
+            self.environ[M.STREAM_IDLE_ENV] = bad
+            code, record = self.run_brief()
+            self.assertEqual(code, M.EXIT_PREFLIGHT_REFUSED, (bad, record))
+            self.assertIn(M.STREAM_IDLE_ENV, record["refusals"][0])
+            self.assertEqual(self.sent("turn/start"), [])
+            code, report = M.status(ROOT, self.environ)
+            self.assertEqual(code, M.EXIT_PREFLIGHT_REFUSED, bad)
+            self.assertIn(M.STREAM_IDLE_ENV, report["reasons"][0])
+        del self.environ[M.STREAM_IDLE_ENV]
+
 
 class BrokerTest(FakeMuseHarness):
     def wait(self, session, timeout=20):
@@ -429,6 +466,19 @@ class BrokerTest(FakeMuseHarness):
                                            **extra)
         self.assertEqual(code, 0, lines)
         return answer["session"]
+
+    def test_session_record_carries_the_stream_idle_timeout(self):
+        session = self.start()
+        self.assertEqual(MB.load_record(self.state, session)["stream_idle_timeout_secs"],
+                         M.DEFAULT_STREAM_IDLE_TIMEOUT_SECS)
+        self.wait(session)
+        self.environ[M.STREAM_IDLE_ENV] = "bad"
+        try:
+            code, lines, _ = MB.cmd_start(ROOT, self.environ, "x", str(self.target), False, "low", "silent", 60)
+        finally:
+            del self.environ[M.STREAM_IDLE_ENV]
+        self.assertEqual(code, M.EXIT_PREFLIGHT_REFUSED, lines)
+        self.assertIn(M.STREAM_IDLE_ENV, " ".join(lines))
 
     def test_steer_reaches_the_running_turn(self):
         self.scenario["turn"]["wait_for_steer"] = True

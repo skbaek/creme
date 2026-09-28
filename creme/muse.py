@@ -66,6 +66,9 @@ EXIT_PIN_FAILED = 12
 
 DEFAULT_EFFORT = "medium"
 DEFAULT_TIMEOUT_SECONDS = 1800
+STREAM_IDLE_ENV = "CREME_MUSE_STREAM_IDLE_TIMEOUT_SECS"
+DEFAULT_STREAM_IDLE_TIMEOUT_SECS = 900
+STREAM_IDLE_CHILD_ENV = "TBH_STREAM_IDLE_TIMEOUT_SECS"
 USAGE_REFUSE_PERCENT = 99
 BOOTSTRAP_TIMEOUT_SECONDS = 120
 INTERRUPT_WAIT_SECONDS = 60
@@ -143,13 +146,40 @@ def resolve_binary(environ: Optional[dict] = None) -> Path:
     return Path(environ.get(BINARY_ENV) or DEFAULT_BINARY).expanduser()
 
 
+def stream_idle_timeout_seconds(environ: Optional[dict] = None) -> int:
+    """The model-stream idle timeout for every Muse child process, in seconds.
+
+    Default ``DEFAULT_STREAM_IDLE_TIMEOUT_SECS``; the master may override it
+    with ``CREME_MUSE_STREAM_IDLE_TIMEOUT_SECS``. Anything but a positive
+    integer is refused. The first-event timeout is deliberately left unset.
+    """
+    source = os.environ if environ is None else environ
+    raw = source.get(STREAM_IDLE_ENV)
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_STREAM_IDLE_TIMEOUT_SECS
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise MuseError(f"{STREAM_IDLE_ENV}={raw!r} is not a positive integer of seconds")
+    if value < 1:
+        raise MuseError(f"{STREAM_IDLE_ENV}={raw!r} is not a positive integer of seconds")
+    return value
+
+
 def child_environment(environ: Optional[dict] = None) -> tuple[dict, list[str]]:
     """The Muse child's environment: provider, model, and prompt overrides removed; no self-update."""
-    environ = dict(os.environ if environ is None else environ)
+    source = os.environ if environ is None else environ
+    timeout_secs = stream_idle_timeout_seconds(source)
+    environ = dict(source)
     removed = sorted(key for key in environ if key.startswith(_SCRUBBED_PREFIXES) or key == "CLAUDE_CONFIG_DIR")
     for key in removed:
         environ.pop(key)
     environ["MUSE_NO_AUTO_UPDATE"] = "1"   # the launcher never swaps the binary under a session
+    # Muse aborts a model call whose stream is silent for 3 minutes ("model
+    # stream idle timeout"); long-context Lean work outlasts that silence, so
+    # every child (bootstrap exec and serve) gets the longer idle budget. The
+    # first-event timeout is left unset.
+    environ[STREAM_IDLE_CHILD_ENV] = str(timeout_secs)
     return environ, removed
 
 
@@ -684,11 +714,21 @@ def status(module_root: Path, environ: Optional[dict] = None) -> tuple[int, dict
     environ = dict(os.environ if environ is None else environ)
     state = state_root(module_root, environ)
     binary = resolve_binary(environ)
-    env, scrubbed = child_environment(environ)
-    report: dict = {"binary": str(binary), "state": str(state), "pinned_model": PINNED_MODEL,
-                    "tripwire": tripwire_path(state).exists(), "scrubbed_env": scrubbed,
-                    "postures": {mode: {"profile": PROFILES[mode], "serve_flags": list(SERVE_FLAGS[mode]),
-                                        "approval_mode": "promptUnmatched"} for mode in MODES}}
+    try:
+        env, scrubbed = child_environment(environ)
+        stream_idle = stream_idle_timeout_seconds(environ)
+    except MuseError as exc:
+        report: dict = {"binary": str(binary), "state": str(state), "pinned_model": PINNED_MODEL,
+                        "tripwire": tripwire_path(state).exists(), "scrubbed_env": [],
+                        "postures": {mode: {"profile": PROFILES[mode], "serve_flags": list(SERVE_FLAGS[mode]),
+                                            "approval_mode": "promptUnmatched"} for mode in MODES}}
+        report.update(verdict="REFUSED", reasons=[str(exc)])
+        return EXIT_PREFLIGHT_REFUSED, report
+    report = {"binary": str(binary), "state": str(state), "pinned_model": PINNED_MODEL,
+              "tripwire": tripwire_path(state).exists(), "scrubbed_env": scrubbed,
+              "stream_idle_timeout_secs": stream_idle,
+              "postures": {mode: {"profile": PROFILES[mode], "serve_flags": list(SERVE_FLAGS[mode]),
+                                  "approval_mode": "promptUnmatched"} for mode in MODES}}
     reasons: list[str] = []
     if not binary.is_file():
         report.update(verdict="REFUSED", reasons=[f"Muse binary {binary} not found (set {BINARY_ENV})"])
@@ -743,6 +783,7 @@ def format_status(report: dict) -> str:
         usage_text = "unobserved (usage/read returned no window; admission records it and does not refuse)"
     lines = [
         f"verdict={report.get('verdict')} binary={report.get('binary')} version={report.get('version')}",
+        f"stream_idle_timeout_secs={report.get('stream_idle_timeout_secs')}",
         f"pin={report.get('pinned_model')} catalogue_default={report.get('catalogue_default')} "
         f"(never used) models={[row.get('modelId') for row in report.get('models') or []]}",
         f"usage: {usage_text}",
@@ -779,6 +820,11 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
     run_id = f"{stamp}-{secrets.token_hex(3)}"
     summary: dict = {"run": run_id, "mode": request.mode, "effort": request.effort, "model": PINNED_MODEL,
                      "target": str(request.target)}
+    try:
+        summary["stream_idle_timeout_secs"] = stream_idle_timeout_seconds(environ)
+    except MuseError as exc:
+        summary.update(verdict="REFUSED", exit=EXIT_PREFLIGHT_REFUSED, refusals=[str(exc)])
+        return EXIT_PREFLIGHT_REFUSED, summary
     refusals = early_refusals(state, request.effort, request.brief, module_root, str(request.target),
                               request.mode, request.lean_goal)
     if request.lean_goal is not None:

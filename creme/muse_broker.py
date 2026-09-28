@@ -946,6 +946,10 @@ class Broker:
                                          self.lean_repositories)
         if lean_goal is not None:
             refusals += self.lean_mcp_check()
+        try:
+            stream_idle = M.stream_idle_timeout_seconds(self.environ)
+        except M.MuseError as exc:
+            refusals.append(str(exc))
         if refusals:
             return {"ok": False, "code": M.EXIT_PREFLIGHT_REFUSED, "verdict": "REFUSED", "refusals": refusals}
         stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -953,6 +957,7 @@ class Broker:
         record = {
             "id": session_id, "created": PB.now_iso(), "state": "starting", "muse_session": resume,
             "target": str(Path(str(target)).expanduser().resolve()), "mode": mode, "effort": effort,
+            "stream_idle_timeout_secs": stream_idle,
             "detail": detail, "broker_instance": self.instance, "turns": [], "pending_approvals": [],
             "last_event": None, "last_attention_seq": 0, "resumed_from": (prior or {}).get("id"),
             "turn_timeout_seconds": int(request.get("turn_timeout_seconds") or M.DEFAULT_TIMEOUT_SECONDS),
@@ -1108,6 +1113,10 @@ def _open_output(answer: dict) -> tuple[int, list[str], dict]:
 def _client_refusals(module_root: Path, environ: dict, effort: str, brief: Optional[str], target: Optional[str],
                      mode: str, lean: Optional[str]) -> Optional[tuple[int, list[str], dict]]:
     refusals = M.early_refusals(M.state_root(module_root, environ), effort, brief, module_root, target, mode, lean)
+    try:
+        M.stream_idle_timeout_seconds(environ)
+    except M.MuseError as exc:
+        refusals.append(str(exc))
     if not refusals:
         return None
     answer = {"ok": False, "code": M.EXIT_PREFLIGHT_REFUSED, "verdict": "REFUSED", "refusals": refusals}

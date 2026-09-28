@@ -58,7 +58,8 @@ if args == ["--version"]:
 
 if args and args[0] == "exec":
     log_call({"argv": args, "env_model": os.environ.get("MUSE_MODEL"),
-              "no_update": os.environ.get("MUSE_NO_AUTO_UPDATE")})
+              "no_update": os.environ.get("MUSE_NO_AUTO_UPDATE"),
+              "stream_idle": os.environ.get("TBH_STREAM_IDLE_TIMEOUT_SECS")})
     session_id = args[args.index("--session-id") + 1]
     workspace = args[args.index("--workspace") + 1]
     if SCENARIO.get("exec_fail"):
@@ -84,7 +85,7 @@ if not args or args[0] != "serve":
     print(f"fake muse: unsupported {args}", file=sys.stderr)
     sys.exit(2)
 
-log_call({"argv": args})
+log_call({"argv": args, "stream_idle": os.environ.get("TBH_STREAM_IDLE_TIMEOUT_SECS")})
 write_lock = threading.Lock()
 state = {"session": None, "model": None, "mode": "onRequest", "effort": None, "turn": None, "steers": [],
          "decisions": {}, "stage": {}, "stage_decisions": [], "interrupted": False, "cursor": 0, "events": [], "lost": False, "pending": {},

@@ -105,7 +105,12 @@ store report `reports/creme-muse-pseudo-v1.md`):
 3. **Environment.** The Muse child's environment drops `MUSE_*` (including
    `MUSE_MODEL`), `TBH_*`, `META_*`, and other providers' keys, and sets
    `MUSE_NO_AUTO_UPDATE=1` so the launcher never swaps the binary under a
-   session.
+   session. It also sets `TBH_STREAM_IDLE_TIMEOUT_SECS=900`: Muse aborts a
+   model call whose stream is silent for 3 minutes ("model stream idle
+   timeout"), which killed long-context Lean turns, so every child (bootstrap
+   `exec` and `serve`) gets the longer idle budget. Override with
+   `CREME_MUSE_STREAM_IDLE_TIMEOUT_SECS` (a positive integer of seconds); the
+   first-event timeout is left unset.
 
 The pseudo-subagent never uses the user's `musec` launcher and never relies on
 saved Muse state for its sandbox: each serve host's posture is chosen per

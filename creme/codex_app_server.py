@@ -64,7 +64,11 @@ READ_ONLY_METHODS = frozenset({
 
 
 class AppServerError(RuntimeError):
-    """Transport or protocol failure."""
+    """Transport or protocol failure, retaining structured RPC evidence when available."""
+
+    def __init__(self, *args: object, rpc_error: Optional[dict] = None) -> None:
+        super().__init__(*args)
+        self.rpc_error = rpc_error
 
 
 class PinViolation(RuntimeError):
@@ -337,7 +341,8 @@ class AppServerProcess:
                 self._condition.wait(timeout=min(remaining, 0.5))
             message = self._responses.pop(identifier)
         if "error" in message:
-            raise AppServerError(f"{self.label} {method} failed: {json.dumps(message['error'])[:400]}")
+            raise AppServerError(f"{self.label} {method} failed: {json.dumps(message['error'])[:400]}",
+                                 rpc_error=message["error"])
         return message.get("result")
 
     def next_notification(self, timeout: float) -> Optional[dict]:

@@ -306,6 +306,7 @@ class MuseSession(PB.SessionRecord):
                 errors.append(f"usage/read failed: {exc}")
             PB.write_private_json(turn_dir / "usage-after.json", {"usage": usage_after, "at": PB.now_iso()})
             time.sleep(0.3)
+            M.finalize_durable(self.host, outcome, errors)
             audit = audit_session_log(self.host.log_path, self.host.log_start, outcome.turn_id, self.host.session_id)
             PB.write_private_json(turn_dir / "audit.json", audit)
             PB.write_private_json(turn_dir / "approvals.json", state.approvals)

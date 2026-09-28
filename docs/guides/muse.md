@@ -226,7 +226,10 @@ every `send` or `steer`:
 
 1. `view/page` from the last durable view cursor processed: every missed
    durable event goes through the same path as a live one (guard, records,
-   turn completion), and a durable event is never processed twice;
+   turn completion). Immutable `sourceRange` plus event/item revision identifies
+   processed events; `viewCursor` is only a paging position. Folded reminder
+   records can reuse a cursor later assigned to a genuine message or usage
+   event, so cursors must never serve as event identities;
 2. `approval/listPending`: every still-pending approval goes through the same
    allowlist, and one left to the master appears as an `approval` line that
    `approve` answers (replayed approval events are skipped, so a resolved one is
@@ -258,6 +261,15 @@ and a failing one falls back to tailing the durable log
 that goes through the same allowlist and master queue and is answered with
 `approval/decide`; the run's `terminal` record (run id = turn id) ends the
 turn, with the last `assistant_message_committed` text as its final message.
+Every terminal, including a live `turn/completed`, receives bounded durable
+finalization. It recovers the committed final assistant text and replaces live
+usage counters with sums of `model_completed` records whose `payload.kind` is
+`run` and whose `run_id` is exactly the parent turn. Every counted completion
+must name the pinned model and carry valid input/output usage; child/reminder
+records are excluded. Repeated finalization does not add the totals twice.
+Missing, unreadable, corrupt, or incomplete terminal evidence fails the turn
+with an explicit diagnostic. The full session model audit still checks all
+observed model identities and the contributor tripwire remains active.
 The durable run terminal is authoritative whenever it is present. After a
 source fails, reconciles run every 5 seconds. A failing reconcile source is
 recorded as a turn **warning** and never by itself fails a turn or a `run`.
@@ -270,6 +282,23 @@ remaining stages of the same approval are answered with the same one-shot
 choice at once (and any stage that arrives later is answered from that
 decision), so the master sees one `aN` per command. Every stage decision is
 recorded in the turn's `approvals.json`.
+
+A retryable `approval/decide` durability-fence error is reconciled by bounded
+read-only log polling. It is accepted only when `decision_applied` records the
+exact outgoing `commandId`, approval id, parent run, and requested decision.
+The RPC error and durable confirmation remain recorded; an unresolved or
+mismatched decision fails the turn. The wrapper never retries the approval
+command or replays its shell effects.
+
+**Dispatch and visibility.** A master should include the applicable proof skill
+instructions in the Muse brief, or authorize exact reads, when those files are
+outside Muse's target workspace. Native file-tool confinement also applies in
+Lean mode; a missing skill read is not permission to edit proofs blind. In a
+Codex workspace sandbox, local broker/socket operations may be denied or appear
+unavailable even when the broker exists. Diagnose the execution context and
+socket visibility; request the host delegate/escalation for the same authorized
+`python3 -m creme muse ...` command when necessary. Do not change Muse auth or
+settings, or create alternative sockets to bypass the restriction.
 
 ## Clearing the tripwire
 

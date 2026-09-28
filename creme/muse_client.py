@@ -334,8 +334,14 @@ class MuseGuard:
         return self.request("turn/interrupt", params, timeout=30)
 
     def decide(self, params: dict, choice: str) -> Any:
-        return self.command("approval/decide", {"approvalId": params["approvalId"], "choiceId": choice,
-                                                "requirementId": params["currentRequirementId"]}, timeout=30)
+        request = {"commandId": uuid7(), "sessionId": self.session_id, "approvalId": params["approvalId"],
+                   "choiceId": choice, "requirementId": params["currentRequirementId"]}
+        try:
+            return self.request("approval/decide", request, timeout=30)
+        except AppServerError as exc:
+            # Keep the exact identity of this one-shot decision; recovery must never send it again.
+            exc.approval_request = request
+            raise
 
     def reopen(self, turn_id: str, tokens: Optional[dict] = None, models: Optional[dict] = None) -> TurnOutcome:
         """Make ``turn_id`` the active turn again (Muse is still running it); counts carry over."""
@@ -508,7 +514,8 @@ def audit_session_log(path: Optional[Path], start_line: int, turn_id: Optional[s
                 result["child_links"] += 1
             if kind == "model_completed" and (event.get("model") or payload.get("model")) == PINNED_MODEL:
                 result["attributed_any"] += 1
-            if turn_id is not None and kind == "model_completed" and _run_id(record) == turn_id:
+            if turn_id is not None and payload.get("kind") == "run" and kind == "model_completed" \
+                    and payload.get("run_id") == turn_id:
                 result["completions"] += 1
                 model = event.get("model") or payload.get("model")
                 if model == PINNED_MODEL:

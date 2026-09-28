@@ -202,7 +202,8 @@ def run_turn(turn_id, text):
     model = served()
     append_log(state["session"], {"payload_type": "run.model.configured",
                                   "payload": {"model_id": turn.get("log_model") or model}})
-    completion = {"kind": "model_completed", "usage": {"input_tokens": 100}}
+    completion = {"kind": "model_completed", "usage": {"input_tokens": 100, "output_tokens": 7,
+                                                       "cached_tokens": 40, "reasoning_tokens": 3}}
     if not turn.get("completion_without_model"):
         completion["model"] = turn.get("log_model") or model
     append_log(state["session"], {"payload_type": "runtime.session",
@@ -212,6 +213,9 @@ def run_turn(turn_id, text):
                   "child_session_id": "child-1"}}})
     append_log(state["session"], {"payload_type": "reminder", "payload": {"reminder_roster": {
         "agents": [{"id": "verify-reminder", "model": "same-as-main"}]}}})
+    was_lost = state["lost"]
+    if turn.get("drop_final_view"):
+        state["lost"] = True
     note("session/tokenUsage", {"turnId": turn_id, **({} if turn.get("usage_without_model")
                                                        else {"modelId": turn.get("usage_model") or model}),
                                 "usage": {"inputTokens": 100, "outputTokens": 7, "cachedTokens": 40,
@@ -231,6 +235,7 @@ def run_turn(turn_id, text):
         append_log(state["session"], {"payload_type": "runtime.session", "payload": {
             "kind": "run", "run_id": turn_id, "event": {"kind": "terminal", "terminal": "completed", "reason": None}}})
     # Muse records the durable terminal before the session reads idle.
+    state["lost"] = was_lost
     note("turn/completed", {"turnId": turn_id, "terminal": "completed", "durationMs": 12},
          durable=not turn.get("drop_terminal"))
     state["turn"] = None
@@ -383,12 +388,20 @@ for line in sys.stdin:
                 "requirement_id": {"pending_action_id": approval_id, "source_index": index},
                 "choice_id": params["choiceId"]}}})
         last = params["choiceId"] == "abort" or index + 1 >= stage["total"]
-        respond(message, {"approvalId": approval_id, "commandId": params["commandId"], "status": "accepted",
-                          "terminal": last})
+        fence = (SCENARIO.get("turn") or {}).get("decision_fence") if last else None
+        if not fence:
+            respond(message, {"approvalId": approval_id, "commandId": params["commandId"], "status": "accepted",
+                              "terminal": last})
         if last:
             append_log(state["session"], {"payload_type": "runtime.session", "payload": {
                 "kind": "approval", "run_id": state["turn"], "event": {
-                    "kind": "decision_applied", "pending_action_id": approval_id}}})
+                    "kind": "decision_applied", "pending_action_id": approval_id,
+                    "decided_by_command_id": "wrong-command" if fence == "mismatch" else params["commandId"],
+                    "decision": "abort" if fence == "wrong-decision" else
+                                ("approved" if params["choiceId"] == "allow_once" else "abort")}}})
+            if fence:
+                respond(message, error={"code": -32603, "data": {"kind": "internal", "retryable": True},
+                    "message": "approval decide settlement failed: approval ledger durability fence"})
             with decided:
                 state["decisions"][approval_id] = params["choiceId"]
                 decided.notify_all()

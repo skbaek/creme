@@ -458,25 +458,37 @@ def durable_cursor(message: dict) -> Optional[str]:
     return None
 
 
+def event_identity(message: dict) -> Optional[str]:
+    """Source records identify events; a folded view cursor is only a paging position."""
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    source = params.get("sourceRange")
+    if not source:
+        return None
+    item = params.get("item") if isinstance(params.get("item"), dict) else {}
+    return json.dumps([message.get("method"), source, params.get("turnId") or item.get("turnId"),
+                       item.get("itemId"), item.get("revision")], sort_keys=True)
+
+
 class ViewTracker:
-    """Which durable view events a client has processed, so a replay never processes one twice."""
+    """Track immutable source events independently of the projection's reusable cursors."""
 
     def __init__(self, cursor: Optional[str]) -> None:
         self.cursor = cursor
         self.seen: set[str] = set()
         self.unhealthy = False
-        self.degraded = False        # a projection call failed: reconcile more often, from the durable log
+        self.degraded = False
         self.last_reconcile = time.monotonic()
 
     def admit(self, message: dict) -> bool:
-        """Record a message's durable cursor; False when it was already processed."""
+        identity = event_identity(message)
         cursor = durable_cursor(message)
-        if cursor is None:
+        if cursor is not None:
+            self.cursor = cursor
+        if identity is None:
             return True
-        if cursor in self.seen:
+        if identity in self.seen:
             return False
-        self.seen.add(cursor)
-        self.cursor = cursor
+        self.seen.add(identity)
         return True
 
 
@@ -504,20 +516,15 @@ def replay_view(host: "MuseHost", tracker: ViewTracker, turn_id: Optional[str] =
         page = host.guard.request("view/page", params, timeout=60) or {}
         for event in page.get("events") or []:
             if not isinstance(event, dict) or event.get("method", "").startswith("approval/"):
-                durable = durable_cursor(event)
-                if durable:
-                    tracker.seen.add(durable)
-                    tracker.cursor = durable
+                if isinstance(event, dict):
+                    tracker.admit(event)
                 continue
-            durable = durable_cursor(event)
             other = event_turn(event)
             if turn_id is not None and other is not None and other != turn_id:
                 # Another turn's event (earlier turns, the echo bootstrap) never touches this turn.
-                if durable:
-                    tracker.seen.add(durable)
-                    tracker.cursor = durable
+                tracker.admit(event)
                 continue
-            if durable is None or durable not in tracker.seen:
+            if event_identity(event) is None or event_identity(event) not in tracker.seen:
                 messages.append(event)   # the caller's process() admits it
         following = page.get("nextCursor")
         if not following or following == cursor:
@@ -615,6 +622,61 @@ def once_choice(params: dict, decision: str) -> str:
     return "allow_once" if decision == "approved" else "abort"
 
 
+def recover_decision(host: "MuseHost", exc: AppServerError, decision: str) -> bool:
+    """Reconcile one specific settlement error by reading durable evidence, never retrying the action."""
+    error = exc.rpc_error if isinstance(exc.rpc_error, dict) else {}
+    request = getattr(exc, "approval_request", None)
+    data = error.get("data") if isinstance(error.get("data"), dict) else {}
+    if not isinstance(request, dict) or error.get("code") != -32603 or data.get("retryable") is not True \
+            or "approval ledger durability fence" not in str(error.get("message", "")):
+        return False
+    for attempt in range(3):
+        host.durable.poll()
+        if host.durable.confirms_decision(request, decision, host.guard.active_turn):
+            return True
+        if attempt < 2:
+            time.sleep(0.1)
+    return False
+
+
+def finalize_durable(host: "MuseHost", outcome: TurnOutcome, errors: list[str]) -> None:
+    """Finalize every terminal from durable parent-run records (also when the live terminal arrived)."""
+    for attempt in range(3):
+        host.durable.poll()
+        logged = host.durable.terminal(outcome.turn_id)
+        totals, usage_error = host.durable.usage(outcome.turn_id, PINNED_MODEL)
+        if host.durable.error:
+            break  # unreadable or malformed evidence fails closed at this boundary
+        # Use the full bounded window even when earlier usage/text already exist:
+        # a final completion can still be landing behind the live terminal.
+        if attempt < 2:
+            time.sleep(0.1)
+    failure = None
+    if host.durable.error:
+        failure = host.durable.error
+    elif logged is None:
+        failure = "durable parent-run terminal is missing"
+    else:
+        outcome.status = logged.get("terminal") or "failed"
+        outcome.completed = outcome.completed or time.time()
+        if isinstance(logged.get("duration_ms"), int):
+            outcome.duration_ms = logged["duration_ms"]
+        text = host.durable.messages.get(outcome.turn_id)
+        if text is not None:
+            outcome.final_message = text
+        totals, usage_error = host.durable.usage(outcome.turn_id, PINNED_MODEL)
+        if totals is not None:
+            outcome.tokens = totals  # authoritative replacement; repeated finalization is idempotent
+            if all(model == PINNED_MODEL for model in outcome.models):
+                outcome.models = {PINNED_MODEL: totals["completions"]}
+        if outcome.status == "completed":
+            failure = usage_error or ("durable final assistant text is missing" if text is None else None)
+    if failure:
+        message = f"durable finalization failed: {failure}"
+        if message not in errors:
+            errors.append(message)
+
+
 def decide_stages(host: "MuseHost", params: dict, decision: str, reason: str, turn: TurnState,
                   emit: Callable[[str, str, str], None]) -> None:
     """Answer the approval's current stage and every later stage of the same approval with one decision.
@@ -643,7 +705,12 @@ def decide_stages(host: "MuseHost", params: dict, decision: str, reason: str, tu
             entry["answer"] = answer
         except (AppServerError, PinViolation) as exc:
             entry["error"] = str(exc)[:300]
-            if not any(marker in str(exc) for marker in _BENIGN_DECIDE):
+            if isinstance(exc, AppServerError) and recover_decision(host, exc, decision):
+                answer = {"terminal": True, "status": "durably_confirmed"}
+                entry["answer"] = answer
+                entry["command_id"] = exc.approval_request["commandId"]
+                turn.warnings.append("approval/decide settlement error; exact command decision confirmed in durable log")
+            elif not any(marker in str(exc) for marker in _BENIGN_DECIDE):
                 turn.errors.append(f"approval/decide failed: {exc}")
         turn.approvals.append(entry)
         if not isinstance(answer, dict) or answer.get("terminal") is not False:
@@ -983,6 +1050,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
         remember_usage(state, usage_after)
         PB.write_private_json(run_dir / "usage-after.json", {"usage": usage_after, "at": PB.now_iso()})
         time.sleep(0.5)   # the durable log lands before the notification
+        finalize_durable(host, outcome, errors)
         audit = audit_session_log(host.log_path, host.log_start, outcome.turn_id if outcome else None,
                                   host.session_id)
     except PinViolation as exc:

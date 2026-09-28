@@ -11,6 +11,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 from creme import muse as M
 from creme import muse_broker as MB
@@ -18,7 +19,8 @@ from creme import muse_client as C
 from creme import model_fit
 from creme import pseudo_broker as PB
 from creme.cli import main
-from creme.codex_app_server import PinViolation
+from creme.codex_app_server import AppServerError, PinViolation
+from creme.muse_log import DurableLog
 
 ROOT = Path(__file__).resolve().parents[2]
 FAKE = ROOT / "scripts/tests/fixtures/muse/fake_muse.py"
@@ -37,6 +39,172 @@ class FakeProcess:
 
 def guard(effort: str = "low", lean: str | None = None) -> C.MuseGuard:
     return C.MuseGuard(FakeProcess(), "s-1", effort, "lean" if lean else "read-only", lean)
+
+
+class DurableRecoveryTest(unittest.TestCase):
+    def event(self, source, cursor="same", method="session/tokenUsage", model=C.PINNED_MODEL):
+        return {"method": method, "params": {"sourceRange": {"first": {"id": source, "sequence": source}},
+                "viewCursor": cursor, "sessionId": "s-1", "turnId": "t-1", "modelId": model,
+                "usage": {"inputTokens": 10, "outputTokens": 2}}}
+
+    def test_live_and_replayed_events_use_source_identity_not_cursor(self):
+        tracker = M.ViewTracker(None)
+        old = self.event(1)
+        new = self.event(2)
+        self.assertTrue(tracker.admit(old))
+        self.assertTrue(tracker.admit(new))  # reused cursor, distinct immutable source
+        self.assertFalse(tracker.admit(self.event(2, cursor="different")))
+        class PageGuard:
+            def request(self, *args, **kwargs):
+                return {"events": [self_event], "nextCursor": None}
+        self_event = self.event(3)
+        host = SimpleNamespace(session_id="s-1", guard=PageGuard())
+        replayed = M.replay_view(host, tracker, "t-1")
+        self.assertEqual(replayed, [self_event])
+        self.assertTrue(tracker.admit(replayed[0]))
+        self.assertEqual(M.replay_view(host, tracker, "t-1"), [])
+
+    def test_item_source_identity_normalizes_turn_location_and_json_key_order(self):
+        live = {"method": "item/completed", "params": {
+            "sourceRange": {"first": {"id": "event", "sequence": 1}, "stream": {"id": "session"}},
+            "viewCursor": "live", "item": {"itemId": "message", "revision": 2, "turnId": "turn"}}}
+        replay = {"method": live["method"], "params": {**live["params"], "turnId": "turn", "viewCursor": "replay",
+            "sourceRange": {"stream": {"id": "session"}, "first": {"sequence": 1, "id": "event"}}}}
+        tracker = M.ViewTracker(None)
+        self.assertTrue(tracker.admit(live))
+        self.assertFalse(tracker.admit(replay))
+        replay["params"]["item"] = {**replay["params"]["item"], "revision": 3}
+        self.assertTrue(tracker.admit(replay))
+        self.assertEqual(AppServerError().args, ())
+        self.assertEqual(AppServerError("one", "two").args, ("one", "two"))
+
+    def test_contributor_event_at_reused_cursor_is_never_skipped(self):
+        tracker, g = M.ViewTracker(None), guard()
+        g.active_turn = "t-1"
+        g.outcome = C.TurnOutcome(turn_id="t-1")
+        for message in (self.event(1), self.event(2, model="muse-spark-1.3-contributor")):
+            if tracker.admit(message):
+                g.observe(message)
+        self.assertTrue(g.guard_failures)
+
+    def records(self, model=C.PINNED_MODEL):
+        def record(event, run="t-1"):
+            return {"payload": {"kind": "run", "run_id": run, "event": event}}
+        return [record({"kind": "model_completed", "model": model,
+                        "usage": {"input_tokens": 10, "output_tokens": 2, "cached_tokens": 4,
+                                  "reasoning_tokens": 1}}),
+                record({"kind": "model_completed", "model": model,
+                        "usage": {"input_tokens": 20, "output_tokens": 3}}, run="child"),
+                record({"kind": "assistant_message_committed", "text": "durable final"}),
+                record({"kind": "terminal", "terminal": "completed"})]
+
+    def test_finalization_replaces_live_totals_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as base:
+            path = Path(base) / "session.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in self.records()))
+            host = SimpleNamespace(durable=DurableLog(path))
+            outcome = C.TurnOutcome(turn_id="t-1")
+            outcome.tokens["prompt"] = 999
+            errors = []
+            M.finalize_durable(host, outcome, errors)
+            M.finalize_durable(host, outcome, errors)
+            self.assertEqual(errors, [])
+            self.assertEqual(outcome.final_message, "durable final")
+            self.assertEqual(outcome.tokens, dict(prompt=10, output=2, total=12, cached=4, reasoning=1,
+                                                  completions=1))
+
+    def test_finalization_waits_for_bounded_late_durable_records(self):
+        records = self.records()
+        class DelayedLog(DurableLog):
+            polls = 0
+            def poll(self):
+                self.polls += 1
+                if self.polls == 2:
+                    for record in records:
+                        self._take(record)
+                return 0
+        log = DelayedLog(None)
+        errors = []
+        outcome = C.TurnOutcome(turn_id="t-1")
+        M.finalize_durable(SimpleNamespace(durable=log), outcome, errors)
+        self.assertEqual(log.polls, 3)
+        self.assertEqual(errors, [])
+        self.assertEqual(outcome.models, {C.PINNED_MODEL: 1})
+
+    def test_finalization_includes_late_extra_completion_after_terminal(self):
+        records = self.records()
+        class LateCompletionLog(DurableLog):
+            polls = 0
+            def poll(self):
+                self.polls += 1
+                if self.polls == 1:
+                    for record in records:
+                        self._take(record)
+                elif self.polls == 2:
+                    self._take(records[0])
+                return 0
+        outcome, errors = C.TurnOutcome(turn_id="t-1"), []
+        M.finalize_durable(SimpleNamespace(durable=LateCompletionLog(None)), outcome, errors)
+        self.assertEqual(errors, [])
+        self.assertEqual(outcome.tokens["completions"], 2)
+        self.assertEqual(outcome.tokens["total"], 24)
+
+    def test_missing_corrupt_and_unattributed_source_fail_closed(self):
+        for shape in ("missing", "corrupt", "unattributed", "usage"):
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as base:
+                path = Path(base) / "session.jsonl"
+                records = self.records(model=None if shape == "unattributed" else C.PINNED_MODEL)
+                if shape == "usage":
+                    del records[0]["payload"]["event"]["usage"]["output_tokens"]
+                if shape != "missing":
+                    path.write_text(("bad JSON\n" if shape == "corrupt" else "") +
+                                    "".join(json.dumps(r) + "\n" for r in records))
+                errors = []
+                M.finalize_durable(SimpleNamespace(durable=DurableLog(path)), C.TurnOutcome(turn_id="t-1"), errors)
+                self.assertTrue(errors)
+
+    def test_partial_append_is_buffered_and_conflicting_decisions_fail_closed(self):
+        with tempfile.TemporaryDirectory() as base:
+            path = Path(base) / "session.jsonl"
+            record = self.records()[0]
+            raw = json.dumps(record) + "\n"
+            path.write_text(raw[:12])
+            log = DurableLog(path)
+            self.assertEqual(log.poll(), 0)
+            self.assertIsNone(log.error)
+            with path.open("a") as handle:
+                handle.write(raw[12:])
+            self.assertEqual(log.poll(), 1)
+            self.assertEqual(log.usage("t-1", C.PINNED_MODEL)[0]["completions"], 1)
+        event = {"kind": "decision_applied", "pending_action_id": "ap", "decision": "abort",
+                 "decided_by_command_id": "cmd"}
+        log = DurableLog(None)
+        log._take({"payload": {"kind": "approval", "run_id": "t-1", "event": dict(event)}})
+        event["decision"] = "approved"
+        log._take({"payload": {"kind": "approval", "run_id": "t-1", "event": event}})
+        self.assertFalse(log.confirms_decision({"commandId": "cmd", "approvalId": "ap", "sessionId": "s-1"},
+                                              "approved", "t-1"))
+        self.assertIn("conflicting", log.error)
+
+    def test_settlement_recovery_requires_exact_authoritative_decision(self):
+        request = {"commandId": "cmd", "sessionId": "s-1", "approvalId": "ap"}
+        for shape in ("match", "missing", "command", "decision", "approval", "run", "session"):
+            with self.subTest(shape=shape):
+                log = DurableLog(None)
+                event = {"kind": "decision_applied", "pending_action_id": "ap", "decision": "approved",
+                         "decided_by_command_id": "cmd", "session_stream": {"id": "s-1"}}
+                run = "t-1"
+                if shape == "command": event["decided_by_command_id"] = "other"
+                if shape == "decision": event["decision"] = "abort"
+                if shape == "approval": event["pending_action_id"] = "other"
+                if shape == "run": run = "other"
+                if shape == "session": event["session_stream"]["id"] = "other"
+                if shape != "missing": log._take({"payload": {"kind": "approval", "run_id": run, "event": event}})
+                exc = AppServerError("fence", rpc_error={"code": -32603, "data": {"retryable": True},
+                    "message": "approval ledger durability fence"})
+                exc.approval_request = request
+                host = SimpleNamespace(durable=log, guard=SimpleNamespace(active_turn="t-1"))
+                self.assertEqual(M.recover_decision(host, exc, "approved"), shape == "match")
 
 
 class ModelPinGuardTest(unittest.TestCase):
@@ -314,6 +482,26 @@ class RunTest(FakeMuseHarness):
                      "usage-after.json", "verdict.json", "audit.json", "bootstrap.json", "transcript.jsonl"):
             self.assertTrue((run_dir / name).exists(), name)
         self.assertEqual(json.loads((run_dir / "audit.json").read_text())["verdict"], "PASS")
+
+    def test_live_terminal_recovers_missing_final_view_and_complete_usage(self):
+        self.scenario["turn"].update(drop_final_view=True, text="durable-only final")
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+        self.assertIsNotNone(record["last_message"])
+        self.assertEqual(Path(record["last_message"]).read_text(), "durable-only final\n")
+        self.assertEqual(record["tokens"], dict(prompt=100, output=7, total=107, cached=40, reasoning=3,
+                                               completions=1))
+
+    def test_settlement_fence_is_confirmed_once_or_remains_failed(self):
+        for fence in ("match", "mismatch", "wrong-decision"):
+            with self.subTest(fence=fence):
+                self.scenario["turn"].update(decision_fence=fence, approvals=[{"kind": "shell", "command": "ls"}])
+                self.write_scenario()
+                before = len(self.sent("approval/decide"))
+                code, record = self.run_brief()
+                self.assertEqual(record["verdict"], "PASS" if fence == "match" else "FAILED", record)
+                self.assertEqual(len(self.sent("approval/decide")) - before, 1)
 
     def test_a_served_contributor_model_fails_closed_and_trips(self):
         self.scenario["served_model"] = "muse-spark-1.3-contributor"
@@ -647,6 +835,17 @@ class BrokerTest(FakeMuseHarness):
 
     def stage_decisions(self) -> list:
         return [call["stage_decision"] for call in self.calls() if "stage_decision" in call]
+
+    def test_live_terminal_recovers_durable_final_in_broker(self):
+        self.scenario["turn"].update(drop_final_view=True, text="broker durable final")
+        self.write_scenario()
+        session = self.start()
+        code, lines, record = self.wait(session)
+        turn = record["turns"][0]
+        self.assertEqual((code, turn["verdict"]), (0, "PASS"), lines)
+        self.assertIsNotNone(turn["last_message"])
+        self.assertEqual(Path(turn["last_message"]).read_text(), "broker durable final\n")
+        self.assertEqual(turn["tokens"]["prompt"], 100)
 
     def test_projection_failure_falls_back_to_the_durable_log(self):
         # listPending, session/read and view/page all fail once the view is gone (measured 2026-09-28);

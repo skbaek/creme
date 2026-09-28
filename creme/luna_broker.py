@@ -27,15 +27,12 @@ child of the broker and exits when the broker's pipe closes.
 from __future__ import annotations
 
 import datetime as _dt
-import fcntl
 import json
 import os
 import re
 import secrets
 import signal
 import socket
-import stat
-import struct
 import subprocess
 import sys
 import threading
@@ -45,13 +42,12 @@ from typing import Any, Callable, Optional
 
 from . import luna_lean
 from . import luna_reserve as L
+from . import pseudo_broker as PB
 from .codex_app_server import APPROVAL_METHODS, AppServerError, PinViolation, decline_server_requests
 
 
-DETAIL_LEVELS = ("silent", "summary", "live")
-DEFAULT_DETAIL = "silent"
-_EVENT_RANK = {"attention": 0, "summary": 1, "live": 2}
-_DETAIL_RANK = {"silent": 0, "summary": 1, "live": 2}
+DETAIL_LEVELS = PB.DETAIL_LEVELS
+DEFAULT_DETAIL = PB.DEFAULT_DETAIL
 
 # ``unclean``: a Lean session whose wind-down did not report OK when it stopped.
 TERMINAL_STATES = ("stopped", "refused", "failed", "tripped", "lost", "unclean")
@@ -67,15 +63,15 @@ ROLLOUT_WAIT_ENV = "CREME_LUNA_RESERVE_ROLLOUT_WAIT_SECONDS"
 MAX_LEAN_SESSIONS = 2
 MAX_LEAN_SESSIONS_ENV = "CREME_LUNA_MAX_LEAN_SESSIONS"
 
-MAX_REQUEST_BYTES = 256 * 1024
-MAX_SOCKET_PATH_BYTES = 100
-LINE_WIDTH = 200
-STOP_WAIT_SECONDS = 60.0
+MAX_REQUEST_BYTES = PB.MAX_REQUEST_BYTES
+MAX_SOCKET_PATH_BYTES = PB.MAX_SOCKET_PATH_BYTES
+LINE_WIDTH = PB.LINE_WIDTH
+STOP_WAIT_SECONDS = PB.STOP_WAIT_SECONDS
 
-EXIT_USAGE = 2
-EXIT_ATTENTION = 20
-EXIT_INTERRUPTED = 21
-EXIT_TIMEOUT = 124
+EXIT_USAGE = PB.EXIT_USAGE
+EXIT_ATTENTION = PB.EXIT_ATTENTION
+EXIT_INTERRUPTED = PB.EXIT_INTERRUPTED
+EXIT_TIMEOUT = PB.EXIT_TIMEOUT
 
 _SESSION_ID = re.compile(r"^lr-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
 _APPROVAL_ID = re.compile(r"^a[0-9]{1,6}$")
@@ -95,9 +91,6 @@ _DECLARATION = re.compile(
 _APPROVAL_SUMMARY = re.compile(r"^command `([^`]*)` in (.*?)(?: reason: .*)?$")
 
 
-_SPAWNED: list[subprocess.Popen] = []
-
-
 def _max_lean_sessions(environ: dict) -> int:
     """Return the bounded Lean-session cap, failing safe on bad configuration."""
     try:
@@ -107,97 +100,29 @@ def _max_lean_sessions(environ: dict) -> int:
     return value if 1 <= value <= 4 else MAX_LEAN_SESSIONS
 
 
-class BrokerError(RuntimeError):
-    """A broker or client condition with a user-facing reason."""
+BrokerError = PB.BrokerError
 
 
 # ---------------------------------------------------------------------------
-# Files and permissions
+# Files and permissions (shared with every brokered pseudo-subagent)
 
-
-def broker_dir(state: Path) -> Path:
-    return state / "broker"
-
-
-def sessions_dir(state: Path) -> Path:
-    return state / "sessions"
-
-
-def socket_path(state: Path) -> Path:
-    return broker_dir(state) / "broker.sock"
-
-
-def info_path(state: Path) -> Path:
-    return broker_dir(state) / "broker.json"
-
-
-def private_dir(path: Path) -> Path:
-    """Create or verify a directory only this user can enter (0700, owned, no symlink)."""
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = os.lstat(path)
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise BrokerError(f"{path} is not a plain directory")
-    if info.st_uid != os.getuid():
-        raise BrokerError(f"{path} is not owned by this user")
-    if stat.S_IMODE(info.st_mode) & 0o077:
-        os.chmod(path, 0o700)
-    return path
-
-
-def write_private_json(path: Path, value: Any) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, path)
-
-
-def read_json(path: Path) -> Optional[dict]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def one_line(text: Any, width: int = LINE_WIDTH) -> str:
-    flat = " | ".join(part.strip() for part in str(text).splitlines() if part.strip())
-    return flat if len(flat) <= width else flat[: width - 3] + "..."
-
-
-def _now_iso() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+broker_dir = PB.broker_dir
+sessions_dir = PB.sessions_dir
+socket_path = PB.socket_path
+info_path = PB.info_path
+private_dir = PB.private_dir
+write_private_json = PB.write_private_json
+read_json = PB.read_json
+one_line = PB.one_line
+_now_iso = PB.now_iso
+peer_uid = PB.peer_uid
 
 
 def code_digest(module_root: Path) -> str:
     """Digest of the modules a broker runs, so a client never drives a broker on other code."""
-    import hashlib
-
-    digest = hashlib.sha256()
-    for relative in ("creme/luna_broker.py", "creme/luna_reserve.py", "creme/codex_app_server.py",
-                     "creme/luna_lean.py", "templates/luna-reserve/preamble.md",
-                     "templates/luna-reserve/lean-preamble.md"):
-        try:
-            digest.update((module_root / relative).read_bytes())
-        except OSError:
-            digest.update(b"missing:" + relative.encode())
-    return digest.hexdigest()[:16]
-
-
-def peer_uid(connection: socket.socket) -> Optional[int]:
-    """The connecting process's uid, or None when the platform cannot say."""
-    try:
-        if sys.platform == "darwin":
-            # getsockopt(SOL_LOCAL=0, LOCAL_PEERCRED=1) -> struct xucred
-            raw = connection.getsockopt(0, 1, 76)
-            _version, uid = struct.unpack_from("=II", raw)
-            return uid
-        if hasattr(socket, "SO_PEERCRED"):
-            raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-            return struct.unpack("3i", raw)[1]
-    except OSError:
-        return None
-    return None
+    return PB.file_digest(module_root, (
+        "creme/luna_broker.py", "creme/luna_reserve.py", "creme/codex_app_server.py", "creme/luna_lean.py",
+        "creme/pseudo_broker.py", "templates/luna-reserve/preamble.md", "templates/luna-reserve/lean-preamble.md"))
 
 
 # ---------------------------------------------------------------------------
@@ -205,38 +130,14 @@ def peer_uid(connection: socket.socket) -> Optional[int]:
 
 
 def load_record(state: Path, session_id: str) -> Optional[dict]:
-    if not _SESSION_ID.match(session_id or ""):
-        return None
-    return read_json(sessions_dir(state) / session_id / "session.json")
+    return PB.load_record(state, session_id, _SESSION_ID)
 
 
 def all_records(state: Path) -> list[dict]:
-    root = sessions_dir(state)
-    if not root.is_dir():
-        return []
-    records = [read_json(path) for path in sorted(root.glob("lr-*/session.json"))]
-    return sorted((record for record in records if record), key=lambda record: record.get("id", ""))
+    return PB.all_records(state, "lr-")
 
 
-def read_events(state: Path, session_id: str, offset: int = 0) -> tuple[list[dict], int]:
-    path = sessions_dir(state) / session_id / "events.jsonl"
-    try:
-        with path.open("rb") as handle:
-            handle.seek(offset)
-            data = handle.read()
-    except OSError:
-        return [], offset
-    events = []
-    consumed = 0
-    for raw in data.splitlines(keepends=True):
-        if not raw.endswith(b"\n"):
-            break
-        consumed += len(raw)
-        try:
-            events.append(json.loads(raw))
-        except ValueError:
-            continue
-    return events, offset + consumed
+read_events = PB.read_events
 
 
 def _declaration_headers(source: bytes) -> dict[str, bytes]:
@@ -384,20 +285,15 @@ def build_approval_failure(record: dict, approval: dict, header_base: Optional[s
     return failures[0] if failures else None
 
 
-def visible(event: dict, detail: str) -> bool:
-    return _EVENT_RANK.get(event.get("level"), 2) <= _DETAIL_RANK.get(detail, 0)
-
-
-def format_event(event: dict) -> str:
-    stamp = time.strftime("%H:%M:%S", time.localtime(event.get("t", 0)))
-    return one_line(f"[{event.get('seq')}] {stamp} {event.get('kind')}: {event.get('text')}")
+visible = PB.visible
+format_event = PB.format_event
 
 
 # ---------------------------------------------------------------------------
 # Broker-side session
 
 
-class BrokerSession:
+class BrokerSession(PB.SessionRecord):
     """One guarded app-server and thread held by the broker."""
 
     def __init__(self, broker: "Broker", session_id: str, record: dict) -> None:
@@ -423,38 +319,8 @@ class BrokerSession:
         self.last_activity = time.monotonic()
         self.pump_thread: Optional[threading.Thread] = None
 
-    # -- record and events ----------------------------------------------
-    def persist(self) -> None:
-        with self.data_lock:
-            self.record["updated"] = _now_iso()
-            write_private_json(self.dir / "session.json", self.record)
-
-    def set_state(self, value: str, note: Optional[str] = None) -> None:
-        with self.data_lock:
-            self.record["state"] = value
-            if note is not None:
-                self.record["note"] = note
-            self.persist()
-
-    def emit(self, level: str, kind: str, text: str) -> None:
-        with self.data_lock:
-            self.seq += 1
-            event = {"seq": self.seq, "t": round(time.time(), 3), "level": level, "kind": kind,
-                     "text": one_line(text, 400)}
-            descriptor = os.open(self.dir / "events.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(event, sort_keys=True) + "\n")
-            self.record["last_event"] = {"seq": self.seq, "kind": kind, "text": one_line(text, 120)}
-            if level == "attention":
-                self.record["last_attention_seq"] = self.seq
-            self.persist()
-
     def is_open(self) -> bool:
         return not self.closed and self.server is not None
-
-    @property
-    def state(self) -> str:
-        return self.record.get("state", "")
 
     # -- opening --------------------------------------------------------
     def open(self, brief: Optional[str], resume_thread: Optional[str]) -> tuple[int, dict]:
@@ -1138,49 +1004,19 @@ class Broker:
 
     # -- lifecycle ------------------------------------------------------
     def serve(self) -> int:
-        os.umask(0o077)
-        private_dir(self.state)
-        private_dir(broker_dir(self.state))
-        private_dir(sessions_dir(self.state))
-        path = socket_path(self.state)
-        if len(os.fsencode(str(path))) > MAX_SOCKET_PATH_BYTES:
-            raise BrokerError(f"socket path is too long for AF_UNIX: {path}; set {L.STATE_ENV} to a shorter path")
-        if path.exists() or path.is_symlink():
-            if not stat.S_ISSOCK(os.lstat(path).st_mode):
-                raise BrokerError(f"{path} exists and is not a socket")
-            path.unlink()
+        listener = PB.listen(self.state, L.STATE_ENV)
         self.reconcile_registry()
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(str(path))
-        os.chmod(path, 0o600)
-        listener.listen(16)
-        listener.settimeout(1.0)
         self.listener = listener
         write_private_json(info_path(self.state), {
-            "pid": os.getpid(), "instance": self.instance, "socket": str(path), "started": _now_iso(),
-            "uid": os.getuid(), "module_root": str(self.module_root), "code": self.code,
+            "pid": os.getpid(), "instance": self.instance, "socket": str(socket_path(self.state)),
+            "started": _now_iso(), "uid": os.getuid(), "module_root": str(self.module_root), "code": self.code,
         })
-        signal.signal(signal.SIGTERM, lambda *_: self.stopping.set())
         try:
-            while not self.stopping.is_set():
-                try:
-                    connection, _ = listener.accept()
-                except socket.timeout:
-                    self.check_idle()
-                    continue
-                except OSError:
-                    break
-                threading.Thread(target=self.handle, args=(connection,), daemon=True).start()
+            PB.serve_loop(listener, self.stopping, self.check_idle, self.handle)
         finally:
             self.stop_all("broker shutdown")
             listener.close()
-            info = read_json(info_path(self.state)) or {}
-            if info.get("instance") == self.instance:
-                for leftover in (path, info_path(self.state)):
-                    try:
-                        leftover.unlink()
-                    except OSError:
-                        pass
+            PB.remove_own_socket(self.state, self.instance)
         return 0
 
     def check_idle(self) -> None:
@@ -1263,42 +1099,15 @@ class Broker:
 
     # -- requests -------------------------------------------------------
     def handle(self, connection: socket.socket) -> None:
-        with connection:
-            connection.settimeout(30)
-            uid = self.peer_uid_function(connection)
-            if uid is not None and uid != os.getuid():
-                self._reply(connection, {"ok": False, "code": EXIT_USAGE, "error": "peer uid refused"})
-                return
-            data = b""
-            try:
-                while not data.endswith(b"\n") and len(data) <= MAX_REQUEST_BYTES:
-                    chunk = connection.recv(65536)
-                    if not chunk:
-                        break
-                    data += chunk
-                request = json.loads(data)
-                if not isinstance(request, dict):
-                    raise ValueError("request is not an object")
-            except (OSError, ValueError) as exc:
-                self._reply(connection, {"ok": False, "code": EXIT_USAGE, "error": f"bad request: {exc}"})
-                return
+        def touch() -> None:
             self.last_request = time.monotonic()
-            connection.settimeout(None)
-            try:
-                reply = self.dispatch(request)
-            except (BrokerError, L.LunaReserveError) as exc:
-                reply = {"ok": False, "code": L.EXIT_PREFLIGHT_REFUSED, "error": str(exc)}
-            except Exception as exc:  # the broker must answer, not die
-                reply = {"ok": False, "code": L.EXIT_CODEX_FAILED, "error": f"broker error: {exc!r}"}
-            self.last_request = time.monotonic()
-            self._reply(connection, reply)
 
-    @staticmethod
-    def _reply(connection: socket.socket, reply: dict) -> None:
-        try:
-            connection.sendall((json.dumps(reply, sort_keys=True) + "\n").encode("utf-8"))
-        except OSError:
-            pass
+        def failure(exc: Exception) -> dict:
+            if isinstance(exc, (BrokerError, L.LunaReserveError)):
+                return {"ok": False, "code": L.EXIT_PREFLIGHT_REFUSED, "error": str(exc)}
+            return {"ok": False, "code": L.EXIT_CODEX_FAILED, "error": f"broker error: {exc!r}"}
+
+        PB.handle_connection(connection, self.peer_uid_function, self.dispatch, touch, failure)
 
     def session(self, session_id: Any) -> BrokerSession:
         with self.lock:
@@ -1536,150 +1345,20 @@ def reap_orphan_app_server(pid: Any) -> bool:
 # Client
 
 
-def call(state: Path, op: str, timeout: float = 180.0, **arguments: Any) -> dict:
-    path = socket_path(state)
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    connection.settimeout(timeout)
-    try:
-        connection.connect(str(path))
-        connection.sendall((json.dumps({"op": op, **arguments}) + "\n").encode("utf-8"))
-        data = b""
-        while not data.endswith(b"\n"):
-            chunk = connection.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-    finally:
-        connection.close()
-    reply = json.loads(data)
-    if not isinstance(reply, dict):
-        raise ValueError("broker reply is not an object")
-    return reply
-
-
-def probe_broker(state: Path) -> Optional[dict]:
-    """A live broker whose ping matches its recorded pid and instance, or None."""
-    info = read_json(info_path(state))
-    if info is None:
-        return None
-    try:
-        reply = call(state, "ping", timeout=3)
-    except (OSError, ValueError):
-        return None
-    if reply.get("instance") != info.get("instance") or reply.get("pid") != info.get("pid") \
-            or reply.get("uid") != os.getuid():
-        return None
-    return reply
-
-
-def _process_command(pid: int) -> str:
-    try:
-        completed = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
-                                   check=False)
-    except OSError:
-        return ""
-    return completed.stdout.strip()
-
-
-def _pid_alive(pid: Any) -> bool:
-    if not isinstance(pid, int) or pid <= 1:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    try:
-        completed = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
-                                   check=False)
-    except OSError:
-        return True
-    status = completed.stdout.strip()
-    return bool(status) and not status.startswith("Z")  # an exited, unreaped child is not alive
-
-
-def replace_stale_broker(state: Path, info: Optional[dict]) -> list[str]:
-    """Stop a recorded broker that no longer answers, only if its command line carries its instance token."""
-    notes = []
-    if info and _pid_alive(info.get("pid")):
-        pid = info["pid"]
-        if info.get("instance") and f"--instance {info['instance']}" in _process_command(pid):
-            os.kill(pid, signal.SIGTERM)
-            deadline = time.monotonic() + 5
-            while _pid_alive(pid) and time.monotonic() < deadline:
-                time.sleep(0.1)
-            if _pid_alive(pid) and f"--instance {info['instance']}" in _process_command(pid):
-                os.kill(pid, signal.SIGKILL)
-            notes.append(f"stopped unresponsive broker pid {pid}")
-        else:
-            notes.append(f"recorded broker pid {pid} is another process; not signalled")
-    path = socket_path(state)
-    if path.is_symlink() or path.exists():
-        if not stat.S_ISSOCK(os.lstat(path).st_mode):
-            raise BrokerError(f"{path} exists and is not a socket")
-        path.unlink()
-        notes.append("removed stale socket")
-    try:
-        info_path(state).unlink()
-    except OSError:
-        pass
-    return notes
+call = PB.call
+probe_broker = PB.probe_broker
+_process_command = PB.process_command
+_pid_alive = PB.pid_alive
+replace_stale_broker = PB.replace_stale_broker
 
 
 def ensure_broker(module_root: Path, environ: dict, start_timeout: float = 20.0) -> dict:
     """Return a verified live broker, replacing a stale one and starting a new one if needed."""
-    state = L.state_root(module_root, environ)
-    private_dir(state)
-    directory = private_dir(broker_dir(state))
-    private_dir(sessions_dir(state))
-    descriptor = os.open(directory / "broker.lock", os.O_WRONLY | os.O_CREAT, 0o600)
-    with os.fdopen(descriptor, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        reply = probe_broker(state)
-        notes: list[str] = []
-        if reply is not None:
-            if reply.get("module_root") == str(module_root) and reply.get("code_digest") == code_digest(module_root):
-                return reply
-            if reply.get("live"):
-                raise BrokerError(
-                    f"the running broker (pid {reply.get('pid')}) runs other code ({reply.get('module_root')}) and "
-                    f"holds open sessions; stop them or run shutdown first")
-            call(state, "shutdown", timeout=STOP_WAIT_SECONDS)
-            deadline = time.monotonic() + 10
-            while _pid_alive(reply.get("pid")) and time.monotonic() < deadline:
-                time.sleep(0.1)
-            notes.append(f"replaced idle broker pid {reply.get('pid')} running other code")
-        notes += replace_stale_broker(state, read_json(info_path(state)))
-        instance = secrets.token_hex(8)
-        env = dict(environ)
-        env["PYTHONPATH"] = str(module_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        log = os.open(directory / "broker.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        try:
-            process = subprocess.Popen(
-                [sys.executable, "-m", "creme", "luna-reserve", "broker-serve", "--instance", instance],
-                cwd=str(module_root), env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                start_new_session=True,
-            )
-        finally:
-            os.close(log)
-        _SPAWNED.append(process)  # keep the handle so a long-lived caller can reap it
-        deadline = time.monotonic() + start_timeout
-        while time.monotonic() < deadline:
-            reply = probe_broker(state)
-            if reply is not None and reply.get("instance") == instance:
-                reply["notes"] = notes + ["started broker"]
-                return reply
-            if process.poll() is not None:
-                break
-            time.sleep(0.1)
-        tail = ""
-        try:
-            tail = (directory / "broker.log").read_text(encoding="utf-8")[-600:]
-        except OSError:
-            pass
-        raise BrokerError(f"broker did not start: {one_line(tail, 300)}")
+    return PB.ensure_broker(
+        L.state_root(module_root, environ), module_root, environ, code_digest(module_root),
+        lambda instance: [sys.executable, "-m", "creme", "luna-reserve", "broker-serve", "--instance", instance],
+        start_timeout,
+    )
 
 
 def serve_main(module_root: Path, instance: str, environ: Optional[dict] = None) -> int:
@@ -1706,31 +1385,11 @@ def serve_main(module_root: Path, instance: str, environ: Optional[dict] = None)
 
 
 def _refusal_lines(reply: dict) -> list[str]:
-    lines = [f"verdict={reply.get('verdict') or 'ERROR'} exit={reply.get('code')}"]
-    if reply.get("error"):
-        lines.append(f"error: {one_line(reply['error'])}")
-    lines.extend(f"refused: {one_line(item)}" for item in (reply.get("refusals") or [])[:8])
-    lines.extend(f"failure: {one_line(item)}" for item in (reply.get("failures") or [])[:8])
-    lines.extend(f"codex: {one_line(item)}" for item in (reply.get("errors") or [])[:4])
-    if reply.get("message"):
-        lines.append(reply["message"])
-    return lines
+    return PB.refusal_lines(SPEC, reply)
 
 
 def _broker_call(module_root: Path, environ: dict, op: str, autostart: bool, **arguments: Any) -> dict:
-    state = L.state_root(module_root, environ)
-    try:
-        if autostart:
-            ensure_broker(module_root, environ)
-        elif probe_broker(state) is None:
-            session = arguments.get("session")
-            record = load_record(state, str(session)) if session else None
-            detail = f"; session {session} is {record.get('state')}" if record else ""
-            return {"ok": False, "code": L.EXIT_CODEX_FAILED,
-                    "error": f"no Luna reserve broker is running{detail}; resume its thread in a new session"}
-        return call(state, op, **arguments)
-    except (OSError, ValueError, BrokerError) as exc:
-        return {"ok": False, "code": L.EXIT_CODEX_FAILED, "error": f"broker unavailable: {exc}"}
+    return PB.broker_call(SPEC, module_root, environ, op, autostart, ensure_broker, **arguments)
 
 
 def _lean_client_refusals(module_root: Path, lean: Optional[str], target: Optional[str]) -> list[str]:
@@ -1792,25 +1451,7 @@ def _open_output(reply: dict) -> tuple[int, list[str], dict]:
 
 
 def cmd_simple(module_root: Path, environ: dict, op: str, session: str, **arguments: Any) -> tuple[int, list[str], dict]:
-    reply = _broker_call(module_root, environ, op, False, session=session, **arguments)
-    code = int(reply.get("code", L.EXIT_CODEX_FAILED))
-    if not reply.get("session"):
-        return code, _refusal_lines(reply), reply
-    head = f"session={reply['session']} state={reply.get('state')} {str(reply.get('verdict', '')).lower()}"
-    if reply.get("turn"):
-        head += f" turn={reply['turn']}"
-    if reply.get("approval"):
-        head += f" {reply['approval']}={reply.get('decision')}"
-    if reply.get("detail"):
-        head += f" detail={reply['detail']}"
-    if reply.get("stop_audit"):
-        head += f" stop_audit={reply['stop_audit']}"
-    if reply.get("wind_down"):
-        head += f" wind_down={reply['wind_down']}"
-    lines = [head]
-    if code != 0:
-        lines.extend(_refusal_lines(reply)[1:])
-    return code, lines, reply
+    return PB.simple_output(SPEC, _broker_call(module_root, environ, op, False, session=session, **arguments))
 
 
 def _verdict_code(record: dict) -> int:
@@ -1874,33 +1515,12 @@ def session_lines(record: dict, excerpt_lines: int = 3) -> list[str]:
     return lines
 
 
-def _broker_alive_for(state: Path, record: dict) -> bool:
-    reply = probe_broker(state)
-    return reply is not None and reply.get("instance") == record.get("broker_instance")
+_broker_alive_for = PB.broker_alive_for
 
 
 def cmd_wait(module_root: Path, environ: dict, session: str, timeout: float,
              poll_seconds: float = 0.5) -> tuple[int, list[str], dict]:
-    state = L.state_root(module_root, environ)
-    deadline = time.monotonic() + timeout
-    next_liveness = 0.0
-    while True:
-        record = load_record(state, session)
-        if record is None:
-            return EXIT_USAGE, [f"no session {session}"], {}
-        current = record.get("state")
-        if current in TERMINAL_STATES or current == "idle" or record.get("pending_approvals"):
-            return _verdict_code(record), session_lines(record), record
-        now = time.monotonic()
-        if now >= next_liveness:
-            next_liveness = now + 5
-            if not _broker_alive_for(state, record):
-                lines = session_lines(record)
-                lines.append("broker is gone; the session is lost; resume its thread in a new session")
-                return L.EXIT_CODEX_FAILED, lines, record
-        if now > deadline:
-            return EXIT_TIMEOUT, session_lines(record) + [f"timeout after {timeout:g}s; still {current}"], record
-        time.sleep(poll_seconds)
+    return PB.cmd_wait(SPEC, module_root, environ, session, timeout, poll_seconds)
 
 
 def cmd_approve_builds(module_root: Path, environ: dict, session: str, header_base: Optional[str],
@@ -1952,38 +1572,7 @@ def cmd_approve_builds(module_root: Path, environ: dict, session: str, header_ba
 
 def cmd_events(module_root: Path, environ: dict, session: str, follow: bool, last: int, since: int,
                emit: Callable[[str], None], poll_seconds: float = 0.5, timeout: Optional[float] = None) -> int:
-    state = L.state_root(module_root, environ)
-    record = load_record(state, session)
-    if record is None:
-        emit(f"no session {session}")
-        return EXIT_USAGE
-    if not follow:
-        events, _ = read_events(state, session)
-        shown = [event for event in events if event.get("seq", 0) > since and visible(event, record.get("detail"))]
-        for event in shown[-max(1, min(last, 200)):]:
-            emit(format_event(event))
-        return L.EXIT_OK
-    offset = 0
-    deadline = time.monotonic() + timeout if timeout else None
-    next_liveness = time.monotonic() + 5
-    while True:
-        record = load_record(state, session) or record
-        events, offset = read_events(state, session, offset)
-        for event in events:
-            if event.get("seq", 0) > since and visible(event, record.get("detail")):
-                emit(format_event(event))
-        if record.get("state") in TERMINAL_STATES:
-            emit(f"session {session} ended: {record.get('state')}")
-            return _verdict_code(record)
-        now = time.monotonic()
-        if now >= next_liveness:
-            next_liveness = now + 5
-            if not _broker_alive_for(state, record):
-                emit(f"session {session} lost: the broker is gone")
-                return L.EXIT_CODEX_FAILED
-        if deadline is not None and now > deadline:
-            return EXIT_TIMEOUT
-        time.sleep(poll_seconds)
+    return PB.cmd_events(SPEC, module_root, environ, session, follow, last, since, emit, poll_seconds, timeout)
 
 
 def cmd_read(module_root: Path, environ: dict, session: str, items: int, lines: int) -> tuple[int, list[str], dict]:
@@ -2022,47 +1611,23 @@ def cmd_read(module_root: Path, environ: dict, session: str, items: int, lines: 
 
 
 def cmd_list(module_root: Path, environ: dict, limit: int) -> tuple[int, list[str], dict]:
-    state = L.state_root(module_root, environ)
-    reply = probe_broker(state)
-    live = set((reply or {}).get("live") or [])
-    records = all_records(state)[-max(1, min(limit, 50)):]
-    lines = [f"broker={'pid ' + str(reply['pid']) if reply else 'not running'} sessions={len(all_records(state))} "
-             f"tripwire={'PRESENT' if L.tripwire_path(state).exists() else 'absent'}"]
-    for record in records:
-        current = record.get("state")
-        if current in OPEN_STATES and record.get("id") not in live:
-            current = "lost"
-        last = (record.get("last_event") or {}).get("text") or ""
-        lines.append(one_line(
-            f"{record.get('id')} {current} thread={record.get('thread_id')} {record.get('mode')} "
-            f"turns={len(record.get('turns') or [])} pending={len(record.get('pending_approvals') or [])} "
-            f"target={record.get('target')} last={last}", 240))
-    return L.EXIT_OK, lines, {"broker": reply, "sessions": records}
+    return PB.cmd_list(SPEC, module_root, environ, limit,
+                       lambda record: f"thread={record.get('thread_id')} {record.get('mode')}")
 
 
 def cmd_detail(module_root: Path, environ: dict, session: str, level: str) -> tuple[int, list[str], dict]:
-    state = L.state_root(module_root, environ)
-    if level not in DETAIL_LEVELS:
-        return EXIT_USAGE, [f"detail must be one of {', '.join(DETAIL_LEVELS)}"], {}
-    record = load_record(state, session)
-    if record is None:
-        return EXIT_USAGE, [f"no session {session}"], {}
-    if record.get("state") in OPEN_STATES and probe_broker(state) is not None:
-        return cmd_simple(module_root, environ, "detail", session, level=level)
-    record["detail"] = level
-    write_private_json(sessions_dir(state) / session / "session.json", record)
-    return L.EXIT_OK, [f"session={session} state={record.get('state')} detail={level}"], record
+    return PB.cmd_detail(SPEC, module_root, environ, session, level, ensure_broker)
 
 
 def cmd_shutdown(module_root: Path, environ: dict) -> tuple[int, list[str], dict]:
-    state = L.state_root(module_root, environ)
-    if probe_broker(state) is None:
-        info = read_json(info_path(state))
-        notes = replace_stale_broker(state, info) if info else []
-        return L.EXIT_OK, ["no broker is running"] + notes, {}
-    info = read_json(info_path(state)) or {}
-    reply = call(state, "shutdown", timeout=STOP_WAIT_SECONDS * 3)
-    deadline = time.monotonic() + 10
-    while _pid_alive(info.get("pid")) and time.monotonic() < deadline:
-        time.sleep(0.1)
-    return L.EXIT_OK, [f"broker pid {info.get('pid')} shut down; sessions stopped={reply.get('stopped')}"], reply
+    return PB.cmd_shutdown(SPEC, module_root, environ)
+
+
+SPEC = PB.ClientSpec(
+    command="luna-reserve", display="Luna reserve", state_root=L.state_root, session_pattern=_SESSION_ID,
+    session_prefix="lr-", verdict_code=_verdict_code, session_lines=session_lines,
+    exit_ok=L.EXIT_OK, exit_refused=L.EXIT_PREFLIGHT_REFUSED, exit_failed=L.EXIT_CODEX_FAILED,
+    server_label="codex", resume_hint="resume its thread in a new session",
+    list_header=lambda state: f"tripwire={'PRESENT' if L.tripwire_path(state).exists() else 'absent'}",
+    open_states=OPEN_STATES, terminal_states=TERMINAL_STATES,
+)

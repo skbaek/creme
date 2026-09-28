@@ -173,6 +173,20 @@ def decline_server_requests(method: str, params: Any, request_id: Any = None) ->
 
 
 class AppServerProcess:
+    """Line-delimited JSON-RPC over a child's stdio (the transport, not the policy).
+
+    A subclass for another server sets ``subcommand``, ``label``, ``jsonrpc``
+    (the envelope version field, when the protocol wants one) and
+    ``initialize_params``; ``creme.muse_client`` does so for ``muse serve``.
+    """
+
+    subcommand = "app-server"
+    label = "codex app-server"
+    jsonrpc: Optional[str] = None
+
+    def initialize_params(self, client_name: str) -> dict:
+        return {"clientInfo": {"name": client_name, "title": "Creme", "version": "1"}}
+
     def __init__(self, binary: Path, arguments: list[str], env: dict,
                  transcript: Optional[TextIO] = None,
                  server_request_handler: ServerRequestHandler = decline_server_requests,
@@ -196,16 +210,14 @@ class AppServerProcess:
     def start(self, client_name: str = "creme") -> dict:
         try:
             self._process = subprocess.Popen(
-                [str(self.binary), "app-server", *self.arguments],
+                [str(self.binary), self.subcommand, *self.arguments],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr if self.stderr is not None else subprocess.DEVNULL,
                 text=True, bufsize=1, env=self.env,
             )
         except OSError as exc:
-            raise AppServerError(f"cannot start codex app-server: {exc}")
+            raise AppServerError(f"cannot start {self.label}: {exc}")
         threading.Thread(target=self._read_loop, daemon=True).start()
-        result = self.request("initialize", {
-            "clientInfo": {"name": client_name, "title": "Creme", "version": "1"},
-        })
+        result = self.request("initialize", self.initialize_params(client_name))
         self.notify("initialized", None)
         return result
 
@@ -249,14 +261,16 @@ class AppServerProcess:
     # -- wire -----------------------------------------------------------
     def _send(self, message: dict) -> None:
         if self._process is None or self._process.stdin is None or self._closed:
-            raise AppServerError("codex app-server is not running")
+            raise AppServerError(f"{self.label} is not running")
+        if self.jsonrpc is not None:
+            message = {"jsonrpc": self.jsonrpc, **message}
         self._record("out", message)
         try:
             with self._write_lock:
                 self._process.stdin.write(json.dumps(message) + "\n")
                 self._process.stdin.flush()
         except (OSError, ValueError) as exc:
-            raise AppServerError(f"codex app-server write failed: {exc}")
+            raise AppServerError(f"{self.label} write failed: {exc}")
 
     def _read_loop(self) -> None:
         assert self._process is not None and self._process.stdout is not None
@@ -317,13 +331,13 @@ class AppServerProcess:
             while identifier not in self._responses:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise AppServerError(f"codex app-server did not answer {method}")
+                    raise AppServerError(f"{self.label} did not answer {method}")
                 if self._process is not None and self._process.poll() is not None:
-                    raise AppServerError(f"codex app-server exited during {method}")
+                    raise AppServerError(f"{self.label} exited during {method}")
                 self._condition.wait(timeout=min(remaining, 0.5))
             message = self._responses.pop(identifier)
         if "error" in message:
-            raise AppServerError(f"codex app-server {method} failed: {json.dumps(message['error'])[:400]}")
+            raise AppServerError(f"{self.label} {method} failed: {json.dumps(message['error'])[:400]}")
         return message.get("result")
 
     def next_notification(self, timeout: float) -> Optional[dict]:

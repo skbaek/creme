@@ -227,6 +227,7 @@ class TurnOutcome:
     steer_items: list = field(default_factory=list)
     tool_calls: int = 0
     guard_failures: list = field(default_factory=list)
+    unattributed_usage: int = 0
     started: float = field(default_factory=time.time)
     completed: Optional[float] = None
     duration_ms: Optional[int] = None
@@ -383,10 +384,15 @@ class MuseGuard:
             return self.fail(f"session/modelRouteUnserved: the pinned route {params.get('modelId')!r} "
                              f"is unserved (installed {params.get('installedProviderId')!r})")
         if method == "session/tokenUsage":
+            # An explicit id is checked wherever it appears. A missing id (the schema allows it
+            # on pre-schema records, and the echo bootstrap's completion has none) is not a
+            # failure by itself: the current turn's usage is marked unattributed, and the
+            # durable-log audit must then attribute every completion of the turn to the pin.
             failures = self.see_model(params.get("modelId"), "session/tokenUsage")
-            if params.get("modelId") is None:
-                failures += self.fail("session/tokenUsage without a model id; attribution cannot be shown")
-            if outcome is not None and params.get("turnId") == outcome.turn_id:
+            current = outcome is not None and params.get("turnId") == outcome.turn_id
+            if params.get("modelId") is None and current:
+                outcome.unattributed_usage += 1
+            if current:
                 usage = params.get("usage") or {}
                 outcome.tokens["prompt"] += int(params.get("promptTokens") or 0)
                 outcome.tokens["output"] += int(usage.get("outputTokens") or 0)
@@ -457,13 +463,27 @@ def log_length(path: Optional[Path]) -> int:
         return sum(1 for _ in handle)
 
 
-def audit_session_log(path: Optional[Path], start_line: int) -> dict:
-    """Every model id the durable log names after ``start_line`` must be the pin.
+def _run_id(record: dict) -> Optional[str]:
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    return payload.get("run_id") or event.get("run_id")
 
-    ``same-as-main`` (the reminder roster's model) is accepted only as that
-    literal, which the runtime resolves to the session's model.
+
+def audit_session_log(path: Optional[Path], start_line: int, turn_id: Optional[str] = None,
+                      session_id: Optional[str] = None) -> dict:
+    """Positive attribution from the durable session log after ``start_line``.
+
+    * Every model id the log names must be the pin, except the literal
+      ``same-as-main``, which the reminder roster uses for child sessions.
+    * ``same-as-main`` is accepted only when the log links those children to
+      this session (a ``*child_session_linked`` record whose parent is
+      ``session_id``) or the log holds a pinned completion of this session.
+    * With ``turn_id``: every ``model_completed`` record of that run must name
+      the pin; ``completions``, ``attributed`` and ``unattributed`` count them.
+      A completion that names no model is a failure (fail-closed).
     """
-    result: dict = {"verdict": "PASS", "failures": [], "models": {}, "lines": 0, "start_line": start_line}
+    result: dict = {"verdict": "PASS", "failures": [], "models": {}, "lines": 0, "start_line": start_line,
+                    "completions": 0, "attributed": 0, "unattributed": 0, "child_links": 0, "attributed_any": 0}
     if path is None or not path.is_file():
         result.update(verdict="FAIL", failures=[f"session log {path} is not readable"])
         return result
@@ -480,10 +500,30 @@ def audit_session_log(path: Optional[Path], start_line: int) -> dict:
             _models_in(record, found)
             for model in found:
                 result["models"][model] = result["models"].get(model, 0) + 1
+            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+            event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+            kind = event.get("kind") or payload.get("kind")
+            if isinstance(kind, str) and kind.endswith("child_session_linked") \
+                    and (event.get("parent_session_id") or payload.get("parent_session_id")) == session_id:
+                result["child_links"] += 1
+            if kind == "model_completed" and (event.get("model") or payload.get("model")) == PINNED_MODEL:
+                result["attributed_any"] += 1
+            if turn_id is not None and kind == "model_completed" and _run_id(record) == turn_id:
+                result["completions"] += 1
+                model = event.get("model") or payload.get("model")
+                if model == PINNED_MODEL:
+                    result["attributed"] += 1
+                elif model is None:
+                    result["unattributed"] += 1
     for model in result["models"]:
         if model == "same-as-main":
             continue
         result["failures"] += model_failures(model, "session log")
+    if result["models"].get("same-as-main") and not result["child_links"] and not result["attributed_any"]:
+        result["failures"].append("same-as-main appears with no child link to this session and no pinned "
+                                  "completion; its model cannot be attributed")
+    if result["unattributed"]:
+        result["failures"].append(f"{result['unattributed']} model completion(s) of turn {turn_id} name no model")
     if result["failures"]:
         result["verdict"] = "FAIL"
     return result

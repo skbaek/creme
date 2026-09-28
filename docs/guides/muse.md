@@ -18,8 +18,9 @@ uses one recipe for both.
   product improvement), so an omitted model anywhere is a bug. Any served-model
   evidence of another model (`session/modelChanged`, `session/tokenUsage`,
   `session/modelRouteUnserved`, the durable session log) fails the turn closed,
-  records the `MODEL_PIN_FAILURE` tripwire, and stops every session. Only the
-  user clears the tripwire, after reviewing the run.
+  records the `MODEL_PIN_FAILURE` tripwire, and stops every session. Clearing
+  it is an explicit master action after reviewing the run (see
+  [Clearing the tripwire](#clearing-the-tripwire)).
 - **A result is a worker summary, not evidence.** Verify every claim that
   matters on the files, commands, and gates themselves.
 - **Never modify the user's Muse configuration**, auth, or trust files. Nothing
@@ -167,13 +168,33 @@ ledger) needs the unsandboxed Lean host.
 ## Guards and verdict
 
 Besides the pins above, the guard fails the turn closed on: a notification or
-token usage naming another model or none; `session/modelRouteUnserved`; a
+token usage naming another model (any turn); `session/modelRouteUnserved`; a
 native subagent; a forbidden native tool (`web_fetch`, `web_search`,
 `add_memory`, `edit_memory`, `cron_create`, `cron_delete`, `workflow`); or an
 MCP tool that ran outside what the mode allows. After a guard failure only
 `turn/interrupt` may be sent. Each turn ends with an audit of the durable
-session log: every model id recorded after the attach point must be the pin
-(the reminder agents' `same-as-main` is accepted as that literal).
+session log after the attach point:
+
+- every model id recorded must be the pin, except the literal `same-as-main`
+  of the reminder agents, which is accepted only when the log links those
+  child sessions to this session (`*child_session_linked` with this session as
+  parent) or holds a pinned model completion of it;
+- every `model_completed` record of the turn's run must name the pin; one that
+  names no model fails the turn.
+
+A `session/tokenUsage` with **no** model id is not a failure by itself (the
+schema allows it, and the echo bootstrap's zero-token completion has none; a
+replay from the view start on 2026-09-28 met exactly that and falsely tripped
+`4b254f7`). For the current turn it is counted as unattributed, and the turn
+then needs positive attribution: at least one `model_completed` of the turn
+naming the pin, and none naming anything else or nothing. Usage of another
+turn without an id is ignored. So the alarm trips on: an explicit non-pin or
+contributor id anywhere; `session/modelRouteUnserved`; a completion of the turn
+with no model; model-less usage of a turn whose completions the log cannot
+attribute; `same-as-main` without a pinned parent; an unreadable session log;
+and the other guard failures above. Anything else ambiguous stays fail-closed:
+a completed turn with no model evidence at all is `FAILED` (not passed), and a
+failed pin read-back refuses the session before any turn.
 
 `PASS` requires the turn to complete, every observed model to be the pin with
 at least one attributed model call, the session-log audit to pass, no guard
@@ -220,6 +241,20 @@ every `send` or `steer`:
 
 A reconcile that recovered an approval or ended a turn prints a `reconcile`
 attention event.
+
+## Clearing the tripwire
+
+```sh
+python3 -m creme muse clear-tripwire --reason TEXT
+```
+
+Only the master runs it, after reviewing the tripped run (its `session.json`,
+`transcript.jsonl`, and Muse's session log) and deciding the alarm was false or
+is resolved. It refuses without a non-empty reason and while any broker session
+is live, and it moves `MODEL_PIN_FAILURE` to
+`.creme/muse/tripwire-records/MODEL_PIN_FAILURE-<UTC stamp>.json` with the
+reason, time, and user added. A true pin failure is a user matter: tell the
+user and do not clear it.
 
 ## Records
 

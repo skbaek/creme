@@ -117,6 +117,17 @@ class ModelPinGuardTest(unittest.TestCase):
         self.assertEqual((g.outcome.status, g.outcome.final_message, g.outcome.tool_calls, g.outcome.tokens["prompt"]),
                          (None, None, 0, 0))
 
+    def test_usage_without_a_model_id_is_unattributed_not_a_failure(self):
+        g = guard()
+        g.outcome = C.TurnOutcome(turn_id="t")
+        self.assertEqual(g.observe({"method": "session/tokenUsage", "params": {
+            "sessionId": "s-1", "turnId": "t", "promptTokens": 3}}), [])
+        self.assertEqual(g.observe({"method": "session/tokenUsage", "params": {
+            "sessionId": "s-1", "turnId": "echo-bootstrap-run"}}), [])
+        self.assertEqual((g.outcome.unattributed_usage, g.guard_failures), (1, []))
+        self.assertTrue(g.observe({"method": "session/tokenUsage", "params": {
+            "sessionId": "s-1", "turnId": "old-turn", "modelId": "muse-spark-1.3-contributor"}}))
+
     def test_session_log_audit_rejects_any_other_model(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "session.jsonl"
@@ -126,7 +137,19 @@ class ModelPinGuardTest(unittest.TestCase):
             self.assertEqual(C.audit_session_log(path, 1)["verdict"], "FAIL")   # the nested 1.2
             self.assertEqual(C.audit_session_log(path, 0)["verdict"], "FAIL")
             path.write_text(json.dumps({"payload": {"model_id": C.PINNED_MODEL, "model": "same-as-main"}}) + "\n")
-            self.assertEqual(C.audit_session_log(path, 0)["verdict"], "PASS")
+            self.assertEqual(C.audit_session_log(path, 0, None, "s-1")["verdict"], "FAIL")   # unlinked same-as-main
+            link = {"payload": {"kind": "run", "run_id": "t", "event": {
+                "kind": "memory_reminder_child_session_linked", "parent_session_id": "s-1"}}}
+            done = {"payload": {"kind": "run", "run_id": "t", "event": {"kind": "model_completed",
+                                                                        "model": C.PINNED_MODEL}}}
+            bare = {"payload": {"kind": "run", "run_id": "t", "event": {"kind": "model_completed"}}}
+            path.write_text("\n".join(json.dumps(r) for r in (
+                {"payload": {"model": "same-as-main"}}, link, done)) + "\n")
+            audit = C.audit_session_log(path, 0, "t", "s-1")
+            self.assertEqual((audit["verdict"], audit["attributed"], audit["completions"]), ("PASS", 1, 1))
+            self.assertEqual(C.audit_session_log(path, 0, "t", "other")["verdict"], "PASS")  # pinned completion
+            path.write_text("\n".join(json.dumps(r) for r in (link, done, bare)) + "\n")
+            self.assertEqual(C.audit_session_log(path, 0, "t", "s-1")["verdict"], "FAIL")    # a completion w/o model
             self.assertEqual(C.audit_session_log(Path(temp) / "missing", 0)["verdict"], "FAIL")
 
 
@@ -309,6 +332,39 @@ class RunTest(FakeMuseHarness):
         code, record = self.run_brief()
         self.assertEqual(record["verdict"], "PIN_FAILED", record)
         self.assertEqual(record["session_log_audit"], "FAIL")
+
+    def test_model_less_usage_passes_when_the_log_attributes_the_turn(self):
+        self.scenario["turn"]["usage_without_model"] = True
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+        self.assertFalse(M.tripwire_path(self.state).exists())
+
+    def test_model_less_usage_and_an_unattributed_completion_fails_closed(self):
+        self.scenario["turn"].update(usage_without_model=True, completion_without_model=True)
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (M.EXIT_PIN_FAILED, "PIN_FAILED"), record)
+
+    def test_a_real_non_pin_model_id_in_token_usage_trips(self):
+        self.scenario["turn"]["usage_model"] = "muse-spark-1.2"
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (M.EXIT_PIN_FAILED, "PIN_FAILED"), record)
+        self.assertTrue(M.tripwire_path(self.state).exists())
+
+    def test_clear_tripwire_is_an_explicit_recorded_master_action(self):
+        M.record_tripwire(self.state, "r1", "m1", ["x"])
+        code, lines, _ = MB.cmd_clear_tripwire(ROOT, self.environ, "  ")
+        self.assertEqual(code, M.EXIT_PREFLIGHT_REFUSED, lines)
+        code, lines, _ = MB.cmd_clear_tripwire(ROOT, self.environ, "false alarm: echo bootstrap usage, see report")
+        self.assertEqual(code, 0, lines)
+        self.assertFalse(M.tripwire_path(self.state).exists())
+        kept = list((self.state / "tripwire-records").glob("MODEL_PIN_FAILURE-*.json"))
+        self.assertEqual(len(kept), 1)
+        record = json.loads(kept[0].read_text())
+        self.assertEqual((record["run"], record["cleared"]["reason"]),
+                         ("r1", "false alarm: echo bootstrap usage, see report"))
 
     def test_read_only_run_that_changes_the_target_fails(self):
         self.scenario["turn"]["touch"] = str(self.target / "stray.txt")
@@ -500,6 +556,33 @@ class BrokerTest(FakeMuseHarness):
         code, lines, record = self.wait(session)
         self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)
         self.assertEqual(len(record["turns"]), 1)
+
+    def test_clear_tripwire_refuses_while_a_session_is_live(self):
+        session = self.start()
+        self.wait(session)
+        M.record_tripwire(self.state, "r1", None, ["x"])
+        code, lines, _ = MB.cmd_clear_tripwire(ROOT, self.environ, "reason")
+        self.assertEqual(code, M.EXIT_PREFLIGHT_REFUSED, lines)
+        self.assertIn(session, lines[0])
+        self.assertTrue(M.tripwire_path(self.state).exists())
+
+    def test_resume_without_a_cursor_does_not_trip_on_the_bootstrap_usage(self):
+        # 2026-09-28: session/resume returned no viewCursor; the replay paged from the start and met the
+        # echo bootstrap's model-less tokenUsage, which 4b254f7 took for a pin failure.
+        self.reconciling("1")
+        first = self.start()
+        self.wait(first)
+        MB.cmd_simple(ROOT, self.environ, "stop", first)
+        self.scenario.update(resume_without_cursor=True, resume_lost=True)
+        self.scenario["turn"].update(sleep=2.5)
+        self.write_scenario()
+        muse_session = MB.load_record(self.state, first)["muse_session"]
+        code, lines, answer = MB.cmd_resume(ROOT, self.environ, muse_session, None, False, None, "silent", 60)
+        self.assertEqual(code, 0, lines)
+        MB.cmd_simple(ROOT, self.environ, "send", answer["session"], text="again")
+        code, lines, record = self.wait(answer["session"])
+        self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)
+        self.assertFalse(M.tripwire_path(self.state).exists())
 
     def test_send_starts_a_new_turn_when_idle_and_steer_refuses(self):
         session = self.start()

@@ -38,6 +38,15 @@ def append_log(session_id, record):
         handle.write(json.dumps(record) + "\n")
 
 
+def events_path(session_id):
+    return HOME / "sessions" / session_id / "view.jsonl"
+
+
+def load_events(session_id):
+    path = events_path(session_id)
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
 def meta_path(session_id):
     return HOME / "sessions" / session_id / "meta.json"
 
@@ -59,6 +68,12 @@ if args and args[0] == "exec":
     meta_path(session_id).write_text(json.dumps({
         "workspace": workspace, "profile": args[args.index("--permission-profile") + 1]}))
     append_log(session_id, {"payload_type": "runtime.session.metadata", "payload": {"provider_id": "echo"}})
+    # The echo bootstrap's completion reports usage with no model id (measured on Muse 1.4.0).
+    events_path(session_id).parent.mkdir(parents=True, exist_ok=True)
+    with open(events_path(session_id), "a") as handle:
+        handle.write(json.dumps({"method": "session/tokenUsage", "params": {
+            "sessionId": session_id, "turnId": "echo-bootstrap-run", "viewCursor": "v:1", "sourceRange": {"first": 1},
+            "usage": {"inputTokens": 0, "outputTokens": 0}, "promptTokens": 0, "totalTokens": 0}}) + "\n")
     append_log(session_id, {"payload_type": "runtime.model_selection.initialized",
                             "payload": {"model_id": SCENARIO.get("initial_model", "muse-spark-1.3-contributor")}})
     print(json.dumps({"stream": {"kind": "session", "id": session_id}, "payload_type": "run.terminal.completed",
@@ -99,13 +114,6 @@ def note(method, params, durable=True):
         send(message)
 
 
-def events_path(session_id):
-    return HOME / "sessions" / session_id / "view.jsonl"
-
-
-def load_events(session_id):
-    path = events_path(session_id)
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
 def lose_projection():
@@ -178,9 +186,18 @@ def run_turn(turn_id, text):
     model = served()
     append_log(state["session"], {"payload_type": "run.model.configured",
                                   "payload": {"model_id": turn.get("log_model") or model}})
+    completion = {"kind": "model_completed", "usage": {"input_tokens": 100}}
+    if not turn.get("completion_without_model"):
+        completion["model"] = turn.get("log_model") or model
+    append_log(state["session"], {"payload_type": "runtime.session",
+                                  "payload": {"kind": "run", "run_id": turn_id, "event": completion}})
+    append_log(state["session"], {"payload_type": "runtime.session", "payload": {"kind": "run", "run_id": turn_id,
+        "event": {"kind": "memory_reminder_child_session_linked", "parent_session_id": state["session"],
+                  "child_session_id": "child-1"}}})
     append_log(state["session"], {"payload_type": "reminder", "payload": {"reminder_roster": {
         "agents": [{"id": "verify-reminder", "model": "same-as-main"}]}}})
-    note("session/tokenUsage", {"turnId": turn_id, "modelId": model,
+    note("session/tokenUsage", {"turnId": turn_id, **({} if turn.get("usage_without_model")
+                                                       else {"modelId": turn.get("usage_model") or model}),
                                 "usage": {"inputTokens": 100, "outputTokens": 7, "cachedTokens": 40,
                                           "reasoningTokens": 3, "cacheReadTokens": 0, "cacheWriteTokens": 0},
                                 "promptTokens": 100, "totalTokens": 107,
@@ -236,7 +253,11 @@ for line in sys.stdin:
         state["model"] = SCENARIO.get("initial_model", "muse-spark-1.3-contributor")
         state["events"] = load_events(state["session"])
         state["cursor"] = len(state["events"])
-        respond(message, {"session": session_object(), "viewCursor": f"v:{state['cursor']}", "history": {"mode": "none"},
+        if SCENARIO.get("resume_lost"):
+            state["lost"] = True   # the projection was already unavailable: nothing is pushed live
+        respond(message, {"session": session_object(),
+                          "viewCursor": None if SCENARIO.get("resume_without_cursor") else f"v:{state['cursor']}",
+                          "history": {"mode": "none"},
                           "pendingRequests": []})
     elif method == "session/setModel":
         state["model"] = params["model"]["modelId"]

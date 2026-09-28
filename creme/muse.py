@@ -117,6 +117,26 @@ def record_tripwire(state: Path, run_id: str, session_id: Optional[str], failure
                                      "at": PB.now_iso()})
 
 
+def clear_tripwire(state: Path, reason: str, live_sessions: list[str], by: str) -> tuple[int, list[str], dict]:
+    """The master's explicit clear: refuse while a session is live; keep the tripwire as a timestamped record."""
+    path = tripwire_path(state)
+    if not reason or not reason.strip():
+        return EXIT_PREFLIGHT_REFUSED, ["refused: --reason must say why the tripwire is a false alarm or resolved"], {}
+    if live_sessions:
+        return EXIT_PREFLIGHT_REFUSED, [f"refused: {len(live_sessions)} session(s) are live: "
+                                        f"{', '.join(live_sessions)}; stop them first"], {}
+    if not path.exists():
+        return EXIT_OK, ["no tripwire is present"], {}
+    record = PB.read_json(path) or {"unparsed": path.read_text(encoding="utf-8", errors="replace")[:4000]}
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    records = PB.private_dir(state / "tripwire-records")
+    target = records / f"{TRIPWIRE_NAME}-{stamp}.json"
+    record = {**record, "cleared": {"at": PB.now_iso(), "reason": reason.strip(), "by": by}}
+    PB.write_private_json(target, record)
+    path.unlink()
+    return EXIT_OK, [f"tripwire cleared; record kept at {target}", f"reason: {reason.strip()}"], record
+
+
 def resolve_binary(environ: Optional[dict] = None) -> Path:
     environ = os.environ if environ is None else environ
     return Path(environ.get(BINARY_ENV) or DEFAULT_BINARY).expanduser()
@@ -342,7 +362,7 @@ class MuseHost:
             return [f"muse serve host is {result.get('sessionDurability')}; resume needs durable sessions"]
         self.guard = MuseGuard(self.process, str(self.session_id), self.effort, self.mode, self.lean_goal)
         resumed = self.guard.command("session/resume", {"excludeItems": True}, timeout=120) or {}
-        self.view_cursor = resumed.get("viewCursor")
+        self.view_cursor = resumed.get("viewCursor") or self.view_head()
         session = resumed.get("session") or {}
         path = session.get("path")
         self.log_path = Path(path) if path else None
@@ -352,6 +372,16 @@ class MuseHost:
         refusals += self.guard.pin()
         self.log_start = log_length(self.log_path)
         return refusals
+
+    def view_head(self) -> Optional[str]:
+        """The newest durable view cursor (``session/resume`` sometimes returns none), or None."""
+        try:
+            page = self.guard.request("view/page", {"sessionId": self.session_id, "limit": 1,
+                                                    "direction": "backward"}, timeout=60) or {}
+        except (AppServerError, PinViolation):
+            return None
+        events = [event for event in page.get("events") or [] if isinstance(event, dict)]
+        return durable_cursor(events[-1]) if events else None
 
     def usage(self) -> Optional[dict]:
         """``usage/read`` (no model call): the last observed subscription windows, or None."""
@@ -416,7 +446,13 @@ class ViewTracker:
         return True
 
 
-def replay_view(host: "MuseHost", tracker: ViewTracker) -> list[dict]:
+def event_turn(message: dict) -> Optional[str]:
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    item = params.get("item") if isinstance(params.get("item"), dict) else {}
+    return params.get("turnId") or item.get("turnId")
+
+
+def replay_view(host: "MuseHost", tracker: ViewTracker, turn_id: Optional[str] = None) -> list[dict]:
     """Durable view events after the tracker's cursor that were not processed yet (approval events excluded).
 
     The events are returned unadmitted: the caller passes each through the same
@@ -440,6 +476,13 @@ def replay_view(host: "MuseHost", tracker: ViewTracker) -> list[dict]:
                     tracker.cursor = durable
                 continue
             durable = durable_cursor(event)
+            other = event_turn(event)
+            if turn_id is not None and other is not None and other != turn_id:
+                # Another turn's event (earlier turns, the echo bootstrap) never touches this turn.
+                if durable:
+                    tracker.seen.add(durable)
+                    tracker.cursor = durable
+                continue
             if durable is None or durable not in tracker.seen:
                 messages.append(event)   # the caller's process() admits it
         following = page.get("nextCursor")
@@ -562,12 +605,16 @@ def verdict_for(outcome: Optional[TurnOutcome], audit: dict, guard_failures: lis
     pin_failures = list(guard_failures) + list(audit.get("failures") or [])
     if any(model != PINNED_MODEL for model in models):
         pin_failures.append(f"observed models {sorted(models)}")
+    if outcome is not None and outcome.unattributed_usage and not audit.get("attributed"):
+        # Model-less usage for this turn, and the durable log names no pinned completion of it.
+        pin_failures.append(f"{outcome.unattributed_usage} token-usage report(s) without a model id, and the "
+                            f"session log attributes no completion of turn {outcome.turn_id} to the pin")
     if pin_failures:
         return "PIN_FAILED"
     if outcome is None or timed_out or errors or git_failure or outcome.status != "completed":
         return "INTERRUPTED" if outcome is not None and outcome.status == "cancelled" and not timed_out \
             and not errors and not git_failure else "FAILED"
-    if not models:
+    if not models and not audit.get("attributed"):
         return "FAILED"   # a completed turn with no attributed model call proves nothing about the pin
     return "PASS"
 
@@ -744,7 +791,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
         def reconcile() -> None:
             tracker.last_reconcile = time.monotonic()
             try:
-                others, terminals = split_terminals(replay_view(host, tracker))
+                others, terminals = split_terminals(replay_view(host, tracker, outcome.turn_id))
                 for message in others:
                     process(message)
                 for params in pending_approvals(host):
@@ -753,7 +800,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
                     current = session_status(host)
                     if turn_over(current, outcome.turn_id):
                         time.sleep(0.5)   # the terminal may have just landed
-                        more, late = split_terminals(replay_view(host, tracker))
+                        more, late = split_terminals(replay_view(host, tracker, outcome.turn_id))
                         for message in more:
                             process(message)
                         mine = [t for t in terminals + late if (t.get("params") or {}).get("turnId") == outcome.turn_id]
@@ -801,7 +848,8 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
         remember_usage(state, usage_after)
         PB.write_private_json(run_dir / "usage-after.json", {"usage": usage_after, "at": PB.now_iso()})
         time.sleep(0.5)   # the durable log lands before the notification
-        audit = audit_session_log(host.log_path, host.log_start)
+        audit = audit_session_log(host.log_path, host.log_start, outcome.turn_id if outcome else None,
+                                  host.session_id)
     except PinViolation as exc:
         errors.append(f"pin violation: {exc}")
     except (AppServerError, MuseError, OSError) as exc:

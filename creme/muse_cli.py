@@ -134,6 +134,11 @@ def cmd_shutdown(arguments: argparse.Namespace) -> int:
     return _print(arguments, code, lines, record)
 
 
+def cmd_clear_tripwire(arguments: argparse.Namespace) -> int:
+    code, lines, record = MB.cmd_clear_tripwire(ROOT, dict(os.environ), arguments.reason)
+    return _print(arguments, code, lines, record)
+
+
 def cmd_broker_serve(arguments: argparse.Namespace) -> int:
     return MB.serve_main(ROOT, arguments.instance)
 
@@ -223,6 +228,10 @@ def register(commands: Any) -> None:
         item = sub(name, "list recorded sessions")
         item.add_argument("--limit", type=_positive, default=10)
         item.set_defaults(func=cmd_sessions)
+
+    clear = sub("clear-tripwire", "master only: clear MODEL_PIN_FAILURE with a recorded reason")
+    clear.add_argument("--reason", required=True)
+    clear.set_defaults(func=cmd_clear_tripwire)
 
     shutdown = sub("shutdown", "stop every session and the broker")
     shutdown.set_defaults(func=cmd_shutdown)

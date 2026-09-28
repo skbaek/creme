@@ -305,7 +305,7 @@ class MuseSession(PB.SessionRecord):
                 errors.append(f"usage/read failed: {exc}")
             PB.write_private_json(turn_dir / "usage-after.json", {"usage": usage_after, "at": PB.now_iso()})
             time.sleep(0.3)
-            audit = audit_session_log(self.host.log_path, self.host.log_start)
+            audit = audit_session_log(self.host.log_path, self.host.log_start, outcome.turn_id, self.host.session_id)
             PB.write_private_json(turn_dir / "audit.json", audit)
             PB.write_private_json(turn_dir / "approvals.json", state.approvals)
             git_failure = None
@@ -450,7 +450,8 @@ class MuseSession(PB.SessionRecord):
             tracker = self.tracker
             tracker.last_reconcile = time.monotonic()
             try:
-                replayed = M.replay_view(self.host, tracker)
+                active = self.guard.outcome.turn_id if self.guard is not None and self.guard.outcome else None
+                replayed = M.replay_view(self.host, tracker, active)
                 others, terminals = M.split_terminals(replayed)
                 for message in others:
                     self.process(message)
@@ -467,7 +468,7 @@ class MuseSession(PB.SessionRecord):
                     current = M.session_status(self.host)
                     if M.turn_over(current, outcome.turn_id):
                         time.sleep(0.5)   # the terminal may have landed after the first replay
-                        more, late = M.split_terminals(M.replay_view(self.host, tracker))
+                        more, late = M.split_terminals(M.replay_view(self.host, tracker, outcome.turn_id))
                         for message in more:
                             self.process(message)
                         mine = [t for t in terminals + late
@@ -626,7 +627,7 @@ class MuseSession(PB.SessionRecord):
                     self.record["turns"][-1].update({"status": "abandoned", "verdict": "FAILED",
                                                      "errors": ["no completion after interrupt at stop"]})
                 self.guard.finish_turn()
-            audit = audit_session_log(self.host.log_path, self.host.log_start)
+            audit = audit_session_log(self.host.log_path, self.host.log_start, None, self.host.session_id)
             PB.write_private_json(self.dir / "stop-audit.json", audit)
             self.closed = True
             self.host.close()
@@ -1117,6 +1118,17 @@ def cmd_sessions(module_root: Path, environ: dict, limit: int) -> tuple[int, lis
 
 def cmd_detail(module_root: Path, environ: dict, session: str, level: str) -> tuple[int, list[str], dict]:
     return PB.cmd_detail(SPEC, module_root, environ, session, level, ensure_broker)
+
+
+def cmd_clear_tripwire(module_root: Path, environ: dict, reason: str) -> tuple[int, list[str], dict]:
+    """Clear MODEL_PIN_FAILURE (a master action with a recorded reason); refused while any session is live."""
+    state = M.state_root(module_root, environ)
+    answer = PB.probe_broker(state)
+    live = list((answer or {}).get("live") or [])
+    live += [record["id"] for record in all_records(state)
+             if record.get("state") in OPEN_STATES and record["id"] not in live and answer is not None]
+    by = f"{environ.get('USER', 'unknown')} via creme muse clear-tripwire"
+    return M.clear_tripwire(state, reason, live, by)
 
 
 def cmd_shutdown(module_root: Path, environ: dict) -> tuple[int, list[str], dict]:

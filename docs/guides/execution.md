@@ -218,22 +218,43 @@ at checkpoints. **Let the wrapper classify**: omit `--contention` and
 `--memory-gib`, and it prices the modules stale right now from the ledger.
 State a class only when you know something the ledger cannot, such as a cold
 worktree or an expected broad rebuild, and an estimate only when you also know
-the peak. `--threads 1` lowers compiler threads without changing admission.
+the peak. Compiler threads are chosen for you: at probe time the build prices
+its stale set at each thread count from 2 up to the profile's
+`admission.max_build_threads` (automatic: half the logical cores) with the
+ordinary estimator, which sums that many of the largest module peaks, and runs
+the most threads whose priced need still fits what admission would grant right
+now (`need + admitted needs <= available - floor`). It never runs fewer than 2
+threads, never more than the evidence prices (an unproven default is not
+widened), and the ledger row and JSON summary record `threads` and
+`threads_source`. `--threads N` overrides the choice (`--threads 1` lowers
+compiler threads without changing admission).
 
 When the whole stale closure is refused `LIGHT_ONLY` or `NEVER_FITS`, pass
 `--walk` instead of walking the set by hand: the wrapper builds the closure in
-one invocation if admitted, otherwise one owned unit per stale module, imports
-first, then the targets. A `--wait` for the whole closure that runs out
+one invocation if admitted, otherwise a sequence of owned units, imports first,
+then the targets. A `--wait` for the whole closure that runs out
 (`WAIT_TIMEOUT`) falls back to the walk too, so a closure that never fits is
-not waited on for the full wait and then refused. Each unit names exactly one
-module whose stale imports are already built, so it is priced alone (Lake
-overhead plus that module's own peak or recorded floor), never as the
-concurrent sum of siblings it does not run beside; the JSON summary's
-`priced_stale_modules` per unit shows it. It re-queues a retracted unit once at
-its observed peak and stops at the first unit that fails, is refused, or
-retracts twice, naming the modules left unbuilt. A Muse or Luna Lean session
-may use the same walk: the plain form and `lake-build GOAL --walk [--wait N] --
-MODULES` are the only build commands its broker approves by rule.
+not waited on for the full wait and then refused. The stale set is grouped
+into waves of equal import height (modules of one wave never import each
+other), and each unit builds one batch of at most
+`max_build_threads x admission.walk_batch_factor` (default 4) modules of one
+wave, so Lake builds them in parallel within the unit's threads. Every unit is
+an ordinary owned build with its own probe, estimate, hold, watchdog, and
+ledger row, priced by the ordinary estimator on exactly its own stale set (the
+JSON summary's `priced_stale_modules` per unit shows it); no estimate is
+lowered for a batch. A module whose price is only a failed-attempt floor, or
+that a retracted attempt left unfinished, is built alone, so a floor never
+inflates a sibling batch. A batch is first asked for without waiting; if it is
+refused `LIGHT_ONLY`, `NEVER_FITS`, or `WAIT_TIMEOUT`, or the watchdog retracts
+it, it is split in half and each half retried, down to one module, which waits
+for admission and is re-queued once at its observed peak if retracted, exactly
+as a single-module unit always was. A refusal about another session's hold is
+waited out for the whole batch. The walk stops at the first unit that fails, is
+refused (single module), or retracts twice, naming the modules left unbuilt
+(siblings of a failed batch that Lake finished are built and restore instantly
+on the next run). A Muse or Luna Lean session may use the same walk: the plain
+form and `lake-build GOAL --walk [--wait N] -- MODULES` are the only build
+commands its broker approves by rule.
 
 The wrapper prints failed and warning jobs (bounded), Lake's verdict, and a
 JSON summary with per-target verdicts, failed modules, and the `log:` path of

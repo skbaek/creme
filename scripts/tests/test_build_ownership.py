@@ -835,7 +835,7 @@ class BuildOwnershipTest(unittest.TestCase):
         with patch("creme.build_ownership.subprocess.run", side_effect=PermissionError("denied")):
             self.assertIsNone(owned._process_snapshot())
 
-    def test_lake_build_cli_defaults_to_two_threads_and_forwards_options(self) -> None:
+    def test_lake_build_cli_defaults_to_the_adaptive_thread_choice_and_forwards_options(self) -> None:
         with patch("creme.cli.run_lake_build", return_value=17) as run:
             result = cmd_lake_build(SimpleNamespace(
                 goal="g",
@@ -847,7 +847,7 @@ class BuildOwnershipTest(unittest.TestCase):
             ["T"],
             memory_gib=None,
             contention=None,
-            threads=2,
+            threads=None,
             probe=True,
             wait_seconds=7,
             census=False,

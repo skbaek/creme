@@ -54,8 +54,12 @@ youngest first, five seconds apart. A retracted build exits **75** with JSON
 whose observed peak floors the retry: the in-flight modules' own peaks when
 the sampler saw them, otherwise the whole run's peak as a floor for any stale
 set that still contains every unfinished module, so a plain `--wait` retry is
-never priced as before. `--walk` re-queues a retracted unit once at
-that peak and stops if it retracts again. Holds taken with `adaptive-acquire`
+never priced as before. `--walk` builds batches of same-height stale modules
+(at most `max_build_threads x walk_batch_factor` per unit, each an ordinary owned
+build priced on its own stale set; a module priced only by a failed-attempt floor
+or left unfinished by a retraction is a unit of its own). A batch that is refused
+with a walk trigger or retracted is halved down to one module; a single module is
+re-queued once at that peak and the walk stops if it retracts again. Holds taken with `adaptive-acquire`
 (language-server loops, gate runners) are admitted by the same arithmetic and
 keep the renewal verdicts of the execution guide; they are never retracted.
 
@@ -134,8 +138,27 @@ clear.
 
 ## Wrapper options, cache, and sizing
 
-`--threads` accepts `1` or `2` and defaults to `2`; it sets
-`LEAN_NUM_THREADS` for that owned invocation. A one-thread choice does not
+`--threads N` (1 to 64) sets `LEAN_NUM_THREADS` for that owned invocation and
+always wins. Omitted, the build chooses at probe time (`choose_build_threads`):
+the largest count in `[2, ceiling]` whose priced need, with that many concurrent
+`lean` peaks (`_model_peak` takes the larger of the ledger's observed
+concurrency and the thread count), fits `largest_fitting_need` (available
+memory less the floor and the other labels' admitted needs, read-only from the
+semaphore). The ceiling is `admission.max_build_threads` in the host profile;
+0, the default, is half the logical cores (at least 2), since the host may admit
+two heavy builds. The choice is never below 2, never above the number of stale
+modules, and never widened when the need is an unproven default or the host
+cannot report headroom; the answer is always a count that was priced and fit.
+Pricing at several thread counts is cheap because the estimator's evidence scan
+is: the 30-day ledger is parsed once per process and only appended rows after
+that (`read_recent_ledger`, which keeps no restored-module lists, most of a
+row's bytes), and the repository scope of an old row's removed worktree is
+asked of Git once per repository root, not once per row (`_legacy_repository_identity`).
+On the 2026-09 ledger this took one estimate from about 4.7 s to 0.2 s cold and
+0.06 s warm, with the same needs, and it was most of the roughly 6 s each
+one-module walk unit spent outside Lake. The chosen count enters the input identity (evidence is keyed on threads), and
+is recorded as `threads` and `threads_source` in the ledger row. A one-thread
+choice does not
 change target interpretation, admission, sizing, measurement, or release, and
 does not by itself prove that only one compiler process ran. Wrapper options
 belong before `--`; every token after it remains a Lake target. The Linux

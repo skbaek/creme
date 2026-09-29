@@ -373,7 +373,12 @@ class WalkRequeueTest(unittest.TestCase):
         self.assertEqual(host.run(["Pkg.Top"], walk=True), 0)
         self.assertEqual([call for call in host.lake_calls if call == ["Pkg.Left"]],
                          [["Pkg.Left"], ["Pkg.Left"]])
-        requeued = host.acquires[host.lake_calls.index(["Pkg.Left"]) + 2]
+        # Left and Right are one wave: the batch is refused at limit 2 and split
+        # first, so the re-queued unit is found by its wait, not by its position.
+        requeued = [
+            call for call in host.acquires
+            if call["wait_seconds"] == owned.WALK_REQUEUE_WAIT_SECONDS
+        ][0]
         self.assertGreaterEqual(requeued["need_gib"], 1000.0 / 1024.0)
         self.assertFalse(requeued["unproven"])
         self.assertEqual(requeued["wait_seconds"], owned.WALK_REQUEUE_WAIT_SECONDS)

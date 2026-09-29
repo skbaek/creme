@@ -33,6 +33,18 @@ ADMISSION_DEFAULTS = {
     # rebuild is a heavy module and keeps the task default instead.
     "narrow_default_gib": 4,
     "heavy_module_seconds": 20,
+    # Ceiling of the compiler threads an owned build may choose for itself
+    # from its priced need (`--threads` still wins).  0 means automatic: half
+    # the logical cores, at least 2, because the host may admit two heavy
+    # builds at once and each should be able to use its half.  The choice is
+    # further bounded by what the memory evidence prices, so this is a CPU
+    # ceiling, never a memory claim.
+    "max_build_threads": 0,
+    # `--walk` builds same-height stale modules together, at most this many
+    # times the build's thread ceiling per unit.  1 keeps a unit's batch no
+    # larger than its threads; the default leaves Lake a short queue so a slow
+    # module does not idle the other threads.
+    "walk_batch_factor": 4,
 }
 # Margin-era tunables retired by launch-and-watch admission.  A profile that
 # still carries one stays valid; the value is ignored.
@@ -45,6 +57,8 @@ ADMISSION_RANGES = {
     "wait_poll_seconds": (2, 5),
     "narrow_default_gib": (1, 32),
     "heavy_module_seconds": (1, 86400),
+    "max_build_threads": (0, 64),
+    "walk_batch_factor": (1, 64),
 }
 # The language-server worker watchdog (`creme lean-mcp`) stops an owned
 # `lean --worker` whose footprint passes a ceiling.  The profile may set it in

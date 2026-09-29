@@ -1840,6 +1840,35 @@ def acquire(
     )
 
 
+def largest_fitting_need(
+    label: str,
+    adapter: Optional[Adapter] = None,
+    policy: Optional[dict[str, Any]] = None,
+) -> Optional[float]:
+    """The largest need admission would accept for ``label`` right now, or None.
+
+    Read-only and advisory: it is the fit arithmetic (`fit_arithmetic`) with
+    the other labels' admitted needs charged, so a caller that sizes a build to
+    it asks for what the ordinary admission rule would then grant.  Nothing is
+    reserved, and admission still decides.  ``None`` when the host cannot say
+    (headroom unavailable, a drain-level pressure cause, or any read failure),
+    which a caller must treat as "assume nothing".
+    """
+    try:
+        selected = adapter or get_adapter()
+        selected_policy = policy or _runtime_admission_policy(selected)
+        sample = selected.memory_headroom()
+        if _pressure_cause(sample) is not None:
+            return None
+        admitted = _admitted_need_gib(
+            (item for item in snapshot()["soft"] if item["label"] != label),
+            int(selected_policy["task_memory_gib"]),
+        )
+        return fit_arithmetic(sample, selected_policy, 0.0, admitted)["largest_fitting_need_gib"]
+    except Exception:
+        return None
+
+
 def _validate_request(
     label: str,
     lease: int,

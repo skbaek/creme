@@ -86,6 +86,9 @@ _SAFE_LEDGER_KEYS = {
     # peak evidence, no margin), whether it was an unproven default, the
     # watchdog's lowest observed availability, and what the watchdog did.
     "need_gib", "unproven", "min_available_gib", "watchdog_events",
+    # Additive, from creme-walk-parallel-v1: how the thread count was chosen
+    # (explicit, default, or adaptive with the priced need that fit).
+    "threads_source",
 }
 DEFAULT_LAKE_OVERHEAD_GIB = 1.0
 # A stale set this small has its concurrency computed exactly from the import
@@ -216,6 +219,62 @@ def read_ledger(
     return rows, corrupt
 
 
+# The estimator reads the last 30 days of the ledger several times per build
+# (rows, failed rows, and once per thread count the build considers), and the
+# ledger is append-only, so the parsed rows are kept and only appended bytes
+# are parsed on the next read.  A different file, a shorter file, or a changed
+# tail (a rewrite rather than an append) starts over.
+_RECENT_TAIL_BYTES = 256
+_RECENT_LEDGER: dict[str, Any] = {"key": None}
+
+
+def read_recent_ledger(days: int = 30) -> tuple[list[dict[str, Any]], int]:
+    """`read_ledger(f"{days}d")`, parsing only what was appended since the last call."""
+    path = ledger_path()
+    if not path.exists():
+        return [], 0
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        os.fchmod(lock.fileno(), 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+        with path.open("rb") as source:
+            status = os.fstat(source.fileno())
+            key = (str(path), status.st_ino)
+            cache = _RECENT_LEDGER
+            offset = int(cache.get("offset") or 0)
+            valid = cache.get("key") == key and status.st_size >= offset
+            if valid and offset:
+                source.seek(max(0, offset - _RECENT_TAIL_BYTES))
+                valid = source.read(min(offset, _RECENT_TAIL_BYTES)) == cache.get("tail")
+            if not valid:
+                cache.clear()
+                cache.update(key=key, offset=0, tail=b"", rows=[], corrupt=0)
+                offset = 0
+            source.seek(offset)
+            chunk = source.read(status.st_size - offset)
+    complete = chunk.rfind(b"\n") + 1     # a torn last line is left for the next read
+    if complete:
+        rows: list[dict[str, Any]] = cache["rows"]
+        for line in chunk[:complete].decode("utf-8", errors="replace").splitlines(keepends=True):
+            try:
+                row = json.loads(line)
+                if not _valid_ledger_row(row):
+                    raise ValueError("unsupported row")
+                datetime.fromisoformat(row["time"].replace("Z", "+00:00"))
+                # The estimator never reads the restored-module list, which is
+                # most of a row's bytes on a broad build (107 of 140 MB in the
+                # 2026-09 ledger); a resident cache keeps a valid empty list.
+                if row.get("modules_restored"):
+                    row["modules_restored"] = []
+                rows.append(row)
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                cache["corrupt"] += 1
+        cache["offset"] = offset + complete
+        cache["tail"] = ((cache.get("tail") or b"") + chunk[:complete])[-_RECENT_TAIL_BYTES:]
+    cutoff = _iso(datetime.now(timezone.utc) - timedelta(days=days))
+    return [row for row in cache["rows"] if str(row["time"]) >= cutoff], int(cache["corrupt"])
+
+
 def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
@@ -292,7 +351,7 @@ def _valid_ledger_row(row: Any) -> bool:
     optional_strings = (
         "toolchain", "outcome", "toolchain_digest", "manifest_digest",
         "requested_contention", "evidence_contention", "estimate_source",
-        "dependency", "dependency_rev",
+        "dependency", "dependency_rev", "threads_source",
         "evidence_reason", "stale_detail", "hint", "log_path",
     )
     if not all(key not in row or isinstance(row[key], str) for key in optional_strings):
@@ -1408,6 +1467,27 @@ def repository_identity(worktree: Path) -> Optional[str]:
     return _identity_digest(["repository", str(path)])
 
 
+# One estimate scans every old row's recorded worktree, and each answer is a
+# `git` subprocess (about 9 ms); a build asks several times, so on a ledger
+# with hundreds of past worktrees (most since removed, all sharing three
+# repository roots) the scan alone cost seconds per unit.  Git's answer for a
+# path cannot change within a build, so it is remembered briefly by the path
+# Git was asked about.
+_LEGACY_IDENTITY_TTL_SECONDS = 300.0
+_LEGACY_IDENTITY_CACHE: dict[str, tuple[float, Optional[str]]] = {}
+
+
+def _remembered_repository_identity(path: Path) -> Optional[str]:
+    key = str(path)
+    now = time.monotonic()
+    cached = _LEGACY_IDENTITY_CACHE.get(key)
+    if cached is not None and now - cached[0] < _LEGACY_IDENTITY_TTL_SECONDS:
+        return cached[1]
+    found = repository_identity(path)
+    _LEGACY_IDENTITY_CACHE[key] = (now, found)
+    return found
+
+
 def _legacy_repository_identity(recorded_worktree: Any) -> Optional[str]:
     """Recover scope for an old linked-worktree row only from live Git state.
 
@@ -1421,11 +1501,11 @@ def _legacy_repository_identity(recorded_worktree: Any) -> Optional[str]:
         return None
     path = Path(recorded_worktree)
     if path.is_dir():
-        found = repository_identity(path)
+        found = _remembered_repository_identity(path)
         if found is not None:
             return found
     if path.parent.name == ".worktrees" and path.parent.parent.is_dir():
-        return repository_identity(path.parent.parent)
+        return _remembered_repository_identity(path.parent.parent)
     return None
 
 
@@ -2159,7 +2239,7 @@ def _evidence_rows(
     the same worktree as conservative legacy fallback.
     """
     try:
-        rows, _corrupt = read_ledger("30d")
+        rows, _corrupt = read_recent_ledger(30)
     except (OSError, ValueError):
         # Unreadable performance state is not evidence; it must never widen
         # admission, so the caller falls back to the conservative class.
@@ -2541,9 +2621,18 @@ def _model_peak(
     measured: dict[str, float],
     graph: Optional[dict[str, set[str]]],
     evidence: dict[str, Any],
+    threads: Optional[int] = None,
 ) -> tuple[float, int, list[float]]:
-    """Lake overhead plus the `lean` peaks that can run at once."""
+    """Lake overhead plus the `lean` peaks that can run at once.
+
+    ``threads`` is the build's `LEAN_NUM_THREADS`: Lake may run that many
+    `lean` processes at once, so the concurrency the ledger has *observed* is
+    a floor, never a ceiling, on what a wider build is priced for.  A build at
+    one or two threads is priced exactly as before.
+    """
     cap = max(int(evidence["concurrency"]), 2 if len(measured) > 1 else 1)
+    if isinstance(threads, int) and not isinstance(threads, bool) and threads > cap:
+        cap = threads
     width = stale_set_width(measured, graph, cap)
     top = sorted(measured.values(), reverse=True)[:width]
     return float(evidence["overhead_gib"]) + sum(top), width, top
@@ -2610,59 +2699,24 @@ def _fallback_clause(
     return f"; fallback prices {name} at {gib:.2f} GiB from row {time} ({kind}){extra}"
 
 
-def size_stale_set(
-    stale: list[str],
-    graph: Optional[dict[str, set[str]]],
-    rows: list[dict[str, Any]],
-    settings: dict[str, int],
-    default_gib: int,
-    input_identity: Optional[dict[str, Any]] = None,
-    failed_rows: Iterable[dict[str, Any]] = (),
-    toolchain_digest: Optional[str] = None,
-) -> dict[str, Any]:
-    """Size a build's need from the modules it will elaborate, with no margin.
+def _failed_attempt_floors(
+    failed_rows: Iterable[dict[str, Any]], unmeasured: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """Peak floors that failed attempts set for modules with no measurement.
 
-    The need is the Lake overhead plus the peaks that can run at the same
-    time.  A module's peak is its own measurement; failing that, a recorded
-    floor (a drifted or other-toolchain row, or a failed or retracted attempt).
-    When every stale module has one of those, the need is evidence.  When
-    some module has none, a large set is bounded by the tightest broader
-    rebuild that included its members; otherwise the need is a conservative
-    default (the narrow default for a small set of short modules, the profile
-    default for a heavy member or a large set) and the result is ``unproven``.
-
-    An unmeasured module whose elaboration failed in ``failed_rows`` is
-    floored by that failed run: by the module's own recorded peak when the
-    row has one, otherwise by the run's whole process peak only when it is
-    the row's sole failed module.  A row with several failed modules and no
-    per-module peak cannot say which of them the peak belongs to, so it
-    floors none of them.  The floor only ever raises the need.
-    ``toolchain_digest`` scopes fallback evidence as ``module_cost_evidence``
-    describes.
+    A failed module is floored by its own recorded peak when the row has one,
+    otherwise by the run's whole process peak only when it is the row's sole
+    failed module (a row with several failures and no per-module peak cannot
+    say which of them the peak belongs to, so it floors none of them).
     """
-    failed_rows = list(failed_rows)
-    limit = int(settings["tolerant_module_count"])
-    narrow_default = int(settings["narrow_default_gib"])
-    heavy_seconds = float(settings["heavy_module_seconds"])
-    evidence = module_cost_evidence(rows, settings, input_identity, toolchain_digest)
-    names = sorted(set(stale))
-    measured = {name: evidence["lean_peak_gib"][name] for name in names if name in evidence["lean_peak_gib"]}
-    unmeasured = [name for name in names if name not in measured]
-    fallback = {
-        name: evidence["fallback_peak_gib"][name]
-        for name in unmeasured if name in evidence["fallback_peak_gib"]
-    }
-    fallback_build = {
-        name: evidence["fallback_build_peak_gib"][name]
-        for name in unmeasured if name in evidence["fallback_build_peak_gib"]
-    }
+    wanted = set(unmeasured)
     failed_floor: dict[str, dict[str, Any]] = {}
     for row in failed_rows:
         failed_modules = [str(module) for module in row.get("modules_failed") or []]
         recorded = row.get("module_peak_mib")
         recorded = recorded if isinstance(recorded, dict) else {}
         for module in failed_modules:
-            if module not in unmeasured:
+            if module not in wanted:
                 continue
             own = recorded.get(module)
             if _finite_positive(own):
@@ -2682,6 +2736,59 @@ def size_stale_set(
                     "peak_gib": peak_gib, "row_time": str(row.get("time")), "kind": kind,
                     "level": level,
                 }
+    return failed_floor
+
+
+def size_stale_set(
+    stale: list[str],
+    graph: Optional[dict[str, set[str]]],
+    rows: list[dict[str, Any]],
+    settings: dict[str, int],
+    default_gib: int,
+    input_identity: Optional[dict[str, Any]] = None,
+    failed_rows: Iterable[dict[str, Any]] = (),
+    toolchain_digest: Optional[str] = None,
+    threads: Optional[int] = None,
+) -> dict[str, Any]:
+    """Size a build's need from the modules it will elaborate, with no margin.
+
+    The need is the Lake overhead plus the peaks that can run at the same
+    time.  A module's peak is its own measurement; failing that, a recorded
+    floor (a drifted or other-toolchain row, or a failed or retracted attempt).
+    When every stale module has one of those, the need is evidence.  When
+    some module has none, a large set is bounded by the tightest broader
+    rebuild that included its members; otherwise the need is a conservative
+    default (the narrow default for a small set of short modules, the profile
+    default for a heavy member or a large set) and the result is ``unproven``.
+
+    An unmeasured module whose elaboration failed in ``failed_rows`` is
+    floored by that failed run: by the module's own recorded peak when the
+    row has one, otherwise by the run's whole process peak only when it is
+    the row's sole failed module.  A row with several failed modules and no
+    per-module peak cannot say which of them the peak belongs to, so it
+    floors none of them.  The floor only ever raises the need.
+    ``toolchain_digest`` scopes fallback evidence as ``module_cost_evidence``
+    describes.  ``threads`` widens the concurrency the peaks are summed over
+    when the build runs more compiler threads than the ledger has observed
+    (see `_model_peak`).
+    """
+    failed_rows = list(failed_rows)
+    limit = int(settings["tolerant_module_count"])
+    narrow_default = int(settings["narrow_default_gib"])
+    heavy_seconds = float(settings["heavy_module_seconds"])
+    evidence = module_cost_evidence(rows, settings, input_identity, toolchain_digest)
+    names = sorted(set(stale))
+    measured = {name: evidence["lean_peak_gib"][name] for name in names if name in evidence["lean_peak_gib"]}
+    unmeasured = [name for name in names if name not in measured]
+    fallback = {
+        name: evidence["fallback_peak_gib"][name]
+        for name in unmeasured if name in evidence["fallback_peak_gib"]
+    }
+    fallback_build = {
+        name: evidence["fallback_build_peak_gib"][name]
+        for name in unmeasured if name in evidence["fallback_build_peak_gib"]
+    }
+    failed_floor = _failed_attempt_floors(failed_rows, unmeasured)
     fallback_floor = max(
         [*fallback.values(), *fallback_build.values(),
          *(item["peak_gib"] for item in failed_floor.values())],
@@ -2777,7 +2884,7 @@ def size_stale_set(
         return shown + (f", … ({len(items)} in all)" if len(items) > 3 else "")
 
     if not unmeasured:
-        peak, width, top = _model_peak(measured, graph, evidence)
+        peak, width, top = _model_peak(measured, graph, evidence, threads)
         result.update({"peak_gib": round(peak, 2), "width": width})
         return finish(
             "measured", peak,
@@ -2795,7 +2902,7 @@ def size_stale_set(
         # floors with the concurrency model, bounded below by any tree floor.
         modelled = {**measured, **lean_floors}
         peak, width, top = (
-            _model_peak(modelled, graph, evidence) if modelled else (0.0, 0, [])
+            _model_peak(modelled, graph, evidence, threads) if modelled else (0.0, 0, [])
         )
         tree = max(tree_floors.values(), default=0.0)
         need = max(peak, tree)
@@ -2815,11 +2922,11 @@ def size_stale_set(
 
     measured_peak = 0.0
     if measured:
-        measured_peak, _width, _top = _model_peak(measured, graph, evidence)
+        measured_peak, _width, _top = _model_peak(measured, graph, evidence, threads)
     # What the evidence that does exist already proves the need is at least.
     known = {**measured, **lean_floors}
     evidence_need = max(
-        _model_peak(known, graph, evidence)[0] if known else 0.0,
+        _model_peak(known, graph, evidence, threads)[0] if known else 0.0,
         max(tree_floors.values(), default=0.0),
     )
     result["peak_gib"] = round(evidence_need, 2)
@@ -3071,7 +3178,7 @@ def derive_memory_gib(
         )
         fallback = size_stale_set(
             list(stale_set), stale.get("graph"), rows, settings, default_gib, fallback_identity,
-            failed_rows, digests[0],
+            failed_rows, digests[0], threads,
         )
         return int(fallback["estimate_gib"]), {
             "kind": fallback["kind"],
@@ -3100,7 +3207,7 @@ def derive_memory_gib(
     )
     sizing = size_stale_set(
         list(stale_set), stale.get("graph"), rows, settings, default_gib, input_identity,
-        failed_rows, digests[0],
+        failed_rows, digests[0], threads,
     )
     return int(sizing["estimate_gib"]), {
         "kind": sizing["kind"],
@@ -3571,19 +3678,20 @@ def _walk_trigger(admission: str) -> bool:
     return _admission_token(admission) in WALK_TRIGGERS
 
 
-def walk_order(
+def walk_heights(
     modules: Iterable[str], graph: Optional[dict[str, set[str]]]
-) -> Optional[list[str]]:
-    """Order a stale set deepest-first: every module after the ones it imports.
+) -> Optional[dict[str, int]]:
+    """Each stale module's import height: the longest import chain below it in the set.
 
-    A module's height is the longest import chain below it inside the set, so
-    sorting by height (then name, for a stable order) is a topological order
-    of the import graph restricted to the set.  Without a graph the order is
-    unknown and nothing may be walked.
+    Two modules of one height never import each other (an import would put
+    the importer strictly higher), and every stale import of a module has a
+    smaller height, so all modules of one height can be built together once
+    the lower heights are built.  Without a graph the heights are unknown, and
+    an import cycle has none; both answer ``None``.
     """
     names = sorted(set(str(module) for module in modules))
     if not names:
-        return []
+        return {}
     if graph is None or any(name not in graph for name in names):
         return None
     members = set(names)
@@ -3606,7 +3714,160 @@ def walk_order(
                 ready.append(importer)
     if done != len(names):
         return None  # an import cycle has no dependency order
-    return sorted(names, key=lambda name: (height[name], name))
+    return height
+
+
+def walk_order(
+    modules: Iterable[str], graph: Optional[dict[str, set[str]]]
+) -> Optional[list[str]]:
+    """Order a stale set deepest-first: every module after the ones it imports.
+
+    Sorting by height (then name, for a stable order) is a topological order
+    of the import graph restricted to the set.  Without a graph the order is
+    unknown and nothing may be walked.
+    """
+    height = walk_heights(modules, graph)
+    if height is None:
+        return None
+    return sorted(height, key=lambda name: (height[name], name))
+
+
+def walk_waves(
+    modules: Iterable[str], graph: Optional[dict[str, set[str]]]
+) -> Optional[list[list[str]]]:
+    """The stale set as waves of equal import height, lowest first.
+
+    Concatenating the waves gives `walk_order`.  The modules of one wave are
+    independent of each other, so any subset of a wave may be one build unit.
+    """
+    height = walk_heights(modules, graph)
+    if height is None:
+        return None
+    waves: dict[int, list[str]] = {}
+    for name in sorted(height, key=lambda item: (height[item], item)):
+        waves.setdefault(height[name], []).append(name)
+    return [waves[level] for level in sorted(waves)]
+
+
+def walk_isolated_modules(
+    worktree: Path,
+    names: Iterable[str],
+    digests: tuple[Optional[str], Optional[str]],
+    settings: dict[str, int],
+    input_identity: Optional[dict[str, Any]] = None,
+    threads: Optional[int] = None,
+) -> set[str]:
+    """Stale modules a walk must build alone, because their price is a floor.
+
+    A module with no exact measurement but a failed-attempt floor, and every
+    module of a retracted attempt's unfinished set, prices any batch that
+    contains it at that floor (a failed closure's whole process peak can be
+    many GiB), which would make an innocent sibling batch look like it never
+    fits.  Alone, the module is priced exactly as a single-module unit is.
+    """
+    wanted = sorted(set(str(name) for name in names))
+    rows, _detail = _evidence_rows(worktree, *digests, input_identity, threads)
+    failed_rows, _failed_detail = _evidence_rows(
+        worktree, *digests, input_identity, threads, failed=True,
+    )
+    if not failed_rows:
+        return set()
+    evidence = module_cost_evidence(rows, settings, input_identity, digests[0])
+    unmeasured = [name for name in wanted if name not in evidence["lean_peak_gib"]]
+    isolated = set(_failed_attempt_floors(failed_rows, unmeasured))
+    inside = set(wanted)
+    for row in failed_rows:
+        if row.get("outcome") != "retracted" or not _finite_positive(row.get("peak_rss_mib")):
+            continue
+        members = set(str(module) for module in row.get("modules_failed") or [])
+        if members and members <= inside:
+            isolated |= members
+    return isolated
+
+
+def plan_walk_units(
+    waves: list[list[str]], isolated: Iterable[str], cap: int,
+) -> list[list[str]]:
+    """Cut each wave into build units of at most ``cap`` modules.
+
+    An isolated module is a unit of its own (first in its wave, so a module
+    that failed before fails early); the rest of the wave is cut into the
+    fewest units of at most ``cap`` modules, sized evenly.
+    """
+    alone = set(isolated)
+    limit = max(1, int(cap))
+    units: list[list[str]] = []
+    for wave in waves:
+        units.extend([name] for name in wave if name in alone)
+        rest = [name for name in wave if name not in alone]
+        if not rest:
+            continue
+        count = -(-len(rest) // limit)
+        base, extra = divmod(len(rest), count)
+        start = 0
+        for index in range(count):
+            size = base + (1 if index < extra else 0)
+            units.append(rest[start:start + size])
+            start += size
+    return units
+
+
+def resolve_max_threads(settings: dict[str, int], cores: Optional[int]) -> int:
+    """The ceiling on an owned build's compiler threads: the profile's, else half the cores.
+
+    Automatic (0) is half the logical cores, at least `DEFAULT_THREADS`,
+    because the host may admit two heavy builds and each should be able to
+    use its half.  A configured value is honoured, never below the default.
+    """
+    configured = int(settings.get("max_build_threads") or 0)
+    if configured > 0:
+        return max(DEFAULT_THREADS, configured)
+    return max(DEFAULT_THREADS, (cores or DEFAULT_THREADS) // 2)
+
+
+def choose_build_threads(
+    price: Callable[[int], tuple[float, bool]],
+    headroom_gib: Optional[float],
+    ceiling: int,
+    stale_modules: Optional[int] = None,
+) -> tuple[int, str]:
+    """The largest thread count whose priced need fits what admission would grant.
+
+    ``price(t)`` is the need (GiB) the build would be admitted on at ``t``
+    threads and whether it is unproven; ``headroom_gib`` is the largest need
+    admission would accept right now (available less the floor and the needs
+    already admitted).  Never below `DEFAULT_THREADS`, never above ``ceiling``
+    or the number of stale modules (more threads than modules cannot run), and
+    never widened when the evidence is a default rather than a price.  The
+    need only grows with threads, so the largest fitting count is found by
+    bisection; the answer is always one that was priced and fit.
+    """
+    floor = DEFAULT_THREADS
+    top = min(int(ceiling), max(floor, int(stale_modules))) if stale_modules else int(ceiling)
+    if top <= floor:
+        return floor, f"{floor} threads: no wider build is possible here"
+    if headroom_gib is None:
+        return floor, f"{floor} threads: memory headroom is unavailable"
+    need, unproven = price(floor)
+    if unproven:
+        return floor, f"{floor} threads: the need is an unproven default, not a price"
+    best, best_need = floor, need
+    low, high = floor + 1, top
+    while low <= high:
+        middle = (low + high) // 2
+        need_here, unproven_here = price(middle)
+        if not unproven_here and need_here <= headroom_gib:
+            best, best_need = middle, need_here
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best, (
+        f"{best} threads: priced need {best_need:.2f} GiB"
+        + (f" fits the {headroom_gib:.2f} GiB admission would grant now" if best > floor
+           else f" at the {floor}-thread floor")
+        + (f"; {best + 1} threads do not fit or are not priced" if best < top else "")
+        + f" (ceiling {int(ceiling)})"
+    )
 
 
 class _UnitOutput:
@@ -3650,7 +3911,7 @@ def _walk_unit(
     unit_targets: list[str],
     label: str,
     *,
-    threads: int,
+    threads: Optional[int],
     wait_seconds: Optional[int],
     full_output: bool,
     output: TextIO,
@@ -3681,6 +3942,8 @@ def _walk_unit(
     }
     if summary.get("status") == "REFUSED":
         unit["refused"] = True
+    if isinstance(summary.get("threads"), int):
+        unit["threads"] = summary["threads"]
     if summary.get("failed"):
         unit["failed"] = summary["failed"]
     if "target_verdicts" in summary:
@@ -3709,7 +3972,7 @@ def _walk_unit_once_more(
     unit_targets: list[str],
     label: str,
     *,
-    threads: int,
+    threads: Optional[int],
     wait_seconds: Optional[int],
     full_output: bool,
     output: TextIO,
@@ -3741,47 +4004,159 @@ def _walk_unit_once_more(
     return retry
 
 
+def _walk_batch(
+    goal: str,
+    modules: list[str],
+    *,
+    total: int,
+    progress: list[int],
+    threads: Optional[int],
+    wait_seconds: Optional[int],
+    full_output: bool,
+    output: TextIO,
+    units: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Build one wave subset as a unit, halving it when it is too big to run.
+
+    Returns the unit that must stop the walk, or ``None`` when every module
+    of ``modules`` is built.  A single module is an ordinary unit exactly as
+    before: it waits for admission (``wait_seconds``), and a retraction
+    re-queues it once at its observed peak.  A batch is first asked for
+    *without* waiting: refused with a walk trigger (`LIGHT_ONLY`,
+    `NEVER_FITS`, `WAIT_TIMEOUT`), or retracted by the watchdog, it is split in
+    half and each half retried, because a smaller unit may fit where this one
+    does not; a refusal about other sessions' holds is waited out for the whole
+    batch, as it would be for one module.  Any other failure stops the walk.
+    Every attempt, split or not, stays in ``units``.
+    """
+    def label_for(size: int) -> str:
+        first = progress[0] + 1
+        if size == 1:
+            return f"{first}/{total} {modules[0]}"
+        return f"{first}-{first + size - 1}/{total} {size} modules {modules[0]} .. {modules[-1]}"
+
+    if len(modules) == 1:
+        unit = _walk_unit_once_more(
+            goal, modules, label_for(1), threads=threads, wait_seconds=wait_seconds,
+            full_output=full_output, output=output,
+        )
+        unit["module"] = modules[0]
+        unit["modules"] = list(modules)
+        units.append(unit)
+        if unit["exit"] != 0:
+            return unit
+        progress[0] += 1
+        return None
+    label = label_for(len(modules))
+    unit = _walk_unit(
+        goal, modules, label, threads=threads, wait_seconds=None,
+        full_output=full_output, output=output,
+    )
+    if (
+        unit["exit"] != 0 and unit.get("refused") and wait_seconds is not None
+        and not _walk_trigger(str(unit["admission"]))
+    ):
+        # Not a size problem: another session's hold.  Wait for it, once, for
+        # the whole batch; a wait that runs out is a size problem after all.
+        units.append(dict(unit, module=modules[0], modules=list(modules), split=False))
+        unit = _walk_unit(
+            goal, modules, f"{label} (waited)", threads=threads, wait_seconds=wait_seconds,
+            full_output=full_output, output=output,
+        )
+    unit["module"] = modules[0]
+    unit["modules"] = list(modules)
+    if unit["exit"] == 0:
+        units.append(unit)
+        progress[0] += len(modules)
+        return None
+    splittable = (
+        (unit.get("refused") and _walk_trigger(str(unit["admission"])))
+        or unit.get("retracted")
+    )
+    if not splittable:
+        units.append(unit)
+        return unit
+    unit["split"] = True
+    units.append(unit)
+    middle = len(modules) // 2
+    print(
+        f"walk {label}: {'retracted' if unit.get('retracted') else 'refused'} as a batch; "
+        f"splitting into {middle} + {len(modules) - middle} module(s)",
+        file=output, flush=True,
+    )
+    for half in (modules[:middle], modules[middle:]):
+        stopper = _walk_batch(
+            goal, half, total=total, progress=progress, threads=threads,
+            wait_seconds=wait_seconds, full_output=full_output, output=output, units=units,
+        )
+        if stopper is not None:
+            return stopper
+    return None
+
+
 def _walk_stale_set(
     goal: str,
     targets: list[str],
     order: list[str],
     whole_admission: str,
     *,
-    threads: int,
+    threads: Optional[int],
     wait_seconds: Optional[int],
     full_output: bool,
     output: TextIO,
+    waves: Optional[list[list[str]]] = None,
+    isolated: Iterable[str] = (),
+    batch_cap: int = 1,
 ) -> int:
-    """Build a refused closure one stale module at a time, then the targets.
+    """Build a refused closure in dependency waves of owned units, then the targets.
 
-    Sequential by design: host memory is the constraint, so no unit runs
-    beside another.  Each unit names exactly one module, and ``order`` puts
-    every stale import of that module before it, so the unit's own probe finds
-    that module alone stale and prices it alone (Lake overhead plus its own
-    peak or floor), never as a concurrent sum with a sibling it does not run
-    beside.  A unit the watchdog retracts is re-queued once at its
-    observed peak; the first unit that fails, is refused, or retracts twice
-    stops the walk; everything above it would only fail again.
+    ``order`` puts every stale import of a module before it, and ``waves``
+    groups it by import height: the modules of one wave never import each
+    other, and every stale import of a wave's module is in an earlier wave.
+    Each unit names at most ``batch_cap`` modules of one wave (so Lake builds
+    them in parallel within the unit's threads), and every unit is an ordinary
+    owned build: its own probe, estimate, admission, hold, watchdog, and
+    ledger row.  Its probe finds only that batch stale, so the existing
+    estimator prices it (Lake overhead plus the concurrent peaks) exactly as
+    it prices any build; no estimate is lowered or special-cased.  A module
+    whose price is a failed-attempt floor (``isolated``) is a unit of its
+    own, so the floor never inflates a sibling batch.  A batch the host will
+    not admit, or the watchdog retracts, is halved down to one module, and a
+    single module behaves as the walk always has: it waits for admission and a
+    retraction re-queues it once at its observed peak.  The first unit that
+    fails, is refused (single module), or retracts twice stops the walk;
+    everything above it would only fail again.  Without ``waves`` or with
+    ``batch_cap`` 1 every module is its own unit, as before.
     """
+    if waves is None:
+        waves = [[name] for name in order]
+    units_plan = plan_walk_units(waves, isolated, batch_cap)
     print(
         f"walk: the whole closure was refused ({whole_admission}); building "
-        f"{len(order)} stale module(s) one at a time, imports first",
+        f"{len(order)} stale module(s) in {len(units_plan)} unit(s) of at most "
+        f"{max(1, int(batch_cap))}, imports first",
         file=output, flush=True,
     )
     units: list[dict[str, Any]] = []
     stopped: Optional[dict[str, Any]] = None
-    remaining: list[str] = []
-    for index, module in enumerate(order):
-        unit = _walk_unit_once_more(
-            goal, [module], f"{index + 1}/{len(order)} {module}",
-            threads=threads, wait_seconds=wait_seconds, full_output=full_output, output=output,
+    progress = [0]
+    for planned in units_plan:
+        stopped = _walk_batch(
+            goal, planned, total=len(order), progress=progress, threads=threads,
+            wait_seconds=wait_seconds, full_output=full_output, output=output, units=units,
         )
-        unit["module"] = module
-        units.append(unit)
-        if unit["exit"] != 0:
-            stopped = unit
-            remaining = order[index + 1:]
+        if stopped is not None:
             break
+    built: list[str] = []
+    for unit in units:
+        if unit["exit"] == 0:
+            built.extend(unit["modules"])
+    remaining: list[str] = []
+    stopped_at = ""
+    if stopped is not None:
+        attempted = set(stopped["modules"]) | set(built)
+        remaining = [name for name in order if name not in attempted]
+        stopped_at = ", ".join(stopped.get("failed") or stopped["modules"])
     final: Optional[dict[str, Any]] = None
     if stopped is None:
         final = _walk_unit_once_more(
@@ -3797,7 +4172,7 @@ def _walk_stale_set(
     else:
         exit_code = int(stopped["exit"])
         verdicts = {
-            target: f"not built: the walk stopped at {stopped['module']}" for target in targets
+            target: f"not built: the walk stopped at {stopped_at}" for target in targets
         }
         failed_unit = stopped
     refused = failed_unit is not None and failed_unit.get("refused", False)
@@ -3807,7 +4182,11 @@ def _walk_stale_set(
         "walk": {
             "whole_closure_admission": whole_admission,
             "order": order,
-            "units_built": [unit["module"] for unit in units if unit["exit"] == 0],
+            "waves": [len(wave) for wave in waves],
+            "batch_cap": max(1, int(batch_cap)),
+            "units_planned": len(units_plan),
+            "isolated": sorted(set(isolated) & set(order)),
+            "units_built": built,
             "failed_unit": failed_unit,
             "remaining": remaining,
             "units": units,
@@ -3821,13 +4200,56 @@ def _walk_stale_set(
     return exit_code
 
 
+def _adaptive_threads(
+    goal: str,
+    worktree: Path,
+    targets: list[str],
+    digests: tuple[Optional[str], Optional[str]],
+    settings: Callable[[], dict[str, int]],
+    probe_state: dict[str, Any],
+    input_snapshot: Callable[..., tuple[Optional[dict[str, Any]], str]],
+    min_need_gib: Optional[float],
+    output: TextIO,
+) -> tuple[int, str]:
+    """Pick the build's threads from its own pricing at probe time.
+
+    Prices the stale set with the ordinary estimator at each candidate thread
+    count (more threads means more `lean` peaks summed) and takes the widest
+    that fits what admission would grant now (`choose_build_threads`).  Any
+    failure to price or to read the host leaves today's `DEFAULT_THREADS`.
+    """
+    modules = probe_state.get("stale_set")
+    if not modules:
+        return DEFAULT_THREADS, "default: the probe named no stale module to price"
+    try:
+        ceiling = resolve_max_threads(settings(), os.cpu_count())
+        headroom = semaphore.largest_fitting_need(goal)
+
+        def price(count: int) -> tuple[float, bool]:
+            identity, detail = input_snapshot(None, count)
+            estimate, evidence = derive_memory_gib(
+                worktree, targets, settings(), digests, DEFAULT_MEMORY_GIB,
+                probe_state.get("stale"), probe_state, identity, detail, count,
+            )
+            need = float(evidence.get("need_gib") or estimate)
+            if min_need_gib is not None and min_need_gib > 0:
+                need = max(need, float(min_need_gib))
+            return need, bool(evidence.get("unproven"))
+
+        chosen, note = choose_build_threads(price, headroom, ceiling, len(modules))
+    except Exception as exc:  # advisory: never let it break a build
+        return DEFAULT_THREADS, f"default: the adaptive choice failed ({type(exc).__name__})"
+    print(f"threads: {chosen} ({note})", file=output, flush=True)
+    return chosen, f"adaptive: {note}"
+
+
 def run_lake_build(
     goal: str,
     targets: list[str],
     *,
     memory_gib: Optional[int] = None,
     contention: Optional[str] = None,
-    threads: int = DEFAULT_THREADS,
+    threads: Optional[int] = DEFAULT_THREADS,
     probe: bool = False,
     wait_seconds: Optional[int] = None,
     census: bool = False,
@@ -3844,6 +4266,13 @@ def run_lake_build(
     ``watchdog`` False disables the launch-and-watch watchdog (tests only);
     ``watch`` injects its settings.  ``min_need_gib`` floors the need, which
     is how a walk re-queues a retracted unit at its observed peak.
+
+    ``threads`` is the build's `LEAN_NUM_THREADS`.  A number is used as given.
+    ``None`` lets the build choose, at probe time: the most threads, up to the
+    profile's ceiling, whose priced need still fits what admission would grant
+    now, and never fewer than `DEFAULT_THREADS` (`choose_build_threads`).
+    The direct-call default stays `DEFAULT_THREADS`; the command line passes
+    ``None`` unless ``--threads`` is given.
     """
     output = stdout or os.sys.stdout
     cwd = Path.cwd().resolve()
@@ -3933,18 +4362,30 @@ def run_lake_build(
 
     input_identity: Optional[dict[str, Any]] = None
     identity_detail = "stale source closure was not available"
+    requested_threads = threads   # what the caller asked for; a walk's units ask the same
+    threads_source = "explicit" if threads is not None else "default"
 
     def input_snapshot(
         snapshot_digests: Optional[tuple[Optional[str], Optional[str]]] = None,
+        thread_count: Optional[int] = None,
     ) -> tuple[Optional[dict[str, Any]], str]:
         probe_state = stale()
         modules = probe_state.get("stale_set")
         if modules is None:
             return None, "stale source closure was not available"
         return build_input_identity(
-            worktree, modules, probe_state.get("graph"), snapshot_digests or digests, threads,
+            worktree, modules, probe_state.get("graph"), snapshot_digests or digests,
+            thread_count if thread_count is not None else threads,
             toolchain_identity,
         )
+
+    if threads is None:
+        threads = DEFAULT_THREADS
+        if not census and not probe:
+            threads, threads_source = _adaptive_threads(
+                goal, worktree, targets, digests, settings, stale(), input_snapshot,
+                min_need_gib, output,
+            )
 
     if census:
         contention = "exclusive"
@@ -4099,10 +4540,19 @@ def run_lake_build(
                 admitted, admission = acquire(wait_seconds)
             if not admitted and _walk_trigger(admission):
                 if order is not None and len(order) > 1:
+                    ceiling = (
+                        requested_threads if requested_threads is not None
+                        else resolve_max_threads(settings(), os.cpu_count())
+                    )
                     return _walk_stale_set(
                         goal, targets, order, admission,
-                        threads=threads, wait_seconds=wait_seconds,
+                        threads=requested_threads, wait_seconds=wait_seconds,
                         full_output=full_output, output=output,
+                        waves=walk_waves(walk_modules, probe_evidence.get("graph")),
+                        isolated=walk_isolated_modules(
+                            worktree, order, digests, settings(), input_identity, threads,
+                        ),
+                        batch_cap=max(1, int(ceiling) * int(settings()["walk_batch_factor"])),
                     )
                 evidence = dict(evidence)
                 evidence["walk"] = (
@@ -4350,6 +4800,7 @@ def run_lake_build(
         "sampling_samples": sampler.samples if sampler else 0,
         "sampling_unavailable": sampler.unavailable_samples if sampler else 0,
         "swap_before_gib": before, "swap_after_gib": after, "threads": threads,
+        "threads_source": threads_source,
         "probe": False, "admission": admission, "contention": contention,
         "modules_rebuilt": rebuilt, "modules_restored": restored,
         **({"modules_failed": modules_failed} if modules_failed else {}),
@@ -4411,6 +4862,7 @@ def run_lake_build(
         "sampling_samples": sampler.samples if sampler else 0,
         "sampling_unavailable": sampler.unavailable_samples if sampler else 0,
         "modules_rebuilt": len(rebuilt), "modules_restored": len(restored), "admission": admission,
+        "threads": threads, "threads_source": threads_source,
         "interrupted": interrupted,
         "contention": contention,
         "requested_contention": requested_contention,

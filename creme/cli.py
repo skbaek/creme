@@ -58,6 +58,13 @@ def _positive(text: str) -> int:
     return value
 
 
+def _thread_count(text: str) -> int:
+    value = int(text)
+    if not 1 <= value <= 64:
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 64")
+    return value
+
+
 def _nonnegative(text: str) -> int:
     value = int(text)
     if value < 0:
@@ -1225,10 +1232,13 @@ def cmd_lake_build(arguments: argparse.Namespace) -> int:
     )
     options.add_argument(
         "--threads",
-        type=int,
-        choices=(1, 2),
-        default=DEFAULT_THREADS,
-        help=f"set LEAN_NUM_THREADS for this owned build (default: {DEFAULT_THREADS})",
+        type=_thread_count,
+        default=None,
+        help=(
+            "set LEAN_NUM_THREADS for this owned build; omitted, the build chooses at probe "
+            f"time the most threads (at least {DEFAULT_THREADS}, at most the profile's "
+            "max_build_threads ceiling) whose priced need fits what admission would grant"
+        ),
     )
     options.add_argument("--probe", action="store_true")
     options.add_argument(
@@ -1247,7 +1257,8 @@ def cmd_lake_build(arguments: argparse.Namespace) -> int:
         action="store_true",
         help=(
             "if the whole stale closure is refused LIGHT_ONLY or NEVER_FITS, build its stale "
-            "modules one owned unit at a time, imports first, then the targets"
+            "modules in owned units of same-height batches (halved on refusal), imports first, "
+            "then the targets"
         ),
     )
     options.add_argument("targets", nargs=argparse.REMAINDER)

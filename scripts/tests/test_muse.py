@@ -361,6 +361,29 @@ class ApprovalAllowlistTest(unittest.TestCase):
                              "master", command)
         self.assertEqual(self.decide(approval("shell", command=build, workspaceRoot="/tmp"), "lean", "g").action,
                          "master")
+
+    def test_lean_allowlist_admits_the_walk_form_and_only_that_extra_flag(self):
+        ws = str(self.target)
+        for command in ("~/creme/scripts/creme lake-build g --walk -- Blanc.Basic",
+                        "~/creme/scripts/creme lake-build g --walk --wait 900 -- Blanc.Basic Blanc.Vault"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.decide(approval("shell", command=command, workspaceRoot=ws), "lean", "g").action, "approve")
+        for command in ("~/creme/scripts/creme lake-build g --walk --memory-gib 3 -- Blanc.Basic",
+                        "~/creme/scripts/creme lake-build g --walk --contention sensitive -- Blanc.Basic",
+                        "~/creme/scripts/creme lake-build g --walk --probe -- Blanc.Basic",
+                        "~/creme/scripts/creme lake-build g --wait 900 --walk -- Blanc.Basic",
+                        "~/creme/scripts/creme lake-build g --walk --wait 901 -- Blanc.Basic",
+                        "~/creme/scripts/creme lake-build other --walk -- Blanc.Basic",
+                        "~/creme/scripts/creme lake-build g --walk -- Blanc.Basic ; rm -rf x",
+                        "~/creme/scripts/creme lake-build g --walk -- Blanc.Basic && echo ok",
+                        "~/creme/scripts/creme lake-build g --walk -- Blanc.Basic > out"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.decide(approval("shell", command=command, workspaceRoot=ws), "lean", "g").action, "master")
+        walk = "~/creme/scripts/creme lake-build g --walk -- Blanc.Basic"
+        self.assertEqual(self.decide(approval("shell", command=walk, workspaceRoot="/tmp"), "lean", "g").action,
+                         "master")
         self.assertEqual(self.decide(approval("shell", command="~/creme/.semaphore/semaphore status"),
                                      "lean", "g").action, "abort")
         self.assertEqual(self.decide(approval("shell", command="python3 -m creme reclaim --wind-down g"),

@@ -137,7 +137,7 @@ would write standing rules) are never taken.
   control); every MCP tool, network, file-access, protected-write, subagent, or
   unknown subject is aborted.
 - lean: the only shell command approved by rule is the exact owned build
-  `~/creme/scripts/creme lake-build GOAL [--wait N] -- MODULES` (N 1–900, no
+  `~/creme/scripts/creme lake-build GOAL [--walk] [--wait N] -- MODULES` (N 1–900, no
   sizing flags, no shell metacharacters, workspace = target). Semaphore,
   reclaim, and wind-down commands are aborted (the Luna Lean guard, reused).
   **Every other shell command, including plain reads such as `git status`,

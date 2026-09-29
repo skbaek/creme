@@ -1926,3 +1926,34 @@ class FailedAttemptFloorTest(unittest.TestCase):
         self.assertEqual((estimate, evidence["need_gib"]), (6, 5.4))
         self.assertEqual(evidence["unmeasured_modules"], ["A"])
         self.assertIn("failed attempt", evidence["source"])
+
+    def test_two_floored_siblings_price_as_a_concurrent_sum_but_each_alone_as_its_own(self) -> None:
+        """walk-serial-v1: the walk's one-module units are priced alone, not as the sum.
+
+        Each failed row carries the module's own peak, so both siblings are
+        floored at a `lean` level and the concurrency model adds them when
+        they are stale together (the two-module closure below).  A walk unit
+        is one module whose imports are already built, so it is sized on its
+        own stale set: Lake overhead plus that module's floor.
+        """
+        def failed(module: str, peak_gib: float) -> dict:
+            row = _row("2026-09-20T00:00:00Z", ["B"], peak_gib, exit_code=1)
+            row["modules_failed"] = [module]
+            row["module_peak_mib"] = {module: peak_gib * 1024.0}
+            return row
+
+        rows = [failed("A", 10.69), failed("B", 10.31)]
+        graph = {"A": set(), "B": set(), "Top": {"A", "B"}}
+        together = owned.size_stale_set(["A", "B"], graph, [], SETTINGS, 8, failed_rows=rows)
+        alone = {
+            name: owned.size_stale_set([name], graph, [], SETTINGS, 8, failed_rows=rows)
+            for name in ("A", "B")
+        }
+        overhead = together["overhead_gib"]
+        self.assertAlmostEqual(together["need_gib"], overhead + 10.69 + 10.31, places=1)
+        self.assertAlmostEqual(alone["A"]["need_gib"], overhead + 10.69, places=1)
+        self.assertAlmostEqual(alone["B"]["need_gib"], overhead + 10.31, places=1)
+        for sizing in alone.values():
+            self.assertFalse(sizing["unproven"])
+            self.assertLess(sizing["need_gib"], 12.0)       # fits the 22 GiB ceiling with room
+        self.assertGreater(together["need_gib"], 21.0)

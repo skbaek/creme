@@ -608,6 +608,8 @@ class BuildApprovalRuleTest(unittest.TestCase):
             "/bin/zsh -lc '~/creme/scripts/creme lake-build goal -- Module.Name'",
             "/bin/zsh -lc '~/creme/scripts/creme lake-build goal --wait 900 -- Module.Name'",
             f"/bin/zsh -lc '{Path.home()}/creme/scripts/creme lake-build goal -- Module.Name'",
+            "/bin/zsh -lc '~/creme/scripts/creme lake-build goal --walk -- Module.Name'",
+            "/bin/zsh -lc '~/creme/scripts/creme lake-build goal --walk --wait 900 -- Module.Name Other.Name'",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(B.build_approval_failure(
@@ -622,6 +624,10 @@ class BuildApprovalRuleTest(unittest.TestCase):
             "~/creme/scripts/creme lake-build goal --memory-gib 4 -- Module.Name",
             "~/creme/scripts/creme lake-build goal --contention sensitive -- Module.Name",
             "~/creme/scripts/creme lake-build goal --probe -- Module.Name",
+            "~/creme/scripts/creme lake-build goal --walk --memory-gib 4 -- Module.Name",
+            "~/creme/scripts/creme lake-build goal --walk --contention sensitive -- Module.Name",
+            "~/creme/scripts/creme lake-build goal --wait 900 --walk -- Module.Name",
+            "~/creme/scripts/creme lake-build goal --walk -- Module.Name && echo ok",
             "/tmp/creme/scripts/creme lake-build goal -- Module.Name",
         ]
         for inner in commands:
@@ -633,6 +639,9 @@ class BuildApprovalRuleTest(unittest.TestCase):
             with self.subTest(wait=wait):
                 self.assertRejected(self.approval(
                     f"/bin/zsh -lc '~/creme/scripts/creme lake-build goal --wait {wait} -- Module.Name'",
+                ), "--wait")
+                self.assertRejected(self.approval(
+                    f"/bin/zsh -lc '~/creme/scripts/creme lake-build goal --walk --wait {wait} -- Module.Name'",
                 ), "--wait")
         self.assertRejected(self.approval(
             "/bin/zsh -lc '~/creme/scripts/creme lake-build other-goal -- Module.Name'"), "allowed")

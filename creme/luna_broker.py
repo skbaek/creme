@@ -268,7 +268,7 @@ def build_approval_failure(record: dict, approval: dict, header_base: Optional[s
     launcher = f"(?:~/creme/scripts/creme|{re.escape(str(Path.home() / 'creme/scripts/creme'))})"
     pattern = re.compile(
         rf"^{launcher} lake-build {re.escape(goal)}"
-        rf"(?: --wait ([0-9]+))? -- ({_MODULE_NAME}(?: {_MODULE_NAME})*)$"
+        rf"(?: --walk)?(?: --wait ([0-9]+))? -- ({_MODULE_NAME}(?: {_MODULE_NAME})*)$"
     )
     parsed = pattern.fullmatch(inner)
     if parsed is None:

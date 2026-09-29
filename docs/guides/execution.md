@@ -223,9 +223,17 @@ the peak. `--threads 1` lowers compiler threads without changing admission.
 When the whole stale closure is refused `LIGHT_ONLY` or `NEVER_FITS`, pass
 `--walk` instead of walking the set by hand: the wrapper builds the closure in
 one invocation if admitted, otherwise one owned unit per stale module, imports
-first, then the targets. It re-queues a retracted unit once at its observed
-peak and stops at the first unit that fails, is refused, or retracts twice,
-naming the modules left unbuilt.
+first, then the targets. A `--wait` for the whole closure that runs out
+(`WAIT_TIMEOUT`) falls back to the walk too, so a closure that never fits is
+not waited on for the full wait and then refused. Each unit names exactly one
+module whose stale imports are already built, so it is priced alone (Lake
+overhead plus that module's own peak or recorded floor), never as the
+concurrent sum of siblings it does not run beside; the JSON summary's
+`priced_stale_modules` per unit shows it. It re-queues a retracted unit once at
+its observed peak and stops at the first unit that fails, is refused, or
+retracts twice, naming the modules left unbuilt. A Muse or Luna Lean session
+may use the same walk: the plain form and `lake-build GOAL --walk [--wait N] --
+MODULES` are the only build commands its broker approves by rule.
 
 The wrapper prints failed and warning jobs (bounded), Lake's verdict, and a
 JSON summary with per-target verdicts, failed modules, and the `log:` path of

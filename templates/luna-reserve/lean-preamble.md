@@ -38,6 +38,11 @@ Rules:
    - Build only with, from the target worktree:
      `~/creme/scripts/creme lake-build {goal} --wait 900 -- <narrow module targets>`.
      Its underlying form is `~/creme/scripts/creme lake-build {goal} -- <narrow module targets>`.
+     If it is refused `NEVER_FITS` or `LIGHT_ONLY` because the stale closure is
+     large, build with
+     `~/creme/scripts/creme lake-build {goal} --walk --wait 900 -- <narrow module targets>`
+     instead: it builds the stale modules one at a time, imports first. It is
+     the only other build form the broker recognizes.
      Name the edited module or the narrowest consumer that reaches it. Never
      pass `--memory-gib` or `--contention`, and never name a full
      target (a bare `--`, `Blanc`, or `jaune`). The wrapper's priority launcher

@@ -3556,10 +3556,11 @@ class WatchdogConfig:
 
 
 # Refusals the walk answers: the whole closure does not fit now (LIGHT_ONLY)
-# or on any host state (NEVER_FITS), while one module at a time may.  Every
-# other refusal is about another session's holds, which a smaller unit would
-# meet just the same.
-WALK_TRIGGERS = ("LIGHT_ONLY", "NEVER_FITS")
+# or on any host state (NEVER_FITS), while one module at a time may, and a
+# whole-closure wait that ran out (WAIT_TIMEOUT: a need that never fit while
+# it waited is answered the same way).  Every other refusal is about another
+# session's holds, which a smaller unit would meet just the same.
+WALK_TRIGGERS = ("LIGHT_ONLY", "NEVER_FITS", "WAIT_TIMEOUT")
 
 
 def _admission_token(admission: Any) -> str:
@@ -3686,6 +3687,10 @@ def _walk_unit(
         unit["target_verdicts"] = summary["target_verdicts"]
     if isinstance(summary.get("peak_rss_mib"), (int, float)):
         unit["peak_gib"] = round(float(summary["peak_rss_mib"]) / 1024.0, 2)
+    estimate = summary.get("estimate")
+    if isinstance(estimate, dict) and isinstance(estimate.get("stale_modules"), int):
+        # What the unit was priced on: one module, or the walk's ordering broke.
+        unit["priced_stale_modules"] = estimate["stale_modules"]
     if code == RETRACTED_EXIT:
         unit["retracted"] = True
     if code != 0:
@@ -3750,7 +3755,11 @@ def _walk_stale_set(
     """Build a refused closure one stale module at a time, then the targets.
 
     Sequential by design: host memory is the constraint, so no unit runs
-    beside another.  A unit the watchdog retracts is re-queued once at its
+    beside another.  Each unit names exactly one module, and ``order`` puts
+    every stale import of that module before it, so the unit's own probe finds
+    that module alone stale and prices it alone (Lake overhead plus its own
+    peak or floor), never as a concurrent sum with a sibling it does not run
+    beside.  A unit the watchdog retracts is re-queued once at its
     observed peak; the first unit that fails, is refused, or retracts twice
     stops the walk; everything above it would only fail again.
     """
@@ -4076,7 +4085,8 @@ def run_lake_build(
 
         if walk:
             # The walk is a fallback: the whole closure is asked for first,
-            # without waiting, and built in one invocation when admitted.
+            # without waiting, and built in one invocation when admitted.  A
+            # wait that ran out (WAIT_TIMEOUT) falls back to the walk too.
             walk_modules = probe_evidence.get("stale_set") if probe_evidence is not None else None
             order = (
                 walk_order(walk_modules, probe_evidence.get("graph"))

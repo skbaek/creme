@@ -116,7 +116,8 @@ class MuseServeProcess(AppServerProcess):
 # owned build. Reading goes through Muse's workspace-rooted file tools; any
 # other command waits for the master.
 _SHELL_META = re.compile(r"[;&|<>`$(){}\\\n\r]")
-_BUILD = re.compile(r"^(?P<launcher>\S+) lake-build (?P<goal>\S+)(?: --wait (?P<wait>[0-9]+))? -- "
+_BUILD = re.compile(r"^(?P<launcher>\S+) lake-build (?P<goal>\S+)(?P<walk> --walk)?"
+                    r"(?: --wait (?P<wait>[0-9]+))? -- "
                     r"(?P<modules>[A-Za-z0-9_.]+(?: [A-Za-z0-9_.]+)*)$")
 
 
@@ -126,7 +127,7 @@ def build_command_failure(command: str, goal: str, workspace: Optional[str], tar
         return "the command has shell metacharacters"
     match = _BUILD.fullmatch(command.strip())
     if match is None:
-        return "the command is not `~/creme/scripts/creme lake-build GOAL [--wait N] -- MODULES`"
+        return "the command is not `~/creme/scripts/creme lake-build GOAL [--walk] [--wait N] -- MODULES`"
     launchers = {"~/creme/scripts/creme", str(Path.home() / "creme/scripts/creme")}
     if match.group("launcher") not in launchers:
         return "the launcher is not ~/creme/scripts/creme"

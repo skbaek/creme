@@ -448,7 +448,7 @@ routine work.
 
 `approve-builds` is opt-in per call and accepts only a Lean session's command
 approval in its target, exactly `/bin/zsh -lc '<that>'` with `<that>` exactly
-`~/creme/scripts/creme lake-build GOAL [--wait N] -- M1 M2 ...`, N integer 1–900
+`~/creme/scripts/creme lake-build GOAL [--walk] [--wait N] -- M1 M2 ...`, N integer 1–900
 and each M a Lean module name `[A-Za-z0-9_.]+`. With `--header-base`, every
 declaration header from every `--header-file` at REF must be byte-identical in
 the worktree except `--allow-removed` names. `--wait N` is within this rule;
@@ -605,7 +605,7 @@ offered only `decline` or `cancel`); requests from any other server, URL
 elicitations, and device verifications are declined by policy.
 
 Answer a build approval only when the command is exactly
-`~/creme/scripts/creme lake-build GOAL [--wait N] -- <narrow targets>` with no
+`~/creme/scripts/creme lake-build GOAL [--walk] [--wait N] -- <narrow targets>` with no
 `--memory-gib` or `--contention`, N an integer from 1 through 900, its working
 directory the target worktree, and the host with room; `decline` or `cancel`
 anything else.

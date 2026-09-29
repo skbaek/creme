@@ -34,13 +34,16 @@ class _FakeHost:
     module, so the whole closure and a single module price differently.
     """
 
-    def __init__(self, graph, *, limit_gib=2, refusal="LIGHT_ONLY", fail=(), unit_refusal=None):
+    def __init__(self, graph, *, limit_gib=2, refusal="LIGHT_ONLY", fail=(), unit_refusal=None,
+                 wait_timeout=False):
         self.graph = graph
         self.built: set[str] = set()
         self.limit_gib = limit_gib
         self.refusal = refusal
         self.fail = set(fail)
         self.unit_refusal = unit_refusal
+        self.wait_timeout = wait_timeout   # a too-large need that is waited for times out
+        self.priced: list[list[str]] = []  # the stale set each estimate was sized on
         self.lake_calls: list[list[str]] = []
         self.acquires: list[dict] = []
         self.releases = 0
@@ -59,12 +62,20 @@ class _FakeHost:
 
     def derive(self, *args, **_kwargs):
         stale = args[6]
-        return max(1, 2 * len(stale["stale_set"])), {"source": "fixture estimate", "kind": "measured"}
+        self.priced.append(list(stale["stale_set"]))
+        return max(1, 2 * len(stale["stale_set"])), {
+            "source": "fixture estimate", "kind": "measured",
+            "stale_modules": len(stale["stale_set"]),
+        }
 
     def acquire(self, _goal, _note, _lease, **kwargs):
         self.acquires.append(kwargs)
         if self.unit_refusal is not None and kwargs["memory_gib"] <= self.limit_gib:
             return False, f"{self.unit_refusal} — fixture unit refusal"
+        if kwargs["memory_gib"] > self.limit_gib and self.wait_timeout:
+            if kwargs.get("wait_seconds") is not None:
+                return False, "WAIT_TIMEOUT — fixture: no admission within the wait"
+            return False, "DEFER_FOR_HARD — fixture: another hold, for now"
         if kwargs["memory_gib"] > self.limit_gib:
             return False, f"{self.refusal} — fixture: {kwargs['memory_gib']} GiB does not fit"
         return True, "ADMITTED_SOFT — fixture"
@@ -216,6 +227,33 @@ class WalkBehaviourTest(unittest.TestCase):
         self.assertEqual(summary["target_verdicts"], {"Pkg.Top": "built"})
         unit_lines = [line for line in host.output.getvalue().splitlines() if line.startswith("walk ")]
         self.assertEqual(len(unit_lines), 5)
+
+    def test_every_walk_unit_is_priced_on_exactly_one_stale_module(self) -> None:
+        host = _FakeHost(DIAMOND)
+        self.assertEqual(host.run(["Pkg.Top"], walk=True), 0)
+        summary = host.summary()
+        # The whole closure was priced first (4 modules); each unit after it is one module,
+        # and the closing targets unit finds nothing stale.
+        self.assertEqual(len(host.priced[0]), 4)
+        self.assertEqual([len(stale) for stale in host.priced[1:5]], [1, 1, 1, 1])
+        self.assertEqual([stale[0] for stale in host.priced[1:5]], summary["walk"]["order"])
+        self.assertEqual(
+            [unit["priced_stale_modules"] for unit in summary["walk"]["units"]], [1, 1, 1, 1],
+        )
+        self.assertEqual(summary["walk"]["targets_unit"]["priced_stale_modules"], 0)
+
+    def test_a_timed_out_whole_closure_wait_falls_back_to_the_walk(self) -> None:
+        host = _FakeHost(DIAMOND, limit_gib=2, wait_timeout=True)
+        self.assertEqual(host.run(["Pkg.Top"], walk=True, wait_seconds=30), 0)
+        self.assertEqual(
+            [call["wait_seconds"] for call in host.acquires[:2]], [None, 30],
+        )
+        self.assertEqual(
+            host.lake_calls,
+            [["Pkg.Base"], ["Pkg.Left"], ["Pkg.Right"], ["Pkg.Top"], ["Pkg.Top"]],
+        )
+        self.assertEqual([len(stale) for stale in host.priced[1:5]], [1, 1, 1, 1])
+        self.assertEqual(host.summary()["walk"]["whole_closure_admission"].split(" — ")[0], "WAIT_TIMEOUT")
 
     def test_a_failed_unit_stops_the_walk_and_names_what_remains(self) -> None:
         host = _FakeHost(DIAMOND, limit_gib=2, fail={"Pkg.Left"})

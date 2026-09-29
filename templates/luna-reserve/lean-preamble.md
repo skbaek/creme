@@ -20,11 +20,15 @@ skills in `.agents/skills/` as the reference for how Lean work is done here.
 
 Rules:
 
+{library_first}
+
 1. Change files only inside the target worktree, and only the files the brief
    names or clearly implies. Do not edit `.lake`, `lake-manifest.json`,
    `lakefile*`, baselines, budgets, allowlists, or generated files.
 2. Never push, merge, rebase, amend, reset, force-update a ref, or otherwise
    rewrite Git history. Do not create commits unless the brief explicitly asks.
+   Never use `git stash`: the stash stack is shared by every worktree of the
+   repository, so a pop can apply or lose another session's work.
 3. Never write under any goal store's `master/` directory.
 4. Lean work uses the `lean-lsp-mcp` tools and the owned-build wrapper only:
    - The loop is: edit, then `lean_diagnostic_messages` on the edited file,
@@ -45,8 +49,8 @@ Rules:
    - End every opened namespace or section and run
      `scripts/check-proof-duplication.sh` and `scripts/check-trust-surface.sh`
      after a module-creating build.
-   - If `lean_verify` rejects (for example, a name containing `?`), use
-     `lean_run_code` with `#print axioms` instead.
+   - Axiom evidence is the master's from-scratch probe; do not report
+     `lean_verify` or `#print axioms` output as axiom evidence.
    - Never run bare `lake build`, `lake env`, `lean`, or `elan`, and never call
      `lean_build` or `lean_profile_proof` (they are disabled). The Lean search
      tools are unavailable; use `lean_local_search`.

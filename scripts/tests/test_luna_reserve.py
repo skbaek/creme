@@ -84,6 +84,21 @@ def buckets(limits_value=None):
     return reserve, regular
 
 
+class LibraryFirstContractTest(unittest.TestCase):
+    PHRASES = ("docs/COMMON_API.md", "lean_local_search", "concept-level")
+
+    def test_developer_instructions_carry_the_shared_library_rule(self):
+        for write in (False, True):
+            with self.subTest(write=write):
+                request = L.RunRequest(brief="Say OK.", workdir=Path("/w/target"), write=write)
+                text = L.developer_instructions(ROOT, request, Path("/launch/creme"))
+                for phrase in self.PHRASES:
+                    self.assertIn(phrase, text)
+                self.assertNotIn("{library_first}", text)
+        self.assertIn("{library_first}",
+                      (ROOT / "templates/luna-reserve/preamble.md").read_text(encoding="utf-8"))
+
+
 class AuditTest(unittest.TestCase):
     def audit(self, records):
         reserve, regular = buckets()

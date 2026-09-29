@@ -310,7 +310,7 @@ def lean_mcp_failures(environ: Optional[dict] = None) -> list[str]:
 
 def instructions(module_root: Path, target: Path, mode: str, lean_goal: Optional[str]) -> str:
     template = (module_root / (LEAN_PREAMBLE_RELATIVE if lean_goal else PREAMBLE_RELATIVE)).read_text(encoding="utf-8")
-    return (template.replace("{launch_root}", str(launch_root(module_root)))
+    return (PB.render_library_first(template, module_root).replace("{launch_root}", str(launch_root(module_root)))
             .replace("{target}", str(target)).replace("{mode}", mode).replace("{goal}", lean_goal or ""))
 
 

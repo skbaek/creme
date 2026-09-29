@@ -59,7 +59,7 @@ def code_digest(module_root: Path) -> str:
     return PB.file_digest(module_root, (
         "creme/muse_broker.py", "creme/muse.py", "creme/muse_client.py", "creme/pseudo_broker.py",
         "creme/codex_app_server.py", "creme/luna_lean.py", "templates/muse/preamble.md",
-        "templates/muse/lean-preamble.md"))
+        "templates/muse/lean-preamble.md", "templates/shared/library-first.md"))
 
 
 def _max_lean_sessions(environ: dict) -> int:

@@ -16,3 +16,5 @@ not a transcript, plus the report path.
 Your effort is fixed by this profile. Your model is whatever the master passed
 at dispatch, and the master records that pairing against the outcome, so say in
 your return anything that bears on whether the pairing was right for the work.
+
+Shared library first: follow `templates/shared/library-first.md` (reuse before writing generic lemmas; hoist generically applicable results; report what you reused and hoisted).

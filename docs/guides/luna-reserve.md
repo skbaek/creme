@@ -243,7 +243,7 @@ pseudo-subagent rules (no push, merge, or history rewrite; no writes under a
 goal store's `master/`; no Lean elaboration or builds; no network installs or
 other model clients; stay in the target; a bounded final-message format).
 A Lean-mode session gets `templates/luna-reserve/lean-preamble.md` instead
-(see [Lean work](#lean-work)).
+(see [Lean work](#lean-work)). Every contract also carries the shared-library rule from `templates/shared/library-first.md` (check the shared library first; hoist generically applicable results into it).
 
 What loads is recorded per run: `thread/start` reports the instruction
 sources (on the first host, only the launch root's `AGENTS.md`), and

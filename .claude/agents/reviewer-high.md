@@ -24,3 +24,5 @@ Review is worth most from a model other than the one that produced the work.
 Your model is whatever the master passed at dispatch; if it matches the
 author's, say so in the report so the master can weigh the finding set
 accordingly.
+
+Treat missed reuse of the shared library or an unhoisted generically applicable result (`templates/shared/library-first.md`) as a reviewable finding.

@@ -129,6 +129,19 @@ def file_digest(module_root: Path, relatives: Iterable[str]) -> str:
     return digest.hexdigest()[:16]
 
 
+LIBRARY_FIRST_RELATIVE = Path("templates/shared/library-first.md")
+
+
+def library_first_text(module_root: Path) -> str:
+    """The canonical shared-library rule every pseudo-subagent contract carries."""
+    return (module_root / LIBRARY_FIRST_RELATIVE).read_text(encoding="utf-8").strip()
+
+
+def render_library_first(template: str, module_root: Path) -> str:
+    """Fill a contract template's ``{library_first}`` placeholder from the canonical file."""
+    return template.replace("{library_first}", library_first_text(module_root))
+
+
 def peer_uid(connection: socket.socket) -> Optional[int]:
     """The connecting process's uid, or None when the platform cannot say."""
     try:

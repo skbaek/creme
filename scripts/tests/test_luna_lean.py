@@ -318,6 +318,25 @@ class LeanPreambleTest(unittest.TestCase):
         plain = (ROOT / L.PREAMBLE_RELATIVE).read_text(encoding="utf-8")
         self.assertIn("Never run Lean elaboration or builds", plain)
 
+    def test_lean_preamble_carries_the_shared_library_rule(self):
+        mode = LL.LeanMode("goal-v1", Path("/w/blanc/.worktrees/goal-v1"))
+        text = LL.developer_instructions(ROOT, Path("/launch/creme"), mode)
+        for phrase in ("docs/COMMON_API.md", "lean_local_search",
+                       "concept-level"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+        self.assertNotIn("{library_first}", text)
+        self.assertIn("{library_first}",
+                      (ROOT / LL.LEAN_PREAMBLE_RELATIVE).read_text(encoding="utf-8"))
+
+    def test_lean_preamble_reports_no_print_axioms_axiom_evidence(self):
+        raw = (ROOT / LL.LEAN_PREAMBLE_RELATIVE).read_text(encoding="utf-8")
+        self.assertNotIn("use\n     `lean_run_code` with `#print axioms` instead", raw)
+        self.assertNotIn("`lean_run_code` with `#print axioms` instead", raw)
+        mode = LL.LeanMode("goal-v1", Path("/w/blanc/.worktrees/goal-v1"))
+        text = LL.developer_instructions(ROOT, Path("/launch/creme"), mode)
+        self.assertIn("Axiom evidence is the master's from-scratch probe", text)
+
 
 # ---------------------------------------------------------------------------
 # Broker sessions against the fake app-server

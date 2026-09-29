@@ -1002,5 +1002,32 @@ class ModelFitMuseTest(FakeMuseHarness):
         self.assertEqual((usage["turns"], usage["effort"]), ("1", "low"))
 
 
+class LibraryFirstContractTest(unittest.TestCase):
+    PHRASES = ("docs/COMMON_API.md", "lean_local_search", "concept-level")
+
+    def test_instructions_carry_the_shared_library_rule(self):
+        cases = (
+            M.instructions(ROOT, Path("/w/target"), "read-only", None),
+            M.instructions(ROOT, Path("/w/target"), "lean", "goal-v1"),
+            M.first_turn_text(ROOT, Path("/w/target"), "read-only", None, "Do the thing."),
+        )
+        for text in cases:
+            with self.subTest(text=text[:40]):
+                for phrase in self.PHRASES:
+                    self.assertIn(phrase, text)
+                self.assertNotIn("{library_first}", text)
+
+    def test_templates_render_the_rule_instead_of_copying_it(self):
+        for relative in ("templates/muse/preamble.md", "templates/muse/lean-preamble.md"):
+            with self.subTest(template=relative):
+                self.assertIn("{library_first}", (ROOT / relative).read_text(encoding="utf-8"))
+
+    def test_lean_preamble_reports_no_print_axioms_axiom_evidence(self):
+        raw = (ROOT / "templates/muse/lean-preamble.md").read_text(encoding="utf-8")
+        self.assertNotIn("`lean_run_code` with `#print axioms` instead", raw)
+        text = M.instructions(ROOT, Path("/w/target"), "lean", "goal-v1")
+        self.assertIn("Axiom evidence is the master's from-scratch probe", text)
+
+
 if __name__ == "__main__":
     unittest.main()

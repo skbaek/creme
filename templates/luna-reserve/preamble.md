@@ -20,12 +20,16 @@ only as reference for how the workspace works.
 
 Rules:
 
+{library_first}
+
 1. Work on the target directory. In `read-only` mode change no file anywhere;
    you may read the target, the launch root, and its sibling repositories. In
    `write` mode change files only inside the target directory, and only the
    files the brief names or clearly implies.
 2. Never push, merge, rebase, amend, reset, force-update a ref, or otherwise
    rewrite Git history. Do not create commits unless the brief explicitly asks.
+   Never use `git stash`: the stash stack is shared by every worktree of the
+   repository, so a pop can apply or lose another session's work.
 3. Never write under any goal store's `master/` directory.
 4. Never run Lean elaboration or builds: no `lake`, `lean`, `elan`, or a
    language server. Do not start other builds, test suites that elaborate

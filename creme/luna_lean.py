@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Optional
 
+from . import pseudo_broker as PB
 from .task_wind_down import SANCTIONED_SUFFIXES
 
 LEAN_MCP_SERVER = "lean-lsp-mcp"
@@ -546,7 +547,7 @@ class LeanMode:
 def developer_instructions(module_root: Path, launch_root: Path, mode: LeanMode) -> str:
     template = (module_root / LEAN_PREAMBLE_RELATIVE).read_text(encoding="utf-8")
     return (
-        template.replace("{launch_root}", str(launch_root))
+        PB.render_library_first(template, module_root).replace("{launch_root}", str(launch_root))
         .replace("{target}", str(mode.target))
         .replace("{goal}", mode.goal)
     )

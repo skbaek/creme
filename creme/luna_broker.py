@@ -122,7 +122,8 @@ def code_digest(module_root: Path) -> str:
     """Digest of the modules a broker runs, so a client never drives a broker on other code."""
     return PB.file_digest(module_root, (
         "creme/luna_broker.py", "creme/luna_reserve.py", "creme/codex_app_server.py", "creme/luna_lean.py",
-        "creme/pseudo_broker.py", "templates/luna-reserve/preamble.md", "templates/luna-reserve/lean-preamble.md"))
+        "creme/pseudo_broker.py", "templates/luna-reserve/preamble.md", "templates/luna-reserve/lean-preamble.md",
+        "templates/shared/library-first.md"))
 
 
 # ---------------------------------------------------------------------------

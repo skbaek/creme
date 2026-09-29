@@ -408,6 +408,33 @@ else:
         self.assertIn("--dangerously-skip-permissions", argv)
         self.assertNotIn("--sandbox", argv)
 
+    def test_write_prompt_carries_the_shared_library_rule(self) -> None:
+        argv_record = self.root / "agy-argv-write.json"
+        self._scenario(argv_record=argv_record)
+        code, summary = antigravity.run(
+            "edit this", self.target, "gemini-model", "medium", 10,
+            runs_root=self.root / "runs", write=True,
+        )
+        self.assertEqual(code, antigravity.EXIT_OK, summary)
+        argv = json.loads(argv_record.read_text())
+        prompt = argv[argv.index("-p") + 1]
+        canonical = (ROOT / "templates/shared/library-first.md").read_text(encoding="utf-8").strip()
+        self.assertIn("Creme house rule:", prompt)
+        self.assertIn(canonical, prompt)
+        self.assertTrue(prompt.endswith("edit this"), prompt[-50:])
+        self.assertNotIn("{library_first}", prompt)
+
+    def test_read_only_prompt_carries_no_library_rule(self) -> None:
+        argv_record = self.root / "agy-argv-ro.json"
+        self._scenario(argv_record=argv_record)
+        code, summary = antigravity.run(
+            "inspect this", self.target, "gemini-model", "medium", 10,
+            runs_root=self.root / "runs",
+        )
+        self.assertEqual(code, antigravity.EXIT_OK, summary)
+        argv = json.loads(argv_record.read_text())
+        self.assertEqual(argv[argv.index("-p") + 1], "inspect this")
+
 
 if __name__ == "__main__":
     unittest.main()

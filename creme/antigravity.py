@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from . import pseudo_broker as PB
+
 
 READ_ONLY_TOOLS = ("view_file", "list_dir", "grep_search", "find_by_name", "finish")
 WRITE_TOOLS = ("write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file")
@@ -653,6 +655,8 @@ def run(
     agents.mkdir()
     target_path = target_path.resolve()
     (run_dir / "brief.md").write_text(brief, encoding="utf-8")
+    module_root = Path(__file__).resolve().parents[1]
+    prompt = ("Creme house rule:\n" + PB.library_first_text(module_root) + "\n\n" + brief) if write else brief
     (agents / "guard.py").write_text(GUARD_SCRIPT, encoding="utf-8")
     (agents / "guard.py").chmod(0o700)
     _write_json(agents / "guard.json", {
@@ -679,7 +683,7 @@ def run(
         summary["warnings"].append("target is not a Git work tree; its read-only state is not checked")
 
     command = [
-        str(binary), "-p", brief, "--add-dir", str(target_path), "--add-dir", str(run_dir),
+        str(binary), "-p", prompt, "--add-dir", str(target_path), "--add-dir", str(run_dir),
         "--model", resolved_model, "--effort", effort, "--disable-slash-commands",
         "--output-format", "stream-json", "--print-timeout", f"{timeout_seconds}s",
     ]

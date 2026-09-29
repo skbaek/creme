@@ -54,6 +54,8 @@ a weekly window.
 Headless `agy` treats the cwd as a scratch area, not a workspace. Only `--add-dir`
 directories are workspaces, so `run` passes the target that way.
 
+Write-mode prompts carry the shared-library rule from `templates/shared/library-first.md` (check the shared library first; hoist generically applicable results into it).
+
 ## Write mode
 
 Write mode does not pass `agy --sandbox`: measured behavior makes that mode

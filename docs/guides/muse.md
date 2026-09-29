@@ -116,6 +116,8 @@ The pseudo-subagent never uses the user's `musec` launcher and never relies on
 saved Muse state for its sandbox: each serve host's posture is chosen per
 process from the mode.
 
+Every contract also carries the shared-library rule from `templates/shared/library-first.md` (check the shared library first; hoist generically applicable results into it).
+
 ## Sandbox and approvals
 
 | mode | profile | `muse serve` flags | what the sandbox allows |

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from . import pseudo_broker as PB
 from .adapters import get_adapter
 from .codex_app_server import (
     AppServerError,
@@ -606,7 +607,7 @@ def tripwire_path(state: Path) -> Path:
 def developer_instructions(module_root: Path, request: RunRequest, root: Path) -> str:
     template = (module_root / PREAMBLE_RELATIVE).read_text(encoding="utf-8")
     return (
-        template.replace("{launch_root}", str(root))
+        PB.render_library_first(template, module_root).replace("{launch_root}", str(root))
         .replace("{target}", str(request.workdir))
         .replace("{mode}", "write" if request.write else "read-only")
     )

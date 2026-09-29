@@ -49,6 +49,18 @@ and reacquire.
 The `lean-prover` skill carries the operational proof workflow. Its tools live
 under `.agents/skills/lean-prover/tools/`.
 
+### Keep concrete machine images out of unfolding
+
+Never let a concrete memory image, storage map, or long write chain reach
+definitional unfolding or kernel evaluation: a kernel `decide` over concrete
+writes, or a `set`/`rw`/`simp` whose defeq check unfolds a concrete `Mem` term,
+drove single language-server workers and owned builds to 13–16.7 GiB on
+2026-09-29 (Blanc creation-code proofs). State such facts symbolically instead
+(size lemmas, read images, lemmas over a variable memory, an opaque `∃ post`),
+and evaluate only small code windows. A missing import can hide the same
+blow-up behind a slow elaboration instead of a fast error; check imports first
+when a module's memory climbs.
+
 ## Fidelity before speed
 
 A fabricated prefix is evidence only after:

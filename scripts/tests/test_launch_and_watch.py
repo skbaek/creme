@@ -405,11 +405,12 @@ if "--no-build" in sys.argv:
 import os
 step = 32 * 1024 * 1024
 target = {target_mib} * 1024 * 1024
-noise = os.urandom(step)   # incompressible: the compressor cannot hide the hog
+# Fresh noise in every block: repeating one random block can still let host
+# memory reclamation obscure growth. Keep the target and watchdog assertions.
 blocks = []
 total = 0
 while total < target:
-    block = bytearray(noise)
+    block = bytearray(os.urandom(step))
     blocks.append(block)
     total += step
     with open({progress!r}, "w") as handle:

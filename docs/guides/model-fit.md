@@ -1,244 +1,169 @@
-# Model fit tables
+# Model selection from complete episodes
 
-A master choosing a subagent's model and effort should be able to see how each
-option of **its own client** has actually done on this kind of task on this
-host's Jaune, Blanc, and Creme work. The model fit tables hold that record.
-This guide is the method: what the tables are, how an observation is recorded,
-how a cell is summarised, and how a dispatch uses them. Creme carries no
-observation and no judgement about any model; the tables live in the goal
-store.
+Select within the execution client the master has already chosen. The objective
+is aggregate independently verified useful work divided by aggregate episode
+tokens. There is no cross-client ranking, family multiplier, price conversion,
+or separate success-rate floor. A cheaper first attempt followed by recovery is
+one strategy: all attempt, briefing, verification, repair and fallback costs
+belong to its original episode. Worker completion never grants useful-work credit.
 
-## Where the tables are
+Creme stores lossless events and projections in the configured goal store at
+`model-fit/runtime/episodes-v2.sqlite3`. Keep this mutable SQLite/WAL directory
+Git-ignored; export acceptance/evaluation evidence at checkpoints. The public
+code resolves the goal store through the host profile and embeds no private
+host paths. Back up a live database using SQLite backup, not a copy of its main
+file without the WAL.
 
-The tables are in the goal store by default, at
-`$GOAL_STORE/model-fit/<client>.md`, one file per client:
+## Normal work
 
-| file | client | options (columns) |
-|---|---|---|
-| `claude-code.md` | Claude Code | `fable`, `opus`, `sonnet` × `low` `medium` `high` `xhigh` `max` |
-| `codex.md` | Codex | `astra`, `sol`, `luna` × `low` … `max`, and `luna-reserve` × `low` … `max` |
-| `muse.md` | Muse | `muse-spark` × `none` `minimal` `low` `medium` `high` `xhigh` `max` |
-| `antigravity.md` | Antigravity | `gemini-3.8-flash` × `low` `medium` `high` |
+An episode is an ordinary independently useful task, declared before its outcome.
+Its normal brief names milestones whose total credit is at most one and fixes
+the recovery recipe. Accept only the milestones actually verified. A failure or
+interruption retains its spend; accepted partial work can retain its declared
+credit. Unmeasured usage remains unknown, never zero.
 
-`luna-reserve` is a separate column group because it is a different route to
-the Luna model (the `gpt-reserve` allowance through the Creme broker, usually
-driven by a non-Codex master), and its fit need not equal that of a Luna
-worker under a Codex master. It can also serve an older release than
-regular Luna (`luna-reserve status` prints the model); the header says which. The option list is the one
-`creme/model_fit.py` fixes; when a client adds, renames, or retires a
-selectable model or effort, change that list and this table together.
+Task types retain the shared vocabulary; context bands refine these rows:
 
-**An option names its family's current release.** Each table's header states
-which release every family denotes and since when. When a release is
-superseded (a new Opus, a new Sol) or a family is retired, move that family's
-observations to `$GOAL_STORE/model-fit/archive/<client>-<release>.md` with a
-line saying what superseded them, and let its cells restart empty: a run on
-the old release is not evidence about the new one. The archive is history,
-never selection evidence; `validate` does not read it, and `add` numbers new
-observations past every archived id.
-
-Only the goal store holds the files, because their evidence links resolve only
-there and in the host-local master record, and because a public table would
-be a published vendor judgement, which is the user's decision. Moving the
-tables out of the goal store is reserved for the user.
-
-**One file per client, and options are compared only within a file.** There
-is no cross-client table and no cross-client ranking. Most dispatches start
-from a fixed client, and a shared table would invite each vendor's models to
-tilt the comparison. A model may edit another client's file when it recorded
-the run (for example a Claude master recording a Luna reserve run); such a
-commit names itself in its message with `cross-client edit:` and the reason.
-
-## Rows: the task-type vocabulary
-
-Every file has the same rows. Classify a run by the **hardest non-delegable
-judgment its brief asked for**, the same axis the briefs guide sizes by:
-
-| task type | what the brief asked for |
+| Identifier | Work |
 |---|---|
 | `fact-finding` | read-only fact-finding: inventories, searches, state reconnaissance |
-| `interface-design` | interface or architecture design for consumers the brief names |
-| `statement-freezing` | statement freezing and Lean-free design: statements, proof transcripts from named donors |
-| `lean-elaboration` | Lean elaboration from a frozen design (statements, and usually a proof route) |
-| `open-proof` | open-shape proof discovery: no proof to mirror, the route is the work |
-| `proof-repair` | proof repair and diagnosis of a failing or drifted proof |
-| `mutation-controls` | mutation controls: apply, build, restore, report the biting site |
-| `gate-integration` | gate runs, landings, reconciliation, integration of finished units |
-| `code-change` | code change with tests, not Lean |
-| `doc-authoring` | document authoring: guides, reports, goal documents |
-| `review-audit` | hostile review or audit of a candidate |
-| `mechanical-edit` | mechanical edits and hoists whose result is easy to check |
+| `interface-design` | interface or architecture design |
+| `statement-freezing` | statement freezing and Lean-free design (statements, proof transcripts from donors) |
+| `lean-elaboration` | Lean elaboration from a frozen design |
+| `open-proof` | open-shape proof discovery (no proof to mirror) |
+| `proof-repair` | proof repair and diagnosis |
+| `mutation-controls` | mutation controls (apply, build, restore, report the biting site) |
+| `gate-integration` | gate runs, landings, and integration |
+| `code-change` | code change with tests (non-Lean) |
+| `doc-authoring` | document authoring |
+| `review-audit` | hostile review or audit |
+| `mechanical-edit` | mechanical edits and hoists |
 
-A run that did two of these is recorded under the harder one; say the other in
-`notes`. Change the vocabulary only in Creme, and only with a migration of the
-existing observations.
+Use the structured episode interface:
 
-## Observations
+```sh
+python3 -m creme model-fit episode configure --from population.json
+python3 -m creme model-fit episode prepare --from brief.json
+# Launch the returned actual setting through the selected client's normal tool.
+python3 -m creme model-fit episode accept --from acceptance.json
+python3 -m creme model-fit episode table --from population-id.json
+python3 -m creme model-fit episode health
+```
 
-An observation is one dispatched run, recorded **by the master after it has
-verified the result**. The worker's own report is never the verdict. Each
-observation is a `### <prefix>-NNNN` entry under `## Observations` (prefix
-`cc`, `cx`, or `mu`) with these `- key: value` fields:
+Every command accepts `--dir DIRECTORY` to select another private model-fit
+store. JSON `--from -` reads standard input. Exit 3 means a receipt was durably
+saved but still needs reconciliation; exit 2 is an invalid request. `health`
+reports incomplete joins independently of whether a particular receipt applied.
+See [request examples and adapters](model-fit-episodes.md) for complete schemas.
 
-| field | content |
+`prepare` both records the predeclared task and selects its setting. Repeating
+it with the same episode ID and identical request returns the same decision,
+without advancing a clock. A read of `table` or `health` is not a new opportunity.
+The execution client owns the clock: a Codex master dispatching Muse work updates
+Muse evidence, not Codex's clock. Features and context bands are declared before
+outcomes; do not cherry-pick easier tasks for probes and generalize to a full row.
+
+For a brokered task pass `--episode ID` to `muse start` or `luna-reserve start`
+(and `--fit-dir` when using a nondefault store). The binding is persisted before
+the first turn, follows resumed sessions, and captures actual run identity and
+terminal evidence automatically. Each bound session is one task, including its
+repair turns; use another episode/session for unrelated work. Existing broker
+pin, permission and admission guards still govern the launch. Effort changes on
+resume are recorded as actual overrides.
+
+Native adapters use the same normal master acceptance to import run receipts
+and measured usage. There is no second per-task model-fit verdict or narrative.
+Use measured master windows for briefing, verification, recovery and recording;
+allocate a shared window across tasks at most once in total. Cumulative endpoints
+must belong to the same source. Overlapping worker/master windows refuse.
+Bookkeeping and fallbacks are not free. Preserve provider raw categories:
+cached input and reasoning already included in totals are not added again.
+
+## Coverage and unresolved evidence
+
+| Route | Current capture boundary |
 |---|---|
-| `task_type` | a row identifier above |
-| `option` | `family/effort` from this client's columns |
-| `route` | a route tag, then free detail: `claude-agent-tool`, `claude-session`; `codex-subagent`, `codex-session`, `luna-reserve-broker`, `luna-reserve-run`; `muse-worker`, `muse-session`, `muse-broker`, `muse-run`; `antigravity-run`. Detail names the harness, e.g. `luna-reserve-broker (Lean mode, Claude Opus master)` |
-| `goal` | goal id, or `n/a` |
-| `date` | `YYYY-MM-DD` of the run's start |
-| `run` | the run's identifier (agent id, Luna session id, rollout id) |
-| `source` | evidence link to the run record (transcript, session directory) |
-| `verdict` | `pass`, `partial`, `fail`, or `unknown` |
-| `verdict_source` | link to the master's verification record (an event id in `master/events.jsonl`, field notes, a report or review) for `pass`/`partial`/`fail`; for `unknown`, `none — <why no join>` or the record that left it open |
-| `failure_modes` | what went wrong, in a phrase, or `none` |
-| `tokens` | `uncached_input=N cache_read=N cache_write=N output=N reasoning=N`, each an integer or `n/a` |
-| `wall_time` | `<seconds>s` or `n/a` |
-| `turns` | assistant turns (Claude API responses, Luna turns, Codex turns), or `n/a` |
-| `retries` | re-dispatches of the same brief the master made, or `n/a` |
-| `rework` | what the master had to redo or repair after the run, or `none` |
-| `recorded_by` | the recording master (client, model/effort) or the backfill that joined it |
-| `notes` | optional |
+| Native Codex | Combined acceptance imports an owned fresh rollout or an explicit resumed counter window, actual release/effort, and separately measured master windows. A source changing model/effort requires separate attempt windows. |
+| Muse broker | Automatic launch, terminal and measured parent-turn costs. Reminder-agent costs are not exposed in those totals, so usage stays incomplete and cannot promote a model. |
+| Luna reserve broker | Automatic launch and terminal identity. Thread-cumulative usage requires adjacent rollout windows; the broker record alone is incomplete. |
+| Other native clients and one-shot routes | Normalized combined receipts are supported; automatic provider extraction is not claimed. Missing actual identity, completion or total usage remains a capability gap. |
 
-Verdicts: `pass` is accepted as briefed on the master's checks; `partial` is
-accepted after rework, or accepted for part of its scope; `fail` is rejected or
-redone; `unknown` is every run whose master-verified verdict cannot be joined.
-Never infer a verdict from the worker's summary, from silence, or from a later
-merge whose record does not name the run.
+Do not turn these capability gaps into zero-cost observations. A route can still
+perform useful authorized work while its incomplete episode is excluded from
+statistical promotion. The accounting/health view retains its observed costs and
+missing evidence. A protocol PASS is never a master quality verdict.
 
-A run ended or truncated by something outside its work — a client capacity or
-usage limit, a user- or master-ordered wind-down or pause, a master error, a
-reassignment, or a scope cut by a user decision — says nothing about the
-option's quality: record it `unknown` with `verdict_source: none —
-interrupted: <cause> (<record>)`, unless the master's record judged the part it
-finished, in which case judge only that part and name the interruption in
-`notes`. `fail` is for work rejected or redone on its merits, and `partial`
-only when the missing part was the run's own shortfall.
+`episode reconcile` retries durable out-of-order receipts and closes joins whose
+normal master acceptance and final usage have both arrived. Retry order rotates,
+so old gaps do not starve later completed tasks. Nothing is evicted at a fixed
+pending count. Receipt IDs and measured evidence are immutable and idempotent.
+An explicitly evidenced missing-only usage resolution can fill unknown totals;
+the original raw event remains, known counts cannot change, and spend is charged once.
+An invalid unapplied receipt is replaced with an explicit `supersedes` reference;
+an applied acceptance is corrected through `correction_of`. Both retain history.
+New evidence invalidates earlier closure until the new revision is joined.
 
-Cost fields are observables, never dollars. Tokens by category are not a
-price: categories are billed differently and differently by client. A
-weekly-limit or bucket delta may be quoted in `notes` only when the record
-shows the run was the bucket's only consumer in that window. Wall time
-includes waits for host admission and approvals.
+## Population and selection
 
-### Recording one
+Configure a finite list of feasible authorized settings, their observed release,
+route, effort, harness, material context and fixed recovery recipe. A material
+change gets a new population identity; historical evidence remains inspectable.
+Incidental brief wording is not a new population. Actual launch differs from
+proposal only with an explicit override reason, and statistics follow actual
+identity. Sol means `gpt-6.1-sol`; retired `gpt-6-sol` data is not replacement data.
 
-```sh
-python3 -m creme model-fit add "$GOAL_STORE/model-fit/<client>.md" \
-  --from-claude-transcript ~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl \
-  --task-type lean-elaboration --option opus/high \
-  --route "claude-agent-tool (profile worker-high, model opus)" --goal <goal> \
-  --verdict pass --verdict-source "\$GOAL_STORE/master/events.jsonl#<event_id>" \
-  --failure-modes none --rework none --recorded-by "master claude opus/xhigh"
-```
+A cold default is provisional. Cumulative moments use only the fully joined
+prefix in each candidate's pre-outcome launch order. Later completions count
+immediately for accounting but do not skip an earlier unresolved observation in
+inference. This prevents fast-success/slow-failure joining from manufacturing a
+favorable sample. Corrections recompute the affected evidence; incumbent switches
+do not erase other candidates' histories.
 
-In Claude Code the two axes come from different places, so record both. A
-subagent profile fixes only the **effort**; the **model** is the Agent tool's
-`model` parameter, which overrides whatever a profile's frontmatter says. So
-`--option` names the pairing that actually ran (`opus/high`), and the route
-detail names the profile and the model passed (`profile worker-high, model
-opus`). A dispatch that omitted `model` inherited a default rather than
-choosing one and is not a recordable observation; the effective model is
-recoverable from the subagent transcript if you need to check.
+The pure selector uses simultaneous empirical-Bernstein work and cost intervals,
+with an error allocation summable over every sample count and candidate. It
+compares lower-work/upper-cost against upper-work/lower-cost; a zero lower cost
+bound gives an uninformative upper efficiency bound. Keep the incumbent until a
+challenger's lower efficiency exceeds its upper efficiency. All-zero observed
+work is reported as no demonstrated productive route.
 
-`--from-luna-session <session dir>`, `--from-muse-session <session or run dir>`, and
-`--from-codex-rollout <rollout.jsonl>`
-fill `tokens`, `wall_time`, `turns`, `date`, `run`, and `source` the same way;
-any explicit flag overrides what the extractor found. Luna token counts are
-thread-cumulative, so a resumed session is recorded net of the session it
-resumed. `--dry-run` prints the observation without writing. `add` refuses an
-invalid observation and regenerates the summary. Commit the table in the goal
-store with the verification it cites.
+Learning uses both uncertainty-guided trials and protected fair coverage.
+`ceil(.25 log²(1+t))` is the minimum growing coverage target; every other learning
+slot protects coverage independently of favorable priors. Focused trials have a
+`ceil(4 log³(1+t))` per-setting limit. At most one trial is proposed per ten local
+ordinary opportunities and at most one trial is pending. Cancelled proposals
+release reservations and do not count as completed samples. Unfunded coverage
+debt persists. Priors prioritize learning; they never permanently blacklist an
+expensive or statistically weak eligible setting.
 
-## Cells and the derived summary
+A seed allowance avoids cold-start deadlock; at most ten percent of observed
+ordinary expenditure accrues further learning allowance. Incurred trial cost is
+uncapped and the remaining predicted reservation is charged once. An overrun
+stops new trials until the allowance permits them. This runtime's reservations
+are **expected-cost controls**, not strict token caps: no provider enforces an
+entire master-plus-worker episode limit. `enforced` bounds therefore refuse in
+runtime configuration. An explicitly assumed finite bound supports conditional
+confidence statements; unavailable or violated bounds do not support promotion.
 
-The route tags include `antigravity-run` for the one-shot Antigravity route, and
-`muse-broker` and `muse-run` for the Muse pseudo-subagent routes ([Muse guide](muse.md)).
+For the conditional convergence argument and practical limits, see
+[selection guarantees](model-fit-guarantees.md). Neither stationarity alone nor
+a handful of successful real tasks establishes representative sampling, finite
+cost tails, convergence speed, or model superiority.
 
-The block between the `model-fit:summary` markers is generated by
-`python3 -m creme model-fit summarize FILE` (and by every `add`) and is never
-edited by hand. For each family it shows the task-type × effort grid; a cell
-reads `no data`, or `Nv: pP aA fF +uU` — N master-verified runs, their pass,
-partial, and fail counts, and u runs with an unknown verdict. A cell with at
-least three verified runs is marked `guides`. Under the grids, one line per
-populated cell gives its verdicts, up to three most recent failure modes, and
-the median output tokens and wall time. Everything else stays in the
-observations below the summary, read only when a cell decides a choice.
-Quality comes first in every cell; cost is second and carries the cautions
-above.
+## Rollout, rollback and legacy records
 
-Every observation is a single uncontrolled run whose outcome also depends on
-its brief and on the master's verification. A cell is a record, not a
-benchmark. Controlled comparisons, where they exist, are cited from `notes`.
+Start a population in `shadow`: record decisions and normal outcomes, but launch
+its explicit default. Use `active` only after capture and joins work on ordinary
+use. `off` or `shadow` immediately disables active selection for future prepared
+tasks without deleting evidence, pending work, reservations or history. Already
+launched tasks still need their terminal evidence and normal acceptance.
 
-## Selection rule
-
-Before sizing a worker, run `python3 -m creme model-fit recommend CLIENT
-TASK_TYPE`; it replaces reading the grid for the initial choice. The summary
-grid remains useful for drill-down when a recommendation needs explanation or
-review, and open a cell's observations only when that cell decides the choice.
-
-- A cell marked `guides` (at least three verified runs) for the brief's task
-  type informs the choice: prefer an option whose verified runs pass, avoid
-  one whose failure modes match the brief's hardest judgment, and compare cost
-  observables only between options whose quality is comparable.
-- Otherwise the [briefs guide's](briefs.md#sizing-a-worker) sizing rules
-  decide: the standard model first, the effort ladder before the frontier
-  model.
-
-**Record exceptions, not every run** (user decision, 2026-09-23). Record an
-observation only when it would change a future choice:
-
-- a `fail`, or a `partial` whose shortfall was the run's own;
-- a run that contradicts the guiding cell it was sized by;
-- a deliberate test of an option on a cell with no guidance, such as a first
-  trial of a new release or a cheaper rung;
-- a cost observation that would change the choice between options of
-  comparable quality.
-
-A run that went as its sizing expected is not recorded. Batch recordings and
-commit them with the verification they cite at a real checkpoint, not as a
-transaction per run. The per-run rule this replaces cost more reading and
-bookkeeping than its uncontrolled evidence was worth.
-
-## Adaptive recommendation
-
-The policy treats each family/effort pairing as a cell and keeps one
-recommended incumbent for each task type. Each cheaper cell has an N and is
-probed when it is due. A failed probe multiplies its N by 16, a passing probe
-halves N, and a pass at N = 1 promotes that cell; N is capped at 256. The
-probe schedule allows at most one probe in four dispatches of a task type. In
-the worst case, when every cheaper setting fails, the 256 cap makes probes
-about 5% of dispatches.
-
-Costs start with the family and effort priors above. After three measured
-outcomes, the policy uses the median of the last five measured costs in the
-same units as those priors. Once a per-token calibration exists, those units
-will be replaced by weekly-limit percentages. The incumbent is demoted after
-two failures in its last three ordinary outcomes, returning to the last known
-good cell when possible.
-
-Before a dispatch, run:
-
-```sh
-python3 -m creme model-fit recommend CLIENT TASK_TYPE
-```
-
-Use the returned family/effort setting. After the master verifies the result,
-run `python3 -m creme model-fit outcome CLIENT DISPATCH_ID pass|fail --tokens N`.
-Write an observation for every probe and every failure, subject to the
-existing exceptions rule above. A cold task type needs an explicit
-`--default OPTION`, chosen by the briefs guide's sizing rules, on its first
-recommendation.
-
-## Validation
-
-`python3 -m creme model-fit validate [DIR]` (DIR defaults to the goal store's
-`model-fit/`) refuses: a missing or unknown client file; an unknown task type;
-an option from another client or an unknown model or effort; a route that does
-not serve the option; an observation without a `source` link, or a
-`pass`/`partial`/`fail` without a `verdict_source` link; a malformed cost
-field; an observation recorded by the worker; a duplicate id; and a summary
-that differs from what the observations derive, naming any cell that claims
-data no observation supports. `python3 -m creme model-fit init [DIR]` creates
-missing skeletons with every row and column present.
+The old Markdown exception narratives at `$GOAL_STORE/model-fit/<client>.md`
+(`codex.md`, `muse.md`, `claude-code.md`, `antigravity.md`) and JSON streak state
+remain historical.
+They are not all-run denominators and must never seed calibrated moments. A prior
+recommendation may be chosen explicitly as a provisional cold default. Once the
+new runtime exists, legacy `model-fit recommend` refuses and points to `episode
+prepare`; there is no competing active selector. Legacy `add`, `summarize`,
+`validate`, `policy` and old-outcome tools remain for inspecting or closing that
+history, not for ranking new episodes. Routine successful work needs no prose
+entry. Keep unusual qualitative observations when they explain a future decision.

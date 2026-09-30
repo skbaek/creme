@@ -88,13 +88,14 @@ Choose each worker's model and effort for the **hardest non-delegable judgment**
 in its brief, not for the total volume of mechanical work. Volume is what more
 workers are for; only judgment justifies a higher rung.
 
-**Consult the model fit tables first.** Run `python3 -m creme model-fit
-recommend CLIENT TASK_TYPE` before dispatch and `model-fit outcome` after the
-master verifies the result; the summary grid in the client's goal-store file
-(`$GOAL_STORE/model-fit/<client>.md`) remains useful for drill-down. A cell
-with at least three master-verified runs for the brief's task type informs the
-choice; otherwise the rules below decide. Record only the exceptions
-[the model fit guide](model-fit.md) lists.
+**Use episode evidence before dispatch.** Follow [model fit](model-fit.md):
+classify the task, declare independently useful milestones and its recovery
+recipe in the normal brief, then run `model-fit episode prepare` for the chosen
+execution client. Launch the returned actual setting and use one normal master
+acceptance to join run evidence, total episode costs and verified milestones.
+Until a supported efficiency advantage is established, the explicit cold default
+is provisional. Legacy exception rows at `$GOAL_STORE/model-fit/<client>.md`
+remain available for qualitative drill-down; they are not all-run calibration data.
 
 Sizing is a dispatch decision made against the client's currently available
 offerings, not a property of the goal. Recheck the installed client's models
@@ -133,8 +134,8 @@ model, and re-dispatch the remainder to smaller workers.
 
 Use the client-visible model name, not a redundant API-family prefix or suffix
 that the user does not select. As reconciled on 2026-09-23, the workflow's
-Codex choices are **Astra**, **Sol**, and **Luna** (all GPT-6; Terra is
-retired); its Claude Code choices are **Fable**, **Opus** (Opus 5.5), and
+Codex choices are **Astra**, **Sol**, and **Luna** (Sol is GPT-6.1 Sol since
+2026-09-30; GPT-6 Sol and Terra are retired); its Claude Code choices are **Fable**, **Opus** (Opus 5.5), and
 **Sonnet**; its Muse choice, reconciled 2026-09-11, is
 **muse-spark**, selected at launch with `--model`. Recheck those names at
 launch rather than treating this snapshot as a permanent product catalogue.

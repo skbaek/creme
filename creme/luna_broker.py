@@ -1231,8 +1231,14 @@ class Broker:
         if lean_goal is not None:
             record["lean"] = {"goal": str(lean_goal), "mcp_server": luna_lean.LEAN_MCP_SERVER,
                               "disabled_tools": list(luna_lean.OPEN_WORLD_TOOLS)}
-        if request.get("model_fit"):
-            record["model_fit"] = request["model_fit"]
+        fit_binding = request.get("model_fit") or (prior or {}).get("model_fit")
+        if fit_binding:
+            record["model_fit"] = dict(fit_binding)
+            if op == "resume" and prior:
+                record["model_fit"]["attempt_offset"] = fit_binding.get("attempt_offset", 0) + len(prior.get("turns", []))
+            if op == "resume" and prior and record["effort"] != prior.get("effort"):
+                record["model_fit"]["override_reason"] = (
+                    f"master resumed the episode at effort {record['effort']} (was {prior.get('effort')})")
         session = BrokerSession(self, session_id, record)
         if op == "resume":
             record["rollout"] = (prior or {}).get("rollout")

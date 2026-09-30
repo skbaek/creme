@@ -29,6 +29,7 @@ import re
 import secrets
 import signal
 import socket
+import sqlite3
 import stat
 import struct
 import subprocess
@@ -224,10 +225,21 @@ class SessionRecord:
             write_private_json(self.dir / "session.json", self.record)
             if self.record.get("model_fit"):
                 from .model_fit_adapters import broker_capture
+                from .model_fit_episodes import EpisodeError
+                captured_fields = {name: self.record.get(name) for name in
+                                   ("id", "model", "effort", "model_fit", "turns")}
+                fingerprint = hashlib.sha256(json.dumps(captured_fields, sort_keys=True).encode()).hexdigest()
+                # In-memory only: a restarted broker always replays durable
+                # source evidence. Routine log/state persistence need not reopen
+                # SQLite or reconcile the identical turn history every time.
+                if getattr(self, "_model_fit_capture_fingerprint", None) == fingerprint:
+                    return
                 try:
                     health = broker_capture(self.record)
                     self.record["model_fit_capture"] = {"status": "captured", "inbox_pending": health["inbox_pending"]}
-                except (OSError, ValueError, RuntimeError, KeyError) as exc:
+                    if not health["inbox_pending"]:
+                        self._model_fit_capture_fingerprint = fingerprint
+                except (OSError, ValueError, RuntimeError, KeyError, TypeError, sqlite3.Error, EpisodeError) as exc:
                     # Run control remains intact; the durable source and explicit
                     # error survive for replay. Never report absent usage as zero.
                     self.record["model_fit_capture"] = {"status": "gap", "error": str(exc)}

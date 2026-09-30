@@ -57,6 +57,8 @@ def codex_snapshot(path: Path, previous: dict[str, Any] | None = None) -> dict[s
             raise CaptureError("rollout source changed; cannot join a cumulative usage window")
         result = dict(previous or {"source": identity, "cursor": 0, "usage_offset": None,
                                    "raw": None, "model": None, "effort": None, "timestamp": None})
+        # Identity changes describe this measured window, not all prior windows.
+        result["identity_changed"] = False
         if stat.st_size < result["cursor"]:
             raise CaptureError("rollout truncated; cumulative window needs reconciliation")
         handle.seek(result["cursor"])
@@ -75,10 +77,16 @@ def codex_snapshot(path: Path, previous: dict[str, Any] | None = None) -> dict[s
             if not isinstance(payload, dict):
                 payload = {}
             if row.get("type") == "turn_context":
-                result["model"] = payload.get("model") or result["model"]
+                observed = payload.get("model")
+                if observed and result.get("model") and observed != result["model"]:
+                    result["identity_changed"] = True
+                result["model"] = observed or result["model"]
                 settings = (payload.get("collaboration_mode") or {}).get("settings") or {}
-                result["effort"] = (settings.get("reasoning_effort") or payload.get("effort")
-                                    or payload.get("reasoning_effort") or result["effort"])
+                effort = (settings.get("reasoning_effort") or payload.get("effort")
+                          or payload.get("reasoning_effort") or result["effort"])
+                if result.get("effort") and effort != result["effort"]:
+                    result["identity_changed"] = True
+                result["effort"] = effort
             if row.get("type") == "event_msg" and payload.get("type") == "token_count":
                 info = payload.get("info") or {}
                 if not isinstance(info, dict):

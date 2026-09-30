@@ -250,10 +250,10 @@ class RuntimeTest(unittest.TestCase):
         R.submit(self.store, run_receipt("ep-fb", "ep-fb:r1", LOW))
         R.submit(self.store, launch_receipt(
             "ep-fb", "ep-fb:r2", HIGH,
-            override_reason="retry strong"))
+            override_reason="retry strong", attempt_index=2))
         R.submit(self.store, run_receipt(
             "ep-fb", "ep-fb:r2", HIGH,
-            override_reason="retry strong"))
+            override_reason="retry strong", attempt_index=2))
         R.submit(self.store, accept_receipt("ep-fb"))
         row = E.get_episode(self.store, "ep-fb")
         self.assertEqual(row["status"], "closed")

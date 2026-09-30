@@ -370,11 +370,13 @@ effort for its hardest non-delegable judgment, preferring the standard model
 and escalating effort within it before reaching for the frontier one, as
 [the briefs guide](briefs.md) describes; that guide holds the brief contract
 and the model-and-effort ladder the goal document no longer carries.
-The client's model fit table (`$GOAL_STORE/model-fit/<client>.md`) is used via
-`model-fit recommend` before dispatch and `model-fit outcome` after verification,
-with the grid available for drill-down; it records only the exceptions [the
-model fit guide](model-fit.md) lists, and a worker never records its own
-observation.
+Use the [episode model-fit workflow](model-fit.md) when sizing workers:
+`model-fit episode prepare` records the ordinary brief before dispatch, and one
+normal master acceptance joins actual run/usage evidence with verified work.
+Broker tasks carry `--episode`; native tasks use combined acceptance adapters.
+Read `table`/`health` for compact evidence and gaps. Legacy narrative exceptions
+at `$GOAL_STORE/model-fit/<client>.md` are historical, never statistical
+denominators; workers never accept themselves.
 
 A worker dies with the master. It therefore checkpoints to Git and its state
 brief at every green boundary, so that a successor master can respawn it from

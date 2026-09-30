@@ -1,91 +1,25 @@
-"""Model-fit episode evidence and lifecycle store (stages 1/2 foundation).
+"""Durable model-fit episode evidence, projections, and cost accounting.
 
-One durable SQLite store per goal (stdlib ``sqlite3`` only) holds the full
-episode lifecycle as an append-preserved event log plus a projected state.
-Every mutation runs in one atomic transaction: the event row is inserted
-first, then the projection is updated. Reopening the file preserves all
-attribution and statistics; there is no in-memory-only state and no eviction.
+One SQLite store per configured model-fit directory retains immutable events
+and transactional projections. Proposals differ from actual launches; observed
+release/effort/route/harness and fixed context/recovery identity partition data.
+The initial strategy owns all credited work and all attempt, fallback and
+attributable master costs. Predeclared milestone credit sums to at most one.
+Worker completion never grants master acceptance.
 
-Why SQLite: atomic multi-row transactions, a unique-constraint idempotency
-key on every event, and ordered replay come from one standard-library file.
-A second handwritten JSON projection plus unbounded replay on every dispatch
-is deliberately not built.
+Usage normalization retains provider categories, never double-counts cache or
+reasoning, and leaves unknown totals unknown. Explicit missing-only resolutions
+retain original raw events. Shared master windows and cumulative counters have
+separate controls against overlapping or repeated spend. Corrections preserve
+history; uncapped incurred costs survive failure, cancellation and interruption.
+Only complete, accepted or rejected, finalized episodes enter inference.
 
-Contract summary (full rules live in the stage-1/2 report):
-
-- Episode identity: fixed predeclared named milestone work credits
-  totalling at most 1, the selected execution client, task/context
-  descriptors, and a bounded recovery recipe version. The master client is
-  context only: all statistics partition by execution client.
-- Proposal/reservation is separate from actual launch. A launch records the
-  actual run id, adapter-observed effective release, effort, route, and
-  harness version, the eligibility snapshot, and any override reason. No
-  release is ever synthesized: every actual launch carries its real
-  observed model id, and sol-family launches must carry exactly GPT-6.1.
-  Capability exclusions happen before ranking: a setting the route cannot
-  run (e.g. Muse ``none`` effort on a broker route, which the broker
-  rejects before launch) is recorded as a pre-launch rejection, never as a
-  model failure, and a later actual run is never credited to the rejected
-  setting.
-- One episode has one pre-outcome owner: its initial launch (initial
-  setting plus the fixed recovery recipe) fixes the owner cell and takes
-  the next stable sequence there. All episode cost and credit key exactly
-  once to that cell; fallback launches keep actual-configuration
-  diagnostics but take no sequence and earn no separate credit, so a
-  cheap-first recipe with an expensive fallback never creates a free
-  standalone strong success. Context, release, recipe, and harness
-  boundaries partition the cells.
-- Usage: raw category evidence is retained; normalization validates every
-  component (finite, non-negative, non-boolean) and follows explicit
-  conventions (reasoning already inside output is not added twice, cached
-  input already inside total input is not added twice, ``cache_write``
-  counts only when declared additive). Absent components stay unknown and
-  contradictory components are rejected, never silently combined.
-  Cumulative provider counters enter as sourced, sequenced snapshots with
-  store-computed deltas; late or decreasing snapshots are preserved raw
-  without adding or subtracting spend. Missing usage stays visibly
-  unknown, never invented zero. Shared master turns are allocated across
-  episodes with weights summing to at most 1, so one master segment is
-  never counted in multiple episodes.
-- Attempt completion/cancellation is distinct from master acceptance.
-  Partial/unknown/interrupted outcomes are supported, and a worker's own
-  verdict is never acceptance. Credit names predeclared milestones and
-  must equal their sum; corrections form a single chain with no forks, so
-  no milestone is ever counted twice. Incurred cost and genuinely accepted
-  credit survive interruption; retry, fallback, and master-verification
-  costs stay in the same episode.
-- Duplicate events are idempotent, with the replay check running before
-  every cap or ceiling check; a conflicting reuse of an identity fails.
-  Usage or completion arriving before its launch is rejected, never
-  silently held; resubmission after launch recovers idempotently. The
-  event log is the durable inbox: nothing is evicted. Generation
-  boundaries key on actual release, route, recipe, context, and harness;
-  history stays intact and every cell keeps lifetime evidence.
-- Master closure (``finalize_episode``) is the explicit usage-complete
-  marker: every linked run terminal, declared verification usage present,
-  and an acceptance recorded. Only finalized episodes are
-  inference-ready; partial cost stays visible in accounting throughout.
-- Views expose cumulative per-cell episode work/cost/quality/accounting
-  with missing/pending/censored coverage, plus exact ready-episode
-  observations (work, total uncapped cost, owner candidate/generation,
-  stable sequence) for the selector. This module implements no confidence
-  formulas and no streak/backoff selection; selector mathematics lives in
-  the master's own new files, never here. An explicit uncapped
-  observed-spend ledger and reservation state are retained; predictions
-  alone never promise a strict cost cap.
-- ``register_launch`` + ``record_acceptance`` form the small combined
-  launch-registration/acceptance interface for brokers and native adapters.
-- ``candidate_order``/``prefix_ready``/``ready_observations`` expose the
-  finalized ready prefix and unresolved earlier gaps per owner cell, so
-  later inference uses the fully joined prefix rather than whichever jobs
-  finish first; this metadata is not confidence mathematics.
-
-Automatic hooks still needed (not implemented here): broker/native launch
-paths must call ``register_launch`` after capability check and stream usage
-segments per turn; the normal master acceptance action must call
-``record_acceptance`` once with its verification reference; a reconciler
-must surface launched-but-unjoined runs. See the STATE-BRIEF beside this
-module for exact seams.
+The primitives in this module reject unmet dependencies transactionally.
+model_fit_runtime supplies the durable retry inbox, pre-outcome declaration
+ordering, automatic reconciliation, policy configuration and bounded summaries.
+model_fit_adapters supplies broker/native capture, and model_fit_efficiency
+owns confidence and selection mathematics. See docs/guides/model-fit.md for the
+normal one-acceptance workflow, route capabilities and conditional guarantees.
 """
 
 from __future__ import annotations
@@ -1030,6 +964,14 @@ def record_usage(
                 "SELECT 1 FROM launches WHERE run_id=? AND episode_id=?",
                 (run_id, episode_id)).fetchone() is None:
             raise EpisodeError(f"run {run_id!r} does not belong to episode {episode_id!r}")
+        existing = conn.execute("SELECT * FROM usage_segments WHERE segment_key=?", (segment_key,)).fetchone()
+        # A missing-only resolution preserves the original usage event. Replays
+        # of its now-definitive bytes are also harmless, without rewriting it.
+        if (existing is not None and existing["episode_id"] == episode_id
+                and existing["run_id"] == run_id and existing["kind"] == kind
+                and existing["purpose"] == purpose and existing["raw"] == _dump(raw)
+                and event_id is None):
+            return dict(existing)
         fresh = _record_event(conn, event_id or f"usage:{segment_key}", "usage", {
             "segment_key": segment_key, "episode_id": episode_id, "run_id": run_id,
             "kind": kind, "purpose": purpose, "raw": raw,
@@ -1058,6 +1000,54 @@ def record_usage(
         _reopen(conn, episode_id)
     row = conn.execute("SELECT * FROM usage_segments WHERE segment_key=?", (segment_key,)).fetchone()
     return dict(row)
+
+
+def resolve_missing_usage(store: Store, segment_key: str, episode_id: str,
+                          run_id: str, raw: dict[str, Any], evidence: str) -> dict[str, Any]:
+    """Fill a genuinely unknown segment once, preserving its original raw event.
+
+    This cannot revise known counts or cumulative snapshots. The immutable
+    resolution records definitive provider bytes and provenance; only derived
+    usage and spend rows change, so late evidence adds its cost exactly once.
+    """
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise EpisodeError("missing usage resolution requires provider evidence")
+    norm = normalize_usage(raw)
+    if norm["total"] is None:
+        raise EpisodeError("missing usage resolution requires definitive input/output")
+    conn = store.conn
+    with _write_txn(conn):
+        row = conn.execute("SELECT * FROM usage_segments WHERE segment_key=?", (segment_key,)).fetchone()
+        if row is None or row["episode_id"] != episode_id or row["run_id"] != run_id:
+            raise EpisodeError("missing usage resolution must retain its episode and run identity")
+        if row["kind"] != "run":
+            raise EpisodeError("cumulative and shared usage require their own reconciliation")
+        payload = {"segment_key": segment_key, "episode_id": episode_id,
+                   "run_id": run_id, "raw": raw, "evidence": evidence}
+        event = "usage-resolve:" + segment_key
+        if conn.execute("SELECT 1 FROM events WHERE event_id=?", (event,)).fetchone():
+            _record_event(conn, event, "usage.resolve", payload)
+            return dict(row)
+        if not row["missing"] or _load(row["norm_total"]) is not None:
+            raise EpisodeError("known usage is immutable; only missing totals can be resolved")
+        old = _load(row["raw"])
+        for name in ("input", "output"):
+            known = _load(row["norm_" + name])
+            if known is not None and known != norm[name]:
+                raise EpisodeError("resolution cannot change a previously known usage component")
+        for name in ("source", "source_hash", "start_offset", "end_offset"):
+            if name in old and old[name] != raw.get(name):
+                raise EpisodeError("resolution cannot change its measured window identity")
+        _check_measured_window(conn, raw, exclude_segment=segment_key)
+        _record_event(conn, event, "usage.resolve", payload)
+        conn.execute("UPDATE usage_segments SET raw=?,norm_input=?,norm_output=?,norm_total=?,missing=0"
+                     " WHERE segment_key=?", (_dump(raw), _dump(norm["input"]), _dump(norm["output"]),
+                                               _dump(norm["total"]), segment_key))
+        conn.execute("UPDATE spend_ledger SET amount_tokens=? WHERE entry_id=?",
+                     (_dump(norm["total"]), "spend:" + segment_key))
+        conn.execute("UPDATE launches SET usage_final_count=NULL WHERE run_id=?", (run_id,))
+        _reopen(conn, episode_id)
+    return dict(conn.execute("SELECT * FROM usage_segments WHERE segment_key=?", (segment_key,)).fetchone())
 
 
 def record_cumulative_delta(
@@ -1275,15 +1265,15 @@ def _window_of(raw: dict[str, Any], source_hash: Optional[str],
     return str(source_hash), start_offset, end_offset
 
 
-def _check_measured_window(conn, raw, window=None):
+def _check_measured_window(conn, raw, window=None, exclude_segment=""):
     """A provider counter interval may fund either run or master usage once."""
     source, start, end = window if window is not None else _window_of(raw, None, None, None)
     if source is None:
         return
     clash = conn.execute("""SELECT segment_key FROM usage_segments
-        WHERE COALESCE(json_extract(raw,'$.source_hash'),json_extract(raw,'$.source'))=?
+        WHERE segment_key != ? AND COALESCE(json_extract(raw,'$.source_hash'),json_extract(raw,'$.source'))=?
           AND NOT (json_extract(raw,'$.end_offset') <= ? OR json_extract(raw,'$.start_offset') >= ?)""",
-                         (source, start, end)).fetchone()
+                         (exclude_segment, source, start, end)).fetchone()
     if clash:
         raise EpisodeError(f"measured usage window overlaps run segment {clash[0]!r}")
     clash = conn.execute("SELECT master_segment_key FROM master_segments WHERE source_hash=?"

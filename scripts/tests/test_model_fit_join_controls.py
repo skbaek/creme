@@ -70,6 +70,26 @@ class JoinControls(unittest.TestCase):
         moments=R.statistics(self.store,config,self.candidate(config))
         self.assertEqual((moments.n,moments.work,moments.tokens),(1,0,110))
 
+    def test_native_late_registration_uses_preoutcome_declaration_order(self):
+        config=self.configure()
+        self.prepare('earlier')
+        self.drive_episode('later','r2')
+        self.assertEqual(R.statistics(self.store,config,self.candidate(config)).n,0)
+        self.drive_episode('earlier','r1')
+        self.assertEqual(R.statistics(self.store,config,self.candidate(config)).n,2)
+
+    def test_fallback_feedback_cannot_steal_initial_strategy_ownership(self):
+        self.configure()
+        self.prepare('a')
+        later=run_receipt('a','fallback',LOW,attempt_index=2)
+        self.assertEqual(R.submit(self.store,later)['status'],'pending')
+        self.assertIsNone(E.get_episode(self.store,'a')['owner_option'])
+        R.submit(self.store,run_receipt('a','initial',LOW))
+        R.reconcile(self.store)
+        initial=self.store.conn.execute("SELECT run_id FROM launches WHERE episode_id='a' AND is_fallback=0").fetchone()[0]
+        self.assertEqual(initial,'initial')
+        self.assertEqual(E.episode_accounting(self.store,'a')['spend_uncapped_tokens'],200)
+
     def test_duplicate_preparation_does_not_move_clock(self):
         self.configure()
         a=self.prepare('a')
@@ -104,6 +124,25 @@ class JoinControls(unittest.TestCase):
         self.prepare('a')
         for value in [True,'10',float('nan'),-1]:
             with self.assertRaises(E.EpisodeError): E.reserve(self.store,'bad','a',value)
+
+    def test_missing_usage_resolution_retains_raw_and_rejects_rewriting_known_cost(self):
+        self.configure()
+        self.prepare('a')
+        R.submit(self.store, launch_receipt('a','r',LOW))
+        E.record_usage(self.store,'missing','a',{'total_input':30},run_id='r')
+        for raw,evidence in [({'total_input':31,'total_output':2},'provider'),
+                             ({'total_input':30,'total_output':2},'')]:
+            with self.assertRaises(E.EpisodeError):
+                E.resolve_missing_usage(self.store,'missing','a','r',raw,evidence)
+        raw={'total_input':30,'total_output':2}
+        E.resolve_missing_usage(self.store,'missing','a','r',raw,'provider')
+        E.resolve_missing_usage(self.store,'missing','a','r',raw,'provider')
+        E.record_usage(self.store,'missing','a',raw,run_id='r')
+        self.assertEqual(E.episode_accounting(self.store,'a')['spend_uncapped_tokens'],32)
+        original=json.loads(self.store.conn.execute("SELECT payload FROM events WHERE event_id='usage:missing'").fetchone()[0])
+        self.assertEqual(original['raw'],{'total_input':30})
+        with self.assertRaises(E.EpisodeError):
+            E.resolve_missing_usage(self.store,'missing','a','r',{'total_input':30,'total_output':3},'provider')
 
     def test_roll_back_selection_preserves_pending_and_cost(self):
         self.configure()

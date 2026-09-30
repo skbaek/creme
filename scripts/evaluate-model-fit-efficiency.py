@@ -30,15 +30,16 @@ class Recipe:
     fallback_success: float = 1.0
     prior: int = 100
     latency: float = 1.0
+    bookkeeping: int = 2
 
     @property
     def bound(self):
-        return self.attempt + self.verification + self.fallback
+        return self.attempt + self.verification + self.fallback + self.bookkeeping
 
     @property
     def efficiency(self):
         work = self.success + (1 - self.success) * self.fallback_success if self.fallback else self.success
-        cost = self.attempt + self.verification + (1 - self.success) * self.fallback
+        cost = self.attempt + self.verification + self.bookkeeping + (1 - self.success) * self.fallback
         return work / cost
 
     def outcome(self, seed, opportunity):
@@ -47,7 +48,7 @@ class Recipe:
         rng = random.Random(int.from_bytes(salt, "big"))
         first = rng.random() < self.success
         recovered = not first and self.fallback and rng.random() < self.fallback_success
-        return (float(first or recovered), self.attempt + self.verification
+        return (float(first or recovered), self.attempt + self.verification + self.bookkeeping
                 + (self.fallback if not first else 0), not first)
 
 
@@ -87,6 +88,7 @@ def simulate(recipes, seed, token_budget, policy="learn", delay=0):
     last_explore = explorations = switches = failures = opportunities = 0
     reserved = 0
     first_switch = None
+    first_savings = None
     # Reserve the complete worst-case episode before launch for all policies.
     # This leaves at most max_bound unspent; actual work is compared at the
     # same budget, with unspent money explicitly retained in the report.
@@ -131,6 +133,8 @@ def simulate(recipes, seed, token_budget, policy="learn", delay=0):
         spent += cost
         elapsed += recipe.latency
         failures += int(failed)
+        if first_savings is None and work > spent * recipes[0].efficiency:
+            first_savings = spent
         if trial:
             explorations += 1
             last_explore = opportunities
@@ -148,7 +152,11 @@ def simulate(recipes, seed, token_budget, policy="learn", delay=0):
                 exploration_tokens=learning_spent, exploratory_episodes=explorations,
                 failures=failures, opportunities=opportunities, latency=elapsed,
                 unjoined_at_end=len(pending), first_switch_tokens=first_switch,
-                final_incumbent=incumbent, expected_best=oracle, trials=trials)
+                final_incumbent=incumbent, expected_best=oracle, trials=trials,
+                demonstrated_productive_route=work > 0,
+                first_positive_expected_baseline_gain_tokens=first_savings,
+                host_opportunities_at_task_frequency={str(f): round(opportunities/f) for f in (1,.1,.01)},
+                accounting="attempt + verification + actual fallback + bookkeeping; all policies")
 
 
 def main():

@@ -14,7 +14,7 @@ from . import model_fit_runtime as R
 
 
 def codex_run(path, episode_id, run_id, family, route, harness_version,
-              terminal, before=None, override_reason=""):
+              terminal, before=None, override_reason="", attempt_index=1):
     """Import an owned native rollout, including all its measured input/output.
 
     A resumed source requires its saved `before` snapshot. For a fresh worker
@@ -22,6 +22,8 @@ def codex_run(path, episode_id, run_id, family, route, harness_version,
     main chat. Effective release and effort must be present in turn metadata.
     """
     after = C.codex_snapshot(Path(path), before)
+    if after.get("identity_changed"):
+        raise C.CaptureError("native source changed model/effort; register its separately measured attempts")
     if not after.get("model") or not after.get("effort"):
         raise C.CaptureError("native rollout lacks effective release/effort metadata")
     observed_family = {"gpt-6.1-sol": "sol", "gpt-6-astra": "astra", "gpt-6-luna": "luna"}.get(after["model"])
@@ -33,7 +35,7 @@ def codex_run(path, episode_id, run_id, family, route, harness_version,
                           "cached_input_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": 0}}
     usage = C.codex_window(before, after)
     return {"receipt_id": "native:" + run_id + ":" + R.digest(after), "kind": "run",
-            "episode_id": episode_id, "run_id": run_id,
+            "episode_id": episode_id, "run_id": run_id, "attempt_index": attempt_index,
             "option": family + "/" + after["effort"], "release": after["model"],
             "route": route, "harness_version": harness_version, "override_reason": override_reason,
             "terminal": terminal, "segments": [{"id": usage["segment_key"], "usage": usage}],
@@ -64,15 +66,16 @@ def broker_capture(record):
             run_id = record["id"] + ":" + str(turn["turn_id"])
             muse = record.get("model") == "muse-spark-1.3"
             actual = {"episode_id": binding["episode_id"], "run_id": run_id,
+                      "attempt_index": binding.get("attempt_offset", 0) + turn["n"],
                       "option": ("muse-spark" if muse else "luna-reserve") + "/" + record["effort"],
                       "release": record.get("model"),
                       "route": "muse-broker" if muse else "luna-reserve-broker",
                       "harness_version": binding["harness_version"],
                       "override_reason": binding.get("override_reason", "")}
             R.submit(store, {**actual, "receipt_id": "broker-launch:" + run_id, "kind": "launch"})
-            if not turn.get("status"):
+            if turn.get("status") not in {"completed", "interrupted", "cancelled", "failed"}:
                 continue
-            terminal = turn["status"] if turn["status"] in {"completed", "interrupted", "cancelled", "failed"} else "failed"
+            terminal = turn["status"]
             receipt = {**actual, "kind": "run", "receipt_id": "broker-result:" + run_id,
                        "terminal": terminal, "usage_complete": False, "segments": [],
                        "detail": "provider terminal; quality requires master verification"}

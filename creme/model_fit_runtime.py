@@ -104,9 +104,16 @@ def set_mode(store, policy_id, mode, reason, event_id):
     return _policy(store, policy_id)[0]
 
 
+def context_descriptor(config):
+    descriptor = {"version": config["context_version"]}
+    if config.get("context_features"):
+        descriptor["features"] = config["context_features"]
+    return descriptor
+
+
 def generation(config, candidate):
     return E.generation_key(candidate["release"], candidate["route"], candidate["recipe_version"],
-                            E.material_descriptor({"version": config["context_version"]}),
+                            E.material_descriptor(context_descriptor(config)),
                             config["harness_version"])
 
 
@@ -114,17 +121,29 @@ def statistics(store, config, candidate):
     """Aggregate only the joined prefix; never load the historical corpus into a prompt."""
     args = (config["execution_client"], config["task_type"], candidate["option"],
             generation(config, candidate))
+    # Native receipts can arrive in completion order. The episode's SQLite
+    # rowid was fixed by prepare before any outcome; use that order, not the
+    # order in which adapters happened to register their completed launches.
+    # Until an actual identity arrives, an earlier pending proposal might
+    # become any candidate via override, so conservatively block its context.
+    unknown_before = store.conn.execute("""SELECT MIN(e.rowid) FROM episodes e
+        JOIN fit_opportunities o USING(episode_id) WHERE e.execution_client=?
+        AND e.task_type=? AND e.context=? AND e.recipe_version=?
+        AND e.owner_option IS NULL AND o.status='pending'""",
+        (config['execution_client'],config['task_type'],E._dump(context_descriptor(config)),
+         candidate['recipe_version'])).fetchone()[0]
+    cutoff = unknown_before if unknown_before is not None else 9223372036854775807
     rows = store.conn.execute("""WITH population AS (
-        SELECT e.*, COALESCE((SELECT SUM(CAST(s.amount_tokens AS REAL)) FROM spend_ledger s
+        SELECT e.*, e.rowid AS dispatch_order, COALESCE((SELECT SUM(CAST(s.amount_tokens AS REAL)) FROM spend_ledger s
           WHERE s.episode_id=e.episode_id AND s.amount_tokens!='null'),0) AS cost,
           COALESCE((SELECT SUM(a.accepted_work) FROM acceptances a WHERE a.episode_id=e.episode_id
           AND NOT EXISTS (SELECT 1 FROM acceptances b WHERE b.correction_of=a.accept_id)),0) AS work
         FROM episodes e WHERE execution_client=? AND task_type=? AND owner_option=? AND owner_generation=?
-      ), prefix AS (SELECT * FROM population WHERE owner_seq < COALESCE(
-          (SELECT MIN(owner_seq) FROM population WHERE status!='closed' OR usage_complete!=1), 9223372036854775807))
+      ), prefix AS (SELECT * FROM population WHERE dispatch_order < MIN(?,COALESCE(
+          (SELECT MIN(dispatch_order) FROM population WHERE status!='closed' OR usage_complete!=1), 9223372036854775807)))
       SELECT COUNT(*) AS n, COALESCE(SUM(work),0) AS work, COALESCE(SUM(cost),0) AS cost,
         COALESCE(SUM(work*work),0) AS w2, COALESCE(SUM(cost*cost),0) AS c2,
-        COALESCE(MAX(cost),0) AS maxcost FROM prefix""", args).fetchone()
+        COALESCE(MAX(cost),0) AS maxcost FROM prefix""", (*args, cutoff)).fetchone()
     n = rows["n"]
     return Moments(n, rows["work"], rows["cost"],
                    max(0, rows["w2"] - rows["work"]**2/n) if n else 0,
@@ -132,39 +151,37 @@ def statistics(store, config, candidate):
 
 
 def _budget(store, policy_id, config):
-    # Spend is the single ledger (usage rows already mirror into it). Never add
-    # usage_tokens to spend_uncapped_tokens. Pending reservations cover only
-    # the remaining predicted cost, so incurred cost is not counted twice.
-    rows = store.conn.execute("""SELECT o.*, e.owner_option, e.status AS episode_status,
-       COALESCE((SELECT SUM(CAST(s.amount_tokens AS REAL)) FROM spend_ledger s
-                 WHERE s.episode_id=o.episode_id AND s.amount_tokens!='null'),0) AS cost,
-       (SELECT COUNT(*) FROM spend_ledger s WHERE s.episode_id=o.episode_id AND s.amount_tokens='null') AS unknown
-       FROM fit_opportunities o LEFT JOIN episodes e ON e.episode_id=o.episode_id WHERE policy_id=?""",
-                              (policy_id,)).fetchall()
-    normal = spent = reserved = 0.0
-    last = count = concurrent = 0
-    unknown = False
-    trials, pending = {}, {}
-    for row in rows:
-        d = json.loads(row["decision"])
-        if row["owner_option"]:
-            key = row["owner_option"]
-            trials[key] = trials.get(key, 0) + 1
-        elif row["status"] == "pending":
-            key = d["actual"]
-            pending[key] = pending.get(key, 0) + 1
-        if d["actual_exploration"] and row["status"] != "cancelled":
-            last = max(last, row["sequence"])
-            count += 1
-            spent += row["cost"]
-            if row["episode_status"] != "closed":
-                concurrent += 1
-                reserved += max(0, d["reservation"] - row["cost"])
-            unknown = unknown or bool(row["unknown"])
-        else:
-            normal += row["cost"]
-    allowance = config.get("seed_allowance", 0) + config.get("learning_fraction", .1) * normal
-    return Budget(allowance, spent, reserved, concurrent, 1, unknown), last, count, trials, pending
+    # Aggregate on disk: normal dispatch never loads lifetime rows into memory.
+    # Usage already mirrors into the spend ledger, so only that ledger counts.
+    cte = """WITH population AS (
+      SELECT o.sequence, o.status, e.owner_option, e.status AS episode_status,
+        json_extract(o.decision,'$.actual') AS selected,
+        json_extract(o.decision,'$.actual_exploration') AS trial,
+        json_extract(o.decision,'$.reservation') AS reservation,
+        COALESCE((SELECT SUM(CAST(s.amount_tokens AS REAL)) FROM spend_ledger s
+          WHERE s.episode_id=o.episode_id AND s.amount_tokens!='null'),0) AS cost,
+        EXISTS(SELECT 1 FROM spend_ledger s WHERE s.episode_id=o.episode_id AND s.amount_tokens='null') AS unknown
+      FROM fit_opportunities o LEFT JOIN episodes e ON e.episode_id=o.episode_id WHERE policy_id=?
+    ) """
+    row = store.conn.execute(cte + """SELECT
+      COALESCE(SUM(CASE WHEN trial AND status!='cancelled' THEN cost ELSE 0 END),0) AS spent,
+      COALESCE(SUM(CASE WHEN NOT trial OR status='cancelled' THEN cost ELSE 0 END),0) AS normal,
+      COALESCE(SUM(CASE WHEN trial AND status!='cancelled' AND episode_status!='closed'
+                       THEN MAX(0,reservation-cost) ELSE 0 END),0) AS reserved,
+      COALESCE(SUM(CASE WHEN trial AND status!='cancelled' AND episode_status!='closed' THEN 1 ELSE 0 END),0) AS concurrent,
+      COALESCE(MAX(CASE WHEN trial AND status!='cancelled' THEN sequence ELSE 0 END),0) AS last,
+      COALESCE(SUM(CASE WHEN trial AND status!='cancelled' THEN 1 ELSE 0 END),0) AS count,
+      COALESCE(MAX(CASE WHEN trial AND status!='cancelled' THEN unknown ELSE 0 END),0) AS unknown
+      FROM population""", (policy_id,)).fetchone()
+    counts = store.conn.execute(cte + """SELECT COALESCE(owner_option,selected) AS option,
+      SUM(CASE WHEN owner_option IS NOT NULL THEN 1 ELSE 0 END) AS launched,
+      SUM(CASE WHEN owner_option IS NULL AND status='pending' THEN 1 ELSE 0 END) AS pending
+      FROM population GROUP BY option""", (policy_id,)).fetchall()
+    trials = {r['option']: r['launched'] for r in counts}
+    pending = {r['option']: r['pending'] for r in counts}
+    allowance = config.get('seed_allowance',0) + config.get('learning_fraction',.1)*row['normal']
+    return (Budget(allowance,row['spent'],row['reserved'],row['concurrent'],1,bool(row['unknown'])),
+            row['last'],row['count'],trials,pending)
 
 
 def prepare(store, episode_id, policy_id, milestones, master_client, opportunity_ref, features=None):
@@ -176,7 +193,9 @@ def prepare(store, episode_id, policy_id, milestones, master_client, opportunity
     with E._write_txn(store.conn):
         prior = store.conn.execute("SELECT * FROM fit_opportunities WHERE episode_id=?", (episode_id,)).fetchone()
         if prior:
-            if prior["request"] != encode(request):
+            previous_request = json.loads(prior["request"])
+            previous_request.setdefault("features", {})
+            if encode(previous_request) != encode(request):
                 raise E.ConflictError("opportunity id reused with changed task")
             return json.loads(prior["decision"])
         policy, config = _policy(store, policy_id)
@@ -204,7 +223,7 @@ def prepare(store, episode_id, policy_id, milestones, master_client, opportunity
         candidate = next(c for c in config["candidates"] if c["option"] == actual)
         E.create_episode(store, episode_id, config["execution_client"], config["task_type"],
                           milestones, candidate["recipe_version"], master_client,
-                          context={"version": config["context_version"]}, route=candidate["route"])
+                          context=context_descriptor(config), route=candidate["route"])
         E.propose(store, episode_id, episode_id, actual, candidate["prior_tokens"])
         if d["actual_exploration"]:
             E.reserve(store, episode_id, episode_id, decision.reservation, "expected allowance only")
@@ -230,6 +249,14 @@ def _launch(store, receipt):
     row, config, decision = _context(store, episode)
     if row["status"] == "cancelled":
         raise RuntimeError("cancelled before launch; explicitly reconcile the cancellation first")
+    attempt = receipt.get("attempt_index", 1)
+    if type(attempt) is not int or attempt < 1:
+        raise RuntimeError("attempt_index must be a positive predeclared attempt position")
+    if attempt > 1 and not store.conn.execute("SELECT 1 FROM events WHERE event_id=?",
+            (f"runtime-attempt:{episode}:{attempt-1}",)).fetchone():
+        raise RuntimeError("earlier attempt identity has not arrived; retain fallback feedback pending")
+    E._record_event(store.conn, f"runtime-attempt:{episode}:{attempt}", "runtime.attempt",
+                    {"episode_id": episode, "attempt_index": attempt, "run_id": receipt["run_id"]})
     actual = receipt["option"]
     if actual != decision["actual"] and not receipt.get("override_reason"):
         raise RuntimeError("actual launch differs from proposal: override reason required")
@@ -246,7 +273,11 @@ def _receipt(store, receipt):
     _launch(store, receipt)
     run, episode = receipt["run_id"], receipt["episode_id"]
     for segment in receipt.get("segments", []):
-        E.record_usage(store, segment["id"], episode, segment["usage"], run_id=run)
+        if segment.get("resolves_missing"):
+            E.resolve_missing_usage(store, segment["id"], episode, run,
+                                    segment["usage"], segment.get("evidence", ""))
+        else:
+            E.record_usage(store, segment["id"], episode, segment["usage"], run_id=run)
     if receipt.get("terminal"):
         E.record_attempt(store, receipt["receipt_id"] + ":terminal", run, receipt["terminal"],
                          receipt.get("detail", ""))
@@ -383,6 +414,11 @@ def health(store, limit=100):
             "inbox_pending": store.conn.execute("SELECT COUNT(*) FROM fit_inbox WHERE status='pending'").fetchone()[0],
             "pending": pending, "joins": E.reconcile(store, limit),
             "policies": [dict(r) for r in store.conn.execute("SELECT policy_id,mode,incumbent FROM fit_policies")],
+            "capabilities": {
+                "codex-native": "combined actual-source and master-window acceptance",
+                "muse-broker": "automatic parent usage; auxiliary costs incomplete",
+                "luna-reserve-broker": "automatic identity/terminal; cumulative usage needs windows",
+                "other-routes": "normalized receipts; automatic extraction unavailable"},
             "legacy": "preserved separately; no statistical import"}
 
 

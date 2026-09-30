@@ -156,7 +156,8 @@ class Budget:
         for name in ("allowance", "spent", "reserved"):
             finite(getattr(self, name), name)
         finite(reservation, "reservation")
-        if self.pending < 0 or self.max_pending < 1:
+        if (any(isinstance(n, bool) or not isinstance(n, int) for n in (self.pending, self.max_pending))
+                or self.pending < 0 or self.max_pending < 1):
             raise EfficiencyError("invalid pending-trial limit")
         return (not self.unknown_spend and self.pending < self.max_pending
                 and self.spent + self.reserved + reservation <= self.allowance)
@@ -202,20 +203,32 @@ def choose(
         raise EfficiencyError("need distinct feasible candidates and an eligible incumbent")
     fair = quota(opportunity)
     focused = quota(opportunity, True)
-    if not 0 <= last_exploration <= opportunity or exploration_count < 0:
+    if (any(isinstance(n, bool) or not isinstance(n, int)
+            for n in (last_exploration, exploration_count))
+            or not 0 <= last_exploration <= opportunity or exploration_count < 0):
         raise EfficiencyError("invalid exploration clock")
     for table in (trials, pending):
         if any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in table.values()):
             raise EfficiencyError("trial counts must be nonnegative integers")
     intervals = {key: efficiency_interval(c, moments.get(key, Moments()), len(candidates), delta)
                  for key, c in by_id.items()}
-    challengers = [key for key, interval in intervals.items()
-                   if interval.lower > intervals[incumbent].upper]
+    # A disproven episode cap is an operational admission defect, not evidence
+    # that a model has poor statistical quality. Do not reserve it again, claim
+    # it is bounded, or trap all work on its now-uninformative incumbent.
+    # The adapter must reconcile the recipe/cap before it can be readmitted.
+    admissible = [key for key in by_id if intervals[key].status != "cost-bound-violated"]
+    if not admissible:
+        raise EfficiencyError("every candidate has violated its episode cost bound; reconcile admission")
     reason = "retain-provisional-incumbent"
+    if incumbent not in admissible:
+        incumbent = admissible[0]
+        reason = "operational-fallback-after-cost-bound-violation; provisional"
+    challengers = [key for key in admissible
+                   if intervals[key].lower > intervals[incumbent].upper]
     if challengers:
         incumbent = max(challengers, key=lambda key: (intervals[key].lower, key))
         reason = "supported-efficiency-advantage"
-    productive = any(m.work > 0 for m in moments.values())
+    productive = any(moments.get(key, Moments()).work > 0 for key in admissible)
 
     def result(selected: str, why: str, exploration: bool = False) -> Decision:
         candidate = by_id[selected]
@@ -233,8 +246,8 @@ def choose(
         c = by_id[key]
         return pending.get(key, 0) == 0 and budget.admits(
             c.token_bound if c.token_bound is not None else c.prior_tokens)
-    debt = [key for key in by_id if counts[key] < fair and affordable(key)]
-    possible = [key for key in by_id if key != incumbent and counts[key] < focused
+    debt = [key for key in admissible if counts[key] < fair and affordable(key)]
+    possible = [key for key in admissible if key != incumbent and counts[key] < focused
                 and intervals[key].upper > intervals[incumbent].lower and affordable(key)]
     # Every other learning slot protects fair coverage. Smallest accumulated
     # count wins; a currently expensive prior never removes a coverage debtor.
@@ -242,11 +255,16 @@ def choose(
         key = min(debt, key=lambda key: (counts[key], key))
         return result(key, "protected-fair-coverage", True)
     if possible:
-        def priority(key: str) -> tuple[float, int, str]:
+        def priority(key: str) -> tuple[bool, float, int, str]:
             c = by_id[key]
             interval = intervals[key]
             gain = interval.upper - intervals[incumbent].lower
-            return gain / c.prior_tokens, -counts[key], key
+            # Infinite upper bounds convey ignorance, not an infinite estimated
+            # gain. Priors can prioritize these trials; protected fair coverage
+            # independently ensures that a wrong expensive prior cannot starve.
+            score = (1.0 / (c.prior_tokens * math.sqrt(counts[key] + 1))
+                     if math.isinf(gain) else gain / c.prior_tokens)
+            return math.isinf(gain), score, -counts[key], key
         return result(max(possible, key=priority), "focused-efficiency-learning", True)
     if debt:
         return result(min(debt, key=lambda key: (counts[key], key)), "protected-fair-coverage", True)

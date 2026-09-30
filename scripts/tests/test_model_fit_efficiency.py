@@ -86,6 +86,36 @@ class EfficiencyTests(unittest.TestCase):
         self.assertEqual(result.spending_guarantee, "expected-only")
         self.assertEqual(result.reservation, 10)
 
+    def test_foreign_cell_cannot_claim_productivity(self):
+        result = self.decision(moments={"other-client": Moments().add(1, 10)})
+        self.assertFalse(result.demonstrated_productive_route)
+
+    def test_violated_cap_is_not_reserved_again(self):
+        result = self.decision(moments={"expensive-prior": Moments().add(1, 1001)})
+        self.assertEqual(result.selected, "default")
+        self.assertFalse(result.exploration)
+
+    def test_violated_incumbent_gets_explicit_operational_fallback(self):
+        result = self.decision(moments={"default": Moments().add(1, 1001)}, opportunity=1)
+        self.assertEqual(result.incumbent, "expensive-prior")
+        self.assertIn("operational-fallback", result.reason)
+        self.assertIn("provisional", result.reason)
+        with self.assertRaisesRegex(EfficiencyError, "every candidate"):
+            self.decision(moments={key: Moments().add(1, 1001)
+                                   for key in ("default", "expensive-prior")})
+
+    def test_unknown_focused_candidates_still_use_soft_cost_prior(self):
+        cs = [Candidate(key, 100, prior, "enforced") for key, prior in
+              (("default", 100), ("a-cheap", 1), ("b-pricey", 1000000))]
+        result = self.decision(candidates=cs, exploration_count=1)
+        self.assertEqual(result.selected, "a-cheap")
+
+    def test_boolean_clocks_and_fractional_pending_are_refused(self):
+        for override in ({"last_exploration": True}, {"exploration_count": False},
+                         {"budget": Budget(100, 0, 0, .5)}):
+            with self.assertRaises(EfficiencyError):
+                self.decision(**override)
+
     def test_sampling_targets_are_growing_and_sublinear(self):
         for focused in (False, True):
             self.assertGreater(quota(10**12, focused), quota(10**6, focused))

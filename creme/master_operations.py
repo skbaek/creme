@@ -435,7 +435,16 @@ def digest_record(
     _stack_state: Any = None,
 ) -> dict[str, Any]:
     view = _view if _view is not None else master_runtime.read_record(root)
-    lease = _safe_lease(lease_snapshot(), view.events, lease_status())
+    try:
+        lease = _safe_lease(lease_snapshot(), view.events, lease_status())
+    except (semaphore.SemaphoreError, OSError) as exc:
+        # Live semaphore inspection currently needs its own writable mutex.
+        # A sandboxed reader may still inspect durable goals and decisions;
+        # inability to inspect a lease never implies that no master owns it.
+        lease = {
+            "present": None, "client": None, "state": "unavailable",
+            "matches_recorded_acquisition": False, "detail": str(exc),
+        }
     board = view.expected_board
     reconciliation: list[dict[str, Any]] = []
     for event in reversed(view.events):
@@ -686,7 +695,7 @@ def render_digest_human(digest: dict[str, Any]) -> str:
     lines = [
         f"master digest schema {digest['schema_version']}",
         f"role: {digest['role']['recorded']} (descriptive, not authority)",
-        f"lease: {lease['client'] if lease['present'] else 'none'} ({lease['state']})",
+        f"lease: {lease['client'] if lease['present'] else 'unknown' if lease['present'] is None else 'none'} ({lease['state']})",
         f"events: {source['event_count']} ({source['log_digest']})",
         f"board repair required: {str(digest['record']['board_repair']['required']).lower()}",
     ]
@@ -730,11 +739,11 @@ def render_focused_digest_human(digest: dict[str, Any]) -> str:
     lines = [
         f"master continuity schema {digest['schema_version']}",
         f"role: {digest['role']['recorded']} (descriptive, not authority)",
-        f"lease: {lease['client'] if lease['present'] else 'none'} ({lease['state']})",
+        f"lease: {lease['client'] if lease['present'] else 'unknown' if lease['present'] is None else 'none'} ({lease['state']})",
         f"events: {source['event_count']} ({source['log_digest']})",
         f"board repair required: {str(digest['record']['board_repair']['required']).lower()}",
         "",
-        "goals (active, ready, and blocked first):",
+        "goals (canonical stack order):" if digest.get("stack") else "goals (active, ready, and blocked first):",
     ]
     goals = digest["goals"]
     for row in goals["items"]:

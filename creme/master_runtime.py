@@ -1273,7 +1273,9 @@ def _record_lock(root: Path, *, exclusive: bool) -> Iterator[Path]:
     lock_path = root / LOCK_NAME
     local = _thread_lock(root)
     with local:
-        flags = os.O_RDWR
+        # A shared reader needs no write-capable descriptor. Read-only
+        # clients can still participate in the same advisory lock.
+        flags = os.O_RDWR if exclusive else os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:

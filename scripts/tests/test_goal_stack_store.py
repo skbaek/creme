@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,6 +61,17 @@ class StackStoreTests(unittest.TestCase):
         self.assertEqual(terminal['archive']['evidence'], 'report passed')
         self.assertEqual(terminal['revision'], 2)
         self.assertTrue(store.adopted(runtime.read_record(self.root).events))
+
+    def test_readers_work_without_write_capable_lock_descriptors(self):
+        self.initialize([entry()])
+        real_open = os.open
+        def read_only_open(path, flags, *args, **kwargs):
+            if Path(path) == self.root / runtime.LOCK_NAME:
+                self.assertEqual(flags & os.O_ACCMODE, os.O_RDONLY)
+            return real_open(path, flags, *args, **kwargs)
+        with mock.patch.object(runtime.os, 'open', side_effect=read_only_open):
+            self.assertEqual(store.read(self.root)['entries'], [entry()])
+            self.assertTrue(store.adopted(runtime.read_record(self.root).events))
 
     def test_renewal_refusal_writes_nothing(self):
         denied = runtime.RecordWriter(self.root, renew=lambda: (False, 'foreign master'))

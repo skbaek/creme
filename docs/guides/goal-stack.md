@@ -85,3 +85,9 @@ recover the next goal, its full contract/context, all active work and all open
 decisions/findings without scanning historical backlogs. No reader acquires
 master authority to perform this check. Record the migration inventory and
 rehearsal evidence in the goal report.
+
+Shared record reads use read-only lock descriptors. If a sandbox cannot inspect
+the live semaphore, the digest still exposes validated durable goals, decisions
+and findings, with lease state explicitly `unavailable` rather than absent.
+That descriptive view grants no master authority; normal lease acquisition and
+mutation checks remain mandatory.

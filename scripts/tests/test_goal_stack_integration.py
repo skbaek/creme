@@ -203,6 +203,23 @@ class StackIntegrationTest(unittest.TestCase):
         self.assertIn("do second", human)
         self.assertIn("revision 0", human)
 
+    def test_durable_digest_survives_unavailable_live_lease_inspection(self):
+        self.adopt_with_manifest()
+        self.writer.append("decision", self.decision_payload())
+        for source in ('snapshot', 'status'):
+            with self.subTest(source=source):
+                denied = mock.Mock(side_effect=master_operations.semaphore.SemaphoreError('read-only sandbox'))
+                digest = master_operations.focused_digest_record(
+                    self.record_root,
+                    lease_snapshot=denied if source == 'snapshot' else no_lease,
+                    lease_status=denied if source == 'status' else no_lease_status,
+                )
+                self.assertIsNone(digest['lease']['present'])
+                self.assertEqual(digest['lease']['state'], 'unavailable')
+                self.assertEqual(digest['stack']['next_id'], 'second')
+                self.assertEqual(digest['open_decisions']['all_ids'], ['decision-1'])
+                self.assertIn('lease: unknown (unavailable)', master_operations.render_digest_human(digest))
+
     def test_lookup_returns_full_stack_entry(self):
         self.adopt_with_manifest()
         found = master_operations.lookup_digest_record(

@@ -829,7 +829,7 @@ class EpisodeTest(unittest.TestCase):
             (obs["episode_id"], obs["candidate_seq"], obs["owner_option"],
              obs["accepted_work"], obs["usage_tokens"], obs["spend_uncapped_tokens"]),
             ("ep-1", 1, "muse-spark/high", 1.0, 110.0, 110.0))
-        self.assertIn(obs["generation"], 
+        self.assertIn(obs["generation"],
                       self.store.conn.execute(
                           "SELECT owner_generation FROM episodes WHERE episode_id='ep-1'"
                       ).fetchone()["owner_generation"])

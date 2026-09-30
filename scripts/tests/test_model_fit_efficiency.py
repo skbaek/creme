@@ -69,6 +69,13 @@ class EfficiencyTests(unittest.TestCase):
         self.assertEqual(result.selected, "expensive-prior")
         self.assertTrue(result.exploration)
         self.assertFalse(result.demonstrated_productive_route)
+        # Protected debt must win even when focused priority has a cheaper
+        # unresolved alternative. Two candidates alone cannot distinguish the
+        # protected scheduler from an incidental focused choice.
+        candidates = [Candidate(key, 100, prior, "enforced") for key, prior in
+                      (("default", 100), ("cheap", 1), ("expensive-prior", 100000))]
+        result = self.decision(candidates=candidates, trials={"default": 9, "cheap": 2})
+        self.assertEqual(result.selected, "expensive-prior")
 
     def test_budget_pending_unknown_and_spacing_defer_without_erasing_debt(self):
         for budget in (Budget(99, 0, 0, 0), Budget(100, 1, 0, 0),

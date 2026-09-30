@@ -222,6 +222,16 @@ class SessionRecord:
         with self.data_lock:
             self.record["updated"] = now_iso()
             write_private_json(self.dir / "session.json", self.record)
+            if self.record.get("model_fit"):
+                from .model_fit_adapters import broker_capture
+                try:
+                    health = broker_capture(self.record)
+                    self.record["model_fit_capture"] = {"status": "captured", "inbox_pending": health["inbox_pending"]}
+                except (OSError, ValueError, RuntimeError, KeyError) as exc:
+                    # Run control remains intact; the durable source and explicit
+                    # error survive for replay. Never report absent usage as zero.
+                    self.record["model_fit_capture"] = {"status": "gap", "error": str(exc)}
+                write_private_json(self.dir / "session.json", self.record)
 
     def set_state(self, value: str, note: Optional[str] = None) -> None:
         with self.data_lock:

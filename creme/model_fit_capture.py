@@ -126,10 +126,14 @@ def muse_turn(record: dict[str, Any], number: int) -> dict[str, Any]:
     The broker's protocol PASS is never promoted to master acceptance here.
     This function does not assert that unreported auxiliary agents cost zero.
     """
+    if not record.get("id"):
+        raise CaptureError("Muse record has no session identity")
     turns = [t for t in record.get("turns", []) if t.get("n") == number]
     if len(turns) != 1:
         raise CaptureError("no unique recorded Muse turn")
     turn = turns[0]
+    if not turn.get("turn_id"):
+        raise CaptureError("Muse turn has no identity")
     tokens = turn.get("tokens")
     if not isinstance(tokens, dict):
         raise CaptureError("Muse turn has no recorded usage")

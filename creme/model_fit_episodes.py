@@ -101,7 +101,7 @@ from typing import Any, Optional
 
 from . import model_fit
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 # Release identity is always observed, never synthesized: every actual launch
 # must carry the real effective model id reported by its adapter. The store
@@ -300,6 +300,26 @@ CREATE TABLE IF NOT EXISTS spend_ledger (
   kind TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS episodes_cell ON episodes(execution_client,task_type,owner_option,owner_generation,owner_seq);
+CREATE INDEX IF NOT EXISTS spend_episode ON spend_ledger(episode_id);
+CREATE INDEX IF NOT EXISTS usage_episode ON usage_segments(episode_id);
+CREATE INDEX IF NOT EXISTS usage_run ON usage_segments(run_id);
+CREATE INDEX IF NOT EXISTS accept_episode ON acceptances(episode_id);
+CREATE INDEX IF NOT EXISTS accept_correction ON acceptances(correction_of);
+CREATE INDEX IF NOT EXISTS launch_episode ON launches(episode_id);
+CREATE TABLE IF NOT EXISTS fit_policies (
+  policy_id TEXT PRIMARY KEY, config TEXT NOT NULL, mode TEXT NOT NULL,
+  incumbent TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fit_opportunities (
+  episode_id TEXT PRIMARY KEY, policy_id TEXT NOT NULL REFERENCES fit_policies(policy_id),
+  sequence INTEGER NOT NULL, request TEXT NOT NULL, decision TEXT NOT NULL,
+  status TEXT NOT NULL, reconciled_at TEXT NOT NULL, UNIQUE(policy_id, sequence)
+);
+CREATE TABLE IF NOT EXISTS fit_inbox (
+  receipt_id TEXT PRIMARY KEY, payload TEXT NOT NULL, status TEXT NOT NULL,
+  error TEXT NOT NULL, created_at TEXT NOT NULL, attempted_at TEXT NOT NULL
+);
 """
 
 
@@ -315,6 +335,9 @@ class Store:
 
 
 _EXPECTED_COLUMNS: dict[str, list[str]] = {
+    "fit_policies": ["policy_id", "config", "mode", "incumbent", "created_at"],
+    "fit_opportunities": ["episode_id", "policy_id", "sequence", "request", "decision", "status", "reconciled_at"],
+    "fit_inbox": ["receipt_id", "payload", "status", "error", "created_at", "attempted_at"],
     "meta": ["key", "value"],
     "events": ["event_id", "type", "payload", "created_at"],
     "episodes": ["episode_id", "execution_client", "master_client", "task_type",
@@ -353,10 +376,9 @@ _EXPECTED_COLUMNS: dict[str, list[str]] = {
 def open_store(path: Path | str) -> Store:
     """Open (creating) the SQLite evidence store; safe across restarts.
 
-    One clean schema suffices: no production v2 store exists, so there is
-    no compatibility layer and no destructive rebuild. A file that already
-    holds other tables, or lacks exactly this schema, is refused before
-    any DDL runs. Foreign keys are enforced on every connection.
+    Unknown layouts refuse; the recognized first shadow schema has an
+    additive, event-recorded migration. Evidence is never rebuilt or deleted.
+    Foreign keys are enforced on every connection.
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -374,6 +396,30 @@ def open_store(path: Path | str) -> Store:
                 f" (found: {sorted(present - set(_EXPECTED_COLUMNS)) or 'nothing expected'})")
     else:
         conn.executescript(_SCHEMA)
+    # The first ordinary shadow store used schema 3. Upgrade only its
+    # recognized additive runtime shape; preserve every evidence/event row.
+    version = conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
+    if not fresh and version is not None and version["value"] == "3":
+        additions = {"fit_inbox": "attempted_at", "fit_opportunities": "reconciled_at"}
+        for table, columns in _EXPECTED_COLUMNS.items():
+            actual = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
+            old = [c for c in columns if c != additions.get(table)]
+            if actual not in (columns, old):
+                conn.close()
+                raise EpisodeError("unrecognized schema-3 shape; migration refused")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for table, column in additions.items():
+                actual = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
+                if column not in actual:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            conn.execute("UPDATE meta SET value=? WHERE key='schema'", (str(SCHEMA_VERSION),))
+            _record_event(conn, "schema:3:4", "schema.migrate", {"from": 3, "to": 4, "evidence_preserved": True})
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            conn.close()
+            raise
     for table, columns in _EXPECTED_COLUMNS.items():
         actual = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
         if actual != columns:
@@ -521,6 +567,7 @@ def normalize_usage(raw: dict[str, Any]) -> dict[str, Optional[float]]:
     else:
         norm_output = None
 
+    _num(raw.get("cache_write"), "cache_write")
     additive = raw.get("cache_write_additive", False)
     if not isinstance(additive, bool):
         raise EpisodeError("cache_write_additive must be a bool")
@@ -570,7 +617,7 @@ def usage_from_model_fit_tokens(tokens_field: str) -> dict[str, Any]:
 
 
 def _record_event(conn: sqlite3.Connection, event_id: str, kind: str, payload: dict[str, Any]) -> bool:
-    """Insert the event row. True if new; True (no-op) if identical replay.
+    """Insert the event row. True if new; False (no-op) if identical replay.
 
     Raises ConflictError when the id is reused with a different payload.
     """
@@ -676,9 +723,10 @@ def create_episode(
     total = 0.0
     names: list[str] = []
     for credit in work_credits:
-        amount = float(credit.get("credit", 0))
-        if amount < 0:
-            raise EpisodeError("work credit must not be negative")
+        value = credit.get("credit", 0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise EpisodeError("work credit must be a finite non-negative number")
+        amount = float(value)
         name = _credit_name(credit)
         if not name:
             raise EpisodeError("every predeclared work credit must name its milestone")
@@ -726,6 +774,7 @@ def propose(
     predicted_cost: Optional[float] = None, event_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Record a proposal (selection intent); distinct from any actual launch."""
+    _num(predicted_cost, "predicted cost")
     conn = store.conn
     with _write_txn(conn):
         row = _episode_or_raise(conn, episode_id)
@@ -759,6 +808,7 @@ def reserve(
     event_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Reserve a spending allowance for an episode (advisory, never a cap proof)."""
+    _num(amount_predicted, "predicted reservation")
     conn = store.conn
     with _write_txn(conn):
         _episode_or_raise(conn, episode_id)
@@ -830,7 +880,7 @@ def register_launch(
 
     ``release`` is the adapter-observed effective model id and is required:
     the store never synthesizes a release. Sol-family launches must carry
-    exactly ``GPT-6.1``.
+    exactly ``gpt-6.1-sol``.
 
     One episode has one pre-outcome owner: its first (initial) launch fixes
     the owner option and owner generation (initial setting plus the
@@ -988,6 +1038,7 @@ def record_usage(
             existing = conn.execute(
                 "SELECT * FROM usage_segments WHERE segment_key=?", (segment_key,)).fetchone()
             return dict(existing)
+        _check_measured_window(conn, raw)
         try:
             conn.execute(
                 "INSERT INTO usage_segments (segment_key, run_id, episode_id, kind, raw,"
@@ -1084,12 +1135,11 @@ def record_cumulative_delta(
                 kind, delta, applied, advance = "run-delta-nonmonotonic", None, 0, False
             else:
                 kind, delta, applied, advance = "run-delta", current - base, 1, True
-        elif last_total is None:
-            # The stored base was unknown, so this snapshot cannot yield a
-            # delta; it becomes the new base for later snapshots instead.
-            kind, delta, applied, advance = "run-delta-unknown-base", None, 0, True
         elif sequence <= int(source["last_sequence"]):
             kind, delta, applied, advance = "run-delta-late", None, 0, False
+        elif last_total is None:
+            # Only a later snapshot may advance an unknown base.
+            kind, delta, applied, advance = "run-delta-unknown-base", None, 0, True
         elif current < float(last_total) and not _close_enough(current, float(last_total)):
             kind, delta, applied, advance = "run-delta-nonmonotonic", None, 0, False
         else:
@@ -1225,6 +1275,23 @@ def _window_of(raw: dict[str, Any], source_hash: Optional[str],
     return str(source_hash), start_offset, end_offset
 
 
+def _check_measured_window(conn, raw, window=None):
+    """A provider counter interval may fund either run or master usage once."""
+    source, start, end = window if window is not None else _window_of(raw, None, None, None)
+    if source is None:
+        return
+    clash = conn.execute("""SELECT segment_key FROM usage_segments
+        WHERE COALESCE(json_extract(raw,'$.source_hash'),json_extract(raw,'$.source'))=?
+          AND NOT (json_extract(raw,'$.end_offset') <= ? OR json_extract(raw,'$.start_offset') >= ?)""",
+                         (source, start, end)).fetchone()
+    if clash:
+        raise EpisodeError(f"measured usage window overlaps run segment {clash[0]!r}")
+    clash = conn.execute("SELECT master_segment_key FROM master_segments WHERE source_hash=?"
+                         " AND NOT (end_offset <= ? OR start_offset >= ?)", (source, start, end)).fetchone()
+    if clash:
+        raise EpisodeError(f"measured usage window overlaps master segment {clash[0]!r}")
+
+
 def record_master_segment(
     store: Store, master_segment_key: str, master_client: str, raw: dict[str, Any],
     source_hash: Optional[str] = None, start_offset: Optional[int] = None,
@@ -1257,6 +1324,7 @@ def record_master_segment(
                 raise EpisodeError(
                     f"master segment {master_segment_key!r} replayed but its row is missing")
             return dict(existing)
+        _check_measured_window(conn, raw, window)
         source, start, end = window
         if source is not None:
             assert start is not None and end is not None
@@ -2014,9 +2082,9 @@ def candidate_order(
     No confidence arithmetic here: this is the metadata later inference
     needs to use the fully joined prefix.
     """
-    if limit is not None and (not isinstance(limit, int) or limit < 0):
+    if limit is not None and (type(limit) is not int or limit < 0):
         raise EpisodeError("order limit must be a non-negative integer or None")
-    if not isinstance(offset, int) or offset < 0:
+    if type(offset) is not int or offset < 0:
         raise EpisodeError("order offset must be a non-negative integer")
     conn = store.conn
     query = ("SELECT * FROM episodes WHERE execution_client = ? AND task_type = ?"
@@ -2114,9 +2182,9 @@ def ready_observations(
     accounting views and is never silently folded into these
     observations.
     """
-    if limit is not None and (not isinstance(limit, int) or limit < 0):
+    if limit is not None and (type(limit) is not int or limit < 0):
         raise EpisodeError("observations limit must be a non-negative integer or None")
-    if not isinstance(offset, int) or offset < 0:
+    if type(offset) is not int or offset < 0:
         raise EpisodeError("observations offset must be a non-negative integer")
     view = prefix_ready(store, execution_client, task_type, option, generation)
     return view["ready_observations"][offset:(offset + limit) if limit is not None else None]

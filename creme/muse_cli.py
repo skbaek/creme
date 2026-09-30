@@ -68,9 +68,14 @@ def cmd_start(arguments: argparse.Namespace) -> int:
     brief, error = _read_brief(arguments.brief)
     if error:
         return _refused(arguments, error)
+    fit = None
+    if getattr(arguments, "episode", None):
+        from . import model_fit, model_fit_adapters
+        directory = Path(arguments.fit_dir).expanduser() if arguments.fit_dir else model_fit.default_dir(ROOT)
+        fit = model_fit_adapters.binding(directory, arguments.episode)
     code, lines, record = MB.cmd_start(ROOT, dict(os.environ), brief, arguments.target, arguments.write,
                                        arguments.effort, arguments.detail, arguments.timeout_seconds,
-                                       lean=arguments.lean)
+                                       lean=arguments.lean, model_fit=fit)
     return _print(arguments, code, lines, record)
 
 
@@ -168,6 +173,8 @@ def register(commands: Any) -> None:
                        ("resume", "attach a new brokered session to a recorded Muse session")):
         item = sub(name, text)
         if name == "start":
+            item.add_argument("--episode", help="predeclared model-fit episode; automatic run capture")
+            item.add_argument("--fit-dir", help="model-fit directory; defaults to configured goal store")
             item.add_argument("--brief", required=True, help="brief file, or - for stdin")
             item.add_argument("--target", required=True)
         else:

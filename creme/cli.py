@@ -353,10 +353,15 @@ def cmd_luna_reserve_start(arguments: argparse.Namespace) -> int:
     brief, error = _read_brief(arguments.brief)
     if error:
         return _luna_refused(arguments, error)
+    fit = None
+    if getattr(arguments, "episode", None):
+        from . import model_fit_adapters
+        directory = Path(arguments.fit_dir).expanduser() if arguments.fit_dir else model_fit.default_dir(ROOT)
+        fit = model_fit_adapters.binding(directory, arguments.episode)
     code, lines, record = luna_broker.cmd_start(
         ROOT, dict(os.environ), brief, arguments.target, arguments.write, arguments.effort, arguments.detail,
         _luna_policy(arguments).__dict__, list(arguments.overrides or []), arguments.timeout_seconds,
-        lean=arguments.lean,
+        lean=arguments.lean, model_fit=fit,
     )
     return _luna_print(arguments, code, lines, record)
 
@@ -1731,6 +1736,57 @@ def _model_fit_dir(arguments: argparse.Namespace) -> Path:
     return model_fit.default_dir(ROOT)
 
 
+def cmd_model_fit_episode(arguments: argparse.Namespace) -> int:
+    from . import model_fit_runtime as runtime
+    from . import model_fit_adapters as adapters
+    from . import model_fit_capture as capture
+    store = None
+    try:
+        directory = _model_fit_dir(arguments)
+        action = arguments.episode_action
+        request = {}
+        if arguments.from_file:
+            request = json.loads(sys.stdin.read() if arguments.from_file == "-" else
+                                 Path(arguments.from_file).expanduser().read_text())
+        if action == "snapshot":
+            result = capture.codex_snapshot(Path(request["path"]), request.get("previous"))
+        else:
+            store = runtime.open_runtime(directory)
+            if action == "configure":
+                result = runtime.configure(store, **request)
+            elif action == "prepare":
+                result = runtime.prepare(store, **request)
+            elif action in {"receipt", "accept"}:
+                for source in request.pop("codex_sources", []):
+                    receipt = adapters.codex_run(**source)
+                    request.setdefault("runs", []).append(receipt)
+                for window in request.pop("codex_master_windows", []):
+                    request.setdefault("master_segments", []).append(adapters.master_window(**window))
+                if action == "accept":
+                    request["kind"] = "accept"
+                result = runtime.submit(store, request)
+            elif action == "mode":
+                result = runtime.set_mode(store, **request)
+            elif action == "cancel":
+                result = runtime.cancel(store, **request)
+            elif action == "table":
+                result = runtime.table(store, request["policy_id"])
+            elif action == "reconcile":
+                for record in request.get("broker_records", []):
+                    adapters.broker_capture(json.loads(Path(record).read_text()))
+                result = runtime.reconcile(store)
+            else:
+                result = runtime.health(store)
+        print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
+        return 0 if result.get("status") != "pending" else 3
+    except (OSError, ValueError, KeyError, TypeError, runtime.RuntimeError) as exc:
+        print(f"model-fit episode: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if store is not None:
+            store.close()
+
+
 def cmd_model_fit_validate(arguments: argparse.Namespace) -> int:
     try:
         directory = _model_fit_dir(arguments)
@@ -1832,6 +1888,10 @@ def _policy_error(exc: Exception) -> int:
 
 def cmd_model_fit_recommend(arguments: argparse.Namespace) -> int:
     try:
+        if (_model_fit_dir(arguments) / "runtime" / "episodes-v2.sqlite3").exists():
+            raise model_fit_policy.PolicyError(
+                "episode selection is initialized; use model-fit episode prepare. "
+                "Legacy state is historical and is not a calibrated denominator.")
         result = model_fit_policy.recommend(
             _model_fit_dir(arguments), arguments.client, arguments.task_type,
             arguments.default, arguments.now,
@@ -2330,6 +2390,11 @@ def parser() -> argparse.ArgumentParser:
 
     fit = commands.add_parser("model-fit", help="per-client model/effort fit tables in the goal store")
     fit_commands = fit.add_subparsers(dest="fit_action", required=True)
+    episode = fit_commands.add_parser("episode", help="durable within-client episode selection and acceptance")
+    episode.add_argument("episode_action", choices=("configure", "prepare", "receipt", "accept", "mode", "cancel", "table", "reconcile", "health", "snapshot"))
+    episode.add_argument("--from", dest="from_file", metavar="JSON", help="structured request file, or - for stdin")
+    episode.add_argument("--dir", help="private model-fit directory; defaults to configured goal store")
+    episode.set_defaults(func=cmd_model_fit_episode)
     fit_validate = fit_commands.add_parser("validate", help="validate every client table in DIR")
     fit_validate.add_argument("dir", nargs="?", help=f"default: the goal store's {model_fit.TABLE_DIR}/")
     fit_validate.set_defaults(func=cmd_model_fit_validate)
@@ -2474,6 +2539,8 @@ def parser() -> argparse.ArgumentParser:
 
     luna_start = luna_commands.add_parser("start", help="start a brokered session and its first turn; returns at once")
     open_arguments(luna_start)
+    luna_start.add_argument("--episode", help="predeclared model-fit episode; automatic capture")
+    luna_start.add_argument("--fit-dir", help="private model-fit directory")
     luna_start.add_argument("--brief", required=True, help="brief file, or - for stdin")
     luna_start.add_argument("--target", required=True, help="directory the brief is about")
     luna_start.add_argument("--effort", default=luna_reserve.DEFAULT_EFFORT, help="low, medium (default), high, xhigh, or max")

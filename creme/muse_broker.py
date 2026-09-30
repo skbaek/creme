@@ -57,7 +57,8 @@ _MUSE_SESSION = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f
 
 def code_digest(module_root: Path) -> str:
     return PB.file_digest(module_root, (
-        "creme/muse_broker.py", "creme/muse.py", "creme/muse_client.py", "creme/pseudo_broker.py",
+        "creme/muse_broker.py", "creme/muse.py", "creme/muse_client.py", "creme/pseudo_broker.py", "creme/model_fit_adapters.py", "creme/model_fit_runtime.py",
+        "creme/model_fit_episodes.py", "creme/model_fit_capture.py",
         "creme/codex_app_server.py", "creme/luna_lean.py", "templates/muse/preamble.md",
         "templates/muse/lean-preamble.md", "templates/shared/library-first.md"))
 
@@ -966,6 +967,8 @@ class Broker:
         }
         if lean_goal is not None:
             record["lean"] = {"goal": str(lean_goal)}
+        if request.get("model_fit"):
+            record["model_fit"] = request["model_fit"]
         session = MuseSession(self, session_id, record)
         with self.lock:
             if lean_goal is not None:
@@ -1125,12 +1128,16 @@ def _client_refusals(module_root: Path, environ: dict, effort: str, brief: Optio
 
 
 def cmd_start(module_root: Path, environ: dict, brief: str, target: str, write: bool, effort: str, detail: str,
-              turn_timeout_seconds: int, lean: Optional[str] = None) -> tuple[int, list[str], dict]:
+              turn_timeout_seconds: int, lean: Optional[str] = None, model_fit: Optional[dict] = None) -> tuple[int, list[str], dict]:
+    if model_fit and model_fit.get("option") != "muse-spark/" + effort:
+        raise ValueError("model-fit proposal differs from requested broker effort")
     mode = "lean" if lean is not None else ("write" if write else "read-only")
     refused = _client_refusals(module_root, environ, effort, brief, target, mode, lean)
     if refused:
         return refused
     arguments = {"lean": lean} if lean is not None else {}
+    if model_fit:
+        arguments["model_fit"] = model_fit
     return _open_output(_call(module_root, environ, "start", True, brief=brief, target=target, write=write,
                               effort=effort, detail=detail, turn_timeout_seconds=turn_timeout_seconds, **arguments))
 

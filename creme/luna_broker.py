@@ -122,7 +122,8 @@ def code_digest(module_root: Path) -> str:
     """Digest of the modules a broker runs, so a client never drives a broker on other code."""
     return PB.file_digest(module_root, (
         "creme/luna_broker.py", "creme/luna_reserve.py", "creme/codex_app_server.py", "creme/luna_lean.py",
-        "creme/pseudo_broker.py", "templates/luna-reserve/preamble.md", "templates/luna-reserve/lean-preamble.md",
+        "creme/pseudo_broker.py", "creme/model_fit_adapters.py", "creme/model_fit_runtime.py",
+        "creme/model_fit_episodes.py", "creme/model_fit_capture.py", "templates/luna-reserve/preamble.md", "templates/luna-reserve/lean-preamble.md",
         "templates/shared/library-first.md"))
 
 
@@ -1230,6 +1231,8 @@ class Broker:
         if lean_goal is not None:
             record["lean"] = {"goal": str(lean_goal), "mcp_server": luna_lean.LEAN_MCP_SERVER,
                               "disabled_tools": list(luna_lean.OPEN_WORLD_TOOLS)}
+        if request.get("model_fit"):
+            record["model_fit"] = request["model_fit"]
         session = BrokerSession(self, session_id, record)
         if op == "resume":
             record["rollout"] = (prior or {}).get("rollout")
@@ -1405,13 +1408,17 @@ def _lean_client_refusals(module_root: Path, lean: Optional[str], target: Option
 
 def cmd_start(module_root: Path, environ: dict, brief: str, target: str, write: bool, effort: str,
               detail: str, policy: dict, overrides: list[str], turn_timeout_seconds: int,
-              lean: Optional[str] = None) -> tuple[int, list[str], dict]:
+              lean: Optional[str] = None, model_fit: Optional[dict] = None) -> tuple[int, list[str], dict]:
+    if model_fit and model_fit.get("option") != "luna-reserve/" + effort:
+        raise ValueError("model-fit proposal differs from requested broker effort")
     state = L.state_root(module_root, environ)
     refusals = L.early_refusals(state, effort, overrides, brief) or _lean_client_refusals(module_root, lean, target)
     if refusals:
         reply = {"ok": False, "code": L.EXIT_PREFLIGHT_REFUSED, "verdict": "REFUSED", "refusals": refusals}
         return reply["code"], _refusal_lines(reply), reply
     arguments = {"lean": lean} if lean is not None else {}
+    if model_fit:
+        arguments["model_fit"] = model_fit
     reply = _broker_call(module_root, environ, "start", True, brief=brief, target=target,
                          write=write or lean is not None, effort=effort, detail=detail, policy=policy,
                          overrides=overrides, turn_timeout_seconds=turn_timeout_seconds, **arguments)

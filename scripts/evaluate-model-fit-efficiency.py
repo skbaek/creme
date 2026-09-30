@@ -63,6 +63,10 @@ SCENARIOS = {
     # cross-client clock/attribution is an adapter integration test, not this
     # pure simulation's claim.
     "muse-delayed-feedback": [Recipe("muse/medium", 90, 10, 1), Recipe("muse/high", 8, 2, 1, prior=100000)],
+    "six-feasible-options": [Recipe(f"effort-{i}", 90, 10, 1) for i in range(5)]
+        + [Recipe("hidden-best", 8, 2, 1, prior=100000)],
+    "twenty-feasible-options": [Recipe(f"setting-{i:02}", 90, 10, 1) for i in range(19)]
+        + [Recipe("hidden-best", 8, 2, 1, prior=100000)],
 }
 
 

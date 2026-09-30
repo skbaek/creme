@@ -435,6 +435,113 @@ else:
         argv = json.loads(argv_record.read_text())
         self.assertEqual(argv[argv.index("-p") + 1], "inspect this")
 
+    def test_cli_run_refuses_one_percent_by_default(self) -> None:
+        argv_record = self.root / "agy-argv-1pct-default.json"
+        self._scenario(fraction=0.01, argv_record=argv_record)
+        result = subprocess.run(
+            [sys.executable, "-m", "creme", "antigravity", "run", "--brief", "-",
+             "--target", str(self.target), "--model", "gemini-model", "--json"],
+            cwd=ROOT, input="inspect", text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, antigravity.EXIT_PREFLIGHT_REFUSED)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["verdict"], "REFUSED")
+        self.assertTrue(any("below floor" in r for r in payload.get("reasons", [])))
+        self.assertFalse(argv_record.exists())
+
+    def test_cli_run_proceeds_with_zero_min_remaining_percent(self) -> None:
+        argv_record = self.root / "agy-argv-0pct.json"
+        self._scenario(fraction=0.01, argv_record=argv_record)
+        result = subprocess.run(
+            [sys.executable, "-m", "creme", "antigravity", "run", "--brief", "-",
+             "--target", str(self.target), "--model", "gemini-model",
+             "--min-remaining-percent", "0", "--json"],
+            cwd=ROOT, input="inspect", text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, antigravity.EXIT_OK, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["verdict"], "PASS")
+        self.assertTrue(argv_record.exists())
+
+    def test_cli_status_respects_zero_min_remaining_percent(self) -> None:
+        self._scenario(fraction=0.01)
+        default_res = subprocess.run(
+            [sys.executable, "-m", "creme", "antigravity", "status",
+             "--model", "gemini-model", "--json"],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(default_res.returncode, antigravity.EXIT_PREFLIGHT_REFUSED)
+        default_payload = json.loads(default_res.stdout)
+        self.assertEqual(default_payload["admission"], "REFUSED")
+        self.assertTrue(any("below floor" in r for r in default_payload.get("admission_reasons", [])))
+
+        zero_res = subprocess.run(
+            [sys.executable, "-m", "creme", "antigravity", "status",
+             "--model", "gemini-model", "--min-remaining-percent", "0", "--json"],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(zero_res.returncode, antigravity.EXIT_OK, zero_res.stderr)
+        zero_payload = json.loads(zero_res.stdout)
+        self.assertEqual(zero_payload["admission"], "ADMITTED")
+        self.assertEqual(zero_payload.get("admission_reasons", []), [])
+
+    def test_cli_paid_credits_refuse_at_floor_zero_unless_disabled(self) -> None:
+        argv_record = self.root / "agy-argv-credits.json"
+        self._scenario(fraction=0.01, credits=5, use_g1=None, argv_record=argv_record)
+        status_res = subprocess.run(
+            [sys.executable, "-m", "creme", "antigravity", "status",
+             "--model", "gemini-model", "--min-remaining-percent", "0", "--json"],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(status_res.returncode, antigravity.EXIT_PREFLIGHT_REFUSED)
+        status_payload = json.loads(status_res.stdout)
+        self.assertEqual(status_payload["admission"], "REFUSED")
+        self.assertTrue(any("useG1Credits is not false" in r for r in status_payload.get("admission_reasons", [])))
+
+        run_res = subprocess.run(
+            [sys.executable, "-m", "creme", "antigravity", "run", "--brief", "-",
+             "--target", str(self.target), "--model", "gemini-model",
+             "--min-remaining-percent", "0", "--json"],
+            cwd=ROOT, input="inspect", text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(run_res.returncode, antigravity.EXIT_PREFLIGHT_REFUSED)
+        run_payload = json.loads(run_res.stdout)
+        self.assertEqual(run_payload["verdict"], "REFUSED")
+        self.assertTrue(any("useG1Credits is not false" in r for r in run_payload.get("reasons", [])))
+        self.assertFalse(argv_record.exists())
+
+        self._scenario(fraction=0.01, credits=5, use_g1=False, argv_record=argv_record)
+        ok_res = subprocess.run(
+            [sys.executable, "-m", "creme", "antigravity", "run", "--brief", "-",
+             "--target", str(self.target), "--model", "gemini-model",
+             "--min-remaining-percent", "0", "--json"],
+            cwd=ROOT, input="inspect", text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(ok_res.returncode, antigravity.EXIT_OK, ok_res.stderr)
+        self.assertEqual(json.loads(ok_res.stdout)["verdict"], "PASS")
+        self.assertTrue(argv_record.exists())
+
+    def test_cli_invalid_floor_causes_no_model_run(self) -> None:
+        argv_record = self.root / "agy-argv-invalid.json"
+        self._scenario(fraction=0.5, argv_record=argv_record)
+        invalid_values = ["-1", "100.1", "nan", "inf", "-inf", "not-a-number"]
+        for val in invalid_values:
+            res = subprocess.run(
+                [sys.executable, "-m", "creme", "antigravity", "run", "--brief", "-",
+                 "--target", str(self.target), "--model", "gemini-model",
+                 "--min-remaining-percent", val],
+                cwd=ROOT, input="inspect", text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(res.returncode, 2, f"Expected exit 2 for run with value {val}")
+            self.assertFalse(argv_record.exists(), f"Model ran unexpectedly for value {val}")
+
+            status_res = subprocess.run(
+                [sys.executable, "-m", "creme", "antigravity", "status",
+                 "--model", "gemini-model", "--min-remaining-percent", val],
+                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(status_res.returncode, 2, f"Expected exit 2 for status with value {val}")
+
 
 if __name__ == "__main__":
     unittest.main()

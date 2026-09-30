@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import stat
 import sys
@@ -79,6 +80,16 @@ def _task_memory(text: str) -> int:
     value = _positive(text)
     if value > 8:
         raise argparse.ArgumentTypeError("must be between 1 and 8 GiB")
+    return value
+
+
+def _quota_percent(text: Any) -> float:
+    try:
+        value = float(text)
+    except (ValueError, TypeError) as exc:
+        raise argparse.ArgumentTypeError(f"must be a number: {text!r}") from exc
+    if not math.isfinite(value) or not (0.0 <= value <= 100.0):
+        raise argparse.ArgumentTypeError("must be a finite number between 0 and 100")
     return value
 
 
@@ -195,6 +206,17 @@ def cmd_luna_reserve_status(arguments: argparse.Namespace) -> int:
 
 
 def cmd_antigravity_status(arguments: argparse.Namespace) -> int:
+    min_percent = getattr(arguments, "min_remaining_percent", 5.0)
+    try:
+        floor = _quota_percent(min_percent) / 100.0
+    except (argparse.ArgumentTypeError, ValueError) as exc:
+        report = {"verdict": "FAILED", "exit": antigravity.EXIT_USAGE, "reasons": [str(exc)]}
+        if arguments.json:
+            _json(report)
+        else:
+            print(f"verdict=FAILED exit={antigravity.EXIT_USAGE}")
+            print(f"reason: {exc}")
+        return antigravity.EXIT_USAGE
     try:
         quota = antigravity.read_quota(antigravity.resolve_binary())
     except antigravity.AntigravityError as exc:
@@ -216,7 +238,7 @@ def cmd_antigravity_status(arguments: argparse.Namespace) -> int:
             selected_model = arguments.model
             if not any(arguments.model.endswith(f"-{effort}") for effort in ("low", "medium", "high")):
                 selected_model = antigravity.resolve_model(arguments.model, arguments.effort)
-            reasons = antigravity.admission(quota, selected_model, antigravity.DEFAULT_MIN_REMAINING_FRACTION)
+            reasons = antigravity.admission(quota, selected_model, floor)
         except ValueError as exc:
             reasons = [str(exc)]
         report["admission"] = "ADMITTED" if not reasons else "REFUSED"
@@ -234,6 +256,19 @@ def cmd_antigravity_status(arguments: argparse.Namespace) -> int:
 
 
 def cmd_antigravity_run(arguments: argparse.Namespace) -> int:
+    min_percent = getattr(arguments, "min_remaining_percent", 5.0)
+    try:
+        floor = _quota_percent(min_percent) / 100.0
+    except (argparse.ArgumentTypeError, ValueError) as exc:
+        summary = {
+            "verdict": "REFUSED", "exit": antigravity.EXIT_USAGE,
+            "run": "-", "reasons": [str(exc)],
+        }
+        if arguments.json:
+            _json(summary)
+        else:
+            print(antigravity.format_summary(summary))
+        return antigravity.EXIT_USAGE
     if (arguments.allow_command or arguments.lean_goal) and not arguments.write:
         summary = {
             "verdict": "REFUSED", "exit": antigravity.EXIT_USAGE,
@@ -265,6 +300,7 @@ def cmd_antigravity_run(arguments: argparse.Namespace) -> int:
         model=arguments.model,
         effort=arguments.effort,
         timeout_seconds=arguments.timeout_seconds,
+        floor=floor,
         write=arguments.write,
         allow_commands=arguments.allow_command,
         lean_goal=arguments.lean_goal,
@@ -2458,6 +2494,10 @@ def parser() -> argparse.ArgumentParser:
     antigravity_status = antigravity_commands.add_parser("status", help="zero-token quota and admission read")
     antigravity_status.add_argument("--model", default=antigravity.DEFAULT_FAMILY)
     antigravity_status.add_argument("--effort", choices=("low", "medium", "high"), default=antigravity.DEFAULT_EFFORT)
+    antigravity_status.add_argument(
+        "--min-remaining-percent", type=_quota_percent, default=5.0,
+        help="refuse below this remaining plan quota share (0..100, default 5)",
+    )
     antigravity_status.add_argument("--json", action="store_true", help="print the full JSON record")
     antigravity_status.set_defaults(func=cmd_antigravity_status)
     antigravity_run = antigravity_commands.add_parser("run", help="run one bounded brief")
@@ -2466,6 +2506,10 @@ def parser() -> argparse.ArgumentParser:
     antigravity_run.add_argument("--model", default=antigravity.DEFAULT_FAMILY)
     antigravity_run.add_argument("--effort", choices=("low", "medium", "high"), default=antigravity.DEFAULT_EFFORT)
     antigravity_run.add_argument("--timeout-seconds", type=_positive, default=1800)
+    antigravity_run.add_argument(
+        "--min-remaining-percent", type=_quota_percent, default=5.0,
+        help="refuse below this remaining plan quota share (0..100, default 5)",
+    )
     antigravity_run.add_argument("--write", action="store_true", help="enable guarded writes and commands")
     antigravity_run.add_argument("--allow-command", action="append", default=[], metavar="REGEX")
     antigravity_run.add_argument("--lean-goal", metavar="GOAL")

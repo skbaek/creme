@@ -9,10 +9,12 @@ user instructs it, and a result is a worker summary, not evidence.
 ## Commands
 
 ```sh
-python3 -m creme antigravity status [--model M] [--effort low|medium|high] [--json]
+python3 -m creme antigravity status [--model M] [--effort low|medium|high] \
+    [--min-remaining-percent P] [--json]
 python3 -m creme antigravity run --brief FILE|- --target DIR [--model M] \
     [--effort low|medium|high] [--timeout-seconds N] [--write] \
-    [--allow-command REGEX]... [--lean-goal GOAL] [--json]
+    [--min-remaining-percent P] [--allow-command REGEX]... \
+    [--lean-goal GOAL] [--json]
 ```
 
 The model is 3.8 Flash (user decision 2026-09-25). `--model` takes the family
@@ -29,9 +31,12 @@ a weekly window.
 
 ## How a run stays bounded and on plan quota
 
-- **Admission.** The run is refused when the model's pool is below 5% on either
-  window, or when paid AI credits are positive and `useG1Credits` is not
-  explicitly `false`.
+- **Admission.** The run is refused when the model's pool is below the floor
+  (default 5% on either window, configured via `--min-remaining-percent 0..100`),
+  or when paid AI credits are positive and `useG1Credits` is not explicitly
+  `false`. Setting `--min-remaining-percent 0` allows running down to 0% remaining
+  plan quota when explicitly user-authorized; it is a quota reserve preference,
+  not permission for paid credits or model fallback.
 - **Guard.** Each run gets a directory under `.creme/antigravity/runs/`, passed
   as a second `--add-dir`. Its `.agents/hooks.json` installs a PreToolUse guard.
   In read-only mode it allows only `view_file`, `list_dir`, `grep_search`,

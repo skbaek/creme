@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Union
 
-from . import master_reconcile, master_runtime, semaphore
+from . import goal_stack, master_reconcile, master_runtime, semaphore
 from .adapters import Adapter, get_adapter
 from .doctor import STATUS_FAIL, check_goal_store
 from .profile import DEFAULT_RELATIVE_PROFILE, load as load_profile
@@ -332,6 +332,47 @@ def _validate_lookup_id(value: str, what: str) -> str:
     return value
 
 
+def _stack_store():
+    # Local import: goal_stack_store imports master_runtime, so a top-level
+    # import here would bind this module into that cycle.
+    from . import goal_stack_store
+
+    return goal_stack_store
+
+
+def _stack_row(entry: dict[str, Any]) -> dict[str, Any]:
+    """Map one canonical stack entry onto the legacy goal-row shape."""
+    row = dict(entry)
+    row["goal_id"] = entry["id"]
+    row.setdefault("title", "")
+    row.setdefault("branch", "")
+    row.setdefault("checkpoint", "")
+    row.setdefault("worktree", "")
+    row["next_unit"] = entry.get("next", "")
+    return row
+
+
+def _stack_state_for(
+    root: Path,
+    events: Sequence[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Read the live stack once, or return None before adoption.
+
+    After enablement the manifest is authoritative: a missing, corrupt, or
+    mid-transaction stack raises and never falls back to the old board.
+    """
+    store = _stack_store()
+    if not store.enabled(root, events):
+        return None
+    stack = store.read(root)
+    selected = goal_stack.select_next(stack)
+    return {
+        "stack": stack,
+        "rows": [_stack_row(entry) for entry in stack["entries"]],
+        "next": selected,
+    }
+
+
 def _record_metadata(view: master_runtime.RecordView) -> dict[str, Any]:
     rendered_board = master_runtime.render_board(view.events)
     return {
@@ -391,6 +432,7 @@ def digest_record(
     lease_snapshot: Snapshot = semaphore.master_snapshot,
     lease_status: LeaseStatus = semaphore.status_text,
     _view: Optional[master_runtime.RecordView] = None,
+    _stack_state: Any = None,
 ) -> dict[str, Any]:
     view = _view if _view is not None else master_runtime.read_record(root)
     lease = _safe_lease(lease_snapshot(), view.events, lease_status())
@@ -400,13 +442,39 @@ def digest_record(
         if event["kind"] == "master":
             reconciliation = list(event["payload"]["reconciliation"])
             break
-    goals = [
-        {
-            key: row[key]
-            for key in ("goal_id", "status", "branch", "checkpoint", "next_unit")
+    # One captured stack read serves every section below; after enablement
+    # the manifest replaces the old board rows and the old next-unit note.
+    stack_state = (
+        _stack_state
+        if _stack_state is not None
+        else _stack_state_for(root, view.events)
+    )
+    if stack_state is None:
+        goals = [
+            {
+                key: row[key]
+                for key in ("goal_id", "status", "branch", "checkpoint", "next_unit")
+            }
+            for row in board["goals"]
+        ]
+        next_unit = board["next_unit"]
+        stack_summary: Optional[dict[str, Any]] = None
+    else:
+        goals = [
+            {
+                key: row[key]
+                for key in ("goal_id", "status", "title", "branch", "checkpoint", "next_unit")
+            }
+            for row in stack_state["rows"]
+        ]
+        selected = stack_state["next"]
+        next_unit = selected.get("next", "") if selected is not None else ""
+        stack_summary = {
+            "source": "goal-stack.toml",
+            "revision": stack_state["stack"]["revision"],
+            "count": len(stack_state["rows"]),
+            "next_id": selected["id"] if selected is not None else None,
         }
-        for row in board["goals"]
-    ]
     decisions = [
         {
             key: row[key]
@@ -451,8 +519,10 @@ def digest_record(
             lambda row: f"{row['repository']}:{row['kind']}:{row['subject']}",
         ),
         "last_durable_event": board["last_event"],
-        "next_unit": board["next_unit"],
+        "next_unit": next_unit,
     }
+    if stack_summary is not None:
+        digest["stack"] = stack_summary
     if live_reconciliation is not None:
         digest["live_reconciliation"] = {
             "schema_version": master_reconcile.RECONCILIATION_SCHEMA_VERSION,
@@ -480,6 +550,8 @@ def focused_digest_record(
 ) -> dict[str, Any]:
     """Return a prioritized, paged continuity view without changing the record."""
     view = master_runtime.read_record(root)
+    board = view.expected_board
+    stack_state = _stack_state_for(root, view.events)
     digest = digest_record(
         root,
         goals_limit=MAX_DIGEST_LIMIT,
@@ -490,16 +562,26 @@ def focused_digest_record(
         lease_snapshot=lease_snapshot,
         lease_status=lease_status,
         _view=view,
+        _stack_state=stack_state,
     )
-    board = view.expected_board
-    goals = [
-        {
-            key: row[key]
-            for key in ("goal_id", "status", "branch", "checkpoint", "next_unit")
-        }
-        for row in board["goals"]
-    ]
-    goals.sort(key=lambda row: (_GOAL_PRIORITY[row["status"]], row["goal_id"]))
+    if stack_state is None:
+        goals = [
+            {
+                key: row[key]
+                for key in ("goal_id", "status", "branch", "checkpoint", "next_unit")
+            }
+            for row in board["goals"]
+        ]
+        goals.sort(key=lambda row: (_GOAL_PRIORITY[row["status"]], row["goal_id"]))
+    else:
+        # The canonical stack order is the priority; never re-sort it.
+        goals = [
+            {
+                key: row[key]
+                for key in ("goal_id", "status", "title", "branch", "checkpoint", "next_unit")
+            }
+            for row in stack_state["rows"]
+        ]
     digest["view"] = "focused"
     digest["goals"] = _focused_page(
         goals,
@@ -533,6 +615,39 @@ def lookup_digest_record(root: Path, *, kind: str, identifier: str) -> dict[str,
         raise MasterOperationError(f"unsupported digest lookup kind: {kind}")
     _validate_lookup_id(identifier, f"{kind} ID")
     view = master_runtime.read_record(root)
+    if kind == "goal":
+        # Live lookup reads the canonical stack in exact order. Completed
+        # and retired entries leave the live file; they are history, which
+        # `master stack history ID` reads explicitly and never schedules.
+        stack_state = _stack_state_for(root, view.events)
+        if stack_state is not None:
+            selected = next(
+                (row for row in stack_state["rows"]
+                 if row["goal_id"] == identifier),
+                None,
+            )
+            if selected is None:
+                raise MasterOperationError(
+                    f"unknown goal ID: {identifier} (completed or retired "
+                    "entries are history, not schedule: "
+                    "python3 -m creme master stack history "
+                    f"{identifier})"
+                )
+            return {
+                "schema_version": DIGEST_SCHEMA_VERSION,
+                "status": "OK",
+                "view": "lookup",
+                "record": _record_metadata(view),
+                "stack": {
+                    "source": "goal-stack.toml",
+                    "revision": stack_state["stack"]["revision"],
+                },
+                "lookup": {
+                    "kind": kind,
+                    "id": identifier,
+                    "item": dict(selected),
+                },
+            }
     section, key = plural[kind]
     selected = next(
         (row for row in view.expected_board[section] if row[key] == identifier),
@@ -583,7 +698,29 @@ def render_digest_human(digest: dict[str, Any]) -> str:
         lines.append(
             f"live_reconciliation: {len(live['items'])} shown, {live['omitted']} omitted"
         )
-    lines.append(f"next unit: {digest['next_unit'] or '<none>'}")
+    stack = digest.get("stack")
+    if stack is not None:
+        lines.append(
+            f"goal stack: revision {stack['revision']} "
+            f"({stack['count']} entries, canonical order)"
+        )
+        for row in digest["goals"]["items"]:
+            route = f"python3 -m creme master digest --goal {row['goal_id']}"
+            lines.append(
+                f"- {row['goal_id']} [{row['status']}] "
+                f"{_human_preview(row.get('title'), route)}"
+            )
+            lines.append(f"  next: {_human_preview(row['next_unit'], route)}")
+        if digest["goals"]["omitted"]:
+            lines.append(
+                f"more stack entries omitted: {digest['goals']['omitted']}"
+            )
+        if stack["next_id"] is None:
+            lines.append("next unit: <no eligible goal>")
+        else:
+            lines.append(f"next unit: {digest['next_unit'] or '<none>'}")
+    else:
+        lines.append(f"next unit: {digest['next_unit'] or '<none>'}")
     return "\n".join(lines) + "\n"
 
 
@@ -602,8 +739,10 @@ def render_focused_digest_human(digest: dict[str, Any]) -> str:
     goals = digest["goals"]
     for row in goals["items"]:
         route = f"python3 -m creme master digest --goal {row['goal_id']}"
+        title = row.get("title")
         lines.extend([
-            f"- {row['goal_id']} [{row['status']}]",
+            f"- {row['goal_id']} [{row['status']}]"
+            + (f" {_human_preview(title, route)}" if title else ""),
             f"  branch: {_human_preview(row['branch'], route)}",
             f"  checkpoint: {_human_preview(row['checkpoint'], route)}",
             f"  next unit: {_human_preview(row['next_unit'], route)}",
@@ -668,10 +807,14 @@ def render_focused_digest_human(digest: dict[str, Any]) -> str:
             f"{len(live['items']) + live['omitted']}; retrieve: "
             "python3 -m creme master digest --reconcile"
         )
-    lines.append(
-        "next unit: "
-        + _human_preview(digest["next_unit"], "python3 -m creme master digest")
-    )
+    stack = digest.get("stack")
+    if stack is not None and stack["next_id"] is None:
+        lines.append("next unit: <no eligible goal>")
+    else:
+        lines.append(
+            "next unit: "
+            + _human_preview(digest["next_unit"], "python3 -m creme master digest")
+        )
     return "\n".join(lines) + "\n"
 
 

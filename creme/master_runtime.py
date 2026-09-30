@@ -576,6 +576,15 @@ def reduce_events(events: Sequence[dict[str, Any]]) -> dict[str, Any]:
         if kind in {"master", "goal", "note"} and payload["next_unit"]:
             next_unit = payload["next_unit"]
 
+    # After goal-stack adoption the manifest is the one scheduling
+    # authority: historical goal rows stop projecting and the next unit
+    # points at the stack reader. Decisions, findings, and history stay.
+    from . import goal_stack_store as _stack_store
+
+    if _stack_store.adopted(events):
+        goals = {}
+        next_unit = "python3 -m creme master stack next"
+
     log_bytes = _canonical_log(events)
     last = _event_summary(events[-1]) if events else None
     return {
@@ -1616,6 +1625,17 @@ class RecordWriter:
             "payload": payload_snapshot,
         }
         validate_event(event)
+        if kind == "goal":
+            # After adoption the manifest schedules work; new goal events
+            # would fork a second queue, so they refuse while every other
+            # kind (notes, decisions, procedures, audits) still appends.
+            from . import goal_stack_store as _stack_store
+
+            if _stack_store.enabled(self.root, view.events):
+                raise MasterRecordError(
+                    "goal events are retired after goal-stack adoption; "
+                    "schedule with `python3 -m creme master stack ...`"
+                )
         if once_per_acquisition:
             for existing in reversed(view.events):
                 if (

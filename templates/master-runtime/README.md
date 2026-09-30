@@ -17,7 +17,9 @@ master/
 └── audits/
 ```
 
-- `events.jsonl` is the authoritative append-ordered event log.
+- `events.jsonl` is the authoritative append-ordered role, decision, audit,
+  procedure and merge history. After stack adoption, its old goal events are
+  historical and new goal events refuse.
 - `board.json` is its deterministic, replaceable projection.
 - `.record.lock` serializes authorized record transactions.
 - `intent/` contains user-owned intent statements.
@@ -43,3 +45,12 @@ commands refuse with the offending path, its mode, and the `chmod` that
 fixes it.
 The whole `master/` subtree must be ignored and untracked. See the
 [master guide](../../docs/guides/master.md) for authority and recovery rules.
+
+The live scheduling authority is `goal-stack.toml` beside `master/` in the
+configured goal store. It is not part of this private runtime template.
+`master stack` authenticates mutations under the same record/lease locks;
+`archive/goal-stack/transitions/` keeps immutable transition receipts.
+`.goal-stack-pending.json` is a transient publication journal, ignored by Git.
+Readers refuse while it is present; `master stack recover` finishes the bound
+transaction. The master digest reads the stack, never a stale goal board.
+See [goal-stack](../../docs/guides/goal-stack.md).

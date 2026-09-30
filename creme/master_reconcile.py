@@ -740,6 +740,32 @@ def summarize_for_record(
     return [_census_row(rows, len(selected), limit), *selected]
 
 
+def _scheduling_goals(record_root: Path, view) -> list[dict[str, Any]]:
+    """Return the goal rows the reconciler must check.
+
+    After goal-stack adoption the canonical entries replace the old board
+    rows. Only entries that declare a worktree are reconciled: queued inline
+    goals without one invent no missing-worktree obligations. Branch and
+    checkpoint stay optional and are checked only when present.
+    """
+    from . import goal_stack_store as _stack_store
+
+    if not _stack_store.enabled(record_root, view.events):
+        return list(view.expected_board["goals"])
+    stack = _stack_store.read(record_root)
+    rows: list[dict[str, Any]] = []
+    for entry in stack.get("entries", []):
+        if not isinstance(entry, dict) or not entry.get("worktree"):
+            continue
+        rows.append({
+            "goal_id": entry["id"],
+            "worktree": entry["worktree"],
+            "branch": entry.get("branch") or "",
+            "checkpoint": entry.get("checkpoint") or "",
+        })
+    return rows
+
+
 def reconcile_record(
     record_root: Path,
     repository_roots: Mapping[str, Path],
@@ -770,7 +796,7 @@ def reconcile_record(
         [root for root, fact in inspected if fact.status == "OK"], runner
     )
 
-    for goal in view.expected_board["goals"]:
+    for goal in _scheduling_goals(record_root, view):
         matches: list[tuple[Path, RepositoryFact, WorktreeFact]] = []
         for root, fact in inspected:
             candidate = _candidate_path(root, goal["worktree"])
@@ -796,41 +822,44 @@ def reconcile_record(
         claim = checkpoint_claim(goal["checkpoint"])
         for root, fact, worktree in matches:
             worktree.goal_ids = tuple(sorted({*worktree.goal_ids, goal["goal_id"]}))
-            branch_subject = f"goal:{goal['goal_id']}:branch"
-            branch_exists = _ref_exists(root, goal["branch"], runner)
-            if branch_exists is None:
-                discrepancies.append(
-                    _discrepancy(
-                        fact.repository,
-                        "inaccessible-fact",
-                        branch_subject,
-                        recorded=goal["branch"],
-                        observed=None,
-                        detail="recorded goal branch ref could not be inspected",
+            # Branch is optional on stack entries; only a declared branch
+            # makes ref claims. (Legacy board rows always declare one.)
+            if goal["branch"]:
+                branch_subject = f"goal:{goal['goal_id']}:branch"
+                branch_exists = _ref_exists(root, goal["branch"], runner)
+                if branch_exists is None:
+                    discrepancies.append(
+                        _discrepancy(
+                            fact.repository,
+                            "inaccessible-fact",
+                            branch_subject,
+                            recorded=goal["branch"],
+                            observed=None,
+                            detail="recorded goal branch ref could not be inspected",
+                        )
                     )
-                )
-            elif not branch_exists:
-                discrepancies.append(
-                    _discrepancy(
-                        fact.repository,
-                        "missing-ref",
-                        branch_subject,
-                        recorded=goal["branch"],
-                        observed=None,
-                        detail="recorded goal branch ref is missing",
+                elif not branch_exists:
+                    discrepancies.append(
+                        _discrepancy(
+                            fact.repository,
+                            "missing-ref",
+                            branch_subject,
+                            recorded=goal["branch"],
+                            observed=None,
+                            detail="recorded goal branch ref is missing",
+                        )
                     )
-                )
-            elif worktree.branch != goal["branch"]:
-                discrepancies.append(
-                    _discrepancy(
-                        fact.repository,
-                        "head-drift",
-                        branch_subject,
-                        recorded=goal["branch"],
-                        observed=worktree.branch or "detached",
-                        detail="registered worktree branch differs from the board claim",
+                elif worktree.branch != goal["branch"]:
+                    discrepancies.append(
+                        _discrepancy(
+                            fact.repository,
+                            "head-drift",
+                            branch_subject,
+                            recorded=goal["branch"],
+                            observed=worktree.branch or "detached",
+                            detail="registered worktree branch differs from the board claim",
+                        )
                     )
-                )
             if claim.commit is None:
                 continue
             checkpoint_subject = f"goal:{goal['goal_id']}:checkpoint"

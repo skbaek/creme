@@ -26,6 +26,10 @@ constraints govern how repository-prescribed gates run here.
 - Goals, state briefs, and reports belong in the configured goal store. The
   master record is `$GOAL_STORE/master/`: host-local, Git-ignored, and never
   staged, committed, or pushed.
+- `$GOAL_STORE/goal-stack.toml` is the sole live goal order and status after
+  stack adoption. Start with `python3 -m creme master stack list`; use the
+  authenticated stack commands to change it. Old goal events and backlogs are
+  history, never an alternative queue. Detailed goals still own semantics.
 - Blanc consumes Jaune through its Git-pinned Lake dependency. Never replace
   that dependency with a sibling path or symlink.
 
@@ -60,7 +64,7 @@ recommendation.
 1. Confirm the client has the required sibling read/write access. Do not work
    around a real permission boundary.
 2. Read the named goal or the master's brief in full. A goal must have stable
-   identity and status `ready`; a brief names its objective, owned paths,
+   identity and be ready in the stack (or active under this execution); a brief names its objective, owned paths,
    gates, and report location.
 3. Use per-goal worktrees at `PATH/.worktrees/<goal>` for the repository at
    `PATH`, with `/.worktrees/` in its `.gitignore`. Shared main clones stay on

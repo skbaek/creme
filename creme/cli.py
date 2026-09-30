@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -32,6 +33,8 @@ from . import luna_broker, luna_reserve
 from . import muse_cli
 from . import model_fit
 from . import model_fit_policy
+from . import goal_stack
+from . import goal_stack_store
 from . import master_operations
 from . import master_reconcile
 from . import master_retire
@@ -758,6 +761,438 @@ def cmd_master_digest(arguments: argparse.Namespace) -> int:
     else:
         _json(digest)
     return 0
+
+
+STACK_INPUT_LIMIT = 4 * 1024 * 1024
+STACK_HISTORY_RECEIPT_LIMIT = 256
+STACK_ARCHIVE_PARTS = ("archive", "goal-stack", "transitions")
+
+
+def _read_stack_input(source: str) -> bytes:
+    if source == "-":
+        data = sys.stdin.buffer.read(STACK_INPUT_LIMIT + 1)
+    else:
+        path = Path(source).expanduser()
+        try:
+            if path.stat().st_size > STACK_INPUT_LIMIT:
+                raise master_runtime.MasterRecordError(
+                    f"stack input exceeds {STACK_INPUT_LIMIT} bytes"
+                )
+            data = path.read_bytes()
+        except OSError as exc:
+            raise master_runtime.MasterRecordError(
+                f"stack input could not be read: {exc}"
+            ) from exc
+    if len(data) > STACK_INPUT_LIMIT:
+        raise master_runtime.MasterRecordError(
+            f"stack input exceeds {STACK_INPUT_LIMIT} bytes"
+        )
+    return data
+
+
+def _stack_preamble():
+    location, error = _master_location()
+    if location is None:
+        return None, {"status": "unavailable", "detail": error}
+    status, plan = _master_record_status(location)
+    if status is not None:
+        return None, {"schema_version": 1, "status": status, "detail": plan.detail}
+    return location, None
+
+
+def _stack_mutation_request(arguments: argparse.Namespace):
+    """Map parsed `master stack` mutation arguments onto a store request."""
+    expected = getattr(arguments, "expect_revision", None)
+    action = arguments.stack_action
+    if action == "init":
+        try:
+            candidate = goal_stack.parse(_read_stack_input(arguments.source).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise master_runtime.MasterRecordError(
+                f"stack TOML input is invalid: {exc}"
+            ) from exc
+        return action, {"stack": candidate}, None
+    if action == "push":
+        # Strict reader: duplicate keys and non-finite numbers refuse.
+        entry = master_runtime._strict_json(
+            _read_stack_input(arguments.source), "stack entry input")
+        payload = {"entry": entry}
+        if arguments.position is not None:
+            payload["position"] = arguments.position
+        return action, payload, expected
+    if action == "move":
+        return action, {"id": arguments.entry_id, "position": arguments.position}, expected
+    if action == "reorder":
+        return action, {"ids": list(arguments.entry_ids)}, expected
+    if action == "update":
+        changes = master_runtime._strict_json(
+            _read_stack_input(arguments.source), "stack changes input")
+        return action, {"id": arguments.entry_id, "changes": changes}, expected
+    if action == "complete":
+        return action, {"id": arguments.entry_id, "evidence": arguments.evidence}, expected
+    if action == "retire":
+        return action, {"id": arguments.entry_id, "reason": arguments.reason}, expected
+    if action == "recover":
+        return action, {}, None
+    raise master_runtime.MasterRecordError(f"unsupported stack action: {action}")
+
+
+def _format_stack_entry_human(entry: dict[str, Any]) -> str:
+    lines = [
+        f"- {entry.get('id')} [{entry.get('status')}] {entry.get('title', '')}",
+    ]
+    for key in ("goal", "done", "context", "next", "reason", "trigger",
+                "worktree", "branch", "checkpoint", "depends_on"):
+        if key in entry:
+            lines.append(f"  {key}: {entry[key]}")
+    return "\n".join(lines)
+
+
+def _format_stack_list_human(stack: dict[str, Any]) -> str:
+    entries = stack.get("entries", [])
+    lines = [
+        f"goal stack revision {stack.get('revision')} "
+        f"({len(entries)} entries, canonical order):",
+    ]
+    if not entries:
+        lines.append("- <none>")
+    for entry in entries:
+        line = f"- {entry['id']} [{entry['status']}] {entry.get('title', '')}"
+        if entry.get("next"):
+            line += f" | next: {entry['next']}"
+        lines.append(line)
+    selected = goal_stack.select_next(stack)
+    if selected is None:
+        lines.append("next: <no eligible goal>")
+    else:
+        lines.append(
+            f"next: {selected['id']} ({selected.get('next') or '<none>'})"
+        )
+    lines.append("show: python3 -m creme master stack show ID")
+    return "\n".join(lines) + "\n"
+
+
+def _format_stack_next_human(selected: Optional[dict[str, Any]]) -> str:
+    if selected is None:
+        return "no eligible goal\n"
+    route = f"python3 -m creme master stack show {selected['id']}"
+    return "\n".join([
+        f"- {selected['id']} [{selected['status']}] {selected.get('title', '')}",
+        f"  next: {selected.get('next') or '<none>'}",
+        f"  retrieve: {route}",
+        "",
+    ])
+
+
+def _receipt_ids(receipt: dict[str, Any]) -> list[str]:
+    payload = receipt.get("payload") or {}
+    candidates: list[Any] = []
+    if isinstance(payload.get("id"), str):
+        candidates.append(payload["id"])
+    entry = payload.get("entry")
+    if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+        candidates.append(entry["id"])
+    if isinstance(payload.get("ids"), list):
+        candidates.extend(payload["ids"])
+    stack = payload.get("stack")
+    if isinstance(stack, dict) and isinstance(stack.get("entries"), list):
+        for item in stack["entries"]:
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                candidates.append(item["id"])
+    archive = receipt.get("archive")
+    if isinstance(archive, dict) and isinstance(archive.get("id"), str):
+        candidates.append(archive["id"])
+    found: list[str] = []
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate not in found:
+            found.append(candidate)
+    return found
+
+
+def stack_history_report(
+    record_root: Path,
+    goal_store: Path,
+    identifier: Optional[str] = None,
+) -> dict[str, Any]:
+    """Read-only history: legacy goal events plus stack archive receipts.
+
+    Never schedules work; a broad report summarizes IDs and terminal
+    actions, while a selected ID returns full rows.
+    """
+    view = master_runtime.read_record(record_root)
+    legacy = [
+        {**event["payload"], "event_id": event["event_id"], "timestamp": event["timestamp"]}
+        for event in view.events
+        if event["kind"] == "goal"
+    ]
+    archive_dir = goal_store.joinpath(*STACK_ARCHIVE_PARTS)
+    goal_stack_store._safe_path(goal_store, "/".join(STACK_ARCHIVE_PARTS))
+    names: list[str] = []
+    if archive_dir.is_dir():
+        names = sorted(
+            path.name for path in archive_dir.iterdir()
+            if path.name.endswith(".json")
+        )
+
+    def load(name: str):
+        """Read one receipt file; return (summary_row, unreadable)."""
+        path = archive_dir / name
+        try:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size > STACK_INPUT_LIMIT:
+                return None, True
+            receipt = master_runtime._strict_json(path.read_bytes(), "stack history receipt")
+        except (OSError, ValueError, UnicodeDecodeError, master_runtime.MasterRecordError):
+            return None, True
+        if not isinstance(receipt, dict):
+            return None, True
+        return {
+            "file": name,
+            "action": receipt.get("action"),
+            "revision": receipt.get("revision"),
+            "timestamp": receipt.get("timestamp"),
+            "ids": _receipt_ids(receipt),
+            "receipt": receipt,
+        }, False
+
+    receipts: list[dict[str, Any]] = []
+    omitted = 0
+    unreadable = 0
+    if identifier is None:
+        # Broad history shows the newest window with explicit omissions.
+        window = names[-STACK_HISTORY_RECEIPT_LIMIT:]
+        omitted = len(names) - len(window)
+        for name in window:
+            row, bad = load(name)
+            if bad:
+                unreadable += 1
+            else:
+                receipts.append(row)
+    else:
+        # An exact ID search covers every bounded receipt file.
+        for name in names:
+            row, bad = load(name)
+            if bad:
+                unreadable += 1
+            elif identifier in row["ids"]:
+                receipts.append(row)
+    if identifier is None:
+        terminal: dict[str, str] = {}
+        for row in legacy:
+            terminal[row["goal_id"]] = f"goal:{row['status']}"
+        for row in receipts:
+            for gid in row["ids"]:
+                terminal[gid] = f"stack:{row['action']}"
+        return {
+            "schema_version": 1,
+            "status": "OK",
+            "ids": [
+                {"id": gid, "latest_action": terminal[gid]}
+                for gid in sorted(terminal)
+            ],
+            "legacy_goal_event_count": len(legacy),
+            "receipt_count": len(receipts),
+            "omitted_receipts": omitted,
+            "unreadable_receipts": unreadable,
+        }
+    matched_legacy = [row for row in legacy if row["goal_id"] == identifier]
+    if not matched_legacy and not receipts:
+        raise master_operations.MasterOperationError(
+            f"no history for ID: {identifier}"
+        )
+    return {
+        "schema_version": 1,
+        "status": "OK",
+        "id": identifier,
+        "legacy_goal_events": matched_legacy,
+        "receipts": receipts,
+        "omitted_receipts": omitted,
+        "unreadable_receipts": unreadable,
+    }
+
+
+def _format_history_human(
+    report: dict[str, Any],
+    identifier: Optional[str],
+) -> str:
+    if identifier is None:
+        lines = ["stack history (summary; select an ID for full rows):"]
+        if not report["ids"]:
+            lines.append("- <none>")
+        for row in report["ids"]:
+            lines.append(f"- {row['id']}: {row['latest_action']}")
+        lines.append(
+            f"legacy goal events: {report['legacy_goal_event_count']}, "
+            f"receipts: {report['receipt_count']}"
+        )
+        if report["omitted_receipts"]:
+            lines.append(f"omitted receipts: {report['omitted_receipts']}")
+        if report["unreadable_receipts"]:
+            lines.append(f"unreadable receipts: {report['unreadable_receipts']}; history is incomplete")
+        return "\n".join(lines) + "\n"
+    lines = [f"history for {report['id']}:"]
+    for row in report["legacy_goal_events"]:
+        lines.append(
+            f"- legacy {row['event_id']} [{row['status']}] {row['timestamp']}"
+        )
+    for row in report["receipts"]:
+        lines.append(
+            f"- {row['file']}: {row['action']} "
+            f"(revision {row['revision']}, {row['timestamp']})"
+        )
+        archive = (row["receipt"].get("archive") or {})
+        if isinstance(archive, dict) and archive.get("status") in {
+            "complete", "retired",
+        }:
+            evidence = archive.get("evidence", archive.get("reason", ""))
+            lines.append(f"  {archive['status']}: {evidence}")
+    if report["omitted_receipts"]:
+        lines.append(f"omitted receipts: {report['omitted_receipts']}")
+    if report["unreadable_receipts"]:
+        lines.append(f"unreadable receipts: {report['unreadable_receipts']}; history is incomplete")
+    return "\n".join(lines) + "\n"
+
+
+def _run_stack_read(arguments: argparse.Namespace, read) -> int:
+    location, failure = _stack_preamble()
+    if location is None:
+        _json(failure)
+        return 2
+    try:
+        return read(location)
+    except (
+        ValueError,
+        OSError,
+        master_runtime.MasterRecordError,
+        master_operations.MasterOperationError,
+    ) as exc:
+        _json({"schema_version": 1, "status": "unavailable", "detail": str(exc)})
+        return 2
+
+
+def cmd_master_stack_list(arguments: argparse.Namespace) -> int:
+    def read(location) -> int:
+        stack = goal_stack_store.read(location.record_root)
+        if arguments.json:
+            _json({"schema_version": 1, "status": "OK", "stack": stack})
+        else:
+            print(_format_stack_list_human(stack), end="")
+        return 0
+
+    return _run_stack_read(arguments, read)
+
+
+def cmd_master_stack_next(arguments: argparse.Namespace) -> int:
+    def read(location) -> int:
+        stack = goal_stack_store.read(location.record_root)
+        selected = goal_stack.select_next(stack)
+        if arguments.json:
+            _json({
+                "schema_version": 1,
+                "status": "OK",
+                "revision": stack["revision"],
+                "next": selected,
+            })
+        else:
+            print(_format_stack_next_human(selected), end="")
+        return 0
+
+    return _run_stack_read(arguments, read)
+
+
+def cmd_master_stack_show(arguments: argparse.Namespace) -> int:
+    def read(location) -> int:
+        stack = goal_stack_store.read(location.record_root)
+        selected = next(
+            (entry for entry in stack["entries"]
+             if entry["id"] == arguments.entry_id),
+            None,
+        )
+        if selected is None:
+            _json({
+                "schema_version": 1,
+                "status": "unavailable",
+                "detail": f"unknown stack entry ID: {arguments.entry_id}",
+            })
+            return 2
+        if arguments.json:
+            _json({"schema_version": 1, "status": "OK", "entry": selected})
+        else:
+            print(_format_stack_entry_human(selected))
+        return 0
+
+    return _run_stack_read(arguments, read)
+
+
+def cmd_master_stack_validate(arguments: argparse.Namespace) -> int:
+    def read(location) -> int:
+        stack = goal_stack_store.read(location.record_root)
+        detail = {
+            "schema_version": 1,
+            "status": "OK",
+            "revision": stack["revision"],
+            "count": len(stack["entries"]),
+        }
+        if arguments.json:
+            _json(detail)
+        else:
+            print(
+                f"goal stack OK: revision {detail['revision']}, "
+                f"{detail['count']} entries"
+            )
+        return 0
+
+    return _run_stack_read(arguments, read)
+
+
+def cmd_master_stack_mutate(arguments: argparse.Namespace) -> int:
+    location, failure = _stack_preamble()
+    if location is None:
+        _json(failure)
+        return 2
+    try:
+        action, payload, expected = _stack_mutation_request(arguments)
+        # store.mutate authenticates through the master lease transaction;
+        # readers above never acquire.
+        result = goal_stack_store.mutate(
+            location.record_root,
+            action,
+            payload,
+            expected_revision=expected,
+        )
+    except (
+        ValueError,
+        OSError,
+        master_runtime.MasterRecordError,
+        master_operations.MasterOperationError,
+    ) as exc:
+        _json({"schema_version": 1, "status": "refused", "detail": str(exc)})
+        return 2
+    if arguments.json:
+        _json(result)
+    else:
+        changed = "changed" if result.get("changed") else "unchanged"
+        print(
+            f"stack {action} OK: {changed}, "
+            f"revision {result['stack']['revision']}"
+        )
+    return 0
+
+
+def cmd_master_stack_history(arguments: argparse.Namespace) -> int:
+    def read(location) -> int:
+        report = stack_history_report(
+            location.record_root,
+            location.goal_store,
+            arguments.entry_id,
+        )
+        if arguments.json:
+            _json(report)
+        else:
+            print(_format_history_human(report, arguments.entry_id), end="")
+        return 0
+
+    return _run_stack_read(arguments, read)
 
 
 def cmd_tempdir(arguments: argparse.Namespace) -> int:
@@ -1581,6 +2016,106 @@ def parser() -> argparse.ArgumentParser:
     )
     master_digest.add_argument("--human", action="store_true")
     master_digest.set_defaults(func=cmd_master_digest)
+
+    master_stack = master_commands.add_parser(
+        "stack",
+        help="read or mutate the canonical goal-stack manifest without acquiring",
+    )
+    stack_commands = master_stack.add_subparsers(dest="stack_action", required=True)
+
+    def _stack_json(parser):
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="emit machine-readable JSON instead of compact human text",
+        )
+
+    def _stack_revision(parser):
+        parser.add_argument(
+            "--expect-revision",
+            type=_nonnegative,
+            metavar="REVISION",
+            help="refuse the mutation when the live revision moved",
+        )
+
+    stack_list = stack_commands.add_parser("list", help="list entries in canonical order")
+    _stack_json(stack_list)
+    stack_list.set_defaults(func=cmd_master_stack_list)
+
+    stack_next = stack_commands.add_parser("next", help="show the next eligible entry")
+    _stack_json(stack_next)
+    stack_next.set_defaults(func=cmd_master_stack_next)
+
+    stack_show = stack_commands.add_parser("show", help="show one exact entry")
+    stack_show.add_argument("entry_id", metavar="ID")
+    _stack_json(stack_show)
+    stack_show.set_defaults(func=cmd_master_stack_show)
+
+    stack_validate = stack_commands.add_parser("validate", help="validate the live manifest")
+    _stack_json(stack_validate)
+    stack_validate.set_defaults(func=cmd_master_stack_validate)
+
+    stack_init = stack_commands.add_parser("init", help="initialize the manifest from a TOML file")
+    stack_init.add_argument("--from", dest="source", required=True, metavar="FILE")
+    _stack_json(stack_init)
+    stack_init.set_defaults(func=cmd_master_stack_mutate)
+
+    stack_push = stack_commands.add_parser("push", help="insert one JSON entry")
+    stack_push.add_argument("--from", dest="source", required=True, metavar="FILE")
+    stack_push.add_argument("--position", type=_positive, metavar="N")
+    _stack_revision(stack_push)
+    _stack_json(stack_push)
+    stack_push.set_defaults(func=cmd_master_stack_mutate)
+
+    stack_move = stack_commands.add_parser("move", help="move one entry to a 1-based position")
+    stack_move.add_argument("entry_id", metavar="ID")
+    stack_move.add_argument("position", type=_positive, metavar="POSITION")
+    _stack_revision(stack_move)
+    _stack_json(stack_move)
+    stack_move.set_defaults(func=cmd_master_stack_mutate)
+
+    stack_reorder = stack_commands.add_parser(
+        "reorder", help="reorder entries to an exact ID permutation"
+    )
+    stack_reorder.add_argument("entry_ids", nargs="+", metavar="ID")
+    _stack_revision(stack_reorder)
+    _stack_json(stack_reorder)
+    stack_reorder.set_defaults(func=cmd_master_stack_mutate)
+
+    stack_update = stack_commands.add_parser("update", help="update one entry from JSON changes")
+    stack_update.add_argument("entry_id", metavar="ID")
+    stack_update.add_argument("--from", dest="source", required=True, metavar="FILE")
+    _stack_revision(stack_update)
+    _stack_json(stack_update)
+    stack_update.set_defaults(func=cmd_master_stack_mutate)
+
+    stack_complete = stack_commands.add_parser("complete", help="complete one entry with evidence")
+    stack_complete.add_argument("entry_id", metavar="ID")
+    stack_complete.add_argument("--evidence", required=True)
+    _stack_revision(stack_complete)
+    _stack_json(stack_complete)
+    stack_complete.set_defaults(func=cmd_master_stack_mutate)
+
+    stack_retire = stack_commands.add_parser("retire", help="retire one entry with a reason")
+    stack_retire.add_argument("entry_id", metavar="ID")
+    stack_retire.add_argument("--reason", required=True)
+    _stack_revision(stack_retire)
+    _stack_json(stack_retire)
+    stack_retire.set_defaults(func=cmd_master_stack_mutate)
+
+    stack_recover = stack_commands.add_parser(
+        "recover", help="finish an interrupted stack transaction"
+    )
+    _stack_json(stack_recover)
+    stack_recover.set_defaults(func=cmd_master_stack_mutate)
+
+    stack_history = stack_commands.add_parser(
+        "history",
+        help="read-only history: legacy goal events plus archive receipts, never a queue",
+    )
+    stack_history.add_argument("entry_id", nargs="?", metavar="ID", default=None)
+    _stack_json(stack_history)
+    stack_history.set_defaults(func=cmd_master_stack_history)
 
     telemetry = commands.add_parser("telemetry", help="sample dynamic host state through the selected adapter")
     telemetry.set_defaults(func=cmd_telemetry)

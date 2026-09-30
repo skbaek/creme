@@ -46,12 +46,19 @@ local. The record contains:
 | `master/briefs/` | worker briefs the master writes when a full goal document is not worth it | master |
 | `master/audits/` | independent audit reports and the findings register | auditor; master may mark a finding addressed |
 
-The event log is the source of truth and the board is derived from it. Creme
-commits the log first, then rewrites the board under the same record lock. A
-crash after the log commit therefore leaves an accepted event plus a stale
-board that the next authenticated writer repairs. Goal documents, state
-briefs, reports, and evidence trees in the existing goal-store layout remain
-valid worker artifacts; the board points at whichever a piece of work uses.
+The event log owns role, decision, audit, procedure and merge history; the
+board is derived from it. After [goal-stack adoption](goal-stack.md),
+`$GOAL_STORE/goal-stack.toml` exclusively owns live goal status and order.
+Historical goal events stay readable but cannot schedule work; new goal
+events refuse. The board projects no goal queue after adoption. The digest
+reads the canonical stack and preserves open decisions and findings from the
+log. Missing or invalid stack state fails closed, with no historical fallback.
+
+Creme commits an event before rewriting its board under the record lock; the
+next authenticated writer repairs a crash-left stale board. Stack mutations
+use that same lock and lease authority, with their own recoverable publication
+journal and archived receipts. Detailed goal documents, state briefs, reports
+and evidence remain valid artifacts referenced by stack entries.
 The tracked [generic runtime layout](../../templates/master-runtime/README.md)
 documents this shape without containing a host record.
 
@@ -104,9 +111,8 @@ report maintains one condition-to-evidence table; it need not replay the work.
 
 Keep detailed commands and terminal verdicts in the evidence artifact, with a
 short result and exact pointer in the state/report. Record a fact once in its
-canonical owner and refer to it from other surfaces. Goal events should carry
-short checkpoint/next-unit fields and the state/report pointer, not copy the
-whole report into the derived board.
+canonical owner and refer to it from other surfaces. Stack entries carry short checkpoint/next fields and a state/report pointer,
+not a copy of the whole report. Use `master stack update` at green boundaries.
 
 Before removing historical prose from a current document, verify its exact
 prior bytes are committed and recoverable. Leave the immutable commit and
@@ -119,9 +125,12 @@ semantic limit, or ownership boundary. Do not rewrite the authoritative event
 log, user intent, independent audits, or raw evidence to reduce reading cost.
 Private master data stays private; this rule never authorizes committing it.
 
-Start with `python3 -m creme master digest --focused --human`. This read-only
-view prioritizes active, ready and blocked goals, bounds prose previews, and
-lists every open decision/finding ID. Follow the displayed continuation command
+Start with `python3 -m creme master stack list` and
+`python3 -m creme master digest --focused --human`. The stack lists all live
+goals in their explicit order. The digest preserves that order, bounds prose
+previews, and lists every open decision/finding ID. `master stack next`
+selects active work first, otherwise the first ready goal without dependencies;
+it does not start or preempt work. Follow the displayed continuation command
 to page goals. Retrieve an exact full record with `master digest --goal ID`,
 `--decision ID`, or `--finding ID` (prefix each with `python3 -m creme`). The
 original unfiltered JSON digest remains available for existing consumers.
@@ -191,14 +200,15 @@ On the user's direction to start as master, the session runs:
    - `status: lapsed` or `stranded`: the previous master is gone or has
      stopped renewing. Run the same command with `--take-over`; the take-over
      is logged with its identity, and this session is the master.
-4. Reconcile the board with reality before starting anything: semaphore
+4. Reconcile the stack and record with reality before starting anything: semaphore
    status, live worktrees, branches ahead of main, uncommitted trees, and the
    build ledger. `master start` records what it observes; record any further
    discrepancy as a `note` event. A previous
-   master's workers did not survive it; the board says what each was doing,
+   master's workers did not survive it; the stack says what each was doing,
    and this session respawns them from their briefs and worktrees.
 
-Reconciliation reads two fields of every board goal against Git, and both
+Reconciliation reads worktree/branch/checkpoint fields of live stack goals
+that declare a worktree (legacy board goals only before adoption), and both
 readings are deliberately narrow. A checkpoint field that is exactly one object
 name is asserted as a commit claim; any other checkpoint is prose, and only the
 full object names it cites are asserted, each against every configured
@@ -314,14 +324,15 @@ master does before its session ends for any reason it can foresee:
    a green boundary, write its state brief, and return. Wait for them.
    Workers are the master's subagents and die with it; whatever they did not
    checkpoint is lost.
-2. Rewrite the board so it says, per goal, the worktree, the branch, the last
-   checkpoint, and the next unit, so a successor can respawn the worker from
-   that alone.
+2. Update each owned stack entry with its worktree, branch, checkpoint,
+   context and next unit, so a successor can continue from that alone. Mark
+   stopped execution ready unless a genuine blocker or parking trigger applies.
 3. If this session itself took a goal hold or opened a Lean server, run the
    goal-scoped `python3 -m creme reclaim --wind-down GOAL` for it. A
    coordinator that never touched Lean has nothing to reclaim.
 4. Append a `master` event saying the session is ending and what the next
-   master should do first. Rewrite the board.
+   master should do first. The writer updates the derived board; live goal
+   ordering remains solely in the stack.
 5. `~/creme/.semaphore/semaphore master-release`.
 
 Closing without these steps loses in-flight work. Full application exit with

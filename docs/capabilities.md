@@ -94,9 +94,11 @@ applies the existing state-directory and exclusive-lock checks. Unsafe or
 foreign-owned parents are refused without changing their permissions.
 The broker
 accepts only a Jaune/Blanc profile, goal-derived worktree purpose, bounded
-wait/probe/exclusive options, and validated Lake targets. It pins the
+wait/probe/exclusive/walk options, bounded compiler threads, and validated Lake targets. It pins the
 preflight digest and clean Creme runtime tree, owns a private cross-invocation
-lock, and preserves the host's fixed RAM/swap cgroup limits. Direct
+lock, and pins the host's reviewed emergency RAM limit and fixed swap allowances.
+The RAM limit is configurable in the host profile; omission retains 8 GiB.
+It is a kernel fallback, not a replacement for live admission and watchdogs. Direct
 `systemd-run`, current-checkout safe runners, arbitrary commands, temporary
 scripts, resource downgrades, and dependency censuses are not rule-authorized.
 
@@ -112,7 +114,10 @@ Hosts with reviewed `.creme/workflow-recipes.json` also receive the
 argument-rejecting delegate rule. Recipes pin the operation/mode command set;
 routine invocation supplies no executable, command, environment, or path. Its
 service owns the shared build/workflow lock through execution and keeps status
-and completion records when the launching client disconnects. This extends
+and completion records when the launching client disconnects. Registered workflow
+commands also run under continuous pressure monitoring; a retraction is an
+interrupted command, never a passing gate. Merely taking an adaptive hold for
+an unrelated command does not install a watchdog. This extends
 trusted-project execution coverage; it does not provide filesystem isolation.
 
 Optimized cache copies run into a randomly named, Creme-owned staging
@@ -200,6 +205,12 @@ running units already reduce availability; that is deliberately
 conservative. On Darwin the availability figure is the free percentage, which
 counts compressible memory as free and barely moves while a build allocates,
 so the kernel level and swap growth are the live retraction signals there.
+
+Pressure termination gives the owned process group one second to obey SIGTERM,
+then uses SIGKILL if necessary and verifies group cleanup. A launcher exiting
+does not establish that its children exited. These sampled controls still need
+headroom to act; they do not make running at complete memory exhaustion safe.
+Kernel containment remains a separately reviewed fallback on hosts that use it.
 
 Renewal re-samples headroom. Below 30% with multiple soft holders—or whenever
 the recorded worker count or admitted needs already exceed what the host

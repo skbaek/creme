@@ -320,7 +320,7 @@ narrow:
 ```sh
 ~/.codex/bin/codex-creme-contained-build blanc GOAL \
   [--purpose goal|control|mutation|rehearsal] [--probe] [--wait SECS] \
-  [--exclusive] -- [TARGET ...]
+  [--exclusive] [--walk] [--threads N] -- [TARGET ...]
 ```
 
 The broker derives the Jaune/Blanc worktree path from the profile, goal, and
@@ -328,7 +328,11 @@ purpose; it does not accept a repository path, arbitrary command, resource
 downgrade, dependency census, or environment override. It pins the reviewed
 preflight digest and exact clean Creme runtime tree, serializes broker
 calls under private Codex state, runs the host preflight, and then enters the
-fixed 8 GiB systemd cgroup (zero swap for Blanc, 1 GiB for Jaune). Any drift
+profile-configured emergency memory cgroup (8 GiB by default, zero swap for
+Blanc, 1 GiB for Jaune). The optional `containment.memory_max_gib` is reviewed
+host policy, not a per-command override. Update the host's slice and preflight
+to the same value before regenerating the broker; changing only the profile
+does not change the live kernel boundary. Any drift
 fails closed until the bundle is previewed and replaced again. Mutable project
 source and Lake configuration remain the intentional build input under the
 same trust model as the existing host safe-build wrappers; the broker does not

@@ -36,6 +36,7 @@ RENEW_INTERVAL_SECONDS = 240
 RETRACTED_EXIT = 75
 WATCHDOG_INTERVAL_SECONDS = 1.0
 WATCHDOG_GRACE_SECONDS = 3.0
+WATCHDOG_TERM_GRACE_SECONDS = 1.0
 WATCHDOG_STEP_SECONDS = 5.0
 # Retraction ("critical") signals.  The drain-level compressor cause alone
 # never retracts; the user chose this red zone on 2026-09-23.
@@ -3540,7 +3541,11 @@ class Watchdog(threading.Thread):
         self.probe = probe or (lambda: get_adapter().memory_headroom())
         self.reclaim = reclaim or _reclaim_idle_workers
         self.order = order or semaphore.retraction_order
-        self.terminate = terminate or _terminate_process_group
+        # Under critical pressure a stuck process must not consume the normal
+        # ten-second interruption grace before the kernel fallback is reached.
+        self.terminate = terminate or (
+            lambda process: _terminate_process_group(process, timeout=WATCHDOG_TERM_GRACE_SECONDS)
+        )
         self.interval = interval
         self.grace = grace
         self.step = step

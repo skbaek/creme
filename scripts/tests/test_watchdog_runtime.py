@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import functools
 import os
 import signal
 import subprocess
@@ -61,7 +60,6 @@ class WatchdogRuntimeTest(unittest.TestCase):
                     probe=lambda: sample,
                     reclaim=lambda _: "no retained workers in this control",
                     order=lambda: [{"label": "bounded-runtime-control"}],
-                    terminate=functools.partial(owned._terminate_process_group, timeout=0.1),
                     interval=0.02, grace=0.03,
                 )
                 guard.start()

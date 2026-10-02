@@ -12,6 +12,7 @@ WORKFLOW_BROKER_NAME = "codex-creme-contained-workflow"
 RECIPES_RELATIVE = Path(".creme/workflow-recipes.json")
 IDENTIFIER = re.compile(r"[a-z][a-z0-9-]{0,63}")
 ENVIRONMENT = {"HOME", "PATH", "PYTHONNOUSERSITE", "VIRTUAL_ENV", "JAUNE_T8N_TARGET"}
+GATE_INHERITANCE = "BLANC_GATE_SEMAPHORE"
 
 
 def validate_recipes(value: object) -> dict:
@@ -55,8 +56,14 @@ def validate_recipes(value: object) -> dict:
                     index += 1
             if index >= len(argv) or not argv[index].startswith("{repo}/scripts/"):
                 raise ValueError("recipe must execute a repository script")
-            if not isinstance(env, dict) or set(env) - ENVIRONMENT or any(not isinstance(v, str) or '\x00' in v or '\n' in v for v in env.values()):
+            if not isinstance(env, dict) or set(env) - (ENVIRONMENT | {GATE_INHERITANCE}) or any(not isinstance(v, str) or '\x00' in v or '\n' in v for v in env.values()):
                 raise ValueError("recipe environment contains unsupported keys or values")
+            if GATE_INHERITANCE in env and (
+                env[GATE_INHERITANCE] != "inherited"
+                or operation["profile"] != "blanc"
+                or operation["memory_gib"] != 8
+            ):
+                raise ValueError("gate inheritance requires inherited, Blanc profile, and 8 GiB admission")
             for text in [*argv, *env.values()]:
                 remainder = text.replace("{repo}", "").replace("{creme}", "")
                 if "{" in remainder or "}" in remainder or any(p in {".", ".."} for p in text.split("/")):

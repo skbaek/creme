@@ -64,6 +64,18 @@ limited to HOME, PATH, PYTHONNOUSERSITE, VIRTUAL_ENV, and JAUNE_T8N_TARGET;
 values are reviewed constants. Inherited command environment is discarded and
 LAKE_CACHE_DIR always selects canonical Creme's ignored cache.
 
+A Blanc operation reserving exactly 8 GiB may additionally declare
+`"BLANC_GATE_SEMAPHORE": "inherited"` in a mode's pinned recipe environment.
+The service omits this declaration from the certificate-check environment and
+injects the constant only after successful exclusive admission and its durable
+`RUNNING` record. Caller gate controls are stripped from preflight and admission;
+they cannot supply inheritance or change a gate's label, wait, or memory request.
+Every other value, profile, reservation, and recipe gate-control key is refused.
+This declares that the outer reservation covers each gate's complete admission
+need; review the operation's children before selecting it. The gates acquire and
+release no inner hold, while the service retains its unique workflow owner,
+inherited lock, watchdog, cleanup checks, and exact-owner release and recovery.
+
 The broker validates the worktree against the reviewed repository's Git common
 directory and rejects symlink components in its root and script path. It pins
 Creme's clean runtime, launcher, preflight, and recipe definitions. This does

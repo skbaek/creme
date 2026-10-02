@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -86,6 +87,33 @@ class WorkflowBrokerTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_recipes(candidate)
 
+    def test_gate_inheritance_schema_accepts_only_blanc_eight_gib(self):
+        candidate = copy.deepcopy(self.config)
+        operation = candidate["operations"]["fixtures"]
+        operation["memory_gib"] = 8
+        env = operation["modes"]["validate"]["env"]
+        env["BLANC_GATE_SEMAPHORE"] = "inherited"
+        self.assertEqual(validate_recipes(candidate), candidate)
+        for profile, memory, value in [
+            ("blanc", 8, "off"), ("blanc", 8, "anything"),
+            ("blanc", 8, ""), ("blanc", 8, "{repo}"),
+            ("jaune", 8, "inherited"),
+            *(("blanc", memory, "inherited") for memory in range(1, 8)),
+        ]:
+            with self.subTest(profile=profile, memory=memory, value=value):
+                rejected = copy.deepcopy(candidate)
+                rejected["operations"]["fixtures"].update(profile=profile, memory_gib=memory)
+                rejected["operations"]["fixtures"]["modes"]["validate"]["env"]["BLANC_GATE_SEMAPHORE"] = value
+                with self.assertRaises(ValueError):
+                    validate_recipes(rejected)
+        for key in ["BLANC_GATE_SEMAPHORE_LABEL", "BLANC_GATE_SEMAPHORE_WAIT",
+                    "BLANC_GATE_SEMAPHORE_MEMORY_GIB"]:
+            with self.subTest(key=key):
+                rejected = copy.deepcopy(candidate)
+                rejected["operations"]["fixtures"]["modes"]["validate"]["env"][key] = "1"
+                with self.assertRaises(ValueError):
+                    validate_recipes(rejected)
+
     def test_recipe_pins_fail_before_launch(self):
         with mock.patch.dict(self.ns, {"require_control_plane": lambda: None}):
             self.ns["workflow_control_plane"]()
@@ -144,7 +172,158 @@ class WorkflowBrokerTest(unittest.TestCase):
         self.assertNotIn("PYTHONPATH", environment)
         self.assertNotIn("BASH_ENV", environment)
 
-    def service(self, runner):
+    def enable_inheritance(self):
+        operation = self.ns["RECIPES"]["operations"]["fixtures"]
+        operation["memory_gib"] = 8
+        operation["modes"]["validate"]["env"]["BLANC_GATE_SEMAPHORE"] = "inherited"
+        validate_recipes(self.ns["RECIPES"])
+
+    def test_caller_controls_never_reach_host_or_certificate_environment(self):
+        (self.repo / "scripts/gate-cache.py").write_text("")
+        controls = {"BLANC_GATE_SEMAPHORE_LABEL": "hostile-owner",
+                    "BLANC_GATE_SEMAPHORE_WAIT": "99999",
+                    "BLANC_GATE_SEMAPHORE_MEMORY_GIB": "1"}
+        for declared in [False, True]:
+            if declared:
+                self.enable_inheritance()
+            self.ns["RECIPES"]["operations"]["fixtures"]["guard"] = "blanc-build-certificate"
+            for value in ["inherited", "off"]:
+                with self.subTest(declared=declared, caller=value):
+                    calls = []
+                    def run(argv, **kwargs):
+                        calls.append(argv)
+                        environment = kwargs["env"]
+                        for key in controls:
+                            self.assertNotIn(key, environment)
+                        if "--validate-runtime" in argv:
+                            self.assertEqual(environment.get("BLANC_GATE_SEMAPHORE"),
+                                             "inherited" if declared else None)
+                            record = json.loads((self.ns["BROKER_STATE"] / "workflow-last.json").read_text())
+                            self.assertEqual(record["status"], "RUNNING")
+                        else:
+                            self.assertNotIn("BLANC_GATE_SEMAPHORE", environment)
+                        return subprocess.CompletedProcess(argv, 0)
+                    with mock.patch.dict(os.environ, {**controls, "BLANC_GATE_SEMAPHORE": value}):
+                        _, environment = self.ns["workflow_command"](self.repo, "fixtures", "validate")
+                        self.assertNotIn("BLANC_GATE_SEMAPHORE", environment)
+                        self.assertEqual(self.service(run), 0)
+                    admission = next(command for command in calls if "adaptive-acquire" in command)
+                    self.assertEqual(admission[admission.index("--memory-gib") + 1], "8" if declared else "4")
+                    self.assertEqual(admission[admission.index("--contention") + 1], "exclusive")
+
+    def test_inheritance_refusals_start_no_recipe_and_expose_no_token(self):
+        self.enable_inheritance()
+        (self.repo / "scripts/gate-cache.py").write_text("")
+        self.ns["RECIPES"]["operations"]["fixtures"]["guard"] = "blanc-build-certificate"
+        for failure_at in [0, 1, 2]:
+            calls = []
+            def run(argv, **kwargs):
+                calls.append(argv)
+                self.assertNotIn("BLANC_GATE_SEMAPHORE", kwargs["env"])
+                self.assertNotIn("--validate-runtime", argv)
+                return subprocess.CompletedProcess(argv, 2 if len(calls) - 1 == failure_at else 0)
+            with self.subTest(failure_at=failure_at):
+                self.assertEqual(self.service(run), 2)
+                self.assertEqual(len(calls), failure_at + 1)
+                self.assertFalse(any("hard-release" in command for command in calls))
+        run = mock.Mock(side_effect=AssertionError("pin refusal must start nothing"))
+        self.refused(lambda: self.service(
+            run, workflow_control_plane=lambda: self.ns["refuse"]("pin drift")))
+        run.assert_not_called()
+
+    def test_inheritance_is_not_exposed_if_running_record_fails(self):
+        self.enable_inheritance()
+        write_record = self.ns["workflow_record"]
+        command_run = mock.Mock(side_effect=AssertionError("unrecorded command must not start"))
+        def record(payload):
+            if payload["status"] == "RUNNING":
+                raise KeyboardInterrupt()
+            write_record(payload)
+        with mock.patch.dict(self.ns, {"workflow_record": record,
+                                      "workflow_run_command": command_run}):
+            # Call directly so service() cannot replace the command spy.
+            with mock.patch.dict(self.ns, {
+                "require_containment": mock.Mock(), "require_workflow_unit": mock.Mock(),
+                "workflow_control_plane": lambda: None, "workflow_worktree": lambda *args: self.repo,
+            }), mock.patch.object(self.ns["subprocess"], "run", return_value=subprocess.CompletedProcess([], 0)), \
+                    contextlib.redirect_stdout(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+                self.ns["workflow_service"](self.args, self.ns["workflow_parse"](self.args))
+        command_run.assert_not_called()
+
+    def real_gate_helper(self, language):
+        creme = Path(__file__).resolve().parents[2]
+        if creme.parent.name == ".worktrees":
+            creme = creme.parent.parent
+        blanc = Path(os.environ.get("CREME_WORKFLOW_TEST_BLANC_ROOT", str(creme.parent / "blanc")))
+        helper_name = "gate-semaphore.sh" if language == "shell" else "gate_semaphore.py"
+        helper = blanc / "scripts" / helper_name
+        if not helper.is_file():
+            self.skipTest("real Blanc helper source unavailable; set CREME_WORKFLOW_TEST_BLANC_ROOT")
+        (self.repo / "scripts" / helper_name).write_bytes(helper.read_bytes())
+        home = self.path / "helper-home"
+        entry = home / "creme/.semaphore/semaphore"
+        entry.parent.mkdir(parents=True)
+        marker, inner_log, held = self.path / "evaluator", self.path / "inner.log", self.path / "outer-held"
+        entry.write_text("#!/usr/bin/bash\n"
+                         f"printf '%s\\n' \"$*\" >> {shlex.quote(str(inner_log))}\n"
+                         f"test -f {shlex.quote(str(held))} || exit 99\n"
+                         "echo DEFER_HEAVY\nexit 2\n")
+        entry.chmod(0o700)
+        if language == "shell":
+            script = self.repo / "scripts/gen.sh"
+            script.write_text("set -euo pipefail\n"
+                              f"source {shlex.quote(str(self.repo / 'scripts' / helper_name))}\n"
+                              "trap gate_semaphore_release EXIT\n"
+                              "gate_semaphore_acquire 'helper evaluator' 8 exclusive || exit 2\n"
+                              f"printf evaluated > {shlex.quote(str(marker))}\n")
+            command = ["/usr/bin/bash", "{repo}/scripts/gen.sh"]
+        else:
+            script = self.repo / "scripts/gen.py"
+            script.write_text("from pathlib import Path\nimport gate_semaphore as gate\n"
+                              "gate.guard('helper evaluator', 8)\n"
+                              "with gate.admitted('nested helper evaluator', 8):\n"
+                              f"    Path({str(marker)!r}).write_text('evaluated')\n"
+                              "gate._release()\n")
+            command = ["/usr/bin/python3", "-B", "{repo}/scripts/gen.py"]
+        operation = self.ns["RECIPES"]["operations"]["fixtures"]
+        operation["modes"]["validate"].update(argv=command, env={"HOME": str(home)})
+        self.enable_inheritance()
+        real_run = subprocess.run
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if "adaptive-acquire" in argv:
+                self.assertEqual(argv[argv.index("--memory-gib") + 1], "8")
+                self.assertEqual(argv[argv.index("--contention") + 1], "exclusive")
+                held.write_text(argv[3])
+            elif "hard-release" in argv:
+                self.assertEqual(held.read_text(), argv[3])
+                self.assertTrue(marker.exists(), "outer release follows successful helper execution")
+                self.assertFalse(inner_log.exists(), "inherited helpers must acquire and release nothing")
+                held.unlink()
+            elif argv[0] in {"/usr/bin/bash", "/usr/bin/python3"}:
+                result = real_run(argv, **kwargs, capture_output=True, text=True)
+                self.assertTrue(held.exists(), "outer reservation covers helper execution")
+                self.assertEqual(marker.exists(), result.returncode == 0,
+                                 "refused helper must stop before the evaluator marker")
+                if result.returncode:
+                    self.assertNotIn("release ", inner_log.read_text())
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result
+            return subprocess.CompletedProcess(argv, 0)
+        self.assertEqual(self.service(run), 0)
+        self.assertEqual(marker.read_text(), "evaluated")
+        self.assertFalse(inner_log.exists())
+        self.assertFalse(held.exists())
+        self.assertEqual(len(calls), 4)
+
+    def test_real_shell_gate_helper_inherits_full_outer_admission(self):
+        self.real_gate_helper("shell")
+
+    def test_real_python_gate_helper_inherits_full_outer_admission(self):
+        self.real_gate_helper("python")
+
+    def service(self, runner, **overrides):
         def command_run(command, repo, environment, descriptor, owner, goal):
             result = runner(command, cwd=repo, env=environment, check=False, pass_fds=(descriptor,))
             return {"exit_code": result.returncode, "retracted": False, "cleanup_proved": True}
@@ -153,6 +332,7 @@ class WorkflowBrokerTest(unittest.TestCase):
             "workflow_control_plane": lambda: None,
             "workflow_worktree": lambda *args: self.repo,
             "workflow_run_command": command_run,
+            **overrides,
         }), mock.patch.object(self.ns["subprocess"], "run", side_effect=runner), contextlib.redirect_stdout(io.StringIO()):
             return self.ns["workflow_service"](self.args, self.ns["workflow_parse"](self.args))
 

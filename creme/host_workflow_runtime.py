@@ -64,7 +64,10 @@ def workflow_command(repo, operation, mode):
     safe_component_path(Path(script), repo)
     regular_path(Path(script), "recipe script")
     environment = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin", "PYTHONNOUSERSITE": "1"}
-    environment.update({key: expand(value) for key, value in recipe["env"].items()})
+    # Inheritance is a pinned admission declaration, not command environment
+    # until the service has obtained the complete outer reservation.
+    environment.update({key: expand(value) for key, value in recipe["env"].items()
+                        if key != "BLANC_GATE_SEMAPHORE"})
     environment["LAKE_CACHE_DIR"] = str(CREME_ROOT / ".creme/lake-cache")
     return command, environment
 
@@ -405,7 +408,12 @@ def workflow_service(arguments, parsed):
             refuse("host circuit breaker is active")
         repo = workflow_worktree(profile, goal, purpose)
         command, environment = workflow_command(repo, operation, mode)
-        check = subprocess.run([str(PREFLIGHT)], check=False)
+        # Host checks keep their existing host environment except for caller
+        # gate controls. None may assert inheritance before admission.
+        host_environment = {key: value for key, value in os.environ.items()
+                            if key != "BLANC_GATE_SEMAPHORE"
+                            and not key.startswith("BLANC_GATE_SEMAPHORE_")}
+        check = subprocess.run([str(PREFLIGHT)], env=host_environment, check=False)
         if check.returncode:
             return check.returncode
         if RECIPES["operations"][operation].get("guard") == "blanc-build-certificate":
@@ -428,11 +436,13 @@ def workflow_service(arguments, parsed):
             "--note", f"workflow {profile}/{goal} {operation}/{mode}",
             "--memory-gib", str(RECIPES["operations"][operation]["memory_gib"]),
             "--contention", "exclusive", "--lease", "7200",
-        ], check=False)
+        ], env=host_environment, check=False)
         if admission.returncode:
             workflow_record({**metadata, "status": "ADMISSION_REFUSED", "exit_code": admission.returncode})
             return admission.returncode
         workflow_record({**metadata, "status": "RUNNING"})
+        if RECIPES["operations"][operation]["modes"][mode]["env"].get("BLANC_GATE_SEMAPHORE") == "inherited":
+            environment["BLANC_GATE_SEMAPHORE"] = "inherited"
         # SIGTERM's default exit leaves the hold intact; systemd kills the whole
         # control group. No finally-release may certify interrupted work idle.
         result = workflow_run_command(command, repo, environment, descriptor, label, goal)
@@ -440,7 +450,7 @@ def workflow_service(arguments, parsed):
             workflow_record({**metadata, **result, "status": "RELEASE_FAILED",
                              "release_exit_code": 2, "release_action": "preserved-unproven-cleanup"})
             return result["exit_code"] or 2
-        release = subprocess.run([str(CREME), "semaphore", "hard-release", label], check=False)
+        release = subprocess.run([str(CREME), "semaphore", "hard-release", label], env=host_environment, check=False)
         workflow_record({**result, "status": ("RETRACTED" if result["retracted"] else "TERMINAL") if release.returncode == 0 else "RELEASE_FAILED", "unit": UNIT, "owner": label,
                          "profile": profile, "goal": goal, "operation": operation, "mode": mode,
                          "argv": command, "recipes_sha256": RECIPES_SHA256,

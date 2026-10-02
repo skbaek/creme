@@ -322,7 +322,7 @@ def reconcile_previous_workflow():
     status = previous.get("status")
     if not isinstance(status, str):
         refuse("previous workflow record has invalid status; preserve it for recovery")
-    if status in {"TERMINAL", "ADMISSION_REFUSED"} and previous.get("release_exit_code", 0) == 0:
+    if status in {"TERMINAL", "RETRACTED", "ADMISSION_REFUSED"} and previous.get("release_exit_code", 0) == 0:
         return
     if status == "RECOVERED_UNKNOWN":
         validate_recovered_workflow(previous)
@@ -331,6 +331,59 @@ def reconcile_previous_workflow():
         recover_interrupted_workflow(previous)
         return
     refuse("previous workflow is unresolved; inspect status and preserve its recorded owner before retrying")
+
+
+def workflow_peak_gib():
+    """Kernel-observed peak of this contained service, including its descendants."""
+    try:
+        relative = next(line.split(":", 2)[2] for line in Path("/proc/self/cgroup").read_text().splitlines()
+                        if line.startswith("0:"))
+        value = (Path("/sys/fs/cgroup") / relative.lstrip("/") / "memory.peak").read_text().strip()
+        return int(value) / 1024 ** 3
+    except (OSError, StopIteration, ValueError):
+        return None
+
+
+def workflow_run_command(command, repo, environment, descriptor, owner, goal):
+    # This import occurs only after the installed broker verified clean runtime
+    # pins. The parent's group stays watched even if its leader exits first.
+    sys.path.insert(0, str(CREME_ROOT))
+    from creme.build_ownership import Watchdog, RETRACTED_EXIT, _process_group_alive, _terminate_process_group, _reclaim_idle_workers
+
+    proc = subprocess.Popen(command, cwd=repo, env=environment,
+                            pass_fds=(descriptor,), start_new_session=True)
+    class Group:
+        pid = proc.pid
+        def poll(self):
+            return proc.poll() if _process_group_alive(proc.pid) is False else None
+    watchdog = Watchdog(
+        owner, Group(), reclaim=lambda _owner: _reclaim_idle_workers(goal),
+        # Exclusive workflow admission owns the command as one unit. Nested
+        # gate/build holds do not delay retraction of their containing group.
+        order=lambda: [{"label": owner}],
+        terminate=lambda _group: _terminate_process_group(proc, timeout=1.0),
+    )
+    watchdog.start()
+    try:
+        command_exit = proc.wait()
+    finally:
+        # Exceptions preserve the RUNNING owner; inherited lock and systemd's
+        # control-group cleanup still guard recovery after a lost supervisor.
+        watchdog.stop()
+    cleanup = watchdog.cleanup_proved
+    if _process_group_alive(proc.pid) is not False:
+        cleanup = _terminate_process_group(proc) and cleanup
+    return {
+        "exit_code": RETRACTED_EXIT if watchdog.retracted else command_exit,
+        "command_exit_code": command_exit,
+        "retracted": watchdog.retracted,
+        "cleanup_proved": cleanup,
+        "watchdog_events": list(watchdog.events),
+        "min_available_gib": watchdog.min_available_gib,
+        "peak_gib": workflow_peak_gib(),
+        "peak_source": "service-cgroup-memory.peak",
+        "evidence_status": "RETRACTED" if watchdog.retracted else "OBSERVED",
+    }
 
 
 def workflow_service(arguments, parsed):
@@ -379,13 +432,17 @@ def workflow_service(arguments, parsed):
         workflow_record({**metadata, "status": "RUNNING"})
         # SIGTERM's default exit leaves the hold intact; systemd kills the whole
         # control group. No finally-release may certify interrupted work idle.
-        result = subprocess.run(command, cwd=repo, env=environment, check=False, pass_fds=(descriptor,))
+        result = workflow_run_command(command, repo, environment, descriptor, label, goal)
+        if not result["cleanup_proved"]:
+            workflow_record({**metadata, **result, "status": "RELEASE_FAILED",
+                             "release_exit_code": 2, "release_action": "preserved-unproven-cleanup"})
+            return result["exit_code"] or 2
         release = subprocess.run([str(CREME), "semaphore", "hard-release", label], check=False)
-        workflow_record({"status": "TERMINAL" if release.returncode == 0 else "RELEASE_FAILED", "unit": UNIT, "owner": label,
+        workflow_record({**result, "status": ("RETRACTED" if result["retracted"] else "TERMINAL") if release.returncode == 0 else "RELEASE_FAILED", "unit": UNIT, "owner": label,
                          "profile": profile, "goal": goal, "operation": operation, "mode": mode,
                          "argv": command, "recipes_sha256": RECIPES_SHA256,
-                         "exit_code": result.returncode, "release_exit_code": release.returncode})
-        return result.returncode or release.returncode
+                         "release_exit_code": release.returncode})
+        return result["exit_code"] or release.returncode
     finally:
         # In particular, exceptions after admission preserve the hold for
         # ownership-aware recovery. Closing our fd cannot unlock a live child.
@@ -415,7 +472,7 @@ def main(arguments):
         str(SYSTEMD_RUN), "--user", "--wait", "--collect", "--pipe", "--quiet",
         "--unit=" + UNIT, "--slice=creme-lean.slice",
         "--property=MemoryAccounting=yes", "--property=MemoryHigh=infinity",
-        "--property=MemoryMax=8G", "--property=MemorySwapMax=" + ("0" if profile == "blanc" else "1G"),
+        f"--property=MemoryMax={MEMORY_MAX_GIB}G", "--property=MemorySwapMax=" + ("0" if profile == "blanc" else "1G"),
         "--property=OOMScoreAdjust=500", "--property=OOMPolicy=kill",
         "--property=KillMode=control-group",
         str(Path(__file__).resolve()), "--contained", *arguments,

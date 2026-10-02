@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 
 from creme.adapters.base import Adapter
-from creme.profile import effective_policy, fingerprint, load, propose, validate_data, write_reviewed
+from creme.profile import (effective_policy, fingerprint, load, propose, validate_data, write_reviewed,
+                           load_containment_memory_max, load_lsp_aggregate_ceiling)
 
 
 class FakeAdapter(Adapter):
@@ -74,6 +75,39 @@ class ProfileTest(unittest.TestCase):
         data = self.candidate()
         data["credential"] = "not allowed"
         self.assertEqual(validate_data(data).status, "INVALID")
+
+    def test_containment_cap_requires_integer_and_physical_reserve(self):
+        for setting in [None, {}, {"memory_max_gib": True}, {"memory_max_gib": 0},
+                        {"memory_max_gib": 11}, {"memory_max_gib": 4, "swap": 1}]:
+            data = self.candidate()
+            data["containment"] = setting
+            self.assertEqual(validate_data(data).status, "INVALID", setting)
+        data = self.candidate()
+        data["containment"] = {"memory_max_gib": 10}
+        self.assertEqual(validate_data(data).status, "VALID")
+        self.assertEqual(validate_data(data, FakeAdapter(memory_gib=8).static_facts().data).status, "STALE")
+
+    def test_containment_loading_pins_reviewed_value_and_refuses_stale_or_invalid(self):
+        self.assertEqual(load_containment_memory_max(self.root, self.adapter), 8)
+        data = self.candidate()
+        data["containment"] = {"memory_max_gib": 10}
+        path = self.root / ".creme/host-profile.json"
+        write_reviewed(path, data)
+        self.assertEqual(load_containment_memory_max(self.root, self.adapter), 10)
+        self.assertEqual(load_lsp_aggregate_ceiling(self.root, self.adapter), 10)
+        with self.assertRaises(ValueError):
+            load_containment_memory_max(self.root, FakeAdapter(memory_gib=24))
+        path.write_text("{}")
+        with self.assertRaises(ValueError):
+            load_containment_memory_max(self.root, self.adapter)
+
+    def test_aggregate_ceiling_scales_and_is_bounded_by_reviewed_containment(self):
+        self.assertEqual(load_lsp_aggregate_ceiling(self.root, FakeAdapter(memory_gib=64)), 62)
+        self.assertEqual(load_lsp_aggregate_ceiling(self.root, FakeAdapter(available=False)), 8)
+        data = propose(self.root, self.root, FakeAdapter(memory_gib=64))
+        data["containment"] = {"memory_max_gib": 48}
+        write_reviewed(self.root / ".creme/host-profile.json", data)
+        self.assertEqual(load_lsp_aggregate_ceiling(self.root, FakeAdapter(memory_gib=64)), 48)
 
 
 if __name__ == "__main__":

@@ -67,6 +67,8 @@ ADMISSION_RANGES = {
 # into swap whatever else runs.
 LSP_WATCHDOG_RANGES = {"worker_ceiling_gib": (2, 1024)}
 LSP_WORKER_CEILING_FALLBACK_GIB = 16
+CONTAINMENT_MEMORY_MAX_DEFAULT_GIB = 8
+CONTAINMENT_RESERVE_GIB = 2
 
 
 @dataclass(frozen=True)
@@ -144,7 +146,7 @@ def validate_data(
     if not isinstance(data, dict):
         return ProfileValidation("INVALID", "profile root must be an object")
     required = {"schema_version", "fingerprint", "facts", "workspace", "policy", "overrides"}
-    optional = {"admission", "lsp_watchdog"}
+    optional = {"admission", "lsp_watchdog", "containment"}
     if set(data) - optional != required:
         missing = sorted(required - set(data))
         extra = sorted(set(data) - required - optional)
@@ -190,6 +192,16 @@ def validate_data(
         return ProfileValidation("INVALID", "facts.machine must be non-empty")
     if not _is_positive_int(facts.get("logical_cores")) or not _is_positive_int(facts.get("physical_memory_bytes")):
         return ProfileValidation("INVALID", "static numeric facts must be positive integers")
+    containment = data.get("containment")
+    if "containment" in data:
+        if not isinstance(containment, dict) or set(containment) != {"memory_max_gib"}:
+            return ProfileValidation("INVALID", "containment requires only memory_max_gib")
+        cap = containment["memory_max_gib"]
+        if not _is_positive_int(cap, 1024):
+            return ProfileValidation("INVALID", "containment.memory_max_gib must be an integer in 1..1024")
+        physical = facts["physical_memory_bytes"]
+        if (cap + CONTAINMENT_RESERVE_GIB) * 1024 ** 3 > physical:
+            return ProfileValidation("INVALID", "containment.memory_max_gib must preserve 2 GiB of physical memory")
     dynamic = DYNAMIC_KEYS.intersection(facts)
     if dynamic:
         return ProfileValidation("INVALID", f"dynamic facts may not be persisted: {sorted(dynamic)}")
@@ -348,3 +360,42 @@ def load_lsp_worker_ceiling(
         # ceiling still stops a runaway worker.
         return LSP_WORKER_CEILING_FALLBACK_GIB
     return lsp_worker_ceiling_gib(profile, memory)
+
+
+def load_containment_memory_max(creme_root: Path, adapter: Optional[Adapter] = None) -> int:
+    """Reviewed emergency cap pinned into generated brokers; never a CLI override."""
+    path = creme_root / DEFAULT_RELATIVE_PROFILE
+    if path.is_symlink():
+        raise ValueError("contained-memory profile must be a regular file")
+    if not path.exists():
+        return CONTAINMENT_MEMORY_MAX_DEFAULT_GIB
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("contained-memory profile must be a regular file")
+    checked = load(path, adapter)
+    if checked.status not in {"VALID", "LIMITED"}:
+        raise ValueError(f"cannot pin contained-memory cap: {checked.detail}")
+    return (checked.profile or {}).get("containment", {}).get(
+        "memory_max_gib", CONTAINMENT_MEMORY_MAX_DEFAULT_GIB,
+    )
+
+
+def load_lsp_aggregate_ceiling(
+    creme_root: Optional[Path] = None, adapter: Optional[Adapter] = None,
+) -> float:
+    """Fallback aggregate LSP ceiling when current pressure cannot be observed."""
+    from . import semaphore
+    selected = adapter or get_adapter()
+    configured = None
+    try:
+        root = creme_root or semaphore.canonical_creme_root()
+        checked = load(root / DEFAULT_RELATIVE_PROFILE, selected)
+        if checked.status in {"VALID", "LIMITED"}:
+            configured = (checked.profile or {}).get("containment", {}).get("memory_max_gib")
+        facts = selected.static_facts()
+        memory = (facts.data or {}).get("physical_memory_bytes") if facts.status == "OK" else None
+    except Exception:
+        memory = None
+    if _is_positive_int(memory):
+        available = max(1.0, memory / 1024 ** 3 - CONTAINMENT_RESERVE_GIB)
+        return min(available, float(configured)) if configured is not None else available
+    return float(configured or CONTAINMENT_MEMORY_MAX_DEFAULT_GIB)

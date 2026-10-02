@@ -6,6 +6,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from .profile import load_containment_memory_max
+
 
 BROKER_NAME = "codex-creme-contained-build"
 PREFLIGHT_RELATIVE = Path(".creme/bin/lean-host-preflight")
@@ -44,6 +46,7 @@ def render_contained_build_broker(
 ) -> str:
     root = str(creme_root.resolve())
     parent = str(creme_root.resolve().parent)
+    memory_max_gib = load_containment_memory_max(creme_root)
     return f'''#!/usr/bin/python3 -I
 """Generated least-privilege host broker for contained Creme Lake builds."""
 
@@ -63,6 +66,7 @@ EXPECTED_LAUNCHER_ENTRY = {json.dumps(launcher_entry)}
 EXPECTED_RUNTIME_TREE = {json.dumps(runtime_tree)}
 PREFLIGHT = CREME_ROOT / {json.dumps(str(PREFLIGHT_RELATIVE))}
 EXPECTED_PREFLIGHT_SHA256 = {json.dumps(preflight_sha256)}
+MEMORY_MAX_GIB = {memory_max_gib}
 GIT = Path("/usr/bin/git")
 SYSTEMD_RUN = Path("/usr/bin/systemd-run")
 CREME = CREME_ROOT / "scripts/creme"
@@ -157,7 +161,7 @@ def require_worktree(profile: str, goal: str, purpose: str, repository: Path | N
     return repo
 
 
-def parse(arguments: list[str]) -> tuple[str, str, str, bool, int | None, bool, list[str]]:
+def parse(arguments: list[str]) -> tuple[str, str, str, bool, int | None, bool, bool, int | None, list[str]]:
     if len(arguments) < 2:
         refuse("usage: codex-creme-contained-build PROFILE GOAL [options] -- [TARGET ...]")
     profile, goal, *rest = arguments
@@ -169,6 +173,8 @@ def parse(arguments: list[str]) -> tuple[str, str, str, bool, int | None, bool, 
     probe = False
     wait = None
     exclusive = False
+    walk = False
+    threads = None
     index = 0
     while index < len(rest) and rest[index] != "--":
         option = rest[index]
@@ -187,6 +193,16 @@ def parse(arguments: list[str]) -> tuple[str, str, str, bool, int | None, bool, 
         elif option == "--exclusive":
             exclusive = True
             index += 1
+        elif option == "--walk":
+            walk = True
+            index += 1
+        elif option == "--threads" and index + 1 < len(rest):
+            if len(rest[index + 1]) > 2 or re.fullmatch(r"[0-9]+", rest[index + 1]) is None:
+                refuse("--threads must be an integer from 1 to 64")
+            threads = int(rest[index + 1])
+            if not 1 <= threads <= 64:
+                refuse("--threads must be an integer from 1 to 64")
+            index += 2
         else:
             refuse(f"unsupported broker option: {{option}}")
     if index >= len(rest) or rest[index] != "--":
@@ -206,7 +222,7 @@ def parse(arguments: list[str]) -> tuple[str, str, str, bool, int | None, bool, 
         plain = target[1:] if target.startswith("+") else target
         if any(part in {{"", ".", ".."}} for part in plain.split("/")):
             refuse(f"invalid build target path: {{target!r}}")
-    return profile, goal, purpose, probe, wait, exclusive, targets
+    return profile, goal, purpose, probe, wait, exclusive, walk, threads, targets
 
 
 def cgroup_value(directory: Path, name: str) -> str:
@@ -230,7 +246,7 @@ def require_containment(profile: str) -> None:
     expected_swap = "0" if profile == "blanc" else str(1024 ** 3)
     expected = {{
         "memory.high": "max",
-        "memory.max": str(8 * 1024 ** 3),
+        "memory.max": str(MEMORY_MAX_GIB * 1024 ** 3),
         "memory.swap.max": expected_swap,
         "memory.oom.group": "1",
     }}
@@ -238,9 +254,14 @@ def require_containment(profile: str) -> None:
         actual = cgroup_value(directory, name)
         if actual != value:
             refuse(f"contained cgroup {{name}}={{actual}}, expected {{value}}")
+    if directory.parent.name != "creme-lean.slice":
+        refuse("contained service is not directly under the Lean slice")
+    parent_cap = cgroup_value(directory.parent, "memory.max")
+    if parent_cap != expected["memory.max"]:
+        refuse(f"Lean slice memory.max={{parent_cap}}, expected {{expected['memory.max']}}")
 
 
-def build_command(goal: str, probe: bool, wait: int | None, exclusive: bool, targets: list[str]) -> list[str]:
+def build_command(goal: str, probe: bool, wait: int | None, exclusive: bool, targets: list[str], *, walk: bool = False, threads: int | None = None) -> list[str]:
     command = [str(CREME), "lake-build", goal]
     if probe:
         command.append("--probe")
@@ -248,6 +269,10 @@ def build_command(goal: str, probe: bool, wait: int | None, exclusive: bool, tar
         command.extend(["--wait", str(wait)])
     if exclusive:
         command.extend(["--contention", "exclusive"])
+    if walk:
+        command.append("--walk")
+    if threads is not None:
+        command.extend(["--threads", str(threads)])
     command.append("--")
     command.extend(targets)
     return command
@@ -314,10 +339,10 @@ def main(arguments: list[str]) -> int:
     contained = bool(arguments and arguments[0] == "--contained")
     if contained:
         arguments = arguments[1:]
-    profile, goal, purpose, probe, wait, exclusive, targets = parse(arguments)
+    profile, goal, purpose, probe, wait, exclusive, walk, threads, targets = parse(arguments)
     require_control_plane()
     repo = require_worktree(profile, goal, purpose)
-    command = build_command(goal, probe, wait, exclusive, targets)
+    command = build_command(goal, probe, wait, exclusive, targets, walk=walk, threads=threads)
     if contained:
         require_containment(profile)
         lock = broker_lock()
@@ -339,7 +364,7 @@ def main(arguments: list[str]) -> int:
             "--slice=creme-lean.slice",
             "--property=MemoryAccounting=yes",
             "--property=MemoryHigh=infinity",
-            "--property=MemoryMax=8G",
+            f"--property=MemoryMax={{MEMORY_MAX_GIB}}G",
             f"--property=MemorySwapMax={{swap}}",
             "--property=OOMScoreAdjust=500",
             "--property=OOMPolicy=kill",

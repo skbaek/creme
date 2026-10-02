@@ -5,6 +5,14 @@
   "additionalProperties": false,
   "required": ["schema_version", "fingerprint", "facts", "workspace", "policy", "overrides"],
   "properties": {
+    "containment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_max_gib"],
+      "properties": {
+        "memory_max_gib": {"type": "integer", "minimum": 1, "maximum": 1024}
+      }
+    },
     "schema_version": {"const": 1},
     "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "facts": {

@@ -39,6 +39,22 @@ intent is stored with the private hold, not persisted as a host fact.
 `workspace.goal_store` may name a private goal location or remain null. No
 Creme runtime path requires that store to exist.
 
+Optional `containment.memory_max_gib` selects the Linux contained build and
+workflow emergency cap. It is an integer from 1 to 1024 and must leave at least
+2 GiB of recorded physical memory outside the cap. Omitted, the existing 8 GiB
+cap remains. A reviewed 16 GiB host may choose `{"containment":
+{"memory_max_gib": 12}}`; a larger host can select a larger feasible value.
+This is an emergency kernel ceiling, separate from an admission estimate.
+Current available memory and pressure still govern execution.
+
+The cap is pinned into generated brokers at bundle review, and each contained
+execution verifies both its service cap and its parent Lean slice cap. Changing
+the ignored profile requires reviewing and regenerating the complete capability
+bundle and setting the Lean slice to the same cap. Callers cannot override it.
+Blanc retains zero service swap; Jaune retains 1 GiB. When LSP pressure telemetry
+is unavailable, its aggregate emergency fallback uses physical memory less
+2 GiB, bounded by this configured cap when present.
+
 ## Local host guidance
 
 Machine-specific operational findings that do not fit the static JSON profile

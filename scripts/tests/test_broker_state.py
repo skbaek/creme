@@ -88,7 +88,7 @@ class BrokerStateTest(unittest.TestCase):
             "namespace['require_control_plane']=lambda:None\n"
             "namespace['require_containment']=lambda profile:None\n"
             "namespace['require_worktree']=lambda *args:Path(sys.argv[2])\n"
-            "namespace['build_command']=lambda *args:[sys.executable,sys.argv[3],sys.argv[4]]\n"
+            "namespace['build_command']=lambda *args,**kwargs:[sys.executable,sys.argv[3],sys.argv[4]]\n"
             "namespace['PREFLIGHT']=Path(sys.argv[5])\n"
             "raise SystemExit(namespace['main'](['--contained','blanc','control','--','Blanc']))\n"
         )

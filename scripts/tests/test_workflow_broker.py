@@ -145,10 +145,14 @@ class WorkflowBrokerTest(unittest.TestCase):
         self.assertNotIn("BASH_ENV", environment)
 
     def service(self, runner):
+        def command_run(command, repo, environment, descriptor, owner, goal):
+            result = runner(command, cwd=repo, env=environment, check=False, pass_fds=(descriptor,))
+            return {"exit_code": result.returncode, "retracted": False, "cleanup_proved": True}
         with mock.patch.dict(self.ns, {
             "require_containment": mock.Mock(), "require_workflow_unit": mock.Mock(),
             "workflow_control_plane": lambda: None,
             "workflow_worktree": lambda *args: self.repo,
+            "workflow_run_command": command_run,
         }), mock.patch.object(self.ns["subprocess"], "run", side_effect=runner), contextlib.redirect_stdout(io.StringIO()):
             return self.ns["workflow_service"](self.args, self.ns["workflow_parse"](self.args))
 

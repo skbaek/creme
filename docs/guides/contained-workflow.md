@@ -85,7 +85,8 @@ The systemd service owns the same private lock used by contained builds. It
 holds that lock through preflight, exclusive adaptive admission, command exit,
 and release. A lost outer client cannot release it. The command inherits the
 lock descriptor to preserve exclusion if its supervisor disappears. Systemd
-uses control-group termination and the fixed 8 GiB memory limit, zero Blanc swap
+uses control-group termination and the profile's pinned emergency memory limit
+(8 GiB by default), zero Blanc swap
 or 1 GiB Jaune swap, and the existing Lean slice and OOM group policy.
 
 Admission failure executes no recipe. The prospective owner is fsynced in an `ADMITTING` record before acquisition,
@@ -96,6 +97,30 @@ goal, operation and mode. A collected/missing service with a nonterminal record
 is unknown, not successful or idle. Do not relaunch until supported inspection
 resolves the prior job and its hold. The fixed service name also refuses a
 second workflow launch while the first unit remains active.
+
+Registered workflow commands run in a dedicated process group watched throughout
+execution using the owned builder's current critical signals: Linux available
+memory below the 2 GiB floor or sustained memory PSI full pressure, sustained
+Darwin warning pressure, and rapid swap growth. The monitor samples while the
+command runs; critical pressure held through its grace retracts the whole owned
+group with a short termination timeout. Exclusive workflow admission treats the
+containing group as one retraction unit even when a gate has nested holds.
+Normal script and gate verdicts pass through unchanged.
+
+A retracted run returns 75 and records `RETRACTED`, the command's observed exit,
+pressure events, minimum sampled available memory, and the kernel's service
+`memory.peak` when readable. These measurements describe execution, not a green
+gate verdict. After any command exit, surviving group children are terminated;
+the exact workflow hold is released only after group cleanup is proved. Unknown
+cleanup records `RELEASE_FAILED` and retains that owner for supported recovery.
+Builds launched through the owned builder and registered workflows have this
+monitoring; an ordinary direct gate invocation is not made watched merely by
+acquiring a semaphore hold.
+
+Contained builds also accept `--walk` and `--threads 1..64` before the literal
+`--` target separator. The owned builder can split a refused stale closure into
+smaller batches with `--walk`; probes remain read-only and cannot use `--wait`.
+Neither option accepts resource properties, command paths, or environment input.
 
 An ordinary retry of an explicitly selected registered recipe performs that
 supported recovery inside the fixed workflow service. Before changing the old

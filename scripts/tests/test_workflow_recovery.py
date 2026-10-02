@@ -105,11 +105,15 @@ class WorkflowRecoveryTest(unittest.TestCase):
         self.assertEqual(error.exception.code, 2)
 
     def service(self, runner, extra: dict | None = None) -> int:
+        def command_run(command, repo, environment, descriptor, owner, goal):
+            result = runner(command, cwd=repo, env=environment, check=False, pass_fds=(descriptor,))
+            return {"exit_code": result.returncode, "retracted": False, "cleanup_proved": True}
         patches = {
             "require_containment": mock.Mock(),
             "require_workflow_unit": mock.Mock(),
             "workflow_control_plane": lambda: None,
             "workflow_worktree": lambda *args: self.repo,
+            "workflow_run_command": command_run,
         }
         patches.update(extra or {})
         with mock.patch.dict(self.ns, patches), mock.patch.object(

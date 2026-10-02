@@ -364,15 +364,18 @@ def workflow_run_command(command, repo, environment, descriptor, owner, goal):
         terminate=lambda _group: _terminate_process_group(proc, timeout=1.0),
     )
     watchdog.start()
+    cleanup = True
     try:
         command_exit = proc.wait()
+        # Keep pressure sampling active until surviving descendants are gone.
+        # The same short bound applies if the command leader exits first.
+        if _process_group_alive(proc.pid) is not False:
+            cleanup = _terminate_process_group(proc, timeout=1.0)
     finally:
         # Exceptions preserve the RUNNING owner; inherited lock and systemd's
         # control-group cleanup still guard recovery after a lost supervisor.
         watchdog.stop()
-    cleanup = watchdog.cleanup_proved
-    if _process_group_alive(proc.pid) is not False:
-        cleanup = _terminate_process_group(proc) and cleanup
+    cleanup = cleanup and watchdog.cleanup_proved
     return {
         "exit_code": RETRACTED_EXIT if watchdog.retracted else command_exit,
         "command_exit_code": command_exit,

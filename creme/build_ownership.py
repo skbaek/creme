@@ -3353,9 +3353,16 @@ def _terminate_process_group(proc: subprocess.Popen[str], timeout: float = 10.0)
             # through the wait and final ESRCH probe, but never release a hold
             # merely because this host could not inspect or signal the group.
             pass
+    deadline = time.monotonic() + timeout
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        pass
+    # Reaping the leader is not proof that its children obeyed SIGTERM. A
+    # launcher can exit immediately while a worker in its group keeps running.
+    while _process_group_alive(pgid) is not False and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if _process_group_alive(pgid) is not False:
         try:
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:

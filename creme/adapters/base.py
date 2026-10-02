@@ -169,6 +169,13 @@ class Adapter:
             f"process snapshots are not implemented for {self.system}",
         )
 
+    def process_instances(self, pids: list[int]) -> CapabilityResult:
+        """Start identity and command for named processes; unknown means no signal."""
+        return self.result(
+            "process_instances", "UNAVAILABLE",
+            f"process start identities are not implemented for {self.system}",
+        )
+
     def master_process_witness(self, client: Optional[str]) -> CapabilityResult:
         """Identify an existing process guard without asserting task liveness."""
         if client == "codex" and self.system in {"Linux", "Darwin"}:

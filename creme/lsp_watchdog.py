@@ -13,11 +13,10 @@ touched.  A worker is stopped when
 
 * its footprint (the larger of RSS and the physical footprint, which counts
   compressed pages that RSS omits) passes the configured ceiling; or
-* the host holds the build watchdog's critical signal (`watchdog_critical`:
-  kernel pressure at warning held 10 s, or swap +1 GiB within 10 s) for
-  `grace` seconds, and the worker is the largest owned one at or above the
-  semaphore's heavy-worker size.  A smaller worker is not the pressure's cause,
-  so it is left to the owned-build watchdog and the host's other answers.
+* aggregate owned worker memory passes its emergency ceiling; or
+* the host holds the build watchdog's critical signal for `grace` seconds,
+  and the worker is the largest owned one. Individually small workers can
+  exhaust memory together, so there is no heavy-worker size exclusion.
 
 Stopping a worker is the restart: the Lean server reports the crashed file and
 starts a fresh worker when the file is next used.  Every stop is logged to the
@@ -44,17 +43,18 @@ from .adapters import get_adapter
 from .reclaim import is_lean_worker
 
 
-LSP_WATCH_INTERVAL_SECONDS = 3.0
+LSP_WATCH_INTERVAL_SECONDS = 1.0
 # Critical host pressure must persist this long before a worker is stopped.
 LSP_PRESSURE_GRACE_SECONDS = owned.WATCHDOG_GRACE_SECONDS
 # After a pressure stop, swap and the kernel level need time to settle before
 # a second worker is judged by them.
 LSP_PRESSURE_COOLDOWN_SECONDS = 30.0
 # SIGTERM first; SIGKILL if the worker is still there this much later.
-LSP_TERM_GRACE_SECONDS = 5.0
+LSP_TERM_GRACE_SECONDS = 1.0
 KIB_PER_GIB = 1024 ** 2
 
 Snapshot = dict[int, tuple[int, int, str]]
+Instances = dict[int, tuple[str, str]]
 
 
 @dataclass(frozen=True)
@@ -63,6 +63,7 @@ class Worker:
     command: str
     rss_kib: int
     footprint_kib: Optional[int]
+    started: Optional[str] = None
 
     @property
     def size_kib(self) -> int:
@@ -99,6 +100,20 @@ def _footprints(pids: list[int]) -> dict[int, int]:
     return found
 
 
+def _instances(pids: list[int]) -> Instances:
+    try:
+        sampled = get_adapter().process_instances(pids)
+    except Exception:
+        return {}
+    raw = sampled.data.get("instances") if sampled.status == "OK" and sampled.data else None
+    found = {}
+    for pid, row in (raw or {}).items():
+        if isinstance(row, dict) and isinstance(row.get("started"), str) and row["started"] \
+                and isinstance(row.get("command"), str):
+            found[int(pid)] = (row["started"], row["command"])
+    return found
+
+
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -114,19 +129,22 @@ def stop_worker(
     root_pid: int,
     *,
     snapshot: Callable[[], Optional[Snapshot]] = owned._process_snapshot,
+    instances: Callable[[list[int]], Instances] = _instances,
     grace: float = LSP_TERM_GRACE_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     """SIGTERM the worker, then SIGKILL it if it outlives `grace`.
 
-    Each signal is sent only while a fresh snapshot still shows the same
-    command in `root_pid`'s tree, so a recycled pid is never signalled.
+    Each signal needs a fresh tree/command check and matching process start
+    identity. Missing identity fails closed, including on unsupported hosts.
     Returns the negated last signal sent, or 0 when none was.
     """
     sent = 0
     for signum in (signal.SIGTERM, signal.SIGKILL):
         rows = snapshot()
         if rows is None or owned_workers(root_pid, rows).get(worker.pid) != worker.command:
+            return sent
+        if worker.started is None or instances([worker.pid]).get(worker.pid) != (worker.started, worker.command):
             return sent
         try:
             os.kill(worker.pid, signum)
@@ -192,6 +210,8 @@ class LspWorkerWatchdog(threading.Thread):
         *,
         snapshot: Callable[[], Optional[Snapshot]] = owned._process_snapshot,
         footprints: Callable[[list[int]], dict[int, int]] = _footprints,
+        instances: Callable[[list[int]], Instances] = _instances,
+        aggregate_ceiling_gib: Optional[float] = None,
         probe: Optional[Callable[[], Any]] = None,
         stop: Optional[Callable[[Worker], int]] = None,
         record: Callable[[Worker, str, int], None] = record_stop,
@@ -199,16 +219,18 @@ class LspWorkerWatchdog(threading.Thread):
         interval: float = LSP_WATCH_INTERVAL_SECONDS,
         grace: float = LSP_PRESSURE_GRACE_SECONDS,
         cooldown: float = LSP_PRESSURE_COOLDOWN_SECONDS,
-        heavy_gib: float = semaphore.HEAVY_WORKER_GIB,
     ) -> None:
         super().__init__(daemon=True)
         self.root_pid = root_pid
         self.ceiling_kib = int(ceiling_gib * KIB_PER_GIB)
-        self.heavy_kib = int(heavy_gib * KIB_PER_GIB)
+        self.aggregate_ceiling_kib = (
+            int(aggregate_ceiling_gib * KIB_PER_GIB) if aggregate_ceiling_gib is not None else None
+        )
         self.snapshot = snapshot
         self.footprints = footprints
+        self.instances = instances
         self.probe = probe or (lambda: get_adapter().memory_headroom())
-        self.stop_worker = stop or (lambda worker: stop_worker(worker, root_pid, snapshot=snapshot))
+        self.stop_worker = stop or (lambda worker: stop_worker(worker, root_pid, snapshot=snapshot, instances=instances))
         self.record = record
         self.clock = clock
         self.interval = interval
@@ -220,67 +242,115 @@ class LspWorkerWatchdog(threading.Thread):
         self._warning: Optional[float] = None
         self._critical: Optional[float] = None
         self._quiet_until: Optional[float] = None
+        self._last_sample: Optional[float] = None
+        self._telemetry_missing = False
+        self.telemetry_status = "UNAVAILABLE"
 
-    def _workers(self) -> list[Worker]:
+    def _workers(self) -> Optional[list[Worker]]:
         rows = self.snapshot()
         if rows is None:
-            return []
+            return None
         commands = owned_workers(self.root_pid, rows)
         sizes = self.footprints(sorted(commands)) if commands else {}
+        identities = self.instances(sorted(commands)) if commands else {}
         return [
-            Worker(pid, command, rows[pid][1], sizes.get(pid))
+            Worker(pid, command, rows[pid][1], sizes.get(pid),
+                   identities[pid][0] if identities.get(pid, (None, None))[1] == command else None)
             for pid, command in sorted(commands.items())
         ]
 
-    def _critical_reason(self, now: float) -> Optional[str]:
+    def _critical_reason(self, now: float) -> tuple[bool, Optional[str]]:
         try:
             sample = self.probe()
         except Exception:
-            return None
+            self._telemetry_missing = True
+            self.telemetry_status = "UNAVAILABLE"
+            return False, None
         data = getattr(sample, "data", None)
+        if getattr(sample, "status", None) != "OK" or not isinstance(data, dict):
+            self._telemetry_missing = True
+            self.telemetry_status = "UNAVAILABLE"
+            return False, None
         swap = data.get("swap_used_mib") if isinstance(data, dict) else None
+        level = owned._pressure_level(sample)
+        direct = data.get("memory_available_direct") is True
+        _free, available, _total = semaphore._headroom_values(sample, None)
+        psi = data.get("memory_psi_full_avg10")
+        numeric = lambda value: isinstance(value, (int, float)) and not isinstance(value, bool)
+        if not (level is not None or numeric(swap) or (direct and (numeric(available) or numeric(psi)))):
+            self._telemetry_missing = True
+            self.telemetry_status = "UNAVAILABLE"
+            return False, None
+        if self._telemetry_missing and self._last_sample is not None:
+            gap = now - self._last_sample
+            # Unknown time cannot prove sustained pressure or healthy recovery.
+            if self._warning is not None:
+                self._warning += gap
+            if self._critical is not None:
+                self._critical += gap
+            self._swap = []
+        self._telemetry_missing = False
+        self.telemetry_status = "OK"
+        self._last_sample = now
         if isinstance(swap, (int, float)) and not isinstance(swap, bool):
             self._swap.append((now, float(swap)))
             self._swap = [
                 item for item in self._swap if now - item[0] <= owned.SWAP_GROWTH_WINDOW_SECONDS
             ]
-        level = owned._pressure_level(sample)
         if level is not None and level >= owned.DARWIN_WARNING_PRESSURE_LEVEL:
             if self._warning is None:
                 self._warning = now
         else:
             self._warning = None
-        return owned.watchdog_critical(
+        return True, owned.watchdog_critical(
             sample, semaphore.ADMISSION_FLOOR_GIB, self._swap,
             None if self._warning is None else now - self._warning,
         )
 
-    def _stop_worker(self, worker: Worker, reason: str) -> None:
+    def _stop_worker(self, worker: Worker, reason: str) -> bool:
         code = self.stop_worker(worker)
         if code:
             self.stopped.append(worker.pid)
             self.record(worker, reason, code)
+        return bool(code)
 
     def check(self) -> None:
-        """One sample: stop every worker past the ceiling, then answer pressure."""
+        """One sample: apply emergency ceilings, then answer host pressure."""
         workers = self._workers()
-        now = self.clock()
+        if workers is None:
+            self._telemetry_missing = True
+            self.telemetry_status = "UNAVAILABLE"
+            return
         remaining = []
         for worker in workers:
             if worker.size_kib > self.ceiling_kib:
-                self._stop_worker(worker, (
+                stopped = self._stop_worker(worker, (
                     f"footprint {worker.size_kib / KIB_PER_GIB:.1f} GiB above the "
                     f"{self.ceiling_kib / KIB_PER_GIB:g} GiB lsp worker ceiling"
                 ))
+                if not stopped:
+                    remaining.append(worker)
             else:
                 remaining.append(worker)
-        heavy = [worker for worker in remaining if worker.size_kib >= self.heavy_kib]
-        if not heavy:
-            # Without an owned heavy worker there is nothing here to answer
-            # pressure with; the probe is not paid for.
+        remaining = [worker for worker in remaining if worker.size_kib > 0]
+        if not remaining:
             self._swap, self._warning, self._critical = [], None, None
+            self._last_sample, self._telemetry_missing = None, False
             return
-        critical = self._critical_reason(now)
+        now = self.clock()
+        aggregate = sum(worker.size_kib for worker in remaining)
+        eligible = [worker for worker in remaining if worker.started is not None]
+        if eligible and self.aggregate_ceiling_kib is not None and aggregate > self.aggregate_ceiling_kib:
+            largest = max(eligible, key=lambda worker: worker.size_kib)
+            self._stop_worker(largest, (
+                f"aggregate owned workers {aggregate / KIB_PER_GIB:.1f} GiB above the "
+                f"{self.aggregate_ceiling_kib / KIB_PER_GIB:g} GiB aggregate ceiling; "
+                f"largest owned worker {largest.size_kib / KIB_PER_GIB:.1f} GiB"
+            ))
+            return
+        observed, critical = self._critical_reason(now)
+        if not observed:
+            return
         if critical is None:
             self._critical = None
             return
@@ -290,14 +360,17 @@ class LspWorkerWatchdog(threading.Thread):
             return
         if self._quiet_until is not None and now < self._quiet_until:
             return
-        largest = max(heavy, key=lambda worker: worker.size_kib)
-        self._stop_worker(largest, (
+        if not eligible:
+            return  # unverified process identity never grants signalling authority
+        largest = max(eligible, key=lambda worker: worker.size_kib)
+        stopped = self._stop_worker(largest, (
             f"largest owned worker ({largest.size_kib / KIB_PER_GIB:.1f} GiB) "
-            f"under critical host pressure: {critical}"
+            f"of aggregate {aggregate / KIB_PER_GIB:.1f} GiB under critical host pressure: {critical}"
         ))
-        self._quiet_until = now + self.cooldown
-        self._critical = None
-        self._swap = []
+        if stopped:
+            self._quiet_until = self.clock() + self.cooldown
+            self._critical = None
+            self._swap = []
 
     def run(self) -> None:
         while not self.stop_event.is_set():
@@ -320,6 +393,7 @@ def supervise(
     env: dict[str, str],
     *,
     ceiling_gib: Optional[float] = None,
+    aggregate_ceiling_gib: Optional[float] = None,
     popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     watchdog: Callable[..., LspWorkerWatchdog] = LspWorkerWatchdog,
 ) -> int:
@@ -327,6 +401,9 @@ def supervise(
     from .profile import load_lsp_worker_ceiling
 
     ceiling = ceiling_gib if ceiling_gib is not None else load_lsp_worker_ceiling()
+    if aggregate_ceiling_gib is None:
+        from .profile import load_lsp_aggregate_ceiling
+        aggregate_ceiling_gib = load_lsp_aggregate_ceiling()
     child = popen(command, env=env, executable=command[0])
 
     def forward(signum: int, _frame: Any) -> None:
@@ -336,7 +413,7 @@ def supervise(
             pass
 
     previous = {signum: signal.signal(signum, forward) for signum in _FORWARDED_SIGNALS}
-    guard = watchdog(child.pid, ceiling)
+    guard = watchdog(child.pid, ceiling, aggregate_ceiling_gib=aggregate_ceiling_gib)
     guard.start()
     try:
         code = child.wait()

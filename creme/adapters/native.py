@@ -24,6 +24,33 @@ class NativeAdapter(Adapter):
     def _run(argv: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
+    def process_instances(self, pids: list[int]) -> CapabilityResult:
+        if not pids:
+            return self.result("process_instances", "OK", "no processes requested", {"instances": {}})
+        if any(isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 for pid in pids):
+            return self.result("process_instances", "REFUSED", "process ids must be positive integers")
+        try:
+            sampled = self._run([
+                "/bin/ps", "-p", ",".join(str(pid) for pid in sorted(set(pids))),
+                "-o", "pid=,lstart=,command=",
+            ], timeout=2.0)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self.result("process_instances", "UNAVAILABLE", str(exc))
+        if sampled.returncode:
+            return self.result("process_instances", "UNAVAILABLE", "process identity snapshot failed")
+        instances = {}
+        for line in sampled.stdout.splitlines():
+            fields = line.split(None, 6)
+            if len(fields) != 7:
+                continue
+            try:
+                pid = int(fields[0])
+            except ValueError:
+                continue
+            if pid in pids:
+                instances[pid] = {"started": " ".join(fields[1:6]), "command": fields[6]}
+        return self.result("process_instances", "OK", "process start identities sampled", {"instances": instances})
+
     def python_runtime(
         self,
         version: str,

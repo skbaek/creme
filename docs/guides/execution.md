@@ -149,19 +149,31 @@ its owner's to checkpoint and wind down.
 stdio, and watches the `lean --worker` processes in that child's process tree.
 Those workers are the only processes it signals. Other sessions' workers, the
 `lean --server` and `lake serve` above them, and everything outside the tree
-are never touched. It stops one owned worker (SIGTERM, then SIGKILL five
-seconds later) in either of two cases:
+are never touched. Each signal rechecks ancestry, command, and process start
+identity; unavailable identity grants no signalling authority. Linux and
+Darwin provide this capability; unsupported hosts remain in limited mode.
+It samples once per second and stops owned workers (SIGTERM, then SIGKILL
+one second later) in these cases:
 
 - **Ceiling.** The worker's footprint (the larger of RSS and the physical
   footprint, which counts the compressed pages RSS omits) passes the
   ceiling. The ceiling is `lsp_watchdog.worker_ceiling_gib` in the host
   profile (an integer, 2–1024). By default it is two thirds of physical
   memory, which is 16 GiB on a 24 GiB host.
+- **Aggregate ceiling.** The sum of owned workers' footprints passes the
+  host's aggregate emergency limit: physical RAM minus the 2 GiB admission
+  floor, bounded by the configured containment limit when present. The
+  largest verified owned worker is stopped even if host pressure telemetry
+  is unavailable. Foreign workers never enter the sum or the target set.
 - **Pressure.** The owned-build watchdog's critical signal holds for three
   seconds: kernel pressure at warning or worse for 10 s, or swap growing by
-  1 GiB within 10 s. The worker stopped is the largest owned one at or above
-  the heavy-worker size (8 GiB). A smaller worker is left alone. After a
-  pressure stop, the watchdog waits 30 s before judging another worker.
+  1 GiB within 10 s; Linux also uses `MemAvailable` below the admission floor
+  and sustained memory PSI. The worker stopped is the largest verified owned
+  worker with positive memory usage. No 8 GiB exclusion applies: several
+  smaller workers can exhaust host memory together. The stop records aggregate
+  owned memory. After a pressure stop, the watchdog waits 30 s before judging
+  another worker. A healthy sample resets the pressure grace; unavailable
+  telemetry pauses it and cannot prove either recovery or sustained pressure.
 
 A stop writes an `lsp_worker` row to the build ledger (`exit` is the negated
 signal, `peak_rss_mib` the footprint that decided it). It also writes one

@@ -14,6 +14,9 @@ from unittest.mock import patch
 
 from creme import build_ownership as owned
 from creme import lsp_watchdog as lsp
+from creme.adapters.base import Adapter
+from creme.adapters.linux import LinuxAdapter
+from creme.adapters.darwin import DarwinAdapter
 from creme.profile import fingerprint, lsp_worker_ceiling_gib, validate_data
 
 
@@ -52,6 +55,16 @@ def _sample(level=None, swap_mib=None):
     })
 
 
+def _linux_sample(available_gib=5, psi=0):
+    return SimpleNamespace(status="OK", data={
+        "memory_free_percent": int(available_gib / 16 * 100),
+        "physical_memory_bytes": 16 * 1024 ** 3,
+        "memory_available_direct": True,
+        "memory_available_bytes": int(available_gib * 1024 ** 3),
+        "memory_psi_full_avg10": psi,
+    })
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -80,11 +93,13 @@ class _Host:
         self.rows.pop(worker.pid, None)
         return -int(signal.SIGTERM)
 
-    def watchdog(self, ceiling_gib=16, clock=None):
+    def watchdog(self, ceiling_gib=16, clock=None, aggregate_ceiling_gib=None):
         return lsp.LspWorkerWatchdog(
             ROOT, ceiling_gib,
             snapshot=lambda: self.rows,
             footprints=lambda pids: {pid: self.sizes[pid] for pid in pids if pid in self.sizes},
+            instances=lambda pids: {pid: ("fixture start", self.rows[pid][2]) for pid in pids if pid in self.rows},
+            aggregate_ceiling_gib=aggregate_ceiling_gib,
             probe=self.probe,
             stop=self.stop,
             record=lambda worker, reason, code: self.records.append((worker.pid, reason, code)),
@@ -100,6 +115,32 @@ class OwnershipTest(unittest.TestCase):
     def test_worker_document_is_the_unquoted_file_uri(self) -> None:
         worker = lsp.Worker(1, WORKER_CMD, 0, None)
         self.assertEqual(worker.document, "/repo/.worktrees/goal-a/A B.lean")
+
+
+class ProcessInstanceTest(unittest.TestCase):
+    def test_supported_adapters_sample_start_identity_and_preserve_command(self) -> None:
+        for adapter in (LinuxAdapter(), DarwinAdapter()):
+            with self.subTest(system=adapter.system), patch.object(adapter, "_run", return_value=
+                    SimpleNamespace(returncode=0, stdout="110 Fri Oct  2 01:02:03 2026 " + WORKER_CMD + "\n")) as run:
+                sample = adapter.process_instances([110])
+            self.assertEqual(sample.status, "OK")
+            self.assertEqual(sample.data["instances"], {
+                110: {"started": "Fri Oct 2 01:02:03 2026", "command": WORKER_CMD},
+            })
+            self.assertEqual(run.call_args.kwargs["timeout"], 2.0)
+
+    def test_missing_or_malformed_identity_never_becomes_verified(self) -> None:
+        adapter = LinuxAdapter()
+        with patch.object(adapter, "_run", return_value=SimpleNamespace(returncode=0, stdout="bad row\n")):
+            self.assertEqual(adapter.process_instances([110]).data["instances"], {})
+        with patch.object(adapter, "_run", side_effect=subprocess.TimeoutExpired("ps", 2)):
+            self.assertEqual(adapter.process_instances([110]).status, "UNAVAILABLE")
+        self.assertEqual(Adapter.unsupported("Windows").process_instances([110]).status, "UNAVAILABLE")
+
+    def test_invalid_pid_is_refused_without_launching_a_command(self) -> None:
+        with patch.object(LinuxAdapter, "_run") as run:
+            self.assertEqual(LinuxAdapter().process_instances([True]).status, "REFUSED")
+        run.assert_not_called()
 
 
 class CeilingTest(unittest.TestCase):
@@ -160,16 +201,125 @@ class PressureTest(unittest.TestCase):
         self.assertEqual(host.stopped, [110])
         self.assertIn("swap grew", host.records[0][1])
 
-    def test_pressure_never_stops_a_worker_below_the_heavy_size(self) -> None:
+    def test_two_workers_below_eight_gib_answer_aggregate_pressure(self) -> None:
         clock = _Clock()
         host = _Host(_rows(A=3, B=5), samples=[_sample(level=4)])
         guard = host.watchdog(clock=clock)
-        for moment in range(0, 60, 3):
+        for moment in (0, 10, 13):
+            clock.now = moment
+            guard.check()
+        self.assertEqual(host.stopped, [111])
+        self.assertEqual(host.probes, 3)
+        self.assertIn("aggregate 8.0 GiB", host.records[0][1])
+        self.assertIn(901, host.rows)
+
+    def test_linux_low_availability_and_psi_stop_small_workers(self) -> None:
+        for sample in (_linux_sample(1), _linux_sample(5, psi=25)):
+            with self.subTest(sample=sample):
+                clock = _Clock()
+                host = _Host(_rows(A=3, B=5), samples=[sample])
+                guard = host.watchdog(clock=clock)
+                guard.check()
+                clock.now = 3
+                guard.check()
+                self.assertEqual(host.stopped, [111])
+                self.assertIn(901, host.rows)
+
+    def test_recovery_resets_the_pressure_grace(self) -> None:
+        clock = _Clock()
+        host = _Host(_rows(A=5), samples=[_linux_sample(1), _linux_sample(5), _linux_sample(1)])
+        guard = host.watchdog(clock=clock)
+        for moment in (0, 2, 3, 5):
             clock.now = moment
             guard.check()
         self.assertEqual(host.stopped, [])
-        # Without an owned heavy worker the probe is never paid for.
-        self.assertEqual(host.probes, 0)
+        clock.now = 6
+        guard.check()
+        self.assertEqual(host.stopped, [110])
+
+    def test_unavailable_telemetry_pauses_pressure_without_asserting_recovery(self) -> None:
+        unknowns = [SimpleNamespace(status="UNAVAILABLE", data=None),
+                    SimpleNamespace(status="OK", data={}),
+                    SimpleNamespace(status="UNAVAILABLE", data=_linux_sample(1).data)]
+        for unknown in unknowns:
+            with self.subTest(unknown=unknown):
+                clock = _Clock()
+                host = _Host(_rows(A=5), samples=[_linux_sample(1), _linux_sample(1), unknown, _linux_sample(1)])
+                guard = host.watchdog(clock=clock)
+                for moment in (0, 2, 3):
+                    clock.now = moment
+                    guard.check()
+                self.assertEqual(guard.telemetry_status, "UNAVAILABLE")
+                self.assertIsNotNone(guard._critical)
+                clock.now = 100
+                guard.check()
+                self.assertEqual(host.stopped, [])
+                clock.now = 101
+                guard.check()
+                self.assertEqual(host.stopped, [110])
+
+    def test_probe_exception_is_unknown_and_keeps_ceiling_active(self) -> None:
+        host = _Host(_rows(A=5))
+        guard = host.watchdog()
+        guard.probe = lambda: (_ for _ in ()).throw(OSError("unreadable"))
+        guard.check()
+        self.assertEqual(guard.telemetry_status, "UNAVAILABLE")
+        host.rows[110] = (104, 17 * GIB_KIB, host.rows[110][2])
+        guard.check()
+        self.assertEqual(host.stopped, [110])
+
+    def test_missing_process_snapshot_keeps_pressure_episode_unknown(self) -> None:
+        clock = _Clock()
+        host = _Host(_rows(A=5), samples=[_linux_sample(1)])
+        guard = host.watchdog(clock=clock)
+        guard.check()
+        clock.now = 2
+        guard.check()
+        snapshot = guard.snapshot
+        guard.snapshot = lambda: None
+        clock.now = 3
+        guard.check()
+        self.assertEqual(guard.telemetry_status, "UNAVAILABLE")
+        self.assertIsNotNone(guard._critical)
+        guard.snapshot = snapshot
+        clock.now = 100
+        guard.check()
+        self.assertEqual(host.stopped, [])
+        clock.now = 101
+        guard.check()
+        self.assertEqual(host.stopped, [110])
+
+    def test_aggregate_counts_unverified_workers_but_stops_only_verified_worker(self) -> None:
+        host = _Host(_rows(A=8, B=5))
+        guard = host.watchdog(aggregate_ceiling_gib=12)
+        guard.instances = lambda pids: {111: ("fixture start", host.rows[111][2])}
+        guard.check()
+        self.assertEqual(host.stopped, [111])
+        self.assertIn("aggregate owned workers 13.0 GiB", host.records[0][1])
+        self.assertIn(110, host.rows)
+
+    def test_aggregate_ceiling_answers_fast_growth_even_without_host_telemetry(self) -> None:
+        host = _Host(_rows(A=4, B=4), samples=[SimpleNamespace(status="UNAVAILABLE", data=None)])
+        guard = host.watchdog(ceiling_gib=9, aggregate_ceiling_gib=12)
+        guard.check()
+        self.assertEqual(host.stopped, [])
+        host.rows[110] = (104, 6 * GIB_KIB, host.rows[110][2])
+        host.rows[111] = (104, 7 * GIB_KIB, host.rows[111][2])
+        guard.check()
+        self.assertEqual(host.stopped, [111])
+        self.assertIn("aggregate owned workers 13.0 GiB", host.records[0][1])
+        self.assertIn(901, host.rows)
+
+    def test_missing_identity_does_not_authorize_a_stop(self) -> None:
+        host = _Host(_rows(A=5, B=4), samples=[_linux_sample(1)])
+        clock = _Clock()
+        guard = host.watchdog(clock=clock)
+        guard.instances = lambda pids: {}
+        for moment in (0, 3, 30):
+            clock.now = moment
+            guard.check()
+        self.assertEqual(host.stopped, [])
+        self.assertEqual(host.probes, 3)
 
 
 class StopWorkerTest(unittest.TestCase):
@@ -187,7 +337,9 @@ class StopWorkerTest(unittest.TestCase):
             rows = owned._process_snapshot() or {}
             command = lsp.owned_workers(os.getpid(), rows).get(proc.pid)
             if command:
-                return proc, lsp.Worker(proc.pid, command, 0, None)
+                instance = lsp._instances([proc.pid]).get(proc.pid)
+                if instance and instance[1] == command:
+                    return proc, lsp.Worker(proc.pid, command, 0, None, instance[0])
             time.sleep(0.05)
         self.fail("fake worker never appeared in the process table")
 
@@ -210,6 +362,24 @@ class StopWorkerTest(unittest.TestCase):
         changed = lsp.Worker(worker.pid, worker.command + " other", 0, None)
         self.assertEqual(lsp.stop_worker(changed, os.getpid(), grace=0.2), 0)
         self.assertIsNone(proc.poll())
+
+    def test_recycled_pid_with_same_command_is_not_signalled(self) -> None:
+        rows = _rows(A=3)
+        worker = lsp.Worker(110, rows[110][2], 3 * GIB_KIB, None, "original start")
+        with patch("os.kill") as kill:
+            self.assertEqual(lsp.stop_worker(worker, ROOT, snapshot=lambda: rows,
+                             instances=lambda pids: {110: ("new start", worker.command)}), 0)
+        kill.assert_not_called()
+
+    def test_identity_is_rechecked_before_sigkill(self) -> None:
+        rows = _rows(A=3)
+        worker = lsp.Worker(110, rows[110][2], 3 * GIB_KIB, None, "original start")
+        identities = iter([{110: (worker.started, worker.command)}, {110: ("new start", worker.command)}])
+        with patch("os.kill") as kill, patch.object(lsp, "_alive", return_value=True):
+            code = lsp.stop_worker(worker, ROOT, snapshot=lambda: rows,
+                                   instances=lambda pids: next(identities), grace=0)
+        self.assertEqual(code, -int(signal.SIGTERM))
+        kill.assert_called_once_with(110, signal.SIGTERM)
 
 
 class RecordTest(unittest.TestCase):
@@ -258,8 +428,11 @@ class SuperviseTest(unittest.TestCase):
                 events.append(f"signal {signum}")
 
         class Guard:
-            def __init__(self, pid, ceiling):
+            def __init__(self, pid, ceiling, aggregate_ceiling_gib=None):
                 events.append(f"watch {pid} {ceiling}")
+                self.aggregate = aggregate_ceiling_gib
+                if self.aggregate != 14:
+                    raise AssertionError("aggregate ceiling was not passed to the watchdog")
 
             def start(self):
                 events.append("start")
@@ -275,7 +448,7 @@ class SuperviseTest(unittest.TestCase):
 
         before = signal.getsignal(signal.SIGTERM)
         code = lsp.supervise(["/reviewed/uvx", "lean-lsp-mcp==0.26.1"], {"PATH": "/guard"},
-                             ceiling_gib=12, popen=popen, watchdog=Guard)
+                             ceiling_gib=12, aggregate_ceiling_gib=14, popen=popen, watchdog=Guard)
         self.assertEqual(code, 128 + int(signal.SIGTERM))
         self.assertEqual(events, ["watch 4242 12", "start", "wait", "stop"])
         self.assertEqual(launched["env"], {"PATH": "/guard"})

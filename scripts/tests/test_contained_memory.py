@@ -88,6 +88,24 @@ class ContainedMemoryTest(unittest.TestCase):
         finally:
             os.close(descriptor)
 
+    def test_exited_leader_keeps_group_watched_and_surviving_children_are_cleaned(self):
+        proc = mock.Mock(pid=12345)
+        proc.wait.return_value = proc.poll.return_value = 0
+        watchdog = mock.Mock(retracted=False, cleanup_proved=True,
+                             events=[], min_available_gib=None)
+        def watched(owner, group, **kwargs):
+            # The leader exited, but observed group liveness keeps the monitor
+            # eligible to retract its children until cleanup runs.
+            self.assertIsNone(group.poll())
+            return watchdog
+        with mock.patch.object(subprocess, "Popen", return_value=proc) as spawn, mock.patch.object(build_ownership, "Watchdog", side_effect=watched), mock.patch.object(build_ownership, "_process_group_alive", return_value=True), mock.patch.object(build_ownership, "_terminate_process_group", return_value=True) as terminate, mock.patch.dict(self.ns, {"workflow_peak_gib": lambda: None}):
+            result = self.ns["workflow_run_command"](["fixture"], self.root, {}, 99, "owner", "goal")
+        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
+        self.assertEqual(spawn.call_args.kwargs["pass_fds"], (99,))
+        terminate.assert_called_once_with(proc)
+        self.assertTrue(result["cleanup_proved"])
+        self.assertEqual(result["exit_code"], 0)
+
     def test_unproven_cleanup_preserves_exact_owner_and_release_is_not_called(self):
         repo = self.root / "blanc/.worktrees/goal"
         (repo / "scripts").mkdir(parents=True)

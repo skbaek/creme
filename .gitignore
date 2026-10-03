@@ -14,3 +14,6 @@ acceptance/local/
 
 # Host-local semaphore state; the launcher and documentation remain tracked.
 /.semaphore/state/
+
+# Host-local Claude Code settings (e.g. the model-fit telemetry env); never tracked.
+/.claude/settings.local.json

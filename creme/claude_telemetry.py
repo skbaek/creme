@@ -7,12 +7,19 @@ final counts. This receiver accepts that export on 127.0.0.1 only and appends
 each request body, unmodified, to a daily JSONL file in the goal store's
 ignored model-fit runtime directory. It interprets nothing; the model-fit
 adapter reads the files.
+
+Its purview is Claude Code work under a master, so it lives with the master
+lease: `master start` (Claude client) starts it detached and
+`semaphore master-release` stops it. It is never a login item.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import signal
+import socket
+import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
@@ -81,3 +88,70 @@ def serve(model_fit_dir: Path, port: int = DEFAULT_PORT) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(directory))
     print(f"claude-telemetry: listening on 127.0.0.1:{port}, writing {directory}", flush=True)
     server.serve_forever()
+
+
+RUNTIME = Path(__file__).resolve().parents[1] / ".creme"
+PID_FILE = RUNTIME / "claude-telemetry.pid"
+LOG_FILE = RUNTIME / "claude-telemetry.log"
+SERVE_MARKER = "claude-telemetry serve"
+
+
+def _listening(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _recorded_pid() -> int | None:
+    try:
+        pid = int(PID_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        command = subprocess.run(["ps", "-p", str(pid), "-o", "command="], stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, text=True, check=False).stdout
+    except OSError:
+        return None
+    # A recycled pid running something else is never ours to signal.
+    return pid if SERVE_MARKER in command else None
+
+
+def status(port: int = DEFAULT_PORT) -> dict:
+    return {"listening": _listening(port), "pid": _recorded_pid(), "port": port}
+
+
+def start(model_fit_dir: Path, port: int = DEFAULT_PORT) -> dict:
+    """Start the receiver detached unless something already listens on the port."""
+    if _listening(port):
+        return {"status": "running", **status(port)}
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    with open(LOG_FILE, "a", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "creme", "claude-telemetry", "serve", "--dir", str(model_fit_dir),
+             "--port", str(port)],
+            cwd=str(Path(__file__).resolve().parents[1]), stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            start_new_session=True,
+        )
+    PID_FILE.write_text(f"{process.pid}\n", encoding="utf-8")
+    for _ in range(50):
+        if _listening(port):
+            return {"status": "started", **status(port)}
+        if process.poll() is not None:
+            break
+        threading.Event().wait(0.1)
+    return {"status": "failed", "detail": f"receiver did not listen; see {LOG_FILE}", **status(port)}
+
+
+def stop(port: int = DEFAULT_PORT) -> dict:
+    """Stop the recorded receiver; never signal a process that is not it."""
+    pid = _recorded_pid()
+    if pid is None:
+        PID_FILE.unlink(missing_ok=True)
+        return {"status": "not-running" if not _listening(port) else "foreign-listener", **status(port)}
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if _recorded_pid() is None:
+            break
+        threading.Event().wait(0.1)
+    PID_FILE.unlink(missing_ok=True)
+    return {"status": "stopped", **status(port)}

@@ -1,4 +1,7 @@
 import json
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -49,6 +52,44 @@ class ClaudeTelemetryReceiverTest(unittest.TestCase):
         self.assertEqual(self.post("/v1/logs", b"\x0a\x00", "application/x-protobuf"), 415)
         self.assertEqual(self.post("/v1/logs", b"{not json"), 500)
         self.assertEqual(self.records(), [])
+
+
+class ClaudeTelemetryLifecycleTest(unittest.TestCase):
+    """The receiver follows the master: start is idempotent, stop signals only its own process."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.saved = (T.RUNTIME, T.PID_FILE, T.LOG_FILE)
+        T.RUNTIME, T.PID_FILE, T.LOG_FILE = root, root / "receiver.pid", root / "receiver.log"
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.port = probe.getsockname()[1]
+        self.fit = root / "fit"
+
+    def tearDown(self):
+        T.stop(self.port)
+        T.RUNTIME, T.PID_FILE, T.LOG_FILE = self.saved
+        self.temp.cleanup()
+
+    def test_start_is_idempotent_and_stop_ends_the_listener(self):
+        first = T.start(self.fit, self.port)
+        self.assertEqual(first["status"], "started", first)
+        self.assertTrue(first["listening"])
+        self.assertEqual(T.start(self.fit, self.port)["status"], "running")
+        self.assertEqual(T.stop(self.port)["status"], "stopped")
+        self.assertFalse(T.status(self.port)["listening"])
+        self.assertFalse(T.PID_FILE.exists())
+
+    def test_stop_never_signals_a_recycled_pid(self):
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            T.PID_FILE.write_text(f"{sleeper.pid}\n")
+            self.assertEqual(T.stop(self.port)["status"], "not-running")
+            self.assertIsNone(sleeper.poll())
+        finally:
+            sleeper.kill()
+            sleeper.wait()
 
 
 if __name__ == "__main__":

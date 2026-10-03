@@ -99,6 +99,43 @@ shared segment from measured endpoints. `snapshot --from FILE` reads
 client hook can call the same Python functions without another result-writing
 step. No message body is imported into a usage record.
 
+Claude Code and Antigravity sources use the same acceptance. The episode ID
+defaults to the acceptance's own:
+
+```json
+{
+  "claude_code_sources": [{
+    "path": "/absolute/path/to/.claude/projects/PROJECT/SESSION/subagents/agent-ID.jsonl",
+    "harness_version": "claude-agent-tool-v1",
+    "terminal": "completed",
+    "attempt_index": 1
+  }],
+  "claude_code_master_windows": [{
+    "path": "/absolute/path/to/.claude/projects/PROJECT/SESSION.jsonl",
+    "start": "2026-10-04T09:00:00Z",
+    "end": "2026-10-04T09:40:00Z",
+    "client": "claude-code",
+    "weight": 1
+  }],
+  "antigravity_runs": [{
+    "run_dir": "/absolute/path/to/creme/.creme/antigravity/runs/RUN",
+    "harness_version": "antigravity-run-v1"
+  }]
+}
+```
+
+A Claude source names the subagent transcript; its `agent-ID.meta.json` must
+sit beside it. Optional fields: `run_id` (default `claude-agent:ID`), `route`
+(default `claude-agent-tool`), `family` (a cross-check), `profiles` (the agent
+profile directory, default this checkout's `.claude/agents`), and UTC `since`
+/ `until` to measure a resumed continuation separately from its earlier
+window. A built-in agent type without a project profile takes the uniform
+observed per-turn effort, or refuses. Master windows count responses whose
+first entry falls in `[start, end)`; the end must be in the past, and
+overlapping windows on one transcript refuse. An Antigravity source may set
+`terminal` (default from the result status), `run_id` (default
+`antigravity:RUN`) and `route`.
+
 A normalized `runs` list can be supplied instead. Each entry contains
 `receipt_id`, `episode_id`, `run_id`, `option`, observed `release`, `route`,
 `harness_version`, `attempt_index`, `terminal`, `segments: [{id, usage}]`,

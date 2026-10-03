@@ -1798,6 +1798,14 @@ def cmd_model_fit_episode(arguments: argparse.Namespace) -> int:
                     request.setdefault("runs", []).append(receipt)
                 for window in request.pop("codex_master_windows", []):
                     request.setdefault("master_segments", []).append(adapters.master_window(**window))
+                for source in request.pop("claude_code_sources", []):
+                    source.setdefault("episode_id", request.get("episode_id"))
+                    request.setdefault("runs", []).append(adapters.claude_code_run(**source))
+                for window in request.pop("claude_code_master_windows", []):
+                    request.setdefault("master_segments", []).append(adapters.claude_master_window(**window))
+                for source in request.pop("antigravity_runs", []):
+                    source.setdefault("episode_id", request.get("episode_id"))
+                    request.setdefault("runs", []).append(adapters.antigravity_run(**source))
                 if action == "accept":
                     request["kind"] = "accept"
                 result = runtime.submit(store, request)

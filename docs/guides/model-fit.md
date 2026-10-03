@@ -84,8 +84,11 @@ cached input and reasoning already included in totals are not added again.
 | Route | Current capture boundary |
 |---|---|
 | Native Codex | Combined acceptance imports an owned fresh rollout or an explicit resumed counter window, actual release/effort, and separately measured master windows. A source changing model/effort requires separate attempt windows. |
-| Muse broker | Automatic launch, terminal and measured parent-turn costs. Reminder-agent costs are not exposed in those totals, so usage stays incomplete and cannot promote a model. |
+| Muse broker | Automatic launch, terminal and measured parent-turn costs. Reminder-agent costs are not exposed in those totals (Muse's own durable log records them as `usage_family: reminder` with `reported: false` and zero counts), and compaction usage is reported separately from the parent completions, so usage stays incomplete and cannot promote a model. |
 | Luna reserve broker | Automatic launch and terminal identity. Thread-cumulative usage requires adjacent rollout windows; the broker record alone is incomplete. |
+| Claude Code Agent tool | Combined acceptance imports a subagent transcript (`claude_code_sources`) with its nested Agent-tool children: release from `message.model` (one known release; a fallback refuses), effort from the agent profile's `effort` 1..5 (low..max), usage counted once per response. Subagent transcripts usually lack the final usage of most responses (their output counts are streaming placeholders), so such runs stay incomplete; input is still recorded. A missing child transcript or a compaction is a gap too. |
+| Claude Code master | `claude_code_master_windows` measure the master's own top-level transcript between two UTC times. Master transcripts carry final usage for every response, so windows are normally complete; a compaction inside a window leaves it unknown. |
+| Antigravity run | Combined acceptance imports a `creme antigravity run` record (`antigravity_runs`): release is the init model slug, input plus disjoint cache reads, thinking inside output. Final only when the result event is present and no checkpoint or invoked-subagent step consumed unreported usage. |
 | Other native clients and one-shot routes | Normalized combined receipts are supported; automatic provider extraction is not claimed. Missing actual identity, completion or total usage remains a capability gap. |
 
 Do not turn these capability gaps into zero-cost observations. A route can still

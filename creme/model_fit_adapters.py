@@ -3,6 +3,8 @@
 Adapters expose capability gaps rather than inventing total episode costs.
 Muse parent totals do not cover hidden reminder agents. Luna counters are
 thread-cumulative and therefore require explicit adjacent rollout windows.
+Claude Code subagent transcripts usually lack final output usage; Antigravity
+checkpoint steps report none. Both stay explicit gaps, never zero.
 """
 from __future__ import annotations
 
@@ -106,3 +108,181 @@ def binding(directory, episode_id):
                 "harness_version": config["harness_version"], "option": decision["actual"]}
     finally:
         store.close()
+
+
+PROFILES = Path(__file__).resolve().parents[1] / ".claude" / "agents"
+
+
+def claude_profile_effort(agent_type, profiles=None):
+    """Effort of a Claude Code agent profile: frontmatter `effort` 1..5 -> low..max.
+
+    Returns None when no project profile of that name exists (a built-in agent
+    type); refuses a profile without a valid effort, or whose name ends in a
+    different effort word than its number.
+    """
+    if not isinstance(agent_type, str) or not agent_type or "/" in agent_type:
+        raise C.CaptureError("subagent meta has no valid agentType")
+    path = Path(profiles or PROFILES) / (agent_type + ".md")
+    if not path.is_file():
+        return None
+    lines = path.read_text().splitlines()
+    if not lines or lines[0].strip() != "---" or "---" not in [line.strip() for line in lines[1:]]:
+        raise C.CaptureError(f"profile {agent_type} has no frontmatter")
+    front = lines[1:1 + [line.strip() for line in lines[1:]].index("---")]
+    values = [line.split(":", 1)[1].strip() for line in front if line.split(":", 1)[0].strip() == "effort"]
+    if len(values) != 1 or not values[0].isdigit() or int(values[0]) not in C.CLAUDE_PROFILE_EFFORTS:
+        raise C.CaptureError(f"profile {agent_type} has no effort 1..5")
+    effort = C.CLAUDE_PROFILE_EFFORTS[int(values[0])]
+    named = agent_type.rsplit("-", 1)[-1]
+    if named in C.CLAUDE_PROFILE_EFFORTS.values() and named != effort:
+        raise C.CaptureError(f"profile {agent_type} names effort {named} but sets {effort}")
+    return effort
+
+
+def _claude_tree(transcript, start_ms, end_ms, seen):
+    """Parent transcript plus every Agent-tool child in its directory, recursively."""
+    part = C.claude_transcript(transcript, start_ms, end_ms)
+    parts, gaps = [part], []
+    directory = Path(transcript).parent
+    metas = {}
+    for meta_path in sorted(directory.glob("agent-*.meta.json")):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(meta, dict) and isinstance(meta.get("toolUseId"), str):
+            metas.setdefault(meta["toolUseId"], []).append(meta_path.name[len("agent-"):-len(".meta.json")])
+    for tool_use, agent in sorted(part["children"].items()):
+        ids = set(metas.get(tool_use, [])) | ({agent} if agent else set())
+        if not ids:
+            gaps.append(f"Agent call {tool_use} has no recorded result or child transcript")
+            continue
+        for child in sorted(ids):
+            path = directory / f"agent-{child}.jsonl"
+            if child in seen:
+                continue
+            seen.add(child)
+            if not path.is_file():
+                gaps.append(f"child agent {child} transcript is missing")
+                continue
+            child_parts, child_gaps = _claude_tree(path, None, None, seen)
+            parts += child_parts
+            gaps += child_gaps
+    return parts, gaps
+
+
+def claude_code_run(path, episode_id, harness_version, terminal, run_id=None,
+                    route="claude-agent-tool", family=None, since=None, until=None,
+                    profiles=None, override_reason="", attempt_index=1):
+    """Import one Claude Code subagent (`subagents/agent-<id>.jsonl` + `.meta.json`).
+
+    Release is the single observed `message.model`; effort is the agent
+    profile's (or, for a built-in agent type, the uniform observed per-turn
+    effort). Nested Agent-tool children are part of the run. Usage is final
+    only when every response of every included transcript has its final usage.
+    `since`/`until` (UTC ISO) bound a resumed continuation measured separately.
+    """
+    path = Path(path).resolve()
+    if not path.name.startswith("agent-") or path.suffix != ".jsonl":
+        raise C.CaptureError("Claude Code run source must be a subagents/agent-<id>.jsonl transcript")
+    agent = path.name[len("agent-"):-len(".jsonl")]
+    try:
+        meta = json.loads(path.with_name(f"agent-{agent}.meta.json").read_text())
+    except (OSError, ValueError) as exc:
+        raise C.CaptureError(f"subagent meta is missing or unreadable: {exc}") from exc
+    start_ms = C.utc_millis(since, "since") if since is not None else None
+    end_ms = C.utc_millis(until, "until") if until is not None else None
+    parts, gaps = _claude_tree(path, start_ms, end_ms, {agent})
+    own = parts[0]
+    if not own["calls"]:
+        raise C.CaptureError("subagent transcript has no model response in the window")
+    if len(own["models"]) != 1:
+        raise C.CaptureError(f"subagent changed release {own['models']}; register separate attempts")
+    release = own["models"][0]
+    observed_family = C.CLAUDE_FAMILIES.get(release)
+    if observed_family is None:
+        raise C.CaptureError(f"unknown Claude release {release!r}; extend the family map deliberately")
+    if family is not None and family != observed_family:
+        raise C.CaptureError("observed Claude release does not match its family")
+    if meta.get("model") and C.CLAUDE_FAMILIES.get(release) != meta["model"]:
+        raise C.CaptureError(f"meta model alias {meta['model']!r} disagrees with observed {release}")
+    effort = claude_profile_effort(meta.get("agentType"), profiles)
+    if len(own["efforts"]) > 1:
+        raise C.CaptureError(f"subagent changed effort {own['efforts']}; register separate attempts")
+    if effort is None:
+        if not own["efforts"]:
+            raise C.CaptureError(f"agent type {meta.get('agentType')!r} has no profile effort and no observed effort")
+        effort = own["efforts"][0]
+    elif own["efforts"] and own["efforts"] != [effort]:
+        raise C.CaptureError(f"observed effort {own['efforts']} disagrees with profile effort {effort}")
+    usage = C.claude_usage(parts, gaps)
+    usage.update(source=own["source"], start_offset=own["first_ms"], end_offset=own["last_ms"] + 1,
+                 transcripts=[part["path"] for part in parts], agent_type=meta.get("agentType"),
+                 child_models=sorted({m for part in parts[1:] for m in part["models"]}))
+    complete = usage["total_input"] is not None and usage["total_output"] is not None
+    run_id = run_id or "claude-agent:" + agent + (f":{start_ms}" if start_ms is not None else "")
+    receipt = {"receipt_id": "claude-code:" + run_id + ":" + R.digest(usage), "kind": "run",
+               "episode_id": episode_id, "run_id": run_id, "attempt_index": attempt_index,
+               "option": observed_family + "/" + effort, "release": release, "route": route,
+               "harness_version": harness_version, "override_reason": override_reason,
+               "terminal": terminal,
+               "segments": [{"id": f"claude-code:{own['source']}:{usage['start_offset']}:{usage['end_offset']}",
+                             "usage": usage}],
+               "usage_complete": complete, "usage_evidence": str(path)}
+    if not complete:
+        raw = usage["provider_raw"]
+        receipt["detail"] = (f"usage gap: {raw['unfinished_calls']} of {raw['calls']} responses lack final "
+                             f"output usage; {raw['compactions']} compactions; " + "; ".join(gaps)).rstrip("; ")
+    return receipt
+
+
+def claude_master_window(path, start, end, client="claude-code", weight=1.0):
+    """A master session window [start, end) (UTC ISO) of its own top-level transcript."""
+    start_ms, end_ms = C.utc_millis(start, "start"), C.utc_millis(end, "end")
+    if start_ms >= end_ms:
+        raise C.CaptureError("master window start must precede its end")
+    import time
+    if end_ms > time.time() * 1000:
+        raise C.CaptureError("master window ends in the future; measure it after it closes")
+    part = C.claude_transcript(Path(path), start_ms, end_ms, main_only=True)
+    # The master's own Agent calls are separate runs, not master window cost.
+    usage = C.claude_usage([part], [])
+    usage.update(source=part["source"], start_offset=start_ms, end_offset=end_ms,
+                 observed_models=part["models"], path=part["path"])
+    return {"id": f"claude-code-window:{part['source']}:{start_ms}:{end_ms}", "client": client,
+            "weight": weight, "usage": usage}
+
+
+def antigravity_run(run_dir, episode_id, harness_version, terminal=None, run_id=None,
+                    route="antigravity-run", override_reason="", attempt_index=1):
+    """Import one `creme antigravity run` record as a run of option family/effort.
+
+    Release is the init event's model slug. Usage is final only when the result
+    event is present and no step (checkpoint, subagent) consumed unreported usage.
+    """
+    record = C.antigravity_record(Path(run_dir))
+    verdict, init = record["verdict"], record["init"]
+    if init is None or not init.get("model"):
+        raise C.CaptureError("Antigravity run has no init model")
+    family, effort = verdict.get("family"), verdict.get("effort")
+    if not family or not effort or init["model"] != f"{family}-{effort}":
+        raise C.CaptureError(f"init model {init['model']!r} is not {family}-{effort}")
+    usage = C.antigravity_usage(record)
+    complete = record["result"] is not None and not record["gaps"] and usage["total_input"] is not None
+    name = verdict.get("run") or Path(run_dir).name
+    run_id = run_id or "antigravity:" + name
+    if terminal is None:
+        status = (record["result"] or {}).get("status")
+        terminal = "completed" if status == "SUCCESS" else "failed"
+    conversation = (record["result"] or {}).get("conversation_id") or init.get("conversation_id") or "none"
+    receipt = {"receipt_id": "antigravity:" + run_id + ":" + R.digest(usage), "kind": "run",
+               "episode_id": episode_id, "run_id": run_id, "attempt_index": attempt_index,
+               "option": family + "/" + effort, "release": init["model"], "route": route,
+               "harness_version": harness_version, "override_reason": override_reason,
+               "terminal": terminal,
+               "segments": [{"id": f"antigravity:{name}:{conversation}", "usage": usage}],
+               "usage_complete": complete, "usage_evidence": record["run_dir"]}
+    if not complete:
+        receipt["detail"] = "usage gap: " + "; ".join(
+            record["gaps"] + ([] if record["result"] is not None else ["no result event"]))
+    return receipt

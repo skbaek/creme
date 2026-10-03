@@ -25,7 +25,10 @@ levels `agy` exposes) picks the level; the CLI builds the slug, e.g.
 refuses it. The default effort is provisional (`medium`) until the effort-ladder
 experiment decides. Record a dispatch as an episode of the `antigravity` client
 ([model selection](model-fit.md)); the goal store's `model-fit/antigravity.md`
-is historical.
+is historical. The normal acceptance imports the run record by its directory
+(`antigravity_runs`, see [episode requests](model-fit-episodes.md)); a run with
+a checkpoint step or an invoked subagent stays usage-incomplete, because those
+steps report no tokens.
 
 The Claude families are separate model-fit options from Claude Code's
 `opus`/`sonnet` (user decision 2026-10-04): the harness, toolset and quota pool

@@ -606,6 +606,8 @@ def cmd_master_start(arguments: argparse.Namespace) -> int:
     ) as exc:
         _json({"status": "unavailable", "detail": str(exc)})
         return 2
+    if result["status"] == "master" and arguments.client == "claude":
+        result["claude_telemetry"] = _master_telemetry(start=True)
     _json(result)
     return 0 if result["status"] in {"master", "reader", "takeover-required"} else 2
 
@@ -1508,9 +1510,10 @@ def cmd_semaphore(arguments: argparse.Namespace) -> int:
             ))
         return _sem_result(*semaphore.master_renew(arguments.lease))
     if action == "master-release":
-        return _sem_result(*semaphore.master_release(
-            force=arguments.force, reason=arguments.reason,
-        ))
+        ok, detail = semaphore.master_release(force=arguments.force, reason=arguments.reason)
+        if ok:
+            detail += f"; claude telemetry {_master_telemetry(start=False).get('status')}"
+        return _sem_result(ok, detail)
     return _sem_result(False, f"unknown action: {action}")
 
 
@@ -1772,11 +1775,33 @@ def _model_fit_dir(arguments: argparse.Namespace) -> Path:
     return model_fit.default_dir(ROOT)
 
 
-def cmd_claude_telemetry_serve(arguments: argparse.Namespace) -> int:
+def cmd_claude_telemetry(arguments: argparse.Namespace) -> int:
     from . import claude_telemetry
 
-    claude_telemetry.serve(_model_fit_dir(arguments), arguments.port)
-    return 0
+    action = arguments.telemetry_action
+    if action == "serve":
+        claude_telemetry.serve(_model_fit_dir(arguments), arguments.port)
+        return 0
+    if action == "start":
+        result = claude_telemetry.start(_model_fit_dir(arguments), arguments.port)
+    elif action == "stop":
+        result = claude_telemetry.stop(arguments.port)
+    else:
+        result = claude_telemetry.status(arguments.port)
+    _json(result)
+    return 0 if result.get("status") != "failed" else 1
+
+
+def _master_telemetry(start: bool) -> dict:
+    """The Claude telemetry receiver follows the master lease; its failure never blocks the lease."""
+    from . import claude_telemetry
+
+    try:
+        if start:
+            return claude_telemetry.start(model_fit.default_dir(ROOT))
+        return claude_telemetry.stop()
+    except (OSError, model_fit.ModelFitError) as exc:
+        return {"status": "failed", "detail": str(exc)}
 
 
 def cmd_model_fit_episode(arguments: argparse.Namespace) -> int:
@@ -2509,10 +2534,15 @@ def parser() -> argparse.ArgumentParser:
         "claude-telemetry", help="loopback receiver for Claude Code OpenTelemetry (model-fit usage)",
     )
     telemetry_commands = telemetry_parser.add_subparsers(dest="telemetry_action", required=True)
-    telemetry_serve = telemetry_commands.add_parser("serve", help="receive OTLP/HTTP JSON on 127.0.0.1")
-    telemetry_serve.add_argument("--dir", help="model-fit directory (default: the goal store's)")
-    telemetry_serve.add_argument("--port", type=_positive, default=4318)
-    telemetry_serve.set_defaults(func=cmd_claude_telemetry_serve)
+    for name, text in (("serve", "receive OTLP/HTTP JSON on 127.0.0.1 (foreground)"),
+                       ("start", "start the receiver detached (master start does this)"),
+                       ("stop", "stop the recorded receiver (master-release does this)"),
+                       ("status", "report whether the receiver listens")):
+        telemetry_action = telemetry_commands.add_parser(name, help=text)
+        if name in ("serve", "start"):
+            telemetry_action.add_argument("--dir", help="model-fit directory (default: the goal store's)")
+        telemetry_action.add_argument("--port", type=_positive, default=4318)
+        telemetry_action.set_defaults(func=cmd_claude_telemetry)
 
     antigravity_parser = commands.add_parser(
         "antigravity", help="bounded Antigravity (agy) pseudo-subagent runs",

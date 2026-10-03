@@ -184,7 +184,10 @@ On the user's direction to start as master, the session runs:
 
    It acquires the lease, appends the `master` event with the live
    reconciliation, and on a new acquisition starts the one detached heartbeat
-   itself; do not start another. Verify a renewal in
+   itself; do not start another. For `--client claude` it also starts the
+   loopback Claude Code telemetry receiver (`creme claude-telemetry`) that
+   model-fit needs for subagent output tokens; `semaphore master-release`
+   stops it. It never runs as a login item. Verify a renewal in
    `.semaphore/state/log.jsonl`, since some managed tool sandboxes reap
    detached children.
    - `status: master`, `mode: acquired` or `taken-over`: this session is a

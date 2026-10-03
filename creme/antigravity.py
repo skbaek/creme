@@ -29,6 +29,7 @@ DEFAULT_EFFORT = "medium"
 DEFAULT_BINARY = Path("~/.local/bin/agy")
 SETTINGS_ENV = "CREME_AGY_SETTINGS"
 BINARY_ENV = "CREME_AGY_BIN"
+RUNS_ENV = "CREME_ANTIGRAVITY_RUNS"
 
 
 class AntigravityError(RuntimeError):
@@ -647,7 +648,9 @@ def run(
         summary["reasons"] = reasons
         return EXIT_PREFLIGHT_REFUSED, summary
 
-    root = Path(runs_root).expanduser() if runs_root is not None else Path(__file__).resolve().parents[1] / ".creme/antigravity/runs"
+    if runs_root is None:
+        runs_root = os.environ.get(RUNS_ENV) or Path(__file__).resolve().parents[1] / ".creme/antigravity/runs"
+    root = Path(runs_root).expanduser()
     run_id = _run_id()
     run_dir = root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)

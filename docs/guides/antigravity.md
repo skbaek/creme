@@ -65,7 +65,8 @@ a weekly window.
   `false`. Setting `--min-remaining-percent 0` allows running down to 0% remaining
   plan quota when explicitly user-authorized; it is a quota reserve preference,
   not permission for paid credits or model fallback.
-- **Guard.** Each run gets a directory under `.creme/antigravity/runs/`, passed
+- **Guard.** Each run gets a directory under `.creme/antigravity/runs/` (override
+  `CREME_ANTIGRAVITY_RUNS`, which the tests set), passed
   as a second `--add-dir`. Its `.agents/hooks.json` installs a PreToolUse guard.
   In read-only mode it allows only `view_file`, `list_dir`, `grep_search`,
   `find_by_name` and `finish`; write mode adds only guarded file writes and

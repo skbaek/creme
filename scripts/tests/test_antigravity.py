@@ -28,6 +28,9 @@ class AntigravityTest(unittest.TestCase):
         self.old_env = dict(os.environ)
         os.environ["CREME_AGY_BIN"] = str(self.binary)
         os.environ["CREME_AGY_SETTINGS"] = str(self.settings_path)
+        # Runs the tests launch, including CLI subprocesses, never land in the live runs directory.
+        self.default_runs = self.root / "default-runs"
+        os.environ[antigravity.RUNS_ENV] = str(self.default_runs)
 
     def tearDown(self) -> None:
         os.environ.clear()
@@ -438,6 +441,17 @@ else:
         self.assertEqual(code, antigravity.EXIT_OK, summary)
         argv = json.loads(argv_record.read_text())
         self.assertEqual(argv[argv.index("-p") + 1], "inspect this")
+
+    def test_cli_run_records_under_runs_env(self) -> None:
+        self._scenario(fraction=0.5)
+        result = subprocess.run(
+            [sys.executable, "-m", "creme", "antigravity", "run", "--brief", "-",
+             "--target", str(self.target), "--model", "gemini-model", "--json"],
+            cwd=ROOT, input="inspect", text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, antigravity.EXIT_OK, result.stderr)
+        run = json.loads(result.stdout)["run"]
+        self.assertTrue((self.default_runs / run / "verdict.json").is_file())
 
     def test_cli_run_refuses_one_percent_by_default(self) -> None:
         argv_record = self.root / "agy-argv-1pct-default.json"

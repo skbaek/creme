@@ -10,7 +10,7 @@ import tempfile
 import threading
 import unittest
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -29,6 +29,17 @@ UNPROBED = {
     "roots": ["T"], "package_roots": ["T"], "resolution": "T (module)",
     "stale": None, "detail": "probe unavailable: fixture", "stale_set": None, "graph": None,
 }
+
+
+def _recent_time() -> str:
+    """A ledger time inside the estimator's 30-day window, whatever today is.
+
+    The estimator reads only the last 30 days of the ledger
+    (`read_recent_ledger`), so a fixed fixture date ages out and silently turns
+    a measured row into "no successful measurement".
+    """
+    moment = datetime.now(timezone.utc) - timedelta(hours=1)
+    return moment.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 @contextmanager
@@ -483,8 +494,8 @@ class BuildOwnershipTest(unittest.TestCase):
     # -- B2/B3: evidence classification and derived estimates ------------
     def _measured(self, ledger: Path, *, peak_mib: float, targets=("T",),
                   worktree="/w", toolchain="tc", manifest="mf", exit_code=0,
-                  rebuilt=(), time="2026-09-03T01:00:00Z") -> None:
-        _write_ledger(ledger, [(time, {
+                  rebuilt=(), time: Optional[str] = None) -> None:
+        _write_ledger(ledger, [(time or _recent_time(), {
             "kind": "build", "goal": "g", "targets": list(targets),
             "command": ["lake", "build"], "exit": exit_code, "wall_seconds": 1.0,
             "threads": 2, "probe": False, "admission": "ADMITTED_SOFT",
@@ -1212,7 +1223,7 @@ class TargetResolutionTest(unittest.TestCase):
     # -- B5 positive: a warm full target and a warm package target ---------
     def _row(self, ledger: Path, worktree: Path, targets, peak_mib,
              rebuilt=("Lib", "Lib.Core", "Lib.Top", "Main")):
-        _write_ledger(ledger, [("2026-09-03T01:00:00Z", {
+        _write_ledger(ledger, [(_recent_time(), {
             "kind": "build", "goal": "g", "targets": list(targets),
             "command": ["lake", "build"], "exit": 0, "wall_seconds": 3.0,
             "threads": 2, "probe": False, "admission": "ADMITTED_HARD",

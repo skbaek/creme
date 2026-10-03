@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -56,6 +57,30 @@ def _isolated():
             yield root
 
 
+# The instant the dated ledger fixtures below describe (B11's cut of the real
+# ledger is 2026-09-04; the latest hand-written row is 2026-09-29).
+LEDGER_FIXTURE_NOW = "2026-09-30T00:00:00Z"
+
+
+def pin_ledger_clock(case: unittest.TestCase, instant: str = LEDGER_FIXTURE_NOW) -> None:
+    """Pin build_ownership's clock to `instant` for the rest of `case`.
+
+    The estimator reads only the last 30 days of the ledger
+    (`read_recent_ledger`), so a dated fixture silently stops being evidence
+    30 days after its date unless the clock is pinned to the time it describes.
+    """
+    moment = datetime.fromisoformat(instant.replace("Z", "+00:00"))
+
+    class PinnedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment.astimezone(tz) if tz is not None else moment.astimezone().replace(tzinfo=None)
+
+    patcher = patch.object(owned, "datetime", PinnedDatetime)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+
+
 def _row(time: str, rebuilt, peak_gib: float, *, lean_gib=None, concurrency=1,
          seconds=None, module_peaks=None, targets=("T",), worktree="/w",
          exit_code=0, identity=None, samples=None) -> dict:
@@ -92,6 +117,9 @@ def _sample(available_gib: float, total_gib: float = 24.0):
 
 class StaleSetSizingTest(unittest.TestCase):
     """Item 1 and 2: the estimate and the class come from the stale set."""
+
+    def setUp(self) -> None:
+        pin_ledger_clock(self)
 
     def test_a_single_measured_module_is_sized_from_its_own_lean_peak(self) -> None:
         rows = [_row("2026-09-04T00:00:00Z", ["A"], 2.1, lean_gib=1.5)]
@@ -341,6 +369,9 @@ class StaleSetSizingTest(unittest.TestCase):
 
 class MeasurementIdentitySelectionTest(unittest.TestCase):
     """Exact source cohorts can move across worktrees without forgetting risk."""
+
+    def setUp(self) -> None:
+        pin_ledger_clock(self)
 
     WORKTREE = Path("/current")
     STALE = {
@@ -977,6 +1008,7 @@ class B11ReplayTest(unittest.TestCase):
     }
 
     def setUp(self) -> None:
+        pin_ledger_clock(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         ledger = Path(self.tmp.name) / "ledger.jsonl"
@@ -1884,6 +1916,9 @@ if __name__ == "__main__":
 
 class FailedAttemptFloorTest(unittest.TestCase):
     """workflow-streamlining-v1: a failed elaboration still leaves a cost floor."""
+
+    def setUp(self) -> None:
+        pin_ledger_clock(self)
 
     def failed(self, peak_gib: float) -> dict:
         row = _row("2026-09-20T00:00:00Z", ["B"], peak_gib, exit_code=1)

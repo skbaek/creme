@@ -7,7 +7,6 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from creme import claude_telemetry as T
@@ -17,7 +16,7 @@ class ClaudeTelemetryReceiverTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.directory = Path(self.temp.name)
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), T.make_handler(self.directory))
+        self.server = T.LoopbackHTTPServer(("127.0.0.1", 0), T.make_handler(self.directory))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 

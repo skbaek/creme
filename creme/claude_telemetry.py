@@ -19,6 +19,7 @@ import json
 import os
 import signal
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -81,11 +82,27 @@ def make_handler(directory: Path):
     return Handler
 
 
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    """A ThreadingHTTPServer that binds without a reverse name lookup.
+
+    `HTTPServer.server_bind` calls `socket.getfqdn(host)` between bind and
+    listen. On hosts with slow reverse DNS (GitHub's macOS runners take about
+    35 s for 127.0.0.1) the port stays closed that long, so `start` reports a
+    failed receiver that is in fact still coming up. The name is unused here.
+    """
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 def serve(model_fit_dir: Path, port: int = DEFAULT_PORT) -> None:
     directory = output_directory(model_fit_dir)
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o700)
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(directory))
+    server = LoopbackHTTPServer(("127.0.0.1", port), make_handler(directory))
     print(f"claude-telemetry: listening on 127.0.0.1:{port}, writing {directory}", flush=True)
     server.serve_forever()
 

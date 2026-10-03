@@ -20,10 +20,10 @@ from creme import semaphore
 from creme.profile import ADMISSION_DEFAULTS, admission_settings
 
 try:
-    from test_admission_accuracy import _isolated, _row
+    from test_admission_accuracy import _isolated, _row, pin_ledger_clock
     from test_semaphore import ProcessAdapter
 except ImportError:  # invoked as scripts.tests.test_lake_build_walk
-    from scripts.tests.test_admission_accuracy import _isolated, _row
+    from scripts.tests.test_admission_accuracy import _isolated, _row, pin_ledger_clock
     from scripts.tests.test_semaphore import ProcessAdapter
 
 
@@ -693,6 +693,9 @@ class ThreadPricingTest(unittest.TestCase):
 class WalkIsolationTest(unittest.TestCase):
     """Which stale modules a walk builds alone."""
 
+    def setUp(self) -> None:
+        pin_ledger_clock(self)
+
     def failed(self, module, *, own=None, outcome=None, others=()):
         row = _row("2026-09-20T00:00:00Z", ["B"], 9.0, exit_code=1)
         row["modules_failed"] = [module, *others]
@@ -781,6 +784,9 @@ class HeadroomAndSettingsTest(unittest.TestCase):
 
 class EstimatorEvidenceCostTest(unittest.TestCase):
     """The estimator's evidence scan is cheap enough to price a build at several thread counts."""
+
+    def setUp(self) -> None:
+        pin_ledger_clock(self)
 
     def row(self, minute: int, module: str = "A", restored=("R1", "R2")) -> dict:
         row = _row(f"2026-09-29T00:{minute:02d}:00Z", [module], 2.0, lean_gib=1.5,

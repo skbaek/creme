@@ -1772,6 +1772,13 @@ def _model_fit_dir(arguments: argparse.Namespace) -> Path:
     return model_fit.default_dir(ROOT)
 
 
+def cmd_claude_telemetry_serve(arguments: argparse.Namespace) -> int:
+    from . import claude_telemetry
+
+    claude_telemetry.serve(_model_fit_dir(arguments), arguments.port)
+    return 0
+
+
 def cmd_model_fit_episode(arguments: argparse.Namespace) -> int:
     from . import model_fit_runtime as runtime
     from . import model_fit_adapters as adapters
@@ -2494,6 +2501,15 @@ def parser() -> argparse.ArgumentParser:
     fit_policy.add_argument("client")
     fit_policy.add_argument("--dir")
     fit_policy.set_defaults(func=cmd_model_fit_policy)
+
+    telemetry_parser = commands.add_parser(
+        "claude-telemetry", help="loopback receiver for Claude Code OpenTelemetry (model-fit usage)",
+    )
+    telemetry_commands = telemetry_parser.add_subparsers(dest="telemetry_action", required=True)
+    telemetry_serve = telemetry_commands.add_parser("serve", help="receive OTLP/HTTP JSON on 127.0.0.1")
+    telemetry_serve.add_argument("--dir", help="model-fit directory (default: the goal store's)")
+    telemetry_serve.add_argument("--port", type=_positive, default=4318)
+    telemetry_serve.set_defaults(func=cmd_claude_telemetry_serve)
 
     antigravity_parser = commands.add_parser(
         "antigravity", help="bounded Antigravity (agy) pseudo-subagent runs",

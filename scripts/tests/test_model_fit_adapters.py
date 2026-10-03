@@ -115,6 +115,15 @@ class AdapterControls(unittest.TestCase):
                 with self.assertRaises(C.CaptureError):
                     self.native(path)
 
+    def test_luna_reserve_rollout_imports_its_observed_reserve_release(self):
+        path = self.rollout("reserve", context("gpt-reserve", "medium"), counter(100, 20))
+        receipt = A.codex_run(path, "ep", "run", "luna-reserve", "luna-reserve-broker", "h1",
+                              "completed")
+        self.assertEqual((receipt["release"], receipt["option"]),
+                         ("gpt-reserve", "luna-reserve/medium"))
+        with self.assertRaises(C.CaptureError):
+            self.native(path)
+
     def test_native_identity_drift_within_measured_window_refuses(self):
         for name, changed in (("model", context("gpt-6-astra")), ("effort", context(effort="low"))):
             with self.subTest(name=name):

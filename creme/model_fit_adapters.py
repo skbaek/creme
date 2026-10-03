@@ -30,7 +30,10 @@ def codex_run(path, episode_id, run_id, family, route, harness_version,
         raise C.CaptureError("native source changed model/effort; register its separately measured attempts")
     if not after.get("model") or not after.get("effort"):
         raise C.CaptureError("native rollout lacks effective release/effort metadata")
-    observed_family = {"gpt-6.1-sol": "sol", "gpt-6-astra": "astra", "gpt-6-luna": "luna"}.get(after["model"])
+    # A Luna reserve rollout's turn context names the reserve catalogue model
+    # (`gpt-reserve`), the same id the broker records as its observed release.
+    observed_family = {"gpt-6.1-sol": "sol", "gpt-6-astra": "astra", "gpt-6-luna": "luna",
+                       "gpt-reserve": "luna-reserve"}.get(after["model"])
     if observed_family != family and not (family == "luna-reserve" and observed_family == "luna"):
         raise C.CaptureError("observed native release does not match its family")
     if before is None:

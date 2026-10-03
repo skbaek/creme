@@ -33,10 +33,10 @@ Good fits: inventories and searches, summarising logs or diffs, mechanical
 edits whose result is easy to check, first-pass checks, and mechanical Lean
 work in a Lean-mode session (a named edit, a diagnostics sweep, a narrow
 build). Poor fits: anything needing the network, hard proof strategy, or work
-whose correctness the master cannot cheaply confirm. Effort guidance comes from
-`$GOAL_STORE/model-fit/muse.md` (routes `muse-broker`, `muse-run`); where no
-cell guides, start read-only work at `low` or `medium` and write or Lean work at
-`high`.
+whose correctness the master cannot cheaply confirm. Effort comes from the
+[episode runtime](model-fit.md) (`start --episode ID`; routes `muse-broker`,
+`muse-run`); `$GOAL_STORE/model-fit/muse.md` is historical. As a cold default,
+start read-only work at `low` or `medium` and write or Lean work at `high`.
 
 ## Commands
 

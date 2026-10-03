@@ -105,6 +105,14 @@ New evidence invalidates earlier closure until the new revision is joined.
 
 ## Population and selection
 
+Every dispatch, by every master client, goes through this runtime (user
+directive 2026-10-04). Selection needs reusable populations: configure one per
+execution client, task type and context band, listing every feasible authorized
+candidate, and prepare each task against it. A population made for one task
+with one candidate records spend but never selects, explores or learns. Move a
+population to `active` once its route's capture closes joins on ordinary use;
+a route whose capture is still a gap gets that adapter work first.
+
 Configure a finite list of feasible authorized settings, their observed release,
 route, effort, harness, material context and fixed recovery recipe. A material
 change gets a new population identity; historical evidence remains inspectable.

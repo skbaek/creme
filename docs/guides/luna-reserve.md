@@ -57,13 +57,11 @@ the `gpt-reserve` catalogue lists, and admission re-checks the live catalogue.
 The reserve serves its own Luna release, which can lag the regular `luna`
 model: `status` prints it as `model=` on the reserve line (the bucket's
 `normalModelSlug`; `gpt-5.6-luna` as of 2026-09-25, while regular Luna is
-GPT-6). Effort guidance comes from the goal store's model fit tables
-(`$GOAL_STORE/model-fit/codex.md`, `luna-reserve` columns, which denote that
-reserve release; see the [model fit guide](model-fit.md)): read the summary
-grid, and record only the exceptions that guide asks for. When `status` shows
-a new reserve model, archive the `luna-reserve` observations and restart the
-cells. Where no cell guides, start write and Lean runs at `high` and read-only
-runs at `medium`, and on a Lean proof failure retry the same thread at `xhigh`
+GPT-6). Effort comes from the [episode runtime](model-fit.md)
+(`start --episode ID`); a new reserve model is a new population identity, and
+the `luna-reserve` columns of `$GOAL_STORE/model-fit/codex.md` are historical.
+As a cold default, start write and Lean runs at `high` and read-only runs at
+`medium`, and on a Lean proof failure retry the same thread at `xhigh`
 (`stop`, then `resume THREAD --effort xhigh`) before re-routing. The prose
 calibration of GPT-5.6 Luna is archived at
 `$GOAL_STORE/model-fit/archive/luna-reserve-guide-gpt-5.6.md`. What it says

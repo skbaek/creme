@@ -21,7 +21,9 @@ class ContainedMemoryTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        # The generated brokers bake in `creme_root.resolve()`; on macOS the
+        # temporary directory is under the /var -> /private/var symlink.
+        self.root = Path(self.tmp.name).resolve()
         self.creme = self.root / "creme"
         (self.root / "codex").mkdir(mode=0o700)
         recipes = {"version": 1, "repositories": {"blanc": str(self.root / "blanc"), "jaune": str(self.root / "jaune")},

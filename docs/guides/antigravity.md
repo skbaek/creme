@@ -3,7 +3,7 @@
 `python3 -m creme antigravity` hands a bounded brief to Google's
 Antigravity CLI (`agy`, default `~/.local/bin/agy`, override `CREME_AGY_BIN`).
 Its value is a third model family (Gemini) for model-diverse review, on a quota
-pool separate from Claude and Codex. Like Luna reserve, it is used only when the
+pool separate from Claude and Codex, and Claude 5.5 models on a further pool. Like Luna reserve, it is used only when the
 user instructs it, and a result is a worker summary, not evidence.
 
 ## Commands
@@ -17,11 +17,36 @@ python3 -m creme antigravity run --brief FILE|- --target DIR [--model M] \
     [--lean-goal GOAL] [--json]
 ```
 
-The model is 3.8 Flash (user decision 2026-09-25). `--model` takes the family
-and `--effort` picks the level; the CLI builds the slug. A conflicting full
-slug is refused, as `agy` itself refuses it. The default effort is provisional
-(`medium`) until the effort-ladder experiment decides. Record runs in the goal
-store's `model-fit/antigravity.md`.
+Three families are in use: `gemini-3.8-flash` (the default; user decision
+2026-09-25) and, since 2026-10-04, `claude-sonnet-5-5` and `claude-opus-5-5`.
+`--model` takes the family and `--effort` (`low`, `medium` or `high`, the only
+levels `agy` exposes) picks the level; the CLI builds the slug, e.g.
+`claude-opus-5-5-medium`. A conflicting full slug is refused, as `agy` itself
+refuses it. The default effort is provisional (`medium`) until the effort-ladder
+experiment decides. Record a dispatch as an episode of the `antigravity` client
+([model selection](model-fit.md)); the goal store's `model-fit/antigravity.md`
+is historical.
+
+The Claude families are separate model-fit options from Claude Code's
+`opus`/`sonnet` (user decision 2026-10-04): the harness, toolset and quota pool
+differ, so no Claude Code cell transfers. Whether `agy`'s low/medium/high equal
+Claude Code's levels of the same name is likely but unverified. Measured
+differences (2026-10-04, `agy` 1.2.16):
+
+- `agy` advertises the full toolset in its `init` event, but a Claude model can
+  call only `view_file`, `run_command`, `write_to_file`, `replace_file_content`
+  and non-file tools. It has no `list_dir`, `grep_search`, `find_by_name`,
+  `multi_replace_file_content` or `sed_file`. In read-only mode it therefore
+  reads only files the brief names by absolute path; it cannot list or search.
+  Give a Claude-family read-only brief the exact paths, or use a Gemini model
+  for open exploration.
+- `agy` passes the brief as the whole prompt, so a brief must name the target
+  path; a Claude model does not infer it from the workspace.
+- `init.model` and every payload's `modelName` carry the exact slug, so the
+  model-pin guard and verdict apply unchanged.
+- The "Claude and GPT" pool is small: one trivial read-only run cost about 1% of
+  the 5-hour window on `claude-sonnet-5-5-low` and about 5% on
+  `claude-opus-5-5-low`.
 
 `status` reads `agy -p /usage` and `/credits`, both zero-token, plus
 `useG1Credits` from `~/.gemini/antigravity-cli/settings.json`. `agy models` lists

@@ -98,9 +98,14 @@ CLIENTS: dict[str, Client] = {
         name="antigravity",
         prefix="ag",
         title="Antigravity",
-        families={"gemini-3.8-flash": ("low", "medium", "high")},
+        # Claude models served through agy are separate options from Claude Code's opus/sonnet:
+        # another harness, toolset, and quota pool.
+        families={
+            family: ("low", "medium", "high")
+            for family in ("gemini-3.8-flash", "claude-sonnet-5-5", "claude-opus-5-5")
+        },
         routes={
-            "antigravity-run": "read-only one-shot `creme antigravity run`, any master",
+            "antigravity-run": "one-shot `creme antigravity run` (read-only or --write), any master",
         },
     ),
 }
@@ -119,6 +124,8 @@ def default_weights(client: Any) -> dict[str, Any]:
         "luna-reserve": 0.2,
         "muse-spark": 1.0,
         "gemini-3.8-flash": 1.0,
+        "claude-sonnet-5-5": 2.0,
+        "claude-opus-5-5": 8.0,
     }
     effort_weights = {
         "none": 0.25,

@@ -113,6 +113,10 @@ else:
         self.assertEqual(antigravity.resolve_model("gemini-3.8-flash-high", "high"), "gemini-3.8-flash-high")
         with self.assertRaisesRegex(ValueError, "gemini-3.8-flash-high.*medium"):
             antigravity.resolve_model("gemini-3.8-flash-high", "medium")
+        # agy serves Claude 5.5 models as claude-<family>-5-5-<effort> on the "Claude and GPT" pool.
+        self.assertEqual(antigravity.resolve_model("claude-opus-5-5", "low"), "claude-opus-5-5-low")
+        self.assertEqual(antigravity.resolve_model("claude-sonnet-5-5", "high"), "claude-sonnet-5-5-high")
+        self.assertEqual(antigravity.pool_for_model("claude-opus-5-5-medium"), "3p")
 
     def test_admission_credits_requires_explicit_false(self) -> None:
         quota = {"pools": {"gemini": {"5h": {"remaining_fraction": .8}, "weekly": {"remaining_fraction": .8}}},

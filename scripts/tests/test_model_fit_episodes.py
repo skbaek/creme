@@ -1303,5 +1303,20 @@ class EpisodeTest(unittest.TestCase):
             self.assertFalse(hasattr(ep, name), name)
 
 
+class AntigravityClaudeOptionTest(unittest.TestCase):
+    """Claude models served through agy are Antigravity options, not Claude Code ones."""
+
+    def test_agy_claude_families_are_separate_options(self) -> None:
+        for family in ("claude-opus-5-5", "claude-sonnet-5-5"):
+            for effort in ("low", "medium", "high"):
+                self.assertEqual(
+                    ep.check_capability("antigravity", family, effort, "antigravity-run"),
+                    (True, "eligible"),
+                )
+            self.assertFalse(ep.check_capability("antigravity", family, "xhigh", "antigravity-run")[0])
+            self.assertFalse(ep.check_capability("claude-code", family, "high", "claude-agent-tool")[0])
+        self.assertFalse(ep.check_capability("antigravity", "opus", "high", "antigravity-run")[0])
+
+
 if __name__ == "__main__":
     unittest.main()

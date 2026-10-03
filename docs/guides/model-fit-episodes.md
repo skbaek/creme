@@ -78,7 +78,8 @@ One normal acceptance can import a native run (`accept --from FILE`):
     "route": "codex-subagent",
     "harness_version": "native-subagent-v1",
     "terminal": "completed",
-    "attempt_index": 1
+    "attempt_index": 1,
+    "telemetry": "/absolute/path/to/plans/model-fit/runtime/claude-otel"
   }],
   "master_segments": [{
     "id": "measured-master-window-id",
@@ -108,14 +109,16 @@ defaults to the acceptance's own:
     "path": "/absolute/path/to/.claude/projects/PROJECT/SESSION/subagents/agent-ID.jsonl",
     "harness_version": "claude-agent-tool-v1",
     "terminal": "completed",
-    "attempt_index": 1
+    "attempt_index": 1,
+    "telemetry": "/absolute/path/to/plans/model-fit/runtime/claude-otel"
   }],
   "claude_code_master_windows": [{
     "path": "/absolute/path/to/.claude/projects/PROJECT/SESSION.jsonl",
     "start": "2026-10-04T09:00:00Z",
     "end": "2026-10-04T09:40:00Z",
     "client": "claude-code",
-    "weight": 1
+    "weight": 1,
+    "telemetry": "/absolute/path/to/plans/model-fit/runtime/claude-otel"
   }],
   "antigravity_runs": [{
     "run_dir": "/absolute/path/to/creme/.creme/antigravity/runs/RUN",
@@ -132,7 +135,19 @@ profile directory, default this checkout's `.claude/agents`), and UTC `since`
 window. A built-in agent type without a project profile takes the uniform
 observed per-turn effort, or refuses. Master windows count responses whose
 first entry falls in `[start, end)`; the end must be in the past, and
-overlapping windows on one transcript refuse. An Antigravity source may set
+overlapping windows on one transcript refuse.
+
+Both Claude kinds take `telemetry`, the directory of `otlp-*.jsonl` files
+written by `creme claude-telemetry serve`; it defaults to `runtime/claude-otel`
+under the acceptance's `--dir`, so it is normally omitted. Usage is final only
+when that receiver was running for the whole run: start it (or check its
+LaunchAgent) before dispatching a measured worker. A run whose receipt reports
+`N of M responses have no telemetry record` stays incomplete; re-import it
+after the receiver's file is present, never edit the totals. A master window
+also charges the session's own untranscribed telemetry requests in the window
+(`provider_raw.telemetry.added`). A request dropped while the receiver was
+down leaves no record, so it cannot be detected; a receipt is complete only
+for what was recorded. An Antigravity source may set
 `terminal` (default from the result status), `run_id` (default
 `antigravity:RUN`) and `route`.
 

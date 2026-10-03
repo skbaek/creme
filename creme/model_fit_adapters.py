@@ -3,8 +3,10 @@
 Adapters expose capability gaps rather than inventing total episode costs.
 Muse parent totals do not cover hidden reminder agents. Luna counters are
 thread-cumulative and therefore require explicit adjacent rollout windows.
-Claude Code subagent transcripts usually lack final output usage; Antigravity
-checkpoint steps report none. Both stay explicit gaps, never zero.
+Claude Code subagent transcripts usually lack final output usage, so Claude
+Code usage comes from its OpenTelemetry export joined by request id; without a
+telemetry record per response it stays incomplete. Antigravity checkpoint
+steps report none. Both stay explicit gaps, never zero.
 """
 from __future__ import annotations
 
@@ -139,10 +141,13 @@ def claude_profile_effort(agent_type, profiles=None):
     return effort
 
 
-def _claude_tree(transcript, start_ms, end_ms, seen):
-    """Parent transcript plus every Agent-tool child in its directory, recursively."""
+def _claude_tree(transcript, start_ms, end_ms, seen, owner):
+    """Parent transcript plus every Agent-tool child in its directory, recursively.
+
+    Returns (parts, owners, gaps): owners[i] is the agent id of parts[i].
+    """
     part = C.claude_transcript(transcript, start_ms, end_ms)
-    parts, gaps = [part], []
+    parts, owners, gaps = [part], [owner], []
     directory = Path(transcript).parent
     metas = {}
     for meta_path in sorted(directory.glob("agent-*.meta.json")):
@@ -165,21 +170,30 @@ def _claude_tree(transcript, start_ms, end_ms, seen):
             if not path.is_file():
                 gaps.append(f"child agent {child} transcript is missing")
                 continue
-            child_parts, child_gaps = _claude_tree(path, None, None, seen)
+            child_parts, child_owners, child_gaps = _claude_tree(path, None, None, seen, child)
             parts += child_parts
+            owners += child_owners
             gaps += child_gaps
-    return parts, gaps
+    return parts, owners, gaps
+
+
+def _telemetry(telemetry):
+    """Parsed telemetry of an explicit directory, or None when no directory is named."""
+    return None if telemetry is None else C.claude_telemetry(Path(telemetry).expanduser())
 
 
 def claude_code_run(path, episode_id, harness_version, terminal, run_id=None,
                     route="claude-agent-tool", family=None, since=None, until=None,
-                    profiles=None, override_reason="", attempt_index=1):
+                    profiles=None, override_reason="", attempt_index=1, telemetry=None):
     """Import one Claude Code subagent (`subagents/agent-<id>.jsonl` + `.meta.json`).
 
     Release is the single observed `message.model`; effort is the agent
     profile's (or, for a built-in agent type, the uniform observed per-turn
-    effort). Nested Agent-tool children are part of the run. Usage is final
-    only when every response of every included transcript has its final usage.
+    effort). Nested Agent-tool children are part of the run. Final usage per
+    response comes from `telemetry` (a `claude-otel` directory) joined by
+    request id; telemetry requests of the run's agents without a transcript
+    entry are added. Usage is final only when every response of every included
+    transcript has a telemetry record and no session request is unattributable.
     `since`/`until` (UTC ISO) bound a resumed continuation measured separately.
     """
     path = Path(path).resolve()
@@ -192,7 +206,7 @@ def claude_code_run(path, episode_id, harness_version, terminal, run_id=None,
         raise C.CaptureError(f"subagent meta is missing or unreadable: {exc}") from exc
     start_ms = C.utc_millis(since, "since") if since is not None else None
     end_ms = C.utc_millis(until, "until") if until is not None else None
-    parts, gaps = _claude_tree(path, start_ms, end_ms, {agent})
+    parts, owners, gaps = _claude_tree(path, start_ms, end_ms, {agent}, agent)
     own = parts[0]
     if not own["calls"]:
         raise C.CaptureError("subagent transcript has no model response in the window")
@@ -215,7 +229,11 @@ def claude_code_run(path, episode_id, harness_version, terminal, run_id=None,
         effort = own["efforts"][0]
     elif own["efforts"] and own["efforts"] != [effort]:
         raise C.CaptureError(f"observed effort {own['efforts']} disagrees with profile effort {effort}")
-    usage = C.claude_usage(parts, gaps)
+    siblings = sorted(path.parent.glob("agent-*.jsonl"))
+    session_dir = path.parent.parent
+    siblings.append(session_dir.parent / (session_dir.name + ".jsonl"))
+    join = C.claude_join(parts, owners, _telemetry(telemetry), {agent: (start_ms, end_ms)}, siblings)
+    usage = C.claude_usage(parts, gaps, join)
     usage.update(source=own["source"], start_offset=own["first_ms"], end_offset=own["last_ms"] + 1,
                  transcripts=[part["path"] for part in parts], agent_type=meta.get("agentType"),
                  child_models=sorted({m for part in parts[1:] for m in part["models"]}))
@@ -232,12 +250,18 @@ def claude_code_run(path, episode_id, harness_version, terminal, run_id=None,
     if not complete:
         raw = usage["provider_raw"]
         receipt["detail"] = (f"usage gap: {raw['unfinished_calls']} of {raw['calls']} responses lack final "
-                             f"output usage; {raw['compactions']} compactions; " + "; ".join(gaps)).rstrip("; ")
+                             f"output usage; {raw['compactions']} compactions; "
+                             + "; ".join(raw["gaps"])).rstrip("; ")
     return receipt
 
 
-def claude_master_window(path, start, end, client="claude-code", weight=1.0):
-    """A master session window [start, end) (UTC ISO) of its own top-level transcript."""
+def claude_master_window(path, start, end, client="claude-code", weight=1.0, telemetry=None):
+    """A master session window [start, end) (UTC ISO) of its own top-level transcript.
+
+    Each response's usage is joined to `telemetry` by request id; the session's
+    own telemetry requests in the window without a transcript entry and without
+    an agent id (auxiliary requests) are charged too.
+    """
     start_ms, end_ms = C.utc_millis(start, "start"), C.utc_millis(end, "end")
     if start_ms >= end_ms:
         raise C.CaptureError("master window start must precede its end")
@@ -246,9 +270,10 @@ def claude_master_window(path, start, end, client="claude-code", weight=1.0):
         raise C.CaptureError("master window ends in the future; measure it after it closes")
     part = C.claude_transcript(Path(path), start_ms, end_ms, main_only=True)
     # The master's own Agent calls are separate runs, not master window cost.
-    usage = C.claude_usage([part], [])
+    join = C.claude_join([part], [None], _telemetry(telemetry), {None: (start_ms, end_ms)})
+    usage = C.claude_usage([part], [], join)
     usage.update(source=part["source"], start_offset=start_ms, end_offset=end_ms,
-                 observed_models=part["models"], path=part["path"])
+                 observed_models=sorted(set(part["models"]) | set(join["added_models"])), path=part["path"])
     return {"id": f"claude-code-window:{part['source']}:{start_ms}:{end_ms}", "client": client,
             "weight": weight, "usage": usage}
 

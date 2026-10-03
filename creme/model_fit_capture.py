@@ -259,9 +259,15 @@ def claude_transcript(path: Path, start_ms: int | None = None, end_ms: int | Non
                     calls[ident] = {"outside": True}
                     continue
                 call = calls[ident] = {"model": message.get("model"), "first_ms": moment,
-                                       "input": None, "final": None}
+                                       "input": None, "final": None, "request_id": None,
+                                       "session": row.get("sessionId")}
             if call.get("outside"):
                 continue
+            request = row.get("requestId")
+            if request is not None:
+                if not isinstance(request, str) or call["request_id"] not in {None, request}:
+                    raise CaptureError(f"{path.name}:{number}: response {ident} carries two request ids")
+                call["request_id"] = request
             for block in message.get("content") or []:
                 if isinstance(block, dict) and block.get("type") == "tool_use" \
                         and block.get("name") in CLAUDE_AGENT_TOOLS and isinstance(block.get("id"), str):
@@ -315,25 +321,267 @@ def claude_transcript(path: Path, start_ms: int | None = None, end_ms: int | Non
             "models": sorted({call["model"] for call in real.values()}), "efforts": sorted(efforts),
             "totals": totals, "first_ms": min(stamps) if stamps else None,
             "last_ms": max(stamps) if stamps else None,
+            "sessions": sorted({call["session"] for call in real.values()} - {None}),
+            "responses": [{"request_id": call["request_id"], "model": call["model"], "final": call["final"],
+                           "input": call["input"]} for call in real.values()],
             "children": {key: value for key, value in children.items() if key not in errored}}
 
 
-def claude_usage(parts: list[dict[str, Any]], gaps: list[str]) -> dict[str, Any]:
+# Claude Code OpenTelemetry (`creme claude-telemetry serve`, daily
+# `otlp-YYYYMMDD.jsonl` lines `{"received","signal","body"}` with raw OTLP/JSON
+# bodies). Measured 2026-10-03/04: every API request is a `logs` event
+# `api_request` and a `traces` span `claude_code.llm_request`, both carrying
+# `request_id`, `session.id`, `model` and final input/output/cache counts in the
+# transcript's disjoint convention; only the span carries `agent_id` (absent for
+# the main session). Transcript assistant entries carry the same `requestId`.
+# One request is counted once however many records report it.
+
+CLAUDE_TELEMETRY_KEYS = {"input": "input_tokens", "cache_read": "cache_read_tokens",
+                         "cache_creation": "cache_creation_tokens", "output": "output_tokens"}
+_TELEMETRY_CACHE: dict[tuple, dict[str, Any]] = {}
+
+
+def _otlp_value(value: Any) -> Any:
+    if not isinstance(value, dict) or len(value) != 1:
+        return None
+    kind, inner = next(iter(value.items()))
+    if kind == "intValue":
+        return int(inner)
+    return inner if kind in {"stringValue", "doubleValue", "boolValue"} else None
+
+
+def _otlp_records(body: dict[str, Any], signal: str):
+    """(attributes, time_ms, is_span) for every api_request event / llm_request span."""
+    if signal == "logs":
+        outer, inner, leaf = "resourceLogs", "scopeLogs", "logRecords"
+    elif signal == "traces":
+        outer, inner, leaf = "resourceSpans", "scopeSpans", "spans"
+    else:
+        return
+    for resource in body.get(outer) or []:
+        for scope in resource.get(inner) or []:
+            for record in scope.get(leaf) or []:
+                attributes = {item.get("key"): _otlp_value(item.get("value"))
+                              for item in record.get("attributes") or [] if isinstance(item, dict)}
+                if signal == "logs" and attributes.get("event.name") != "api_request":
+                    continue
+                if signal == "traces" and record.get("name") != "claude_code.llm_request":
+                    continue
+                stamp = record.get("startTimeUnixNano") if signal == "traces" else record.get("timeUnixNano")
+                yield attributes, int(stamp) // 1_000_000 if stamp is not None else None, signal == "traces"
+
+
+def claude_telemetry(directory: Path) -> dict[str, Any]:
+    """API requests reported by Claude Code telemetry, merged by `request_id`.
+
+    Event and span of one request must agree on session, model and counts; the
+    span contributes `agent_id`. A record without `request_id` but with tokens
+    is kept apart as unkeyed. A partial final line is still being written.
+    """
+    directory = Path(directory).resolve()
+    files = sorted(directory.glob("otlp-*.jsonl")) if directory.is_dir() else []
+    key = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in files)
+    if (str(directory), key) in _TELEMETRY_CACHE:
+        return _TELEMETRY_CACHE[(str(directory), key)]
+    requests: dict[str, dict[str, Any]] = {}
+    unkeyed: list[dict[str, Any]] = []
+    for path in files:
+        with path.open("rb") as handle:
+            for number, line in enumerate(handle, 1):
+                if not line.endswith(b"\n"):
+                    break
+                try:
+                    row = json.loads(line)
+                    body, signal = row["body"], row["signal"]
+                except (ValueError, UnicodeError, KeyError, TypeError) as exc:
+                    raise CaptureError(f"{path.name}:{number}: malformed telemetry record") from exc
+                for attributes, moment, span in _otlp_records(body, signal):
+                    where = f"{path.name}:{number}"
+                    if attributes.get("success") is False and \
+                            all(attributes.get(field) is None for field in CLAUDE_TELEMETRY_KEYS.values()):
+                        continue  # a failed attempt reporting no usage
+                    usage = {name: _count(attributes.get(field), f"{where} {field}")
+                             for name, field in CLAUDE_TELEMETRY_KEYS.items()}
+                    agent = attributes.get("agent_id")
+                    record = {"request_id": attributes.get("request_id"), "session": attributes.get("session.id"),
+                              "model": attributes.get("model"), "usage": usage, "time_ms": moment,
+                              "agent_id": agent if span else None, "span": span,
+                              "query_source": attributes.get("query_source") or attributes.get("query_source_safe")}
+                    ident = record["request_id"]
+                    if not isinstance(ident, str) or not ident:
+                        if any(usage.values()):
+                            unkeyed.append(record)
+                        continue
+                    known = requests.get(ident)
+                    if known is None:
+                        requests[ident] = record
+                        continue
+                    for field in ("session", "model", "usage"):
+                        if known[field] != record[field]:
+                            raise CaptureError(f"{where}: telemetry records of {ident} disagree on {field}")
+                    if span:
+                        if known["span"] and known["agent_id"] != record["agent_id"]:
+                            raise CaptureError(f"{where}: telemetry spans of {ident} disagree on agent")
+                        known.update(span=True, agent_id=record["agent_id"], time_ms=moment)
+                    known["query_source"] = known["query_source"] or record["query_source"]
+    result = {"directory": str(directory), "files": len(files), "requests": requests, "unkeyed": unkeyed}
+    _TELEMETRY_CACHE.clear()
+    _TELEMETRY_CACHE[(str(directory), key)] = result
+    return result
+
+
+def _transcript_request_ids(paths: list[Path]) -> set[str]:
+    found: set[str] = set()
+    for path in paths:
+        try:
+            with path.open("rb") as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        continue
+                    if isinstance(row, dict) and isinstance(row.get("requestId"), str):
+                        found.add(row["requestId"])
+        except OSError:
+            continue
+    return found
+
+
+def claude_join(parts: list[dict[str, Any]], owners: list[str | None], telemetry: dict[str, Any] | None,
+                windows: dict[str | None, tuple[int | None, int | None]],
+                siblings: list[Path] | None = None) -> dict[str, Any]:
+    """Final usage of every response from telemetry, plus untranscribed requests.
+
+    `owners[i]` is the agent id of `parts[i]` (None: the session's main thread).
+    A response's transcript final usage, when present, must equal telemetry,
+    and the telemetry model must equal the transcript's. Telemetry requests of
+    an owner in its `windows` entry with no transcript entry are added. An
+    event without its span cannot be attributed; one that could be an owner's
+    is a gap unless `siblings` transcripts account for it.
+    """
+    gaps: list[str] = []
+    sessions = {session for part in parts for session in part["sessions"]}
+    if len(sessions) > 1:
+        raise CaptureError(f"transcripts span sessions {sorted(sessions)}")
+    session = next(iter(sessions), None)
+    requests = (telemetry or {}).get("requests", {})
+    totals = {"input": 0, "cache_read": 0, "cache_creation": 0, "output": 0}
+    seen: dict[str, str | None] = {}
+    joined = missing = unfinished = added = 0
+    models: dict[str | None, set[str]] = {}
+    for part, owner in zip(parts, owners):
+        models.setdefault(owner, set()).update(part["models"])
+        for response in part["responses"]:
+            ident = response["request_id"]
+            record = requests.get(ident) if ident else None
+            if ident is not None:
+                if ident in seen:
+                    raise CaptureError(f"request {ident} appears in two transcript responses")
+                seen[ident] = owner
+            if record is None:
+                missing += 1
+                final = response["final"]
+                if final is None:
+                    unfinished += 1
+                    for key, value in zip(("input", "cache_read", "cache_creation"), response["input"]):
+                        totals[key] += value
+                else:
+                    for key in totals:
+                        totals[key] += final[key]
+                continue
+            if record["model"] != response["model"]:
+                raise CaptureError(f"request {ident}: telemetry model {record['model']} is not the "
+                                   f"transcript release {response['model']}")
+            if record["session"] != session:
+                raise CaptureError(f"request {ident}: telemetry session {record['session']} is not {session}")
+            if record["span"] and record["agent_id"] != owner:
+                raise CaptureError(f"request {ident}: telemetry agent {record['agent_id']} is not {owner}")
+            if response["final"] is not None and response["final"] != record["usage"]:
+                raise CaptureError(f"request {ident}: transcript final usage {response['final']} differs "
+                                   f"from telemetry {record['usage']}")
+            joined += 1
+            for key in totals:
+                totals[key] += record["usage"][key]
+    if telemetry is None:
+        gaps.append("no telemetry directory")
+    elif missing:
+        gaps.append(f"{missing} of {joined + missing} responses have no telemetry record")
+    if session is None:
+        gaps.append("transcripts record no session id; untranscribed requests cannot be matched")
+    observed: set[str] = set()
+    ambiguous = 0
+    sibling_ids: set[str] | None = None
+    master = None in owners
+
+    def inside(record, owner):
+        start, end = windows.get(owner, (None, None))
+        moment = record["time_ms"]
+        if start is None and end is None:
+            return True
+        return moment is not None and (start is None or moment >= start) and (end is None or moment < end)
+
+    candidates = [(ident, record) for ident, record in requests.items() if ident not in seen]
+    candidates += [(None, record) for record in (telemetry or {}).get("unkeyed", [])]
+    for ident, record in candidates:
+        if session is None or record["session"] != session:
+            continue
+        if record["span"]:
+            owner = record["agent_id"]
+            if owner not in models or not inside(record, owner):
+                continue
+            if ident is None:
+                ambiguous += 1
+                continue
+            if not master and record["model"] not in models[owner]:
+                raise CaptureError(f"request {ident} of agent {owner} used {record['model']}, not its "
+                                   f"release {sorted(models[owner])}; register separate attempts")
+            added += 1
+            observed.add(record["model"])
+            for key in totals:
+                totals[key] += record["usage"][key]
+            continue
+        agentish = str(record["query_source"] or "").startswith("agent:")
+        if master:
+            if agentish or not inside(record, None):
+                continue
+            ambiguous += 1
+        elif agentish:
+            if ident is not None:
+                if sibling_ids is None:
+                    sibling_ids = _transcript_request_ids(siblings or [])
+                if ident in sibling_ids:
+                    continue
+            ambiguous += 1
+    if ambiguous:
+        gaps.append(f"{ambiguous} telemetry requests of this session cannot be attributed "
+                    "(no span or no request id)")
+    return {"totals": totals, "joined": joined, "missing": missing, "unfinished": unfinished,
+            "added": added, "added_models": sorted(observed), "gaps": gaps,
+            "session": session, "telemetry": (telemetry or {}).get("directory")}
+
+
+def claude_usage(parts: list[dict[str, Any]], gaps: list[str],
+                 join: dict[str, Any] | None = None) -> dict[str, Any]:
     """Model-fit usage for transcript parts; any gap leaves the affected total unknown."""
-    totals = {key: sum(part["totals"][key] for part in parts)
-              for key in ("input", "cache_read", "cache_creation", "output")}
-    unfinished = sum(part["unfinished_calls"] for part in parts)
+    if join is None:
+        totals = {key: sum(part["totals"][key] for part in parts)
+                  for key in ("input", "cache_read", "cache_creation", "output")}
+        unfinished = sum(part["unfinished_calls"] for part in parts)
+    else:
+        totals, unfinished, gaps = join["totals"], join["unfinished"], gaps + join["gaps"]
     compactions = sum(part["compactions"] for part in parts)
     known_input = totals["input"] + totals["cache_read"] + totals["cache_creation"]
+    raw = {"convention": "anthropic: input, cache read and cache creation are disjoint; "
+                         "cache creation is inside total_input, never added again",
+           "observed": totals, "calls": sum(part["calls"] for part in parts),
+           "unfinished_calls": unfinished, "compactions": compactions, "gaps": gaps}
+    if join is not None:
+        raw["telemetry"] = {key: join[key] for key in ("telemetry", "session", "joined", "missing", "added",
+                                                       "added_models")}
     return {"total_input": None if compactions else known_input,
             "cached_input": totals["cache_read"], "cache_write": totals["cache_creation"],
             "total_output": None if unfinished or compactions or gaps else totals["output"],
-            "reasoning": None, "reasoning_inside_output": True,
-            "provider_raw": {"convention": "anthropic: input, cache read and cache creation are disjoint; "
-                                           "cache creation is inside total_input, never added again",
-                             "observed": totals, "calls": sum(part["calls"] for part in parts),
-                             "unfinished_calls": unfinished, "compactions": compactions,
-                             "gaps": gaps}}
+            "reasoning": None, "reasoning_inside_output": True, "provider_raw": raw}
 
 
 # ---------------------------------------------------------------------------

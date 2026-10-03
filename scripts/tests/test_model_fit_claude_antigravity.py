@@ -16,6 +16,50 @@ from creme import model_fit_runtime as R
 from scripts.tests.test_model_fit_runtime import base_config
 
 OPUS = "claude-opus-5-5"
+SESSION = "s1"
+BASE_MS = 1790848800000  # 2026-10-01T10:00:00Z
+
+
+def otel_request(ident, second, output, model=OPUS, agent=None, input_tokens=10, cache_read=100,
+                 cache_creation=5, session=SESSION, query_source="sdk"):
+    """One API request as Claude Code reports it: request id is `req_<message id>`."""
+    return {"request_id": "req_" + ident if ident else None, "second": second, "model": model, "agent": agent,
+            "session": session, "query_source": query_source,
+            "usage": {"input_tokens": input_tokens, "output_tokens": output, "cache_read_tokens": cache_read,
+                      "cache_creation_tokens": cache_creation}}
+
+
+def _attributes(values):
+    out = []
+    for key, value in values.items():
+        if value is None:
+            continue
+        out.append({"key": key, "value": {"intValue": value} if isinstance(value, int) else {"stringValue": value}})
+    return out
+
+
+def write_otel(directory, requests, signals=("logs", "traces"), name="otlp-20261001.jsonl"):
+    """Append OTLP/JSON lines in the receiver's format: one event and one span per request."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for request in requests:
+        nanos = str((BASE_MS + request["second"] * 1000) * 1_000_000)
+        common = {"session.id": request["session"], "model": request["model"],
+                  "request_id": request["request_id"], **request["usage"]}
+        if "logs" in signals:
+            event = _attributes({**common, "event.name": "api_request", "query_source": request["query_source"]})
+            lines.append({"received": "2026-10-01T10:00:00Z", "signal": "logs", "body": {"resourceLogs": [
+                {"resource": {"attributes": []}, "scopeLogs": [{"logRecords": [
+                    {"timeUnixNano": nanos, "attributes": event}]}]}]}})
+        if "traces" in signals:
+            span = _attributes({**common, "agent_id": request["agent"], "query_source_safe": request["query_source"]})
+            lines.append({"received": "2026-10-01T10:00:00Z", "signal": "traces", "body": {"resourceSpans": [
+                {"resource": {"attributes": []}, "scopeSpans": [{"spans": [
+                    {"name": "claude_code.llm_request", "startTimeUnixNano": nanos, "attributes": span}]}]}]}})
+    with (directory / name).open("a") as handle:
+        handle.write("".join(json.dumps(line) + "\n" for line in lines))
+    return directory
 
 
 def entry(ident, second, output, stop=None, model=OPUS, effort=None, tools=(), sidechain=True,
@@ -26,7 +70,7 @@ def entry(ident, second, output, stop=None, model=OPUS, effort=None, tools=(), s
         usage["iterations"] = iterations
     content = [{"type": "tool_use", "id": tool, "name": "Agent", "input": {}} for tool in tools]
     return {"type": "assistant", "isSidechain": sidechain, "perTurnEffort": effort,
-            "timestamp": f"2026-10-01T10:00:{second:02d}.000Z",
+            "timestamp": f"2026-10-01T10:00:{second:02d}.000Z", "sessionId": SESSION, "requestId": "req_" + ident,
             "message": {"id": ident, "model": model, "stop_reason": stop, "usage": usage,
                         "content": content}}
 
@@ -56,6 +100,7 @@ class ClaudeCodeCapture(unittest.TestCase):
         (self.profiles / "worker-none.md").write_text("---\nname: worker-none\n---\nbody\n")
         (self.profiles / "worker-low.md").write_text("---\nname: worker-low\neffort: 5\n---\n")
         self.store = R.open_runtime(self.root / "fit")
+        self.otel = self.root / "otel"
 
     def tearDown(self):
         self.store.close()
@@ -71,10 +116,12 @@ class ClaudeCodeCapture(unittest.TestCase):
         return path
 
     def run_receipt(self, path, **extra):
+        extra.setdefault("telemetry", self.otel)
         return A.claude_code_run(path, "ep", "h1", "completed", profiles=self.profiles, **extra)
 
     def test_streamed_response_counts_once_from_final_entry(self):
         path = self.agent("a1", complete_call("m1", 1, 40) + complete_call("m2", 2, 60))
+        write_otel(self.otel, [otel_request("m1", 1, 40, agent="a1"), otel_request("m2", 2, 60, agent="a1")])
         receipt = self.run_receipt(path)
         usage = receipt["segments"][0]["usage"]
         self.assertTrue(receipt["usage_complete"])
@@ -84,6 +131,7 @@ class ClaudeCodeCapture(unittest.TestCase):
 
     def test_placeholder_output_is_never_charged(self):
         path = self.agent("a1", complete_call("m1", 1) + [entry("m2", 2, 8)])
+        write_otel(self.otel, [otel_request("m1", 1, 40, agent="a1")])
         receipt = self.run_receipt(path)
         usage = receipt["segments"][0]["usage"]
         self.assertFalse(receipt["usage_complete"])
@@ -122,6 +170,8 @@ class ClaudeCodeCapture(unittest.TestCase):
         path = self.agent("a1", parent)
         self.agent("c1", complete_call("m9", 3, 1000, model="claude-sonnet-5-5"),
                    "worker-high", "toolu_child", "sonnet")
+        write_otel(self.otel, [otel_request("m1", 1, 40, agent="a1"),
+                               otel_request("m9", 3, 1000, model="claude-sonnet-5-5", agent="c1")])
         receipt = self.run_receipt(path)
         usage = receipt["segments"][0]["usage"]
         self.assertTrue(receipt["usage_complete"])
@@ -131,7 +181,7 @@ class ClaudeCodeCapture(unittest.TestCase):
         self.assertFalse(receipt["usage_complete"])
         self.assertIsNone(receipt["segments"][0]["usage"]["total_output"])
         self.assertIn("child agent c1 transcript is missing", receipt["detail"])
-        unresolved = self.agent("a2", complete_call("m1", 1, tools=("toolu_lost",)))
+        unresolved = self.agent("a2", complete_call("m5", 1, tools=("toolu_lost",)))
         self.assertFalse(self.run_receipt(unresolved)["usage_complete"])
 
     def test_master_window_selects_main_responses_and_compaction_is_unknown(self):
@@ -139,16 +189,21 @@ class ClaudeCodeCapture(unittest.TestCase):
         rows = (complete_call("m1", 1, 7, sidechain=False) + complete_call("m2", 20, 11, sidechain=False)
                 + complete_call("s1", 21, 500, sidechain=True) + complete_call("m3", 40, 13, sidechain=False))
         path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-        window = A.claude_master_window(path, "2026-10-01T10:00:10Z", "2026-10-01T10:00:30Z")
+        write_otel(self.otel, [otel_request("m1", 1, 7), otel_request("m2", 20, 11),
+                               otel_request("s1", 21, 500, agent="x9"), otel_request("m3", 40, 13)])
+        window = A.claude_master_window(path, "2026-10-01T10:00:10Z", "2026-10-01T10:00:30Z",
+                                        telemetry=self.otel)
         self.assertEqual((window["usage"]["total_input"], window["usage"]["total_output"]), (115, 11))
         E.record_master_segment(self.store, window["id"], "claude-code", window["usage"])
-        overlap = A.claude_master_window(path, "2026-10-01T10:00:25Z", "2026-10-01T10:00:45Z")
+        overlap = A.claude_master_window(path, "2026-10-01T10:00:25Z", "2026-10-01T10:00:45Z",
+                                         telemetry=self.otel)
         with self.assertRaises(E.EpisodeError):
             E.record_master_segment(self.store, overlap["id"], "claude-code", overlap["usage"])
         with path.open("a") as handle:
             handle.write(json.dumps({"type": "system", "subtype": "compact_boundary",
                                      "timestamp": "2026-10-01T10:00:50.000Z"}) + "\n")
-        later = A.claude_master_window(path, "2026-10-01T10:00:45Z", "2026-10-01T10:00:55Z")
+        later = A.claude_master_window(path, "2026-10-01T10:00:45Z", "2026-10-01T10:00:55Z",
+                                       telemetry=self.otel)
         self.assertIsNone(E.normalize_usage(later["usage"])["total"])
 
     def test_cli_acceptance_imports_claude_run_and_master_window(self):
@@ -160,6 +215,9 @@ class ClaudeCodeCapture(unittest.TestCase):
         worker = self.agent("a1", complete_call("m1", 1, 40))
         master = self.root / "master.jsonl"
         master.write_text("".join(json.dumps(row) + "\n" for row in complete_call("x1", 30, 5, sidechain=False)))
+        # The default telemetry location is the model-fit directory's runtime/claude-otel.
+        write_otel(self.root / "fit" / "runtime" / "claude-otel",
+                   [otel_request("m1", 1, 40, agent="a1"), otel_request("x1", 30, 5)])
         request = {"receipt_id": "ep:accept", "episode_id": "ep", "verdict": "pass", "milestones": ["done"],
                    "verifier": "master", "worker_ref": "a1", "verification_ref": "fixture",
                    "claude_code_sources": [{"path": str(worker), "harness_version": "h1",

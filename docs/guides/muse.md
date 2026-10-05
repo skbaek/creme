@@ -372,7 +372,9 @@ process remains. These are Luna's Lean-mode rules and code (`creme/luna_lean.py`
 The Lean MCP server is the user's Muse `lean-lsp-mcp` definition, which must
 keep Creme's guarded launcher (`/usr/bin/python3 -m creme lean-mcp -- uvx
 lean-lsp-mcp==PIN`, `LEAN_MCP_DISABLED_TOOLS` covering `lean_build` and
-`lean_profile_proof`, `LEAN_LSP_MAX_OPEN_FILES=2`); a drift refuses the start.
+`lean_profile_proof`, `LEAN_LSP_MAX_OPEN_FILES=2`); its `env.PYTHONPATH` must
+also resolve the Creme checkout root, since Muse starts the server with the
+session workspace as cwd. A drift refuses the start.
 Brief a Lean session as the Luna guide says, and verify the build from the
 wrapper's own records (the ledger row and a `FRESH` probe), not the transcript.
 

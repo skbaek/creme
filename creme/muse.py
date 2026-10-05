@@ -280,6 +280,29 @@ def admission_usage(state: Path, observed: Optional[dict]) -> tuple[Optional[dic
     return None, "unobserved"
 
 
+def _creme_checkout_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _pythonpath_includes_root(raw: Any, creme_root: Path) -> bool:
+    """One ``os.pathsep`` entry of a PYTHONPATH value is the Creme checkout root (symlinks resolved)."""
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        resolved_root = creme_root.resolve()
+    except OSError:
+        resolved_root = creme_root
+    for entry in raw.split(os.pathsep):
+        if not entry.strip():
+            continue
+        try:
+            if Path(entry).expanduser().resolve() == resolved_root:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def lean_mcp_failures(environ: Optional[dict] = None) -> list[str]:
     """The user's Muse ``lean-lsp-mcp`` definition must keep Creme's guarded launcher and pins (read-only check)."""
     environ = os.environ if environ is None else environ
@@ -305,6 +328,12 @@ def lean_mcp_failures(environ: Optional[dict] = None) -> list[str]:
         failures.append("LEAN_MCP_DISABLED_TOOLS does not disable lean_build and lean_profile_proof")
     if env.get("LEAN_LSP_MAX_OPEN_FILES") != "2":
         failures.append("LEAN_LSP_MAX_OPEN_FILES is not 2")
+    creme_root = _creme_checkout_root()
+    if not _pythonpath_includes_root(env.get("PYTHONPATH"), creme_root):
+        failures.append(
+            f"{luna_lean.LEAN_MCP_SERVER} env.PYTHONPATH does not include the Creme checkout root {creme_root} "
+            "(Muse starts the server with the session workspace as cwd, so `python3 -m creme` needs PYTHONPATH); "
+            f"set \"PYTHONPATH\": \"{creme_root}\" in the entry's env")
     return failures
 
 

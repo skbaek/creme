@@ -403,7 +403,8 @@ pin, and environment as `.mcp.json`:
       "LEAN_LOG_LEVEL": "INFO",
       "LEAN_MCP_DISABLED_TOOLS": "lean_build,lean_profile_proof",
       "LEAN_LSP_MAX_OPEN_FILES": "2",
-      "LEAN_LSP_TEST_MODE": "1"
+      "LEAN_LSP_TEST_MODE": "1",
+      "PYTHONPATH": "<absolute path of this Creme checkout>"
     },
     "enabled": true,
     "mode": "required"
@@ -412,9 +413,15 @@ pin, and environment as `.mcp.json`:
 ```
 
 Copy the `env` block exactly from `.mcp.json`, including
-`LEAN_MCP_TOOL_DESCRIPTIONS`. A new muse process reads the file at startup;
-verify with `python3 -m creme doctor` (the Muse global MCP check) and a fresh
-`muse exec` probe that lists the Lean tools before relying on it. The first
+`LEAN_MCP_TOOL_DESCRIPTIONS`, and add `PYTHONPATH` with the absolute path of
+this Creme checkout (a placeholder is shown above; never commit a host path).
+Muse starts this server with the session workspace as its working directory,
+so `python3 -m creme` only resolves through that `PYTHONPATH`; without it the
+server fails at startup in every non-Creme workspace. A new muse process reads
+the file at startup; verify with `python3 -m creme doctor` (the Muse global
+MCP check) and a fresh `muse exec` probe run from a non-Creme workspace (e.g.
+a sibling Jaune or Blanc worktree) that lists the Lean tools before relying
+on it. The first
 call of each MCP tool requests human approval with allow-once and
 allow-for-session choices; record observed prompts per the escalation guide
 rather than pre-approving them, and use `--disable-approval` only to isolate

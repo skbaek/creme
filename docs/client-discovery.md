@@ -226,7 +226,10 @@ Demonstrated:
   `.agents/mcp_config.json`, `.codex/config.toml` are all inert here), but a
   user-global `mcpServers` stdio entry with the guarded launcher, the pinned
   `lean-lsp-mcp==0.26.1`, and the `.mcp.json` environment loads in a fresh
-  process. A headless `muse exec` probe from `~/creme` reported the exact 20
+  process. The entry's `env.PYTHONPATH` must be the absolute Creme checkout
+  path, because Muse starts the server with the session workspace as its
+  working directory and `python3 -m creme` does not resolve otherwise. A
+  headless `muse exec` probe from `~/creme` reported the exact 20
   enabled tools with `lean_build` and `lean_profile_proof` absent, both Lean
   skills, and the Creme project root. The recipe is in
   [setup](setup.md#muse-sessions); `doctor` checks the installed entry.

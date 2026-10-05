@@ -1122,5 +1122,57 @@ class LibraryFirstContractTest(unittest.TestCase):
         self.assertIn("Axiom evidence is the master's from-scratch probe", text)
 
 
+class LeanMcpFailuresTest(unittest.TestCase):
+    def write_settings(self, home: Path, env: dict) -> None:
+        settings = home / ".config" / "muse" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps({"mcpServers": {"lean-lsp-mcp": {
+            "transport": "stdio",
+            "command": "/usr/bin/python3",
+            "args": ["-m", "creme", "lean-mcp", "--", "uvx", "lean-lsp-mcp==0.26.1"],
+            "env": env,
+        }}}), encoding="utf-8")
+
+    def base_env(self, pythonpath: str | None = None) -> dict:
+        env = {
+            "LEAN_MCP_DISABLED_TOOLS": "lean_build,lean_profile_proof",
+            "LEAN_LSP_MAX_OPEN_FILES": "2",
+        }
+        if pythonpath is not None:
+            env["PYTHONPATH"] = pythonpath
+        return env
+
+    def check(self, home: Path) -> list[str]:
+        return M.lean_mcp_failures({"HOME": str(home)})
+
+    def test_entry_without_pythonpath_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.write_settings(home, self.base_env())
+            failures = self.check(home)
+            self.assertTrue(any("PYTHONPATH" in item for item in failures), failures)
+
+    def test_entry_with_checkout_root_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = M._creme_checkout_root()
+            self.write_settings(home, self.base_env(str(root)))
+            self.assertEqual(self.check(home), [])
+
+    def test_entry_with_unrelated_pythonpath_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.write_settings(home, self.base_env("/unrelated/path"))
+            failures = self.check(home)
+            self.assertTrue(any("PYTHONPATH" in item for item in failures), failures)
+
+    def test_entry_with_checkout_root_among_other_entries_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = M._creme_checkout_root()
+            self.write_settings(home, self.base_env(os.pathsep.join(["/unrelated", str(root)])))
+            self.assertEqual(self.check(home), [])
+
+
 if __name__ == "__main__":
     unittest.main()

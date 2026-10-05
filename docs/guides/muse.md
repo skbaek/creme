@@ -323,19 +323,28 @@ all private to the user:
 
 - `runs/<id>/` for `run`: `brief.md`, `bootstrap.json`, `transcript.jsonl` (the
   MSP wire), `events.jsonl`, `approvals.json`, `usage-before.json`,
-  `usage-after.json`, `audit.json`, `last-message.md`, `verdict.json`, and
-  `git-before.txt`/`git-after.txt` for a Git target.
+  `usage-after.json`, `audit.json`, `last-message.md`, `messages.md`,
+  `verdict.json`, and `git-before.txt`/`git-after.txt` for a Git target.
 - `sessions/<id>/` for the broker: `session.json` (the registry record, with
   the Muse session id and the session-log path), `events.jsonl`,
   `transcript.jsonl`, `bootstrap.json`, `stop-audit.json`, `wind-down.json`
   (Lean), and `turns/<n>/` with `brief.md`, `steer-<k>.md`,
-  `usage-before.json`, `usage-after.json`, `audit.json`, `approvals.json`, and
-  `last-message.md`. Token usage per turn (`session/tokenUsage`) is in
-  `session.json`.
+  `usage-before.json`, `usage-after.json`, `audit.json`, `approvals.json`,
+  `last-message.md`, and `messages.md`. Token usage per turn
+  (`session/tokenUsage`) is in `session.json`.
 - `broker/` (socket, info, log), `usage-last.json`, and the tripwire.
 
 Muse's own session log stays where Muse keeps it
 (`~/.local/share/muse/sessions/...`, path recorded).
+
+Every turn also writes `messages.md` beside `last-message.md`: every committed
+assistant message of the turn's run, in order, separated by a `---` line, with
+its path recorded next to `last_message`. When chatter without a `STATUS:`
+header follows the contract block, `last-message.md` holds that contract
+message followed by the later message(s), so the header block is never hidden.
+The contract's 60-line bound covers that header block only; when the brief
+asks for a report in the final message, the worker appends a `REPORT:` section
+after `NOT VERIFIED` in one single final message.
 
 ## Steering
 

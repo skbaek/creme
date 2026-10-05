@@ -501,8 +501,9 @@ class RunTest(FakeMuseHarness):
         self.assertEqual([p["mode"] for p in self.sent("session/setApprovalMode")], ["promptUnmatched"])
         self.assertTrue(all(p["reasoningEffort"] == "low" for p in self.sent("turn/start")))
         run_dir = Path(record["run_dir"])
-        for name in ("brief.md", "events.jsonl", "approvals.json", "last-message.md", "usage-before.json",
-                     "usage-after.json", "verdict.json", "audit.json", "bootstrap.json", "transcript.jsonl"):
+        for name in ("brief.md", "events.jsonl", "approvals.json", "last-message.md", "messages.md",
+                     "usage-before.json", "usage-after.json", "verdict.json", "audit.json", "bootstrap.json",
+                     "transcript.jsonl"):
             self.assertTrue((run_dir / name).exists(), name)
         self.assertEqual(json.loads((run_dir / "audit.json").read_text())["verdict"], "PASS")
 
@@ -1023,6 +1024,75 @@ class ModelFitMuseTest(FakeMuseHarness):
         code, record = self.run_brief()
         usage = model_fit.muse_session_usage(Path(record["run_dir"]))
         self.assertEqual((usage["turns"], usage["effort"]), ("1", "low"))
+
+
+class CommittedMessagesTest(FakeMuseHarness):
+    CONTRACT = ("STATUS: DONE\nSUMMARY:\n- did the thing\nFILES CHANGED:\n- none\n"
+                "CHECKED:\n- fake\nNOT VERIFIED:\n- none")
+    CHATTER = "PARTIAL already delivered, see prior message"
+
+    def test_two_committed_messages_write_messages_md_and_keep_status_in_last_message(self):
+        # 2026-10-06: a turn committed its contract block and then a trailing
+        # chatter message; only the chatter survived in last-message.md.
+        self.scenario["turn"].update(text=self.CHATTER, commit_texts=[self.CONTRACT, self.CHATTER])
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+        self.assertIsNotNone(record["messages"])
+        bodies = Path(record["messages"]).read_text().split("\n---\n")
+        self.assertEqual(bodies, [self.CONTRACT, self.CHATTER + "\n"])
+        last = Path(record["last_message"]).read_text()
+        self.assertIn("STATUS: DONE", last)
+        self.assertIn(self.CHATTER, last)
+        self.assertLess(last.index("STATUS: DONE"), last.index(self.CHATTER))
+
+    def test_single_committed_message_keeps_existing_last_message_semantics(self):
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+        self.assertEqual(Path(record["last_message"]).read_text(), "STATUS: DONE\n")
+        self.assertEqual(Path(record["messages"]).read_text(), "STATUS: DONE\n")
+
+
+class OrderedDurableMessagesTest(unittest.TestCase):
+    def committed(self, run, text):
+        return {"payload": {"kind": "run", "run_id": run,
+                            "event": {"kind": "assistant_message_committed", "text": text}}}
+
+    def test_durable_log_keeps_every_committed_message_in_order(self):
+        first = "STATUS: DONE\nSUMMARY:\n- one"
+        second = "trailing chatter"
+        with tempfile.TemporaryDirectory() as base:
+            path = Path(base) / "session.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in
+                                    [self.committed("t-1", first), self.committed("t-1", second),
+                                     self.committed("other", "unrelated")]))
+            log = DurableLog(path)
+            self.assertEqual(log.poll(), 3)
+            self.assertEqual(log.message_list["t-1"], [first, second])
+            self.assertEqual(log.messages["t-1"], second)  # the last text, as before
+            self.assertEqual(M.turn_messages(log, "t-1"), [first, second])
+            selected = M.select_last_message(M.turn_messages(log, "t-1"))
+            self.assertTrue(selected.startswith("STATUS: DONE"))
+            self.assertIn(second, selected)
+            self.assertEqual(M.join_messages([first, second]), first + "\n---\n" + second + "\n")
+            self.assertIsNone(M.select_last_message([]))
+            self.assertEqual(M.select_last_message([second]), second)
+            self.assertEqual(M.select_last_message([second, first]), first)
+
+
+class ReportChannelPreambleTest(unittest.TestCase):
+    TEMPLATES = ("templates/muse/preamble.md", "templates/muse/lean-preamble.md",
+                 "templates/luna-reserve/preamble.md", "templates/luna-reserve/lean-preamble.md")
+
+    def test_all_preambles_carry_the_optional_report_section(self):
+        for relative in self.TEMPLATES:
+            with self.subTest(template=relative):
+                raw = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn("STATUS: DONE | PARTIAL | BLOCKED", raw)
+                self.assertIn("REPORT:", raw)
+                self.assertIn("only when the brief asks for a report or other long deliverable", raw)
+                self.assertIn("The 60-line bound applies to the header block above only", raw)
+                self.assertIn("The whole answer must be one final message", raw)
 
 
 class LibraryFirstContractTest(unittest.TestCase):

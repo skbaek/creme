@@ -42,6 +42,7 @@ class DurableLog:
         self.applied: set[str] = set()               # approval ids with a final decision
         self.terminals: dict[str, dict] = {}         # run id -> {"terminal", "reason"}
         self.messages: dict[str, str] = {}           # run id -> last committed assistant text
+        self.message_list: dict[str, list[str]] = {}  # run id -> every committed assistant text, in order
         self.error: Optional[str] = None
         self.corrupt = False
         if path is not None and path.is_file():
@@ -113,6 +114,7 @@ class DurableLog:
             elif kind == "model_completed":
                 self.completions.setdefault(run_id, []).append(event)
             elif kind == "assistant_message_committed" and isinstance(event.get("text"), str):
+                self.message_list.setdefault(run_id, []).append(event["text"])
                 self.messages[run_id] = event["text"]
 
     def confirms_decision(self, request: dict, decision: str, run_id: Optional[str]) -> bool:

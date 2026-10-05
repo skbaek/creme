@@ -57,4 +57,8 @@ CHECKED:
 - <command or file -> result>
 NOT VERIFIED:
 - <item, or "none">
+REPORT:
+- <only when the brief asks for a report or other long deliverable in the final message>
 ```
+
+The 60-line bound applies to the header block above only. When the brief asks for a report or other long deliverable in the final message, append an optional final `REPORT:` section after `NOT VERIFIED`, as long as the brief allows and in the format the brief asks for (e.g. Markdown); use it only then. The whole answer must be one final message (no follow-up messages after it).

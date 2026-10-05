@@ -469,6 +469,11 @@ The broker is a long-lived process started on first use by `start` or
   `turns/<n>/` with `brief.md`, `preflight.json`, `postflight.json`,
   `audit.json`, `items.json`, and `last-message.md`.
 
+The worker contract's 60-line bound covers the `STATUS` header block only;
+when the brief asks for a report in the final message, the worker appends a
+`REPORT:` section after `NOT VERIFIED` (as long as the brief allows, in the
+format it asks for) in one single final message.
+
 A client uses a broker only when a ping returns the recorded pid and instance,
 and `start` or `resume` also requires that the broker runs the client's own
 checkout and code digest; an idle broker on other code is replaced, and one

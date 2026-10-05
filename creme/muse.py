@@ -639,6 +639,56 @@ def recover_decision(host: "MuseHost", exc: AppServerError, decision: str) -> bo
     return False
 
 
+# ---------------------------------------------------------------------------
+# Committed assistant messages: every message of a turn is kept, in order.
+#
+# Measured 2026-10-06 (first real use on this host): a turn committed its
+# contract STATUS block and then a short trailing message, and keeping only
+# the last committed text hid the contract block. The durable log keeps the
+# ordered list per run id (``DurableLog.message_list``); ``messages.md``
+# beside ``last-message.md`` holds every message in order, and
+# ``last-message.md`` never lets trailing chatter hide the contract block.
+
+MESSAGE_SEPARATOR = "\n---\n"
+
+
+def has_status_header(text: str) -> bool:
+    """A contract final-message block starts a line with ``STATUS:``."""
+    return any(line.strip().startswith("STATUS:") for line in text.splitlines())
+
+
+def turn_messages(durable: DurableLog, run_id: str) -> list[str]:
+    """Every committed assistant message of one turn's run, in order."""
+    return list(durable.message_list.get(run_id, []))
+
+
+def select_last_message(messages: list[str]) -> Optional[str]:
+    """The text for ``last-message.md``: the last message, unless chatter
+    without a ``STATUS:`` header follows an earlier contract block, in which
+    case that contract message followed by the later message(s)."""
+    if not messages:
+        return None
+    if has_status_header(messages[-1]):
+        return messages[-1]
+    for index in range(len(messages) - 2, -1, -1):
+        if has_status_header(messages[index]):
+            return MESSAGE_SEPARATOR.join(messages[index:])
+    return messages[-1]
+
+
+def join_messages(messages: list[str]) -> str:
+    """Every message in order, one ``---`` separator line between messages."""
+    return MESSAGE_SEPARATOR.join(text.rstrip("\n") for text in messages).rstrip("\n") + "\n"
+
+
+def write_messages(path: Path, messages: list[str]) -> Optional[Path]:
+    """Write ``messages.md`` (every committed message, in order); None when there is none."""
+    if not messages:
+        return None
+    _write(path, join_messages(messages))
+    return path
+
+
 def finalize_durable(host: "MuseHost", outcome: TurnOutcome, errors: list[str]) -> None:
     """Finalize every terminal from durable parent-run records (also when the live terminal arrived)."""
     for attempt in range(3):
@@ -661,7 +711,7 @@ def finalize_durable(host: "MuseHost", outcome: TurnOutcome, errors: list[str]) 
         outcome.completed = outcome.completed or time.time()
         if isinstance(logged.get("duration_ms"), int):
             outcome.duration_ms = logged["duration_ms"]
-        text = host.durable.messages.get(outcome.turn_id)
+        text = select_last_message(turn_messages(host.durable, outcome.turn_id))
         if text is not None:
             outcome.final_message = text
         totals, usage_error = host.durable.usage(outcome.turn_id, PINNED_MODEL)
@@ -981,7 +1031,8 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
                     outcome.status = logged.get("terminal") or "failed"
                     outcome.completed = outcome.completed or time.time()
                     if outcome.final_message is None:
-                        outcome.final_message = host.durable.messages.get(outcome.turn_id)
+                        outcome.final_message = select_last_message(
+                            turn_messages(host.durable, outcome.turn_id))
                     if logged.get("terminal") != "completed" and logged.get("reason"):
                         turn.warnings.append(f"Muse run terminal {logged.get('terminal')}: {logged.get('reason')}")
                 else:
@@ -1073,6 +1124,8 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
                           timed_out, git_failure)
     if outcome is not None and outcome.final_message is not None:
         _write(run_dir / "last-message.md", outcome.final_message.rstrip("\n") + "\n")
+    committed = turn_messages(host.durable, outcome.turn_id) if outcome is not None else []
+    write_messages(run_dir / "messages.md", committed)
     PB.write_private_json(run_dir / "approvals.json", turn.approvals)
     PB.write_private_json(run_dir / "audit.json", audit)
     code = {"PASS": EXIT_OK, "PIN_FAILED": EXIT_PIN_FAILED}.get(verdict, EXIT_MUSE_FAILED)
@@ -1087,6 +1140,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
         "usage_before": usage_before, "usage_after": usage_after,
         "approvals": len(turn.approvals), "warnings": turn.warnings[:20],
         "last_message": str(run_dir / "last-message.md") if (run_dir / "last-message.md").exists() else None,
+        "messages": str(run_dir / "messages.md") if (run_dir / "messages.md").exists() else None,
     }
     PB.write_private_json(run_dir / "verdict.json", record)
     if verdict == "PIN_FAILED":
@@ -1110,6 +1164,8 @@ def format_run(record: dict) -> str:
                  f"after={json.dumps(record.get('usage_after')) if record.get('usage_after') else 'unobserved'}")
     if record.get("last_message"):
         lines.append(f"last_message={record['last_message']}")
+    if record.get("messages"):
+        lines.append(f"messages={record['messages']}")
     for failure in (record.get("guard_failures") or [])[:4] + (record.get("errors") or [])[:4]:
         lines.append(f"failure: {PB.one_line(failure)}")
     if record.get("git_failure"):

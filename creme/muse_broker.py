@@ -17,7 +17,7 @@ one recipe for both. Layout under the Muse state directory::
     broker/broker.sock, broker.json, broker.log
     sessions/<id>/   session.json, events.jsonl, transcript.jsonl, bootstrap.json,
                      turns/<n>/ brief.md, steer-<k>.md, usage-before.json,
-                     usage-after.json, audit.json, approvals.json, last-message.md
+                     usage-after.json, audit.json, approvals.json, last-message.md, messages.md
 """
 
 from __future__ import annotations
@@ -318,6 +318,8 @@ class MuseSession(PB.SessionRecord):
             last_message = turn_dir / "last-message.md"
             if outcome.final_message is not None:
                 M._write(last_message, outcome.final_message.rstrip("\n") + "\n")
+            messages_path = M.write_messages(turn_dir / "messages.md",
+                                             M.turn_messages(self.host.durable, outcome.turn_id))
             verdict = M.verdict_for(outcome, audit, list(outcome.guard_failures), errors, self.timed_out, git_failure)
             failures = list(outcome.guard_failures) + list(audit.get("failures") or [])
             with self.data_lock:
@@ -330,6 +332,8 @@ class MuseSession(PB.SessionRecord):
                     "steered_items": len(outcome.steer_items), "usage_after": usage_after,
                     "session_log_audit": audit.get("verdict"), "approvals": len(state.approvals),
                     "last_message": str(last_message) if last_message.exists() else None,
+                    "messages": (str(messages_path) if messages_path is not None
+                                 and messages_path.exists() else None),
                 })
                 self.pending.clear()
                 self.record["pending_approvals"] = []
@@ -500,7 +504,8 @@ class MuseSession(PB.SessionRecord):
                     outcome.status = logged.get("terminal") or "failed"
                     outcome.completed = outcome.completed or time.time()
                     if outcome.final_message is None:
-                        outcome.final_message = durable.messages.get(outcome.turn_id)
+                        outcome.final_message = M.select_last_message(
+                            M.turn_messages(durable, outcome.turn_id))
                     if logged.get("terminal") != "completed" and logged.get("reason") and self.turn is not None:
                         self.turn.warnings.append(f"Muse run terminal {logged.get('terminal')}: {logged.get('reason')}")
                     ended = by_log = True
@@ -1079,6 +1084,8 @@ def session_lines(record: dict, excerpt_lines: int = 3) -> list[str]:
         lines.append(PB.one_line(f"approval {approval.get('id')} [accept|decline]: {approval.get('summary')}"))
     for failure in (last.get("failures") or [])[:3] + (last.get("errors") or [])[:2]:
         lines.append(f"failure: {PB.one_line(failure)}")
+    if last.get("messages"):
+        lines.append(f"messages={last['messages']}")
     if last.get("last_message"):
         try:
             text = Path(last["last_message"]).read_text(encoding="utf-8").splitlines()

@@ -7,7 +7,8 @@ The scenario file named by ``FAKE_MUSE_SCENARIO`` drives it:
     served_model    model the host reports on setModel/tokenUsage (default: the requested one)
     usage           usage/read ``usage`` object, or absent
     turn            {"text": final text, "wait_for_steer": bool, "sleep": seconds,
-                     "approvals": [subject, ...], "tools": [tool name, ...], "log_model": id}
+                     "approvals": [subject, ...], "tools": [tool name, ...], "log_model": id,
+                     "commit_texts": [committed assistant texts in order]}
 """
 
 import json
@@ -225,12 +226,16 @@ def run_turn(turn_id, text):
     final = turn.get("text", "STATUS: DONE")
     if state["steers"]:
         final += "\nSTEERED: " + " | ".join(state["steers"])
+    bases = list(turn.get("commit_texts") or [turn.get("text", "STATUS: DONE")])
+    commits = bases[:-1] + [final if len(bases) == 1 else bases[-1] + (
+        ("\nSTEERED: " + " | ".join(state["steers"])) if state["steers"] else "")]
     note("item/completed", {"item": {"itemId": f"msg-{turn_id}", "kind": "agentMessage", "turnId": turn_id,
                                      "status": "completed", "revision": 2, "text": final}})
     if turn.get("touch"):
         Path(turn["touch"]).write_text("written by the fake\n")
-    append_log(state["session"], {"payload_type": "runtime.session", "payload": {
-        "kind": "run", "run_id": turn_id, "event": {"kind": "assistant_message_committed", "text": final}}})
+    for text in commits:
+        append_log(state["session"], {"payload_type": "runtime.session", "payload": {
+            "kind": "run", "run_id": turn_id, "event": {"kind": "assistant_message_committed", "text": text}}})
     if not turn.get("drop_terminal"):
         append_log(state["session"], {"payload_type": "runtime.session", "payload": {
             "kind": "run", "run_id": turn_id, "event": {"kind": "terminal", "terminal": "completed", "reason": None}}})

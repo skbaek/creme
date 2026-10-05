@@ -41,11 +41,31 @@ from .codex_app_server import AppServerError, AppServerProcess, PinViolation
 
 PINNED_MODEL = "muse-spark-1.3"
 PINNED_PROVIDER = "meta"
-PINNED_PROFILE = "tbh"
 # The catalogue's effort ladder for the pinned model; admission re-checks it
 # against the live ``model/list`` variants.
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 CLIENT_NAME = "creme_muse"
+
+
+def pinned_catalogue_route(listing: dict, effort: Optional[str] = None) -> dict:
+    """Use the exact model row's route, never the catalogue's context/default.
+
+    Muse 1.4.2 advertises profileId=null on the pin even when the catalogue
+    context says tbh. Null is an explicit route value, not a missing field.
+    """
+    rows = [row for row in listing.get("models") or []
+            if isinstance(row, dict) and row.get("modelId") == PINNED_MODEL]
+    if len(rows) != 1:
+        raise AppServerError(f"pinned catalogue route requires exactly one {PINNED_MODEL} row; found {len(rows)}")
+    row = rows[0]
+    provider, profile = row.get("providerId"), row.get("profileId")
+    if (provider != PINNED_PROVIDER or "profileId" not in row
+            or (profile is not None and (not isinstance(profile, str) or not profile.strip()))
+            or any(_CONTRIBUTOR.search(value) for value in (provider, profile) if isinstance(value, str))):
+        raise AppServerError("pinned catalogue route is missing or unsafe; no default route may be used")
+    if effort is not None and effort not in (row.get("variants") or []):
+        raise AppServerError(f"effort {effort} is not offered for {PINNED_MODEL}")
+    return {"modelId": PINNED_MODEL, "providerId": provider, "profileId": profile}
 
 # Session approval modes (MSP ``ApprovalMode``). Every pseudo-subagent session
 # uses ``promptUnmatched`` so that each unmatched action reaches the broker's
@@ -290,8 +310,8 @@ class MuseGuard:
 
     def pin(self) -> list[str]:
         """Select the pinned model, the approval mode, and the effort; return failures of the read-back."""
-        self.command("session/setModel", {"model": {"modelId": PINNED_MODEL, "providerId": PINNED_PROVIDER,
-                                                    "profileId": PINNED_PROFILE}})
+        listing = self.request("model/list", {"sessionId": self.session_id}) or {}
+        self.command("session/setModel", {"model": pinned_catalogue_route(listing, self.effort)})
         self.command("session/setApprovalMode", {"mode": APPROVAL_MODE})
         self.command("session/setReasoningEffort", {"reasoningEffort": self.effort})
         return self.verify_pins()

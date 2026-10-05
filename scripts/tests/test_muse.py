@@ -208,6 +208,24 @@ class DurableRecoveryTest(unittest.TestCase):
 
 
 class ModelPinGuardTest(unittest.TestCase):
+    def test_catalogue_route_requires_one_exact_model_and_explicit_safe_route(self):
+        row = {"modelId": C.PINNED_MODEL, "providerId": "meta", "profileId": None, "variants": ["low"]}
+        listing = {"models": [row], "providerId": "meta", "profileId": "tbh"}
+        self.assertEqual(C.pinned_catalogue_route(listing, "low"),
+                         {"modelId": C.PINNED_MODEL, "providerId": "meta", "profileId": None})
+        bad_rows = [[], [row, row], [{**row, "modelId": "muse-spark-1.3-contributor"}],
+                    [{**row, "modelId": "muse-spark-1.2"}]]
+        bad_rows += [[{k: v for k, v in row.items() if k != field}] for field in ("providerId", "profileId")]
+        bad_rows += [[{**row, field: value}] for field, value in
+                     (("providerId", ""), ("providerId", None), ("providerId", "other"),
+                      ("providerId", "meta-contributor"),
+                      ("profileId", "contributor"), ("profileId", ""), ("profileId", 3))]
+        for rows in bad_rows:
+            with self.subTest(rows=rows), self.assertRaises(AppServerError):
+                C.pinned_catalogue_route({**listing, "models": rows}, "low")
+        with self.assertRaises(AppServerError):
+            C.pinned_catalogue_route(listing, "max")
+
     def test_only_the_pinned_model_may_be_selected(self):
         g = guard()
         g.command("session/setModel", {"model": {"modelId": C.PINNED_MODEL}})
@@ -484,6 +502,28 @@ class FakeMuseHarness(unittest.TestCase):
 
 
 class RunTest(FakeMuseHarness):
+    def test_run_uses_null_row_profile_instead_of_catalogue_context(self):
+        self.scenario.update(profile_id=None, variants=["minimal", "low", "medium", "high", "xhigh"])
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+        self.assertEqual([p["model"] for p in self.sent("session/setModel")],
+                         [{"modelId": C.PINNED_MODEL, "providerId": "meta", "profileId": None}])
+
+    def test_wrong_model_or_missing_route_never_selects_or_starts_a_turn(self):
+        row = {"modelId": C.PINNED_MODEL, "providerId": "meta", "profileId": None, "variants": ["low"]}
+        for rows in ([{**row, "modelId": "muse-spark-1.3-contributor"}],
+                     [{**row, "modelId": "muse-spark-1.2"}],
+                     [{**row, "providerId": "other"}],
+                     [{k: v for k, v in row.items() if k != "profileId"}]):
+            with self.subTest(rows=rows):
+                self.scenario["catalogue_models"] = rows
+                self.write_scenario()
+                code, record = self.run_brief()
+                self.assertNotEqual(code, 0, record)
+                self.assertEqual(self.sent("session/setModel"), [])
+                self.assertEqual(self.sent("turn/start"), [])
+
     def test_run_passes_pins_the_model_and_keeps_records(self):
         code, record = self.run_brief()
         self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
@@ -628,6 +668,8 @@ class RunTest(FakeMuseHarness):
         self.assertEqual(code, 0, report)
         self.assertEqual(report["catalogue_default"], "muse-spark-1.3-contributor")
         self.assertEqual(report["pinned_model"], C.PINNED_MODEL)
+        self.assertEqual(report["pinned_route"],
+                         {"modelId": C.PINNED_MODEL, "providerId": "meta", "profileId": "tbh"})
         self.assertEqual(self.sent("turn/start"), [])
 
     def test_stream_idle_timeout_default_reaches_every_child(self):

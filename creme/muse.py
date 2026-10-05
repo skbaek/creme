@@ -46,7 +46,7 @@ from .codex_app_server import AppServerError, PinViolation
 from .muse_log import DurableLog
 from .muse_client import (
     EFFORTS, PINNED_MODEL, ApprovalDecision, MuseGuard, MuseServeProcess, TurnOutcome, audit_session_log,
-    decide_approval, describe_approval, log_length, model_failures, receipt_handler, uuid7,
+    decide_approval, describe_approval, log_length, model_failures, pinned_catalogue_route, receipt_handler, uuid7,
 )
 
 BINARY_ENV = "CREME_MUSE_BIN"
@@ -820,7 +820,12 @@ def status(module_root: Path, environ: Optional[dict] = None) -> tuple[int, dict
         process.close()
     rows = [row for row in listing.get("models") or [] if isinstance(row, dict)]
     report["models"] = [{"modelId": row.get("modelId"), "isDefault": row.get("isDefault"),
+                         "providerId": row.get("providerId"), "profileId": row.get("profileId"),
                          "variants": row.get("variants")} for row in rows]
+    try:
+        report["pinned_route"] = pinned_catalogue_route(listing)
+    except AppServerError as exc:
+        reasons.append(str(exc))
     pinned = next((row for row in rows if row.get("modelId") == PINNED_MODEL), None)
     default = next((row.get("modelId") for row in rows if row.get("isDefault")), None)
     report["catalogue_default"] = default

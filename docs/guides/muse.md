@@ -95,8 +95,12 @@ store report `reports/creme-muse-pseudo-v1.md`):
    echo provider makes no model call, and the session's permission bootstrap is
    durable, so `session/resume` on a serve host reuses it.
 2. **Attach and pin.** A `muse serve` host with the mode's sandbox flags
-   resumes the session. The guard then sends `session/setModel`
-   (`muse-spark-1.3`, provider `meta`), `session/setApprovalMode`
+   resumes the session. The guard reads `model/list` and requires exactly one
+   `muse-spark-1.3` row with provider `meta`, an explicit profile route field, and the
+   requested effort. It sends that row's route in `session/setModel`, including
+   a null profile when advertised; catalogue-level context fields and defaults
+   are never route fallbacks. Missing, ambiguous, or contributor routes refuse
+   before model selection. The guard then sends `session/setApprovalMode`
    (`promptUnmatched`), and `session/setReasoningEffort`, and reads them back:
    `model/list` for the session must show exactly the pin active and offering
    the effort, and `session/read` must report the pin and the approval mode.

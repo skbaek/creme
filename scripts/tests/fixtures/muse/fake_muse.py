@@ -270,7 +270,10 @@ for line in sys.stdin:
         for model_id, default in (("muse-spark-1.3", False), ("muse-spark-1.3-contributor", True)):
             rows.append({"modelId": model_id, "isDefault": default, "isActive": model_id == served()
                          and params.get("sessionId") == state["session"] and state["session"] is not None,
-                         "variants": ["minimal", "low", "medium", "high", "xhigh", "max"], "providerId": "meta"})
+                         "variants": SCENARIO.get("variants", ["minimal", "low", "medium", "high", "xhigh", "max"]),
+                         "providerId": "meta", "profileId": SCENARIO.get("profile_id", "tbh")})
+        if "catalogue_models" in SCENARIO:
+            rows = SCENARIO["catalogue_models"]
         respond(message, {"models": rows, "providerId": "meta", "profileId": "tbh", "source": "providerCatalog"})
     elif method == "usage/read":
         respond(message, {"usage": SCENARIO["usage"]} if SCENARIO.get("usage") else {})
@@ -286,6 +289,12 @@ for line in sys.stdin:
                           "history": {"mode": "none"},
                           "pendingRequests": []})
     elif method == "session/setModel":
+        expected = {"modelId": "muse-spark-1.3", "providerId": "meta",
+                    "profileId": SCENARIO.get("profile_id", "tbh")}
+        if params["model"] != expected:
+            respond(message, error={"code": -32030, "message": "provider route is not in the catalog",
+                                    "data": {"reason": "unsupported_route", "retryable": False}})
+            continue
         state["model"] = params["model"]["modelId"]
         respond(message, {"commandId": params["commandId"], "status": "accepted"})
         note("session/modelChanged", {"modelId": served(), "source": "user"})

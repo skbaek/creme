@@ -217,7 +217,16 @@ failure or error, and, in read-only mode, an unchanged `HEAD` and
 allowance used, not left idle). A fresh serve host reports no usage until its
 first model call, so admission falls back to the last observation of an
 earlier host while its window has not reset (`usage-last.json`), and records
-`unobserved` otherwise. Usage is recorded before and after every turn.
+`unobserved` otherwise. Usage is recorded before and after every turn. When a
+turn ends with a failed terminal carrying a non-empty reason (durable run
+terminal, else the live `turn/completed`), that reason is appended to the
+turn's errors as one bounded line, so the record, the summaries, and the turn
+attention event all show why a zero-token turn failed. A quota-shaped reason
+(HTTP 429, `rate_limit_error`, or quota) is classified as `quota`; when it
+names an ISO-8601 reset time ("resets at …"), that UTC time is recorded as
+`quota_reset` in `usage-last.json` (never invented), and admission refuses new
+turns and starts with exit 10 until it passes. A non-quota failure is shown
+but sets no reset.
 
 ## When the live view is lost
 
@@ -327,19 +336,28 @@ all private to the user:
 
 - `runs/<id>/` for `run`: `brief.md`, `bootstrap.json`, `transcript.jsonl` (the
   MSP wire), `events.jsonl`, `approvals.json`, `usage-before.json`,
-  `usage-after.json`, `audit.json`, `last-message.md`, `verdict.json`, and
-  `git-before.txt`/`git-after.txt` for a Git target.
+  `usage-after.json`, `audit.json`, `last-message.md`, `messages.md`,
+  `verdict.json`, and `git-before.txt`/`git-after.txt` for a Git target.
 - `sessions/<id>/` for the broker: `session.json` (the registry record, with
   the Muse session id and the session-log path), `events.jsonl`,
   `transcript.jsonl`, `bootstrap.json`, `stop-audit.json`, `wind-down.json`
   (Lean), and `turns/<n>/` with `brief.md`, `steer-<k>.md`,
-  `usage-before.json`, `usage-after.json`, `audit.json`, `approvals.json`, and
-  `last-message.md`. Token usage per turn (`session/tokenUsage`) is in
-  `session.json`.
+  `usage-before.json`, `usage-after.json`, `audit.json`, `approvals.json`,
+  `last-message.md`, and `messages.md`. Token usage per turn
+  (`session/tokenUsage`) is in `session.json`.
 - `broker/` (socket, info, log), `usage-last.json`, and the tripwire.
 
 Muse's own session log stays where Muse keeps it
 (`~/.local/share/muse/sessions/...`, path recorded).
+
+Every turn also writes `messages.md` beside `last-message.md`: every committed
+assistant message of the turn's run, in order, separated by a `---` line, with
+its path recorded next to `last_message`. When chatter without a `STATUS:`
+header follows the contract block, `last-message.md` holds that contract
+message followed by the later message(s), so the header block is never hidden.
+The contract's 60-line bound covers that header block only; when the brief
+asks for a report in the final message, the worker appends a `REPORT:` section
+after `NOT VERIFIED` in one single final message.
 
 ## Steering
 
@@ -367,7 +385,9 @@ process remains. These are Luna's Lean-mode rules and code (`creme/luna_lean.py`
 The Lean MCP server is the user's Muse `lean-lsp-mcp` definition, which must
 keep Creme's guarded launcher (`/usr/bin/python3 -m creme lean-mcp -- uvx
 lean-lsp-mcp==PIN`, `LEAN_MCP_DISABLED_TOOLS` covering `lean_build` and
-`lean_profile_proof`, `LEAN_LSP_MAX_OPEN_FILES=2`); a drift refuses the start.
+`lean_profile_proof`, `LEAN_LSP_MAX_OPEN_FILES=2`); its `env.PYTHONPATH` must
+also resolve the Creme checkout root, since Muse starts the server with the
+session workspace as cwd. A drift refuses the start.
 Brief a Lean session as the Luna guide says, and verify the build from the
 wrapper's own records (the ledger row and a `FRESH` probe), not the transcript.
 

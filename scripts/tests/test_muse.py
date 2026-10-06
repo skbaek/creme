@@ -541,8 +541,9 @@ class RunTest(FakeMuseHarness):
         self.assertEqual([p["mode"] for p in self.sent("session/setApprovalMode")], ["promptUnmatched"])
         self.assertTrue(all(p["reasoningEffort"] == "low" for p in self.sent("turn/start")))
         run_dir = Path(record["run_dir"])
-        for name in ("brief.md", "events.jsonl", "approvals.json", "last-message.md", "usage-before.json",
-                     "usage-after.json", "verdict.json", "audit.json", "bootstrap.json", "transcript.jsonl"):
+        for name in ("brief.md", "events.jsonl", "approvals.json", "last-message.md", "messages.md",
+                     "usage-before.json", "usage-after.json", "verdict.json", "audit.json", "bootstrap.json",
+                     "transcript.jsonl"):
             self.assertTrue((run_dir / name).exists(), name)
         self.assertEqual(json.loads((run_dir / "audit.json").read_text())["verdict"], "PASS")
 
@@ -642,6 +643,49 @@ class RunTest(FakeMuseHarness):
         code, record = self.run_brief()
         self.assertEqual(code, M.EXIT_PREFLIGHT_REFUSED, record)
         self.assertEqual(self.sent("turn/start"), [])
+
+    QUOTA_REASON = ("API error 429 [request_id=abc]: Subscription quota exhausted. "
+                    "Your usage window resets at 2099-01-02T03:04:05Z. (rate_limit_error)")
+
+    def test_failed_terminal_reason_is_recorded_and_shown(self):
+        self.scenario["turn"].update(terminal="failed", terminal_reason=self.QUOTA_REASON)
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (M.EXIT_MUSE_FAILED, "FAILED"), record)
+        shown = [error for error in record["errors"] if "429" in error]
+        self.assertEqual(len(shown), 1, record)
+        self.assertLessEqual(len(shown[0]), 300)
+        self.assertIn("quota exhausted", shown[0])
+        self.assertIn(f"failure: {shown[0]}", M.format_run(record))
+        self.assertEqual((PB.read_json(self.state / "usage-last.json") or {}).get("quota_reset"),
+                         "2099-01-02T03:04:05Z")
+
+    def test_quota_reset_refuses_new_turns_until_it_passes(self):
+        self.scenario["turn"].update(terminal="failed", terminal_reason=self.QUOTA_REASON)
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual(record["verdict"], "FAILED", record)
+        starts = len(self.sent("turn/start"))
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (M.EXIT_PREFLIGHT_REFUSED, "REFUSED"), record)
+        self.assertTrue(any("quota" in refusal for refusal in record["refusals"]), record)
+        self.assertEqual(len(self.sent("turn/start")), starts)  # refused before any turn
+        reset = M.quota_reset_timestamp("2099-01-02T03:04:05Z")
+        self.assertTrue(M.quota_reset_refusals(self.state, now=reset - 10), self.state)
+        self.assertEqual(M.quota_reset_refusals(self.state, now=reset + 10), [])
+        self.scenario["turn"] = {"text": "STATUS: DONE"}
+        self.write_scenario()
+        request = M.RunRequest(brief="Say OK.", target=self.target, effort="low", timeout_seconds=30)
+        code, record = M.run(ROOT, request, self.environ, now=reset + 10)
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+
+    def test_non_quota_failure_sets_no_reset(self):
+        self.scenario["turn"].update(terminal="failed", terminal_reason="muse exploded: boom")
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual(record["verdict"], "FAILED", record)
+        self.assertTrue(any("boom" in error for error in record["errors"]), record)
+        self.assertNotIn("quota_reset", PB.read_json(self.state / "usage-last.json") or {})
 
     def test_approvals_follow_the_allowlist(self):
         self.scenario["turn"]["approvals"] = [{"kind": "shell", "command": "ls"},
@@ -1067,6 +1111,75 @@ class ModelFitMuseTest(FakeMuseHarness):
         self.assertEqual((usage["turns"], usage["effort"]), ("1", "low"))
 
 
+class CommittedMessagesTest(FakeMuseHarness):
+    CONTRACT = ("STATUS: DONE\nSUMMARY:\n- did the thing\nFILES CHANGED:\n- none\n"
+                "CHECKED:\n- fake\nNOT VERIFIED:\n- none")
+    CHATTER = "PARTIAL already delivered, see prior message"
+
+    def test_two_committed_messages_write_messages_md_and_keep_status_in_last_message(self):
+        # 2026-10-06: a turn committed its contract block and then a trailing
+        # chatter message; only the chatter survived in last-message.md.
+        self.scenario["turn"].update(text=self.CHATTER, commit_texts=[self.CONTRACT, self.CHATTER])
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+        self.assertIsNotNone(record["messages"])
+        bodies = Path(record["messages"]).read_text().split("\n---\n")
+        self.assertEqual(bodies, [self.CONTRACT, self.CHATTER + "\n"])
+        last = Path(record["last_message"]).read_text()
+        self.assertIn("STATUS: DONE", last)
+        self.assertIn(self.CHATTER, last)
+        self.assertLess(last.index("STATUS: DONE"), last.index(self.CHATTER))
+
+    def test_single_committed_message_keeps_existing_last_message_semantics(self):
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+        self.assertEqual(Path(record["last_message"]).read_text(), "STATUS: DONE\n")
+        self.assertEqual(Path(record["messages"]).read_text(), "STATUS: DONE\n")
+
+
+class OrderedDurableMessagesTest(unittest.TestCase):
+    def committed(self, run, text):
+        return {"payload": {"kind": "run", "run_id": run,
+                            "event": {"kind": "assistant_message_committed", "text": text}}}
+
+    def test_durable_log_keeps_every_committed_message_in_order(self):
+        first = "STATUS: DONE\nSUMMARY:\n- one"
+        second = "trailing chatter"
+        with tempfile.TemporaryDirectory() as base:
+            path = Path(base) / "session.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in
+                                    [self.committed("t-1", first), self.committed("t-1", second),
+                                     self.committed("other", "unrelated")]))
+            log = DurableLog(path)
+            self.assertEqual(log.poll(), 3)
+            self.assertEqual(log.message_list["t-1"], [first, second])
+            self.assertEqual(log.messages["t-1"], second)  # the last text, as before
+            self.assertEqual(M.turn_messages(log, "t-1"), [first, second])
+            selected = M.select_last_message(M.turn_messages(log, "t-1"))
+            self.assertTrue(selected.startswith("STATUS: DONE"))
+            self.assertIn(second, selected)
+            self.assertEqual(M.join_messages([first, second]), first + "\n---\n" + second + "\n")
+            self.assertIsNone(M.select_last_message([]))
+            self.assertEqual(M.select_last_message([second]), second)
+            self.assertEqual(M.select_last_message([second, first]), first)
+
+
+class ReportChannelPreambleTest(unittest.TestCase):
+    TEMPLATES = ("templates/muse/preamble.md", "templates/muse/lean-preamble.md",
+                 "templates/luna-reserve/preamble.md", "templates/luna-reserve/lean-preamble.md")
+
+    def test_all_preambles_carry_the_optional_report_section(self):
+        for relative in self.TEMPLATES:
+            with self.subTest(template=relative):
+                raw = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn("STATUS: DONE | PARTIAL | BLOCKED", raw)
+                self.assertIn("REPORT:", raw)
+                self.assertIn("only when the brief asks for a report or other long deliverable", raw)
+                self.assertIn("The 60-line bound applies to the header block above only", raw)
+                self.assertIn("The whole answer must be one final message", raw)
+
+
 class LibraryFirstContractTest(unittest.TestCase):
     PHRASES = ("docs/COMMON_API.md", "lean_local_search", "concept-level")
 
@@ -1092,6 +1205,58 @@ class LibraryFirstContractTest(unittest.TestCase):
         self.assertNotIn("`lean_run_code` with `#print axioms` instead", raw)
         text = M.instructions(ROOT, Path("/w/target"), "lean", "goal-v1")
         self.assertIn("Axiom evidence is the master's from-scratch probe", text)
+
+
+class LeanMcpFailuresTest(unittest.TestCase):
+    def write_settings(self, home: Path, env: dict) -> None:
+        settings = home / ".config" / "muse" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps({"mcpServers": {"lean-lsp-mcp": {
+            "transport": "stdio",
+            "command": "/usr/bin/python3",
+            "args": ["-m", "creme", "lean-mcp", "--", "uvx", "lean-lsp-mcp==0.26.1"],
+            "env": env,
+        }}}), encoding="utf-8")
+
+    def base_env(self, pythonpath: str | None = None) -> dict:
+        env = {
+            "LEAN_MCP_DISABLED_TOOLS": "lean_build,lean_profile_proof",
+            "LEAN_LSP_MAX_OPEN_FILES": "2",
+        }
+        if pythonpath is not None:
+            env["PYTHONPATH"] = pythonpath
+        return env
+
+    def check(self, home: Path) -> list[str]:
+        return M.lean_mcp_failures({"HOME": str(home)})
+
+    def test_entry_without_pythonpath_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.write_settings(home, self.base_env())
+            failures = self.check(home)
+            self.assertTrue(any("PYTHONPATH" in item for item in failures), failures)
+
+    def test_entry_with_checkout_root_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = M._creme_checkout_root()
+            self.write_settings(home, self.base_env(str(root)))
+            self.assertEqual(self.check(home), [])
+
+    def test_entry_with_unrelated_pythonpath_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.write_settings(home, self.base_env("/unrelated/path"))
+            failures = self.check(home)
+            self.assertTrue(any("PYTHONPATH" in item for item in failures), failures)
+
+    def test_entry_with_checkout_root_among_other_entries_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            root = M._creme_checkout_root()
+            self.write_settings(home, self.base_env(os.pathsep.join(["/unrelated", str(root)])))
+            self.assertEqual(self.check(home), [])
 
 
 if __name__ == "__main__":

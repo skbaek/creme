@@ -174,8 +174,15 @@ def muse_turn(record: dict[str, Any], number: int) -> dict[str, Any]:
 # Anthropic input categories are disjoint: input, cache read and cache creation
 # sum to total input; cache read is reported as its cached subset. A
 # `fallback_message` iteration is a second billed request under another model.
+# A fallback response (a `fallback` content block and/or a `fallback_message`
+# usage iteration under one message id) spans two models, so it is an attempt
+# boundary, not one attempt's usage: `claude_transcript` refuses it unless the
+# caller splits it with `split_at_fallback="before"` (the `from` iteration's
+# usage ends the attempt) or `"after"` (the `fallback_message` iteration
+# starts the next attempt).
 
-CLAUDE_FAMILIES = {"claude-fable-5-1": "fable", "claude-opus-5-5": "opus", "claude-sonnet-5-5": "sonnet"}
+CLAUDE_FAMILIES = {"claude-fable-5-1": "fable", "claude-opus-5-5": "opus", "claude-opus-4-8": "opus",
+                   "claude-sonnet-5-5": "sonnet"}
 CLAUDE_PROFILE_EFFORTS = {1: "low", 2: "medium", 3: "high", 4: "xhigh", 5: "max"}
 CLAUDE_AGENT_TOOLS = ("Agent", "Task")
 _SYNTHETIC = "<synthetic>"
@@ -207,20 +214,83 @@ def _call_usage(usage: Any, where: str) -> dict[str, int]:
             "output": _count(usage.get("output_tokens"), "output_tokens")}
 
 
+_USAGE_KEYS = ("input", "cache_read", "cache_creation", "output")
+
+
+def _fallback_block_models(block: Any) -> tuple[str | None, str | None, bool]:
+    """(from_model, to_model, present) for one transcript content block."""
+    if not isinstance(block, dict) or block.get("type") != "fallback":
+        return None, None, False
+
+    def _model(value: Any) -> str | None:
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, dict) and isinstance(value.get("model"), str) and value["model"]:
+            return value["model"]
+        return None
+
+    return _model(block.get("from")), _model(block.get("to")), True
+
+
+def _is_fallback_iteration(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("type") == "fallback_message"
+
+
+def _sum_call_usages(parts: list[dict[str, int]]) -> dict[str, int]:
+    total = {key: 0 for key in _USAGE_KEYS}
+    for part in parts:
+        for key in total:
+            total[key] += part[key]
+    return total
+
+
+def parse_split_at_fallback(value: Any) -> tuple[str | None, int | None]:
+    """(side, index) for a fallback split; (None, None) when unsplit.
+
+    Accepts `"before"`/`"after"` (exactly one fallback response must be in the
+    window) or `{"side": ..., "index": N}` selecting the N-th fallback response
+    (0-based, in first-entry order) for runs with several fallbacks.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, str):
+        if value in ("before", "after"):
+            return value, None
+    elif isinstance(value, dict):
+        side = value.get("side")
+        index = value.get("index", value.get("fallback_index", value.get("fallback", None)))
+        if side in ("before", "after") and (index is None or (type(index) is int and index >= 0)):
+            return side, index
+    raise CaptureError("split_at_fallback must be 'before'/'after' or "
+                       "{'side': 'before'/'after', 'index': N} (0-based among fallback responses)")
+
+
 def claude_transcript(path: Path, start_ms: int | None = None, end_ms: int | None = None,
-                      main_only: bool = False) -> dict[str, Any]:
+                      main_only: bool = False, split_at_fallback: Any = None) -> dict[str, Any]:
     """Deduplicated API responses of one transcript, by first-entry time in [start, end).
 
     Returns metadata only: per-response usage, observed models and efforts,
     Agent-tool children, and the gaps that keep usage incomplete. Message
     bodies are not retained.
+
+    A fallback response (a `fallback` content block and/or a `fallback_message`
+    usage iteration) bills two requests under two models, so an unsplit read
+    refuses with a message naming `split_at_fallback`. With
+    `split_at_fallback="before"` the result holds the responses up to and
+    including the fallback (the fallback contributing only its `from`
+    iteration) as the attempt ending there; `"after"` holds the fallback's
+    `fallback_message` iteration plus the later responses as the attempt
+    starting there. Streamed entries of the fallback response that already
+    carry the new model are part of the fallback, not a model change.
     """
+    side, index = parse_split_at_fallback(split_at_fallback)
     path = Path(path).resolve()
     calls: dict[str, dict[str, Any]] = {}
-    efforts: set[str] = set()
+    order: list[str] = []                # message ids in first-entry order
     children: dict[str, str | None] = {}     # Agent tool_use id -> launched agent id (None: no result yet)
     errored: set[str] = set()
-    compactions = synthetic = 0
+    compactions = 0
+    compaction_ms: list[int] = []
     with path.open("rb") as handle:
         for number, line in enumerate(handle, 1):
             if not line.endswith(b"\n"):
@@ -237,6 +307,7 @@ def claude_transcript(path: Path, start_ms: int | None = None, end_ms: int | Non
                 (end_ms is None or moment < end_ms)
             if row.get("type") == "system" and row.get("subtype") == "compact_boundary" and inside:
                 compactions += 1
+                compaction_ms.append(moment)
             if row.get("type") == "user":
                 content = (row.get("message") or {}).get("content")
                 result = row.get("toolUseResult")
@@ -258,9 +329,13 @@ def claude_transcript(path: Path, start_ms: int | None = None, end_ms: int | Non
                 if not inside:
                     calls[ident] = {"outside": True}
                     continue
-                call = calls[ident] = {"model": message.get("model"), "first_ms": moment,
-                                       "input": None, "final": None, "request_id": None,
-                                       "session": row.get("sessionId")}
+                call = calls[ident] = {"model": message.get("model"), "models_seen": {message.get("model")},
+                                       "change_at": None, "first_ms": moment,
+                                       "input": None, "inputs_seen": [], "finals": [],
+                                       "final": None, "fallback_block": None,
+                                       "has_fallback_block": False, "efforts": set(),
+                                       "request_id": None, "session": row.get("sessionId")}
+                order.append(ident)
             if call.get("outside"):
                 continue
             request = row.get("requestId")
@@ -272,59 +347,214 @@ def claude_transcript(path: Path, start_ms: int | None = None, end_ms: int | Non
                 if isinstance(block, dict) and block.get("type") == "tool_use" \
                         and block.get("name") in CLAUDE_AGENT_TOOLS and isinstance(block.get("id"), str):
                     children.setdefault(block["id"], None)
-            if message.get("model") != call["model"]:
-                raise CaptureError(f"{path.name}:{number}: response changed model "
-                                   f"{call['model']} -> {message.get('model')} (fallback); "
-                                   "register separate attempts")
+                from_model, to_model, present = _fallback_block_models(block)
+                if present:
+                    call["has_fallback_block"] = True
+                    if (from_model, to_model) != (None, None):
+                        if call["fallback_block"] is None:
+                            call["fallback_block"] = (from_model, to_model)
+                        elif call["fallback_block"] != (from_model, to_model):
+                            raise CaptureError(f"{path.name}:{number}: response {ident} names two fallbacks")
+            # A model change inside one response is decided at the end: streamed
+            # entries of a fallback response may already carry the new model.
+            call["models_seen"].add(message.get("model"))
+            if message.get("model") != call["model"] and call["change_at"] is None:
+                call["change_at"] = number
             if call["model"] == _SYNTHETIC:
                 continue
             if row.get("perTurnEffort") is not None:
-                efforts.add(row["perTurnEffort"])
+                call["efforts"].add(row["perTurnEffort"])
             usage = _call_usage(message.get("usage"), f"{path.name}:{number}")
             start = (usage["input"], usage["cache_read"], usage["cache_creation"])
             iterations = message["usage"].get("iterations")
             if call["input"] is None:
                 call["input"] = start
-            elif call["input"] != start and not iterations:
-                raise CaptureError(f"{path.name}:{number}: streamed entries disagree on input usage")
+            elif call["input"] != start:
+                call["inputs_seen"].append((number, iterations is not None))
             if message.get("stop_reason") is not None:
                 if iterations:
-                    parts = [_call_usage(item, f"{path.name}:{number} iteration") for item in iterations]
-                    models = {item.get("model") for item in iterations if isinstance(item, dict)} - {None}
-                    if models - {call["model"]}:
-                        raise CaptureError(f"{path.name}:{number}: response fell back across models "
-                                           f"{sorted(models | {call['model']})}; register separate attempts")
-                    final = {key: sum(part[key] for part in parts) for key in usage}
+                    call["finals"].append((number, "iterations", iterations))
                 else:
-                    final = usage
-                if call["final"] is not None and call["final"] != final:
-                    raise CaptureError(f"{path.name}:{number}: two different final usages for one response")
-                call["final"] = final
-    real = {key: call for key, call in calls.items()
-            if not call.get("outside") and call["model"] != _SYNTHETIC}
-    synthetic = sum(1 for call in calls.values() if call.get("model") == _SYNTHETIC)
-    totals = {"input": 0, "cache_read": 0, "cache_creation": 0, "output": 0}
-    unfinished = 0
-    for call in real.values():
-        final = call["final"]
-        if final is None:
-            unfinished += 1
-            totals["input"] += call["input"][0]
-            totals["cache_read"] += call["input"][1]
-            totals["cache_creation"] += call["input"][2]
+                    call["finals"].append((number, "usage", usage))
+    fallbacks: dict[str, dict[str, Any]] = {}
+    for ident in order:
+        call = calls[ident]
+        if call.get("outside") or call["model"] == _SYNTHETIC:
+            continue
+        raw_items = [item for finals in call["finals"] for item in finals[2]
+                     if finals[1] == "iterations"]
+        items = [item for item in raw_items if isinstance(item, dict)]
+        has_iterations = any(kind == "iterations" for _, kind, _ in call["finals"])
+        has_plain = any(kind == "usage" for _, kind, _ in call["finals"])
+        tagged = any(_is_fallback_iteration(item) for item in items)
+        if not (call["has_fallback_block"] or tagged):
+            if len(call["models_seen"]) > 1:
+                others = sorted(model for model in call["models_seen"] if model != call["model"])
+                raise CaptureError(f"{path.name}:{call['change_at']}: response changed model "
+                                   f"{call['model']} -> {others} (fallback); register separate attempts")
+            bad = [at for at, had in call["inputs_seen"] if not had]
+            if bad:
+                # Streamed entries disagree on input usage outside a fallback.
+                raise CaptureError(f"{path.name}:{bad[0]}: streamed entries disagree on input usage")
+            if has_iterations and has_plain:
+                raise CaptureError(f"{path.name}:{call['finals'][0][0]}: "
+                                   "two different final usages for one response")
+            if has_iterations:
+                raws = [raw for _, kind, raw in call["finals"] if kind == "iterations"]
+                if any(raw != raws[0] for raw in raws[1:]):
+                    raise CaptureError(f"{path.name}:{call['finals'][1][0]}: "
+                                       "two different final usages for one response")
+                parts = [_call_usage(item, f"{path.name}:{call['finals'][0][0]} iteration")
+                         for item in raws[0]]
+                models = {item.get("model") for item in raws[0] if isinstance(item, dict)} - {None}
+                if models - {call["model"]}:
+                    raise CaptureError(f"{path.name}:{call['finals'][0][0]}: response fell back across models "
+                                       f"{sorted(models | {call['model']})}; register separate attempts")
+                call["final"] = _sum_call_usages(parts)
+            elif has_plain:
+                raws = [raw for _, kind, raw in call["finals"] if kind == "usage"]
+                if any(raw != raws[0] for raw in raws[1:]):
+                    raise CaptureError(f"{path.name}:{call['finals'][1][0]}: "
+                                       "two different final usages for one response")
+                call["final"] = raws[0]
+            continue
+        at = call["finals"][0][0] if call["finals"] else call["change_at"]
+        from_items = [item for item in raw_items if not _is_fallback_iteration(item)]
+        to_items = [item for item in raw_items if _is_fallback_iteration(item)]
+        if not from_items or not to_items:
+            raise CaptureError(f"{path.name}:{at}: response {ident} is a fallback without attributable "
+                               "per-model usage; split_at_fallback cannot split it")
+        from_models = {item.get("model") for item in items if not _is_fallback_iteration(item)} - {None}
+        to_models = {item.get("model") for item in items if _is_fallback_iteration(item)} - {None}
+        if len(from_models) != 1 or len(to_models) != 1:
+            raise CaptureError(f"{path.name}:{at}: response {ident} fallback models are ambiguous "
+                               f"{sorted(from_models | to_models)}; register separate attempts")
+        from_model = next(iter(from_models))
+        to_model = next(iter(to_models))
+        block = call["fallback_block"]
+        if block is not None:
+            for name, expected, observed in (("from", block[0], from_model), ("to", block[1], to_model)):
+                if expected is not None and expected != observed:
+                    raise CaptureError(f"{path.name}:{at}: response {ident} fallback block {name} model "
+                                       f"{expected} disagrees with its usage iterations {observed}")
+        from_usage = _sum_call_usages([_call_usage(item, f"{path.name}:{at} iteration") for item in from_items])
+        to_usage = _sum_call_usages([_call_usage(item, f"{path.name}:{at} iteration") for item in to_items])
+        fallbacks[ident] = {"from_model": from_model, "to_model": to_model,
+                            "from_usage": from_usage, "to_usage": to_usage}
+    if fallbacks and side is None:
+        ordered = [ident for ident in order if ident in fallbacks]
+        first = fallbacks[ordered[0]]
+        models = sorted({first["from_model"], first["to_model"]})
+        extra = f" ({len(ordered)} fallback responses)" if len(ordered) > 1 else ""
+        raise CaptureError(f"response {ordered[0]} fell back across models {models}{extra}; capture each side "
+                           "separately with split_at_fallback 'before' (attempt ending here) / 'after' "
+                           "(attempt starting here) and register separate attempts")
+    split_info: dict[str, Any] | None = None
+    if fallbacks:
+        ordered = [ident for ident in order if ident in fallbacks]
+        if index is None:
+            if len(ordered) != 1:
+                raise CaptureError(f"transcript has {len(ordered)} fallback responses; select one with "
+                                   "split_at_fallback {'side': 'before'/'after', 'index': N} and narrow any "
+                                   "other window with since/until")
+            target = ordered[0]
+            resolved = 0
         else:
-            for key in totals:
-                totals[key] += final[key]
-    stamps = [call["first_ms"] for call in real.values()]
-    return {"path": str(path), "source": source_identity(path), "calls": len(real),
-            "unfinished_calls": unfinished, "compactions": compactions, "synthetic": synthetic,
-            "models": sorted({call["model"] for call in real.values()}), "efforts": sorted(efforts),
-            "totals": totals, "first_ms": min(stamps) if stamps else None,
-            "last_ms": max(stamps) if stamps else None,
-            "sessions": sorted({call["session"] for call in real.values()} - {None}),
-            "responses": [{"request_id": call["request_id"], "model": call["model"], "final": call["final"],
-                           "input": call["input"]} for call in real.values()],
-            "children": {key: value for key, value in children.items() if key not in errored}}
+            if not 0 <= index < len(ordered):
+                raise CaptureError(f"split_at_fallback index {index} is outside the "
+                                   f"{len(ordered)} fallback responses")
+            target = ordered[index]
+            resolved = index
+            others = [ident for ident in ordered if ident != target]
+            if others:
+                raise CaptureError(f"responses {others} also fell back; narrow the window with since/until "
+                                   f"so only fallback {resolved} remains, then split it with split_at_fallback")
+        info = fallbacks[target]
+        split_info = {"side": side, "index": resolved, "target": target,
+                      "from_model": info["from_model"], "to_model": info["to_model"],
+                      "boundary": calls[target]["first_ms"]}
+        position = order.index(target)
+        ranges = {"before": order[:position] + [target], "after": [target] + order[position + 1:]}
+        idents = ranges[side]
+        boundary = calls[target]["first_ms"]
+        side_compactions = sum(1 for moment in compaction_ms
+                               if (moment < boundary) == (side == "before"))
+    else:
+        if side is not None:
+            raise CaptureError(f"split_at_fallback {side!r} names no fallback response in this window")
+        idents = [ident for ident in order if not calls[ident].get("outside")]
+        side_compactions = compactions
+
+    def _summarize(idents: list[str], compaction_count: int) -> dict[str, Any]:
+        views: list[tuple[dict[str, Any], dict[str, int] | None]] = []
+        responses: list[dict[str, Any]] = []
+        side_models: set[str] = set()
+        side_efforts: set[str] = set()
+        synth = 0
+        for ident in idents:
+            call = calls[ident]
+            if call.get("outside") or call["model"] == _SYNTHETIC:
+                if call.get("model") == _SYNTHETIC:
+                    synth += 1
+                continue
+            if split_info is not None and ident == split_info["target"]:
+                info = fallbacks[ident]
+                if split_info["side"] == "before":
+                    model, final = info["from_model"], info["from_usage"]
+                else:
+                    model, final = info["to_model"], info["to_usage"]
+                responses.append({"request_id": call["request_id"], "model": model, "final": final,
+                                  "input": call["input"],
+                                  "fallback": {"side": split_info["side"],
+                                               "from_model": info["from_model"], "to_model": info["to_model"],
+                                               "from_usage": info["from_usage"], "to_usage": info["to_usage"]}})
+            else:
+                model, final = call["model"], call["final"]
+                responses.append({"request_id": call["request_id"], "model": model, "final": final,
+                                  "input": call["input"]})
+            side_models.add(model)
+            side_efforts.update(call["efforts"])
+            views.append((call, final))
+        if split_info is not None and len(side_models) != 1:
+            raise CaptureError(f"split {split_info['side']} still spans releases {sorted(side_models)}; "
+                               "register separate attempts")
+        totals = {"input": 0, "cache_read": 0, "cache_creation": 0, "output": 0}
+        unfinished = 0
+        for call, final in views:
+            if final is None:
+                unfinished += 1
+                totals["input"] += call["input"][0]
+                totals["cache_read"] += call["input"][1]
+                totals["cache_creation"] += call["input"][2]
+            else:
+                for key in totals:
+                    totals[key] += final[key]
+        stamps = [call["first_ms"] for call, _ in views]
+        return {"views": views, "responses": responses, "models": sorted(side_models),
+                "efforts": sorted(side_efforts), "synthetic": synth, "totals": totals,
+                "unfinished": unfinished,
+                "stamps": stamps, "compactions": compaction_count}
+
+    summary = _summarize(idents, side_compactions)
+    if split_info is not None:
+        other = [ident for ident in order if ident not in idents]
+        deferred = [calls[ident]["request_id"] for ident in other
+                    if not calls[ident].get("outside") and calls[ident]["model"] != _SYNTHETIC
+                    and calls[ident]["request_id"] is not None]
+    else:
+        deferred = []
+    result: dict[str, Any] = {"path": str(path), "source": source_identity(path), "calls": len(summary["views"]),
+                              "unfinished_calls": summary["unfinished"], "compactions": summary["compactions"],
+                              "synthetic": summary["synthetic"], "models": summary["models"],
+                              "efforts": summary["efforts"], "totals": summary["totals"],
+                              "first_ms": min(summary["stamps"]) if summary["stamps"] else None,
+                              "last_ms": max(summary["stamps"]) if summary["stamps"] else None,
+                              "sessions": sorted({call["session"] for call, _ in summary["views"]} - {None}),
+                              "responses": summary["responses"], "deferred_ids": deferred,
+                              "children": {key: value for key, value in children.items() if key not in errored}}
+    if split_info is not None:
+        result["split"] = split_info
+    return result
 
 
 # Claude Code OpenTelemetry (`creme claude-telemetry serve`, daily
@@ -371,12 +601,30 @@ def _otlp_records(body: dict[str, Any], signal: str):
                 yield attributes, int(stamp) // 1_000_000 if stamp is not None else None, signal == "traces"
 
 
+def _sum_telemetry_usages(parts: list[dict[str, int]]) -> dict[str, int]:
+    return {key: sum(part[key] for part in parts) for key in ("input", "cache_read", "cache_creation", "output")}
+
+
+def _merge_telemetry_span(known: dict[str, Any], record: dict[str, Any], where: str, ident: str) -> None:
+    if record["span"]:
+        if known["span"] and known["agent_id"] != record["agent_id"]:
+            raise CaptureError(f"{where}: telemetry spans of {ident} disagree on agent")
+        known.update(span=True, agent_id=record["agent_id"], time_ms=record["time_ms"])
+    known["query_source"] = known["query_source"] or record["query_source"]
+
+
 def claude_telemetry(directory: Path) -> dict[str, Any]:
     """API requests reported by Claude Code telemetry, merged by `request_id`.
 
     Event and span of one request must agree on session, model and counts; the
     span contributes `agent_id`. A record without `request_id` but with tokens
     is kept apart as unkeyed. A partial final line is still being written.
+
+    A fallback bills two iterations under one request id and two models. The
+    event and span of one iteration still agree, so a repeated identical
+    iteration merges; a new model under a known request id extends that
+    request's `iterations` (summed into `usage`, models listed in `models`,
+    `fallback` set) instead of refusing.
     """
     directory = Path(directory).resolve()
     files = sorted(directory.glob("otlp-*.jsonl")) if directory.is_dir() else []
@@ -416,14 +664,35 @@ def claude_telemetry(directory: Path) -> dict[str, Any]:
                     if known is None:
                         requests[ident] = record
                         continue
-                    for field in ("session", "model", "usage"):
-                        if known[field] != record[field]:
-                            raise CaptureError(f"{where}: telemetry records of {ident} disagree on {field}")
-                    if span:
-                        if known["span"] and known["agent_id"] != record["agent_id"]:
-                            raise CaptureError(f"{where}: telemetry spans of {ident} disagree on agent")
-                        known.update(span=True, agent_id=record["agent_id"], time_ms=moment)
-                    known["query_source"] = known["query_source"] or record["query_source"]
+                    if known["session"] != record["session"]:
+                        raise CaptureError(f"{where}: telemetry records of {ident} disagree on session")
+                    iterations = known.get("iterations")
+                    if iterations is not None:
+                        if any(item["model"] == record["model"] and item["usage"] == record["usage"]
+                               for item in iterations):
+                            _merge_telemetry_span(known, record, where, ident)
+                            continue
+                        if record["model"] in {item["model"] for item in iterations}:
+                            raise CaptureError(f"{where}: telemetry records of {ident} disagree on usage")
+                        _merge_telemetry_span(known, record, where, ident)
+                        iterations.append({"model": record["model"], "usage": record["usage"]})
+                        known["usage"] = _sum_telemetry_usages([item["usage"] for item in iterations])
+                        known["model"] = record["model"]
+                        known["models"] = sorted({item["model"] for item in iterations})
+                        continue
+                    if known["model"] == record["model"] and known["usage"] == record["usage"]:
+                        _merge_telemetry_span(known, record, where, ident)
+                        continue
+                    if known["model"] == record["model"]:
+                        raise CaptureError(f"{where}: telemetry records of {ident} disagree on usage")
+                    _merge_telemetry_span(known, record, where, ident)
+                    known["iterations"] = [{"model": known["model"], "usage": known["usage"]},
+                                           {"model": record["model"], "usage": record["usage"]}]
+                    known["fallback"] = True
+                    known["usage"] = _sum_telemetry_usages([item["usage"]
+                                                            for item in known["iterations"]])
+                    known["model"] = record["model"]
+                    known["models"] = sorted({item["model"] for item in known["iterations"]})
     result = {"directory": str(directory), "files": len(files), "requests": requests, "unkeyed": unkeyed}
     _TELEMETRY_CACHE.clear()
     _TELEMETRY_CACHE[(str(directory), key)] = result
@@ -458,6 +727,13 @@ def claude_join(parts: list[dict[str, Any]], owners: list[str | None], telemetry
     an owner in its `windows` entry with no transcript entry are added. An
     event without its span cannot be attributed; one that could be an owner's
     is a gap unless `siblings` transcripts account for it.
+
+    A split fallback response carries both iterations in `response["fallback"]`
+    but counts only its own side toward this run: the two sides of one request
+    id never double-count it, and a side without telemetry stays
+    transcript-only (incomplete, never zero). Telemetry for responses the
+    split partitioned to the sibling attempt (`deferred_ids`) is skipped here
+    and counted there.
     """
     gaps: list[str] = []
     sessions = {session for part in parts for session in part["sessions"]}
@@ -489,6 +765,50 @@ def claude_join(parts: list[dict[str, Any]], owners: list[str | None], telemetry
                     for key in totals:
                         totals[key] += final[key]
                 continue
+            fallback = response.get("fallback")
+            if fallback is not None:
+                before = fallback["side"] == "before"
+                side_usage = fallback["from_usage"] if before else fallback["to_usage"]
+                peer_usage = fallback["to_usage"] if before else fallback["from_usage"]
+                side_model = fallback["from_model"] if before else fallback["to_model"]
+                peer_model = fallback["to_model"] if before else fallback["from_model"]
+                whole = {key: side_usage[key] + peer_usage[key] for key in totals}
+                if record["session"] != session:
+                    raise CaptureError(f"request {ident}: telemetry session {record['session']} "
+                                       f"is not {session}")
+                if record["span"] and record["agent_id"] != owner:
+                    raise CaptureError(f"request {ident}: telemetry agent {record['agent_id']} "
+                                       f"is not {owner}")
+                if record.get("fallback"):
+                    if sorted(record.get("models", [])) != sorted([fallback["from_model"],
+                                                                   fallback["to_model"]]) or \
+                            record["usage"] != whole:
+                        raise CaptureError(f"request {ident}: telemetry fallback usage {record['usage']} "
+                                           f"differs from transcript split {whole}")
+                    joined += 1
+                    for key in totals:
+                        totals[key] += side_usage[key]
+                    continue
+                if record["usage"] == whole and record["model"] in (side_model, peer_model):
+                    # One telemetry row already covers both iterations.
+                    joined += 1
+                    for key in totals:
+                        totals[key] += side_usage[key]
+                    continue
+                if record["model"] == side_model and record["usage"] == side_usage:
+                    joined += 1
+                    for key in totals:
+                        totals[key] += record["usage"][key]
+                    continue
+                if record["model"] == peer_model and record["usage"] == peer_usage:
+                    # Only the peer iteration was telemetered; this side stays
+                    # transcript-only and therefore incomplete, never zero.
+                    missing += 1
+                    for key in totals:
+                        totals[key] += side_usage[key]
+                    continue
+                raise CaptureError(f"request {ident}: transcript split usage {side_usage} differs "
+                                   f"from telemetry {record['usage']}")
             if record["model"] != response["model"]:
                 raise CaptureError(f"request {ident}: telemetry model {record['model']} is not the "
                                    f"transcript release {response['model']}")
@@ -522,7 +842,10 @@ def claude_join(parts: list[dict[str, Any]], owners: list[str | None], telemetry
 
     candidates = [(ident, record) for ident, record in requests.items() if ident not in seen]
     candidates += [(None, record) for record in (telemetry or {}).get("unkeyed", [])]
+    deferred = {ident for part in parts for ident in part.get("deferred_ids", []) if ident}
     for ident, record in candidates:
+        if ident is not None and ident in deferred:
+            continue  # transcribed on the sibling side of a fallback split; counted there
         if session is None or record["session"] != session:
             continue
         if record["span"]:
@@ -533,10 +856,14 @@ def claude_join(parts: list[dict[str, Any]], owners: list[str | None], telemetry
                 ambiguous += 1
                 continue
             if not master and record["model"] not in models[owner]:
+                if record.get("fallback"):
+                    raise CaptureError(f"request {ident} of agent {owner} fell back across "
+                                       f"{sorted(record.get('models', []))}; split it with split_at_fallback "
+                                       "'before'/'after' and register separate attempts")
                 raise CaptureError(f"request {ident} of agent {owner} used {record['model']}, not its "
                                    f"release {sorted(models[owner])}; register separate attempts")
             added += 1
-            observed.add(record["model"])
+            observed.update(record.get("models", [record["model"]]))
             for key in totals:
                 totals[key] += record["usage"][key]
             continue

@@ -160,13 +160,29 @@ class DoctorTest(unittest.TestCase):
                     "LEAN_MCP_DISABLED_TOOLS": "lean_build,lean_profile_proof",
                     "LEAN_LSP_MAX_OPEN_FILES": "2",
                     "LEAN_LSP_TEST_MODE": "1",
+                    "PYTHONPATH": str(root.resolve()),
                 },
             }}}), encoding="utf-8")
             matching = muse_check()
             self.assertEqual(len(matching), 1)
             self.assertEqual(matching[0].status, STATUS_OK, matching[0].detail)
             self.assertIn("pinned 0.26.1", matching[0].detail)
+            without_pythonpath = json.loads(settings.read_text(encoding="utf-8"))
+            del without_pythonpath["mcpServers"]["lean-lsp-mcp"]["env"]["PYTHONPATH"]
+            settings.write_text(json.dumps(without_pythonpath), encoding="utf-8")
+            missing_pythonpath = muse_check()
+            self.assertEqual(len(missing_pythonpath), 1)
+            self.assertNotEqual(missing_pythonpath[0].status, STATUS_OK)
+            self.assertIn("PYTHONPATH", missing_pythonpath[0].detail)
+            unrelated = json.loads(settings.read_text(encoding="utf-8"))
+            unrelated["mcpServers"]["lean-lsp-mcp"]["env"]["PYTHONPATH"] = "/unrelated/path"
+            settings.write_text(json.dumps(unrelated), encoding="utf-8")
+            wrong_pythonpath = muse_check()
+            self.assertEqual(len(wrong_pythonpath), 1)
+            self.assertNotEqual(wrong_pythonpath[0].status, STATUS_OK)
+            self.assertIn("PYTHONPATH", wrong_pythonpath[0].detail)
             drifted = json.loads(settings.read_text(encoding="utf-8"))
+            drifted["mcpServers"]["lean-lsp-mcp"]["env"]["PYTHONPATH"] = str(root.resolve())
             drifted["mcpServers"]["lean-lsp-mcp"]["args"][-1] = "lean-lsp-mcp==0.0.0"
             settings.write_text(json.dumps(drifted), encoding="utf-8")
             stale = muse_check()

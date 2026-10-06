@@ -213,7 +213,16 @@ failure or error, and, in read-only mode, an unchanged `HEAD` and
 allowance used, not left idle). A fresh serve host reports no usage until its
 first model call, so admission falls back to the last observation of an
 earlier host while its window has not reset (`usage-last.json`), and records
-`unobserved` otherwise. Usage is recorded before and after every turn.
+`unobserved` otherwise. Usage is recorded before and after every turn. When a
+turn ends with a failed terminal carrying a non-empty reason (durable run
+terminal, else the live `turn/completed`), that reason is appended to the
+turn's errors as one bounded line, so the record, the summaries, and the turn
+attention event all show why a zero-token turn failed. A quota-shaped reason
+(HTTP 429, `rate_limit_error`, or quota) is classified as `quota`; when it
+names an ISO-8601 reset time ("resets at …"), that UTC time is recorded as
+`quota_reset` in `usage-last.json` (never invented), and admission refuses new
+turns and starts with exit 10 until it passes. A non-quota failure is shown
+but sets no reset.
 
 ## When the live view is lost
 

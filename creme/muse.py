@@ -32,6 +32,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -258,7 +259,11 @@ def remember_usage(state: Path, usage: Optional[dict]) -> None:
     """Keep the last usage window a host observed, for the admission of a later host."""
     if isinstance(usage, dict):
         PB.private_dir(state)
-        PB.write_private_json(state / "usage-last.json", {"usage": usage, "at": PB.now_iso()})
+        payload: dict = {"usage": usage, "at": PB.now_iso()}
+        reset = (PB.read_json(state / "usage-last.json") or {}).get("quota_reset")
+        if isinstance(reset, str) and reset:
+            payload["quota_reset"] = reset
+        PB.write_private_json(state / "usage-last.json", payload)
 
 
 def admission_usage(state: Path, observed: Optional[dict]) -> tuple[Optional[dict], str]:
@@ -278,6 +283,113 @@ def admission_usage(state: Path, observed: Optional[dict]) -> tuple[Optional[dic
         if any(blocks.values()):
             return {**last, **blocks}, "last-observed"
     return None, "unobserved"
+
+
+# ---------------------------------------------------------------------------
+# Failure reasons: a turn that ends with zero tokens must still say why.
+#
+# Measured 2026-10-05: a broker turn failed in 3 s with zero tokens while its
+# record showed ``errors: []`` and ``reason: null``; only Muse's durable
+# session log named the cause (a run ``terminal`` record with a 429
+# ``rate_limit_error`` reason). The durable terminal is authoritative, so its
+# non-empty reason is appended to the turn's errors as one bounded line, and a
+# quota-shaped reason additionally records its reset time for admission.
+
+_QUOTA_RESET_RE = re.compile(
+    r"resets?\s+at\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)",
+    re.IGNORECASE)
+
+
+def failure_reason_kind(reason: Any) -> Optional[str]:
+    """``quota`` for a quota/rate-limit reason (HTTP 429, ``rate_limit_error``, quota); else None."""
+    text = str(reason).lower() if isinstance(reason, str) else ""
+    if re.search(r"\b429\b", text) or "rate_limit" in text or "quota" in text:
+        return "quota"
+    return None
+
+
+def quota_reset_from_reason(reason: Any) -> Optional[str]:
+    """The UTC ``...Z`` reset time a quota reason names (``resets at …``); None when absent. Never invented."""
+    match = _QUOTA_RESET_RE.search(reason) if isinstance(reason, str) else None
+    if match is None:
+        return None
+    stamp = match.group(1)
+    try:
+        moment = _dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=_dt.timezone.utc)
+    return moment.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_quota_reset(state: Path) -> Optional[str]:
+    """The recorded quota reset time (UTC ``...Z``), or None."""
+    reset = (PB.read_json(state / "usage-last.json") or {}).get("quota_reset")
+    return reset if isinstance(reset, str) and reset else None
+
+
+def remember_quota_reset(state: Path, reset: str) -> None:
+    """Record a quota reset time beside the last usage observation (never invent one)."""
+    PB.private_dir(state)
+    payload = PB.read_json(state / "usage-last.json") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["quota_reset"] = reset
+    payload.setdefault("at", PB.now_iso())
+    PB.write_private_json(state / "usage-last.json", payload)
+
+
+def quota_reset_timestamp(reset: str) -> Optional[float]:
+    """Epoch seconds of a recorded reset time, or None when it does not parse."""
+    try:
+        moment = _dt.datetime.fromisoformat(reset.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=_dt.timezone.utc)
+    return moment.timestamp()
+
+
+def quota_reset_refusals(state: Path, now: Optional[float] = None) -> list[str]:
+    """Refuse a new turn/start while a recorded quota reset lies in the future (exit 10)."""
+    reset = read_quota_reset(state)
+    if reset is None:
+        return []
+    stamp = quota_reset_timestamp(reset)
+    if stamp is None:
+        return []
+    current = time.time() if now is None else now
+    if current >= stamp:
+        return []
+    return [f"Muse subscription quota exhausted until {reset}; refusing new turns until then "
+            f"(recorded from a failed turn)"]
+
+
+def note_terminal_reason(state: Path, errors: list[str], logged: Optional[dict],
+                         live_reason: Optional[str] = None) -> Optional[str]:
+    """Append a failed terminal's reason to ``errors`` as one bounded line; record a quota reset.
+
+    Returns the reason kind (``quota`` or ``other``), or None when no reason was carried.
+    """
+    # Only a failed terminal is a failure: an interrupted or cancelled turn keeps
+    # its own status (and exit code), whatever reason Muse attached to it.
+    if isinstance(logged, dict) and logged.get("terminal") not in (None, "failed"):
+        return None
+    reason = (logged or {}).get("reason") if isinstance(logged, dict) else None
+    if not (isinstance(reason, str) and reason.strip()) and isinstance(live_reason, str) and live_reason.strip():
+        reason = live_reason
+    if not (isinstance(reason, str) and reason.strip()):
+        return None
+    line = PB.one_line(f"muse run terminal {(logged or {}).get('terminal')}: {reason.strip()}", 300)
+    if line not in errors:
+        errors.append(line)
+    if failure_reason_kind(reason) != "quota":
+        return "other"
+    reset = quota_reset_from_reason(reason)
+    if reset is not None:
+        remember_quota_reset(state, reset)
+    return "quota"
 
 
 def _creme_checkout_root() -> Path:
@@ -959,7 +1071,8 @@ class RunRequest:
     lean_goal: Optional[str] = None
 
 
-def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) -> tuple[int, dict]:
+def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
+        now: Optional[float] = None) -> tuple[int, dict]:
     environ = dict(os.environ if environ is None else environ)
     state = state_root(module_root, environ)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -973,6 +1086,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
         return EXIT_PREFLIGHT_REFUSED, summary
     refusals = early_refusals(state, request.effort, request.brief, module_root, str(request.target),
                               request.mode, request.lean_goal)
+    refusals += quota_reset_refusals(state, now)
     if request.lean_goal is not None:
         refusals.append("run has no Lean mode; use a brokered `start --lean GOAL` session")
     if refusals:
@@ -1131,6 +1245,9 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None) 
         PB.write_private_json(run_dir / "usage-after.json", {"usage": usage_after, "at": PB.now_iso()})
         time.sleep(0.5)   # the durable log lands before the notification
         finalize_durable(host, outcome, errors)
+        if outcome is not None:
+            note_terminal_reason(state, errors, host.durable.terminal(outcome.turn_id),
+                                 outcome.error if isinstance(outcome.error, str) else None)
         audit = audit_session_log(host.log_path, host.log_start, outcome.turn_id if outcome else None,
                                   host.session_id)
     except PinViolation as exc:

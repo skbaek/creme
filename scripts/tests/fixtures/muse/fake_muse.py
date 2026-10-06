@@ -8,7 +8,8 @@ The scenario file named by ``FAKE_MUSE_SCENARIO`` drives it:
     usage           usage/read ``usage`` object, or absent
     turn            {"text": final text, "wait_for_steer": bool, "sleep": seconds,
                      "approvals": [subject, ...], "tools": [tool name, ...], "log_model": id,
-                     "commit_texts": [committed assistant texts in order]}
+                     "commit_texts": [committed assistant texts in order],
+                     "terminal": "failed", "terminal_reason": reason (a failed turn with zero tokens)}
 """
 
 import json
@@ -186,6 +187,19 @@ def run_turn(turn_id, text):
                                          "status": "completed", "turnId": turn_id, "revision": 2}})
     if turn.get("false_terminal"):
         note("turn/completed", {"turnId": turn_id, "terminal": "failed", "reason": "incomplete"})
+    if (turn.get("terminal") or "completed") != "completed":
+        # A failed turn with zero tokens: only the durable terminal (and the
+        # live turn/completed) carries the reason, as measured 2026-10-05.
+        reason = turn.get("terminal_reason")
+        append_log(state["session"], {"payload_type": "runtime.session", "payload": {
+            "kind": "run", "run_id": turn_id, "event": {"kind": "terminal", "terminal": turn["terminal"],
+                                                        "failure_retryable": False, "reason": reason}}})
+        live = {"turnId": turn_id, "terminal": turn["terminal"]}
+        if reason:
+            live["reason"] = reason
+        note("turn/completed", live)
+        state["turn"] = None
+        return
     if turn.get("lose_before_end"):
         lose_projection()
     if turn.get("wait_for_steer"):

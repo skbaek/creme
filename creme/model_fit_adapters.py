@@ -268,7 +268,9 @@ def claude_code_run(path, episode_id, harness_version, terminal, run_id=None,
                  transcripts=[part["path"] for part in parts], agent_type=meta.get("agentType"),
                  child_models=sorted({m for part in parts[1:] for m in part["models"]}))
     complete = usage["total_input"] is not None and usage["total_output"] is not None
-    run_id = run_id or "claude-agent:" + agent + (f":{start_ms}" if start_ms is not None else "")
+    split = own.get("split")
+    run_id = run_id or ("claude-agent:" + agent + (f":{start_ms}" if start_ms is not None else "")
+                        + (f":fallback{split.get('index', 0)}-{split['side']}" if split is not None else ""))
     segment_id = f"claude-code:{own['source']}:{usage['start_offset']}:{usage['end_offset']}"
     if own.get("split") is not None:
         # Both sides share the fallback's timestamp range; the side keeps the

@@ -36,6 +36,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -396,23 +397,48 @@ def _creme_checkout_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _pythonpath_includes_root(raw: Any, creme_root: Path) -> bool:
-    """One ``os.pathsep`` entry of a PYTHONPATH value is the Creme checkout root (symlinks resolved)."""
-    if not isinstance(raw, str) or not raw:
-        return False
+# The variables a probe of the MCP launcher inherits besides the entry's own env: enough
+# for the interpreter to locate the user's site directory, nothing that steers imports.
+_IMPORT_PROBE_INHERITED = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "TMPDIR")
+
+
+def creme_import_failure(command: Any, entry_env: Any, creme_root: Path,
+                         environ: Optional[dict] = None, timeout: float = 30.0) -> Optional[str]:
+    """Why the MCP entry's interpreter cannot import this Creme checkout, or ``None`` when it can.
+
+    Muse starts the user-global ``lean-lsp-mcp`` server with the session workspace as cwd, so
+    ``python3 -m creme`` must resolve from outside the checkout. Hosts resolve it differently
+    (an entry ``PYTHONPATH``, or a user-site ``.pth``), so this runs the entry's own command from
+    an empty temporary directory with only the entry's env and a few locating variables, and
+    requires ``creme`` to resolve to ``creme_root`` itself."""
+    environ = os.environ if environ is None else environ
+    if not isinstance(command, str) or not command:
+        return "the MCP entry names no command"
+    env = {key: environ[key] for key in _IMPORT_PROBE_INHERITED if key in environ}
+    if isinstance(entry_env, dict):
+        env.update({str(key): str(value) for key, value in entry_env.items()})
     try:
         resolved_root = creme_root.resolve()
     except OSError:
         resolved_root = creme_root
-    for entry in raw.split(os.pathsep):
-        if not entry.strip():
-            continue
-        try:
-            if Path(entry).expanduser().resolve() == resolved_root:
-                return True
-        except OSError:
-            continue
-    return False
+    probe = "import pathlib, creme; print(pathlib.Path(creme.__file__).resolve().parents[1])"
+    try:
+        with tempfile.TemporaryDirectory(prefix="creme-mcp-probe-") as cwd:
+            result = subprocess.run([command, "-c", probe], cwd=cwd, env=env, capture_output=True,
+                                    text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"`{command} -m creme` could not be probed: {exc}"
+    if result.returncode != 0:
+        last = (result.stderr.strip().splitlines() or ["no output"])[-1]
+        return f"`{command} -m creme` does not import from outside the checkout ({last})"
+    found = result.stdout.strip()
+    try:
+        same = Path(found).resolve() == resolved_root
+    except OSError:
+        same = False
+    if not same:
+        return f"`{command} -m creme` resolves {found or 'nothing'}, not the Creme checkout {resolved_root}"
+    return None
 
 
 def lean_mcp_failures(environ: Optional[dict] = None) -> list[str]:
@@ -441,11 +467,11 @@ def lean_mcp_failures(environ: Optional[dict] = None) -> list[str]:
     if env.get("LEAN_LSP_MAX_OPEN_FILES") != "2":
         failures.append("LEAN_LSP_MAX_OPEN_FILES is not 2")
     creme_root = _creme_checkout_root()
-    if not _pythonpath_includes_root(env.get("PYTHONPATH"), creme_root):
+    reason = creme_import_failure(server.get("command"), env, creme_root, environ)
+    if reason is not None:
         failures.append(
-            f"{luna_lean.LEAN_MCP_SERVER} env.PYTHONPATH does not include the Creme checkout root {creme_root} "
-            "(Muse starts the server with the session workspace as cwd, so `python3 -m creme` needs PYTHONPATH); "
-            f"set \"PYTHONPATH\": \"{creme_root}\" in the entry's env")
+            f"{luna_lean.LEAN_MCP_SERVER}: {reason}. Muse starts the server with the session workspace as cwd; "
+            f"set \"PYTHONPATH\": \"{creme_root}\" in the entry's env (or install a user-site .pth for it)")
     return failures
 
 

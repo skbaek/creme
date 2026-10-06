@@ -372,6 +372,10 @@ def note_terminal_reason(state: Path, errors: list[str], logged: Optional[dict],
 
     Returns the reason kind (``quota`` or ``other``), or None when no reason was carried.
     """
+    # Only a failed terminal is a failure: an interrupted or cancelled turn keeps
+    # its own status (and exit code), whatever reason Muse attached to it.
+    if isinstance(logged, dict) and logged.get("terminal") not in (None, "failed"):
+        return None
     reason = (logged or {}).get("reason") if isinstance(logged, dict) else None
     if not (isinstance(reason, str) and reason.strip()) and isinstance(live_reason, str) and live_reason.strip():
         reason = live_reason

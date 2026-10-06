@@ -144,12 +144,15 @@ def claude_profile_effort(agent_type, profiles=None):
     return effort
 
 
-def _claude_tree(transcript, start_ms, end_ms, seen, owner):
+def _claude_tree(transcript, start_ms, end_ms, seen, owner, split_at_fallback=None):
     """Parent transcript plus every Agent-tool child in its directory, recursively.
 
     Returns (parts, owners, gaps): owners[i] is the agent id of parts[i].
+    A fallback split applies to every part: a part without a fallback response
+    in its window is included whole, the same convention as `since`/`until`
+    windows leave child transcripts unwindowed.
     """
-    part = C.claude_transcript(transcript, start_ms, end_ms)
+    part = C.claude_transcript(transcript, start_ms, end_ms, split_at_fallback=split_at_fallback)
     parts, owners, gaps = [part], [owner], []
     directory = Path(transcript).parent
     metas = {}
@@ -173,7 +176,8 @@ def _claude_tree(transcript, start_ms, end_ms, seen, owner):
             if not path.is_file():
                 gaps.append(f"child agent {child} transcript is missing")
                 continue
-            child_parts, child_owners, child_gaps = _claude_tree(path, None, None, seen, child)
+            child_parts, child_owners, child_gaps = _claude_tree(path, None, None, seen, child,
+                                                              split_at_fallback)
             parts += child_parts
             owners += child_owners
             gaps += child_gaps
@@ -187,7 +191,8 @@ def _telemetry(telemetry):
 
 def claude_code_run(path, episode_id, harness_version, terminal, run_id=None,
                     route="claude-agent-tool", family=None, since=None, until=None,
-                    profiles=None, override_reason="", attempt_index=1, telemetry=None):
+                    profiles=None, override_reason="", attempt_index=1, telemetry=None,
+                    split_at_fallback=None):
     """Import one Claude Code subagent (`subagents/agent-<id>.jsonl` + `.meta.json`).
 
     Release is the single observed `message.model`; effort is the agent
@@ -198,6 +203,17 @@ def claude_code_run(path, episode_id, harness_version, terminal, run_id=None,
     entry are added. Usage is final only when every response of every included
     transcript has a telemetry record and no session request is unattributable.
     `since`/`until` (UTC ISO) bound a resumed continuation measured separately.
+
+    A fallback response bills two models under one message id, so an unsplit
+    run refuses. Capture each side from the same transcript path as its own
+    source: `split_at_fallback="before"` (original release with the `from`
+    iteration's usage; caller-supplied terminal such as `interrupted`) and
+    `"after"` (fallback release), with distinct `run_id`s and `attempt_index`
+    1 and 2. Responses before the fallback belong to the first attempt and
+    responses after it to the second, so the pair counts every response
+    exactly once; each attempt still observes exactly one release. With
+    several fallbacks, narrow each window with `since`/`until` to one fallback
+    (or select it with `{"side": ..., "index": N}`).
     """
     path = Path(path).resolve()
     if not path.name.startswith("agent-") or path.suffix != ".jsonl":
@@ -209,7 +225,7 @@ def claude_code_run(path, episode_id, harness_version, terminal, run_id=None,
         raise C.CaptureError(f"subagent meta is missing or unreadable: {exc}") from exc
     start_ms = C.utc_millis(since, "since") if since is not None else None
     end_ms = C.utc_millis(until, "until") if until is not None else None
-    parts, owners, gaps = _claude_tree(path, start_ms, end_ms, {agent}, agent)
+    parts, owners, gaps = _claude_tree(path, start_ms, end_ms, {agent}, agent, split_at_fallback)
     own = parts[0]
     if not own["calls"]:
         raise C.CaptureError("subagent transcript has no model response in the window")
@@ -237,18 +253,33 @@ def claude_code_run(path, episode_id, harness_version, terminal, run_id=None,
     siblings.append(session_dir.parent / (session_dir.name + ".jsonl"))
     join = C.claude_join(parts, owners, _telemetry(telemetry), {agent: (start_ms, end_ms)}, siblings)
     usage = C.claude_usage(parts, gaps, join)
-    usage.update(source=own["source"], start_offset=own["first_ms"], end_offset=own["last_ms"] + 1,
+    start_offset, end_offset = own["first_ms"], own["last_ms"] + 1
+    if own.get("split") is not None:
+        # The pair partitions the transcript time range at the fallback
+        # instant so the spend ledger sees adjacent windows, not an overlap;
+        # the shared response's usage itself still splits by iteration.
+        boundary = own["split"]["boundary"]
+        if own["split"]["side"] == "before":
+            start_offset, end_offset = own["first_ms"], max(boundary, own["first_ms"] + 1)
+        else:
+            start_offset = boundary + 1
+            end_offset = max(own["last_ms"] + 1, start_offset + 1)
+    usage.update(source=own["source"], start_offset=start_offset, end_offset=end_offset,
                  transcripts=[part["path"] for part in parts], agent_type=meta.get("agentType"),
                  child_models=sorted({m for part in parts[1:] for m in part["models"]}))
     complete = usage["total_input"] is not None and usage["total_output"] is not None
     run_id = run_id or "claude-agent:" + agent + (f":{start_ms}" if start_ms is not None else "")
+    segment_id = f"claude-code:{own['source']}:{usage['start_offset']}:{usage['end_offset']}"
+    if own.get("split") is not None:
+        # Both sides share the fallback's timestamp range; the side keeps the
+        # segment ids distinct so the pair can be accepted together.
+        segment_id += f":{own['split']['side']}"
     receipt = {"receipt_id": "claude-code:" + run_id + ":" + R.digest(usage), "kind": "run",
                "episode_id": episode_id, "run_id": run_id, "attempt_index": attempt_index,
                "option": observed_family + "/" + effort, "release": release, "route": route,
                "harness_version": harness_version, "override_reason": override_reason,
                "terminal": terminal,
-               "segments": [{"id": f"claude-code:{own['source']}:{usage['start_offset']}:{usage['end_offset']}",
-                             "usage": usage}],
+               "segments": [{"id": segment_id, "usage": usage}],
                "usage_complete": complete, "usage_evidence": str(path)}
     if not complete:
         raw = usage["provider_raw"]

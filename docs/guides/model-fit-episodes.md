@@ -137,6 +137,23 @@ observed per-turn effort, or refuses. Master windows count responses whose
 first entry falls in `[start, end)`; the end must be in the past, and
 overlapping windows on one transcript refuse.
 
+When the provider serves a fallback, one response bills two models under one
+message id (a `fallback` content block with `from`/`to` models and a
+`fallback_message` usage iteration beside the original `message` iteration,
+reported under the fallback model), so an unsplit run refuses instead of
+charging one attempt with two releases. Capture each side from the same
+transcript path as its own source: once with `split_at_fallback: "before"`
+(the original release with the `from` iteration's usage, and a
+caller-supplied terminal such as `interrupted`) and once with
+`"after"` (the fallback release), using distinct `run_id`s and
+`attempt_index` 1 and 2. Responses before the fallback belong to the first
+attempt and responses after it to the second, so the pair counts every
+response exactly once and each attempt still observes exactly one release;
+the shared request id is attributed to its own side only, and a side whose
+telemetry is missing stays incomplete (never zero). With several fallbacks,
+narrow each window with `since`/`until` to a single fallback (or select it
+with `{"side": ..., "index": N}`).
+
 Both Claude kinds take `telemetry`, the directory of `otlp-*.jsonl` files
 written by `creme claude-telemetry serve`; it defaults to `runtime/claude-otel`
 under the acceptance's `--dir`, so it is normally omitted. Usage is final only

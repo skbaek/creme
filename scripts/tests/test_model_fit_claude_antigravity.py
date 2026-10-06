@@ -16,6 +16,7 @@ from creme import model_fit_runtime as R
 from scripts.tests.test_model_fit_runtime import base_config
 
 OPUS = "claude-opus-5-5"
+OPUS_FALLBACK = "claude-opus-4-8"
 SESSION = "s1"
 BASE_MS = 1790848800000  # 2026-10-01T10:00:00Z
 
@@ -63,12 +64,14 @@ def write_otel(directory, requests, signals=("logs", "traces"), name="otlp-20261
 
 
 def entry(ident, second, output, stop=None, model=OPUS, effort=None, tools=(), sidechain=True,
-          usage=None, iterations=None):
+          usage=None, iterations=None, fallback=None):
     usage = dict(usage or {"input_tokens": 10, "cache_read_input_tokens": 100,
                            "cache_creation_input_tokens": 5}, output_tokens=output)
     if iterations is not None:
         usage["iterations"] = iterations
     content = [{"type": "tool_use", "id": tool, "name": "Agent", "input": {}} for tool in tools]
+    if fallback is not None:
+        content.append({"type": "fallback", "from": {"model": fallback[0]}, "to": {"model": fallback[1]}})
     return {"type": "assistant", "isSidechain": sidechain, "perTurnEffort": effort,
             "timestamp": f"2026-10-01T10:00:{second:02d}.000Z", "sessionId": SESSION, "requestId": "req_" + ident,
             "message": {"id": ident, "model": model, "stop_reason": stop, "usage": usage,
@@ -151,6 +154,104 @@ class ClaudeCodeCapture(unittest.TestCase):
                     {"input_tokens": 1, "output_tokens": 3, "type": "fallback_message", "model": "claude-opus-4-8"}]
         with self.assertRaises(C.CaptureError):
             self.run_receipt(self.agent("a1", [entry("m1", 1, 3, stop="end_turn", iterations=fallback)]))
+
+    def fallback_run(self):
+        """Two 5.5 responses, one fallback response, two 4.8 responses."""
+        from_usage = {"input_tokens": 2, "output_tokens": 0, "cache_read_input_tokens": 50,
+                      "cache_creation_input_tokens": 10}
+        to_usage = {"input_tokens": 2, "output_tokens": 199, "cache_read_input_tokens": 60,
+                    "cache_creation_input_tokens": 11}
+        rows = (complete_call("m1", 1, 40) + complete_call("m2", 2, 40)
+                + [entry("m3", 3, 3),
+                   entry("m3", 3, 8, model=OPUS_FALLBACK),
+                   entry("m3", 3, 199, stop="end_turn", model=OPUS_FALLBACK,
+                         usage=dict(to_usage),
+                         iterations=[dict(from_usage, type="message", model=OPUS),
+                                     dict(to_usage, type="fallback_message", model=OPUS_FALLBACK)],
+                         fallback=(OPUS, OPUS_FALLBACK))]
+                + complete_call("m4", 4, 60, model=OPUS_FALLBACK)
+                + complete_call("m5", 5, 60, model=OPUS_FALLBACK))
+        path = self.agent("a1", rows)
+        write_otel(self.otel, [otel_request("m1", 1, 40, agent="a1"),
+                               otel_request("m2", 2, 40, agent="a1"),
+                               otel_request("m3", 3, 0, model=OPUS, agent="a1", input_tokens=2,
+                                            cache_read=50, cache_creation=10),
+                               otel_request("m3", 3, 199, model=OPUS_FALLBACK, agent="a1",
+                                            input_tokens=2, cache_read=60, cache_creation=11),
+                               otel_request("m4", 4, 60, model=OPUS_FALLBACK, agent="a1"),
+                               otel_request("m5", 5, 60, model=OPUS_FALLBACK, agent="a1")])
+        return path
+
+    def test_fallback_response_splits_at_the_attempt_boundary(self):
+        path = self.fallback_run()
+        with self.assertRaises(C.CaptureError) as refused:
+            self.run_receipt(path)
+        self.assertIn("split_at_fallback", str(refused.exception))
+        before = A.claude_code_run(path, "ep", "h1", "interrupted", run_id="a1-before", attempt_index=1,
+                                   profiles=self.profiles, telemetry=self.otel, split_at_fallback="before")
+        after = self.run_receipt(path, run_id="a1-after", attempt_index=2, split_at_fallback="after")
+        self.assertEqual((before["release"], before["terminal"]), (OPUS, "interrupted"))
+        self.assertEqual((after["release"], after["terminal"]), (OPUS_FALLBACK, "completed"))
+        self.assertEqual((before["option"], after["option"]), ("opus/high", "opus/high"))
+        first, second = before["segments"][0]["usage"], after["segments"][0]["usage"]
+        self.assertTrue(before["usage_complete"] and after["usage_complete"])
+        self.assertEqual((first["total_input"], first["total_output"]), (292, 80))
+        self.assertEqual((second["total_input"], second["total_output"]), (303, 319))
+        self.assertEqual(first["total_input"] + second["total_input"], 595)
+        self.assertEqual(first["total_output"] + second["total_output"], 399)
+        indexed = self.run_receipt(path, split_at_fallback={"side": "before", "index": 0})
+        self.assertEqual(indexed["segments"][0]["usage"]["total_input"], 292)
+        with self.assertRaises(C.CaptureError):
+            self.run_receipt(path, split_at_fallback={"side": "before", "index": 1})
+
+    def test_fallback_side_without_telemetry_stays_incomplete(self):
+        path = self.fallback_run()
+        before = A.claude_code_run(path, "ep", "h1", "interrupted", profiles=self.profiles,
+                                   split_at_fallback="before")
+        usage = before["segments"][0]["usage"]
+        self.assertFalse(before["usage_complete"])
+        self.assertIsNone(usage["total_output"])
+        self.assertEqual(usage["total_input"], 292)
+
+    def test_cli_acceptance_imports_split_fallback_attempts(self):
+        config = base_config(execution_client="claude-code", default="opus/high", candidates=[{
+            "option": "opus/high", "prior_tokens": 100, "release": OPUS,
+            "recipe_version": "r1", "route": "claude-agent-tool"}])
+        R.configure(self.store, "policy", config, "active")
+        R.prepare(self.store, "ep", "policy", [{"milestone": "done", "credit": 1}], "claude-code", "fixture")
+        worker = self.fallback_run()
+        master = self.root / "master.jsonl"
+        master.write_text("".join(json.dumps(row) + "\n" for row in complete_call("x1", 30, 5, sidechain=False)))
+        write_otel(self.root / "fit" / "runtime" / "claude-otel",
+                   [otel_request("m1", 1, 40, agent="a1"),
+                    otel_request("m2", 2, 40, agent="a1"),
+                    otel_request("m3", 3, 0, model=OPUS, agent="a1", input_tokens=2,
+                                 cache_read=50, cache_creation=10),
+                    otel_request("m3", 3, 199, model=OPUS_FALLBACK, agent="a1",
+                                 input_tokens=2, cache_read=60, cache_creation=11),
+                    otel_request("m4", 4, 60, model=OPUS_FALLBACK, agent="a1"),
+                    otel_request("m5", 5, 60, model=OPUS_FALLBACK, agent="a1"),
+                    otel_request("x1", 30, 5)])
+        request = {"receipt_id": "ep:accept", "episode_id": "ep", "verdict": "pass", "milestones": ["done"],
+                   "verifier": "master", "worker_ref": "a1", "verification_ref": "fixture",
+                   "claude_code_sources": [
+                       {"path": str(worker), "harness_version": "h1", "terminal": "interrupted",
+                        "run_id": "a1-before", "attempt_index": 1, "split_at_fallback": "before",
+                        "profiles": str(self.profiles)},
+                       {"path": str(worker), "harness_version": "h1", "terminal": "completed",
+                        "run_id": "a1-after", "attempt_index": 2, "split_at_fallback": "after",
+                        "profiles": str(self.profiles)}],
+                   "claude_code_master_windows": [{"path": str(master), "start": "2026-10-01T10:00:25Z",
+                                                   "end": "2026-10-01T10:00:35Z"}]}
+        source = self.root / "accept.json"
+        source.write_text(json.dumps(request))
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            code = cli.main(["model-fit", "episode", "accept", "--dir", str(self.root / "fit"),
+                             "--from", str(source)])
+        self.assertEqual((code, errors.getvalue()), (0, ""))
+        self.assertEqual(E.get_episode(self.store, "ep")["status"], "closed")
+        self.assertEqual(E.episode_accounting(self.store, "ep")["spend_uncapped_tokens"], 372 + 622 + 120)
 
     def test_effort_comes_from_profile_and_disagreement_refuses(self):
         rows = complete_call("m1", 1)

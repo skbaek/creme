@@ -152,25 +152,6 @@ def _extract_pin(text: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def _pythonpath_includes_root(raw: Any, creme_root: Path) -> bool:
-    """One ``os.pathsep`` entry of a PYTHONPATH value is the Creme checkout root (symlinks resolved)."""
-    if not isinstance(raw, str) or not raw:
-        return False
-    try:
-        resolved_root = creme_root.resolve()
-    except OSError:
-        resolved_root = creme_root
-    for entry in raw.split(os.pathsep):
-        if not entry.strip():
-            continue
-        try:
-            if Path(entry).expanduser().resolve() == resolved_root:
-                return True
-        except OSError:
-            continue
-    return False
-
-
 def _load_mcp_surface(path: Path) -> dict[str, Any]:
     """Parse the one MCP entry we own instead of accepting stray text tokens."""
     if path.suffix == ".json":
@@ -442,7 +423,10 @@ def check_client_surface(root: Path) -> list[Check]:
                 muse_env = muse_server.get("env") if isinstance(muse_server.get("env"), dict) else {}
                 muse_env_ok = all(muse_env.get(key) == value for key, value in required_env.items())
                 creme_root = root.resolve()
-                pythonpath_ok = _pythonpath_includes_root(muse_env.get("PYTHONPATH"), creme_root)
+                from .muse import creme_import_failure
+                import_failure = creme_import_failure(muse_server.get("command"), muse_env, creme_root,
+                                                      {**os.environ, "HOME": str(Path.home())})
+                pythonpath_ok = import_failure is None
                 muse_ok = (
                     muse_server.get("transport", "stdio") == "stdio"
                     and muse_pin == expected_pin
@@ -455,10 +439,9 @@ def check_client_surface(root: Path) -> list[Check]:
                     muse_detail = f"pinned {muse_pin} through Creme Lake guard"
                 elif not pythonpath_ok:
                     muse_detail = (
-                        f"env.PYTHONPATH does not resolve the Creme checkout root {creme_root} "
-                        f"in {muse_settings}; set \"PYTHONPATH\": \"{creme_root}\" in the entry's env "
-                        "(Muse starts the server with the session workspace as cwd, "
-                        "so `python3 -m creme` needs PYTHONPATH)")
+                        f"{import_failure} (entry in {muse_settings}); Muse starts the server with the "
+                        f"session workspace as cwd: set \"PYTHONPATH\": \"{creme_root}\" in the entry's env "
+                        "or install a user-site .pth for it")
                 else:
                     muse_detail = f"drift or unconfigured in {muse_settings}"
                 checks.append(Check(

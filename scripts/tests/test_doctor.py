@@ -137,6 +137,9 @@ class DoctorTest(unittest.TestCase):
             (root / "scripts" / "versions.json").write_text(
                 json.dumps({"lean_lsp_mcp": "0.26.1"}), encoding="utf-8"
             )
+            # An importable stand-in package, so the launcher probe can resolve this root.
+            (root / "creme").mkdir()
+            (root / "creme" / "__init__.py").write_text("", encoding="utf-8")
             home = Path(tmp) / "home"
             settings = home / ".config" / "muse" / "settings.json"
 

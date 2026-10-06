@@ -1251,6 +1251,21 @@ class LeanMcpFailuresTest(unittest.TestCase):
             failures = self.check(home)
             self.assertTrue(any("PYTHONPATH" in item for item in failures), failures)
 
+    def test_user_site_pth_without_pythonpath_passes(self):
+        # A host may resolve `python3 -m creme` through a user-site .pth instead of PYTHONPATH.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            probe = subprocess.run(
+                ["/usr/bin/python3", "-c", "import site; print(site.ENABLE_USER_SITE, site.getusersitepackages())"],
+                env={"HOME": str(home)}, capture_output=True, text=True)
+            enabled, _, user_site = probe.stdout.strip().partition(" ")
+            if probe.returncode != 0 or enabled != "True":
+                self.skipTest("the system interpreter has no user site directory")
+            Path(user_site).mkdir(parents=True)
+            (Path(user_site) / "creme.pth").write_text(f"{M._creme_checkout_root()}\n", encoding="utf-8")
+            self.write_settings(home, self.base_env())
+            self.assertEqual(self.check(home), [])
+
     def test_entry_with_checkout_root_among_other_entries_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

@@ -604,6 +604,49 @@ class RunTest(FakeMuseHarness):
         self.assertEqual(code, M.EXIT_PREFLIGHT_REFUSED, record)
         self.assertEqual(self.sent("turn/start"), [])
 
+    QUOTA_REASON = ("API error 429 [request_id=abc]: Subscription quota exhausted. "
+                    "Your usage window resets at 2099-01-02T03:04:05Z. (rate_limit_error)")
+
+    def test_failed_terminal_reason_is_recorded_and_shown(self):
+        self.scenario["turn"].update(terminal="failed", terminal_reason=self.QUOTA_REASON)
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (M.EXIT_MUSE_FAILED, "FAILED"), record)
+        shown = [error for error in record["errors"] if "429" in error]
+        self.assertEqual(len(shown), 1, record)
+        self.assertLessEqual(len(shown[0]), 300)
+        self.assertIn("quota exhausted", shown[0])
+        self.assertIn(f"failure: {shown[0]}", M.format_run(record))
+        self.assertEqual((PB.read_json(self.state / "usage-last.json") or {}).get("quota_reset"),
+                         "2099-01-02T03:04:05Z")
+
+    def test_quota_reset_refuses_new_turns_until_it_passes(self):
+        self.scenario["turn"].update(terminal="failed", terminal_reason=self.QUOTA_REASON)
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual(record["verdict"], "FAILED", record)
+        starts = len(self.sent("turn/start"))
+        code, record = self.run_brief()
+        self.assertEqual((code, record["verdict"]), (M.EXIT_PREFLIGHT_REFUSED, "REFUSED"), record)
+        self.assertTrue(any("quota" in refusal for refusal in record["refusals"]), record)
+        self.assertEqual(len(self.sent("turn/start")), starts)  # refused before any turn
+        reset = M.quota_reset_timestamp("2099-01-02T03:04:05Z")
+        self.assertTrue(M.quota_reset_refusals(self.state, now=reset - 10), self.state)
+        self.assertEqual(M.quota_reset_refusals(self.state, now=reset + 10), [])
+        self.scenario["turn"] = {"text": "STATUS: DONE"}
+        self.write_scenario()
+        request = M.RunRequest(brief="Say OK.", target=self.target, effort="low", timeout_seconds=30)
+        code, record = M.run(ROOT, request, self.environ, now=reset + 10)
+        self.assertEqual((code, record["verdict"]), (0, "PASS"), record)
+
+    def test_non_quota_failure_sets_no_reset(self):
+        self.scenario["turn"].update(terminal="failed", terminal_reason="muse exploded: boom")
+        self.write_scenario()
+        code, record = self.run_brief()
+        self.assertEqual(record["verdict"], "FAILED", record)
+        self.assertTrue(any("boom" in error for error in record["errors"]), record)
+        self.assertNotIn("quota_reset", PB.read_json(self.state / "usage-last.json") or {})
+
     def test_approvals_follow_the_allowlist(self):
         self.scenario["turn"]["approvals"] = [{"kind": "shell", "command": "ls"},
                                               {"kind": "tool", "toolName": "mcp__lean_lsp_mcp__lean_goal"}]

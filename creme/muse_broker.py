@@ -182,11 +182,13 @@ class MuseSession(PB.SessionRecord):
         return M.EXIT_PIN_FAILED, {"verdict": "PIN_FAILED", "failures": failures, "message": M.STOP_MESSAGE}
 
     # -- turns ----------------------------------------------------------
-    def begin_turn(self, text: str, brief: Optional[str] = None) -> tuple[int, dict]:
+    def begin_turn(self, text: str, brief: Optional[str] = None,
+                   now: Optional[float] = None) -> tuple[int, dict]:
         with self.lock:
             self.last_activity = time.monotonic()
             refusals = M.early_refusals(self.broker.state, self.record["effort"], text, self.broker.module_root,
                                         None, self.record["mode"])
+            refusals += M.quota_reset_refusals(self.broker.state, now)
             if self.state != "idle" or not self.is_open():
                 refusals.append(f"session is {self.state}; a new turn needs an idle session")
             if refusals:
@@ -308,6 +310,8 @@ class MuseSession(PB.SessionRecord):
             PB.write_private_json(turn_dir / "usage-after.json", {"usage": usage_after, "at": PB.now_iso()})
             time.sleep(0.3)
             M.finalize_durable(self.host, outcome, errors)
+            M.note_terminal_reason(self.broker.state, errors, self.host.durable.terminal(outcome.turn_id),
+                                   outcome.error if isinstance(outcome.error, str) else None)
             audit = audit_session_log(self.host.log_path, self.host.log_start, outcome.turn_id, self.host.session_id)
             PB.write_private_json(turn_dir / "audit.json", audit)
             PB.write_private_json(turn_dir / "approvals.json", state.approvals)

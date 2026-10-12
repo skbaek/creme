@@ -429,7 +429,12 @@ def host_observation(goal: str) -> tuple[list[str], dict]:
 
 
 def residual_processes(target: Path) -> list[dict]:
-    """``lean`` and ``lake`` processes whose working directory lies inside ``target``."""
+    """``lean`` and ``lake`` processes whose working directory lies inside ``target``.
+
+    Working directories come from the platform adapter, so a Linux host without
+    lsof still attributes each process instead of failing closed for all of them.
+    """
+    from .adapters import get_adapter
     from .reclaim import lean_executable
 
     try:
@@ -448,22 +453,21 @@ def residual_processes(target: Path) -> list[dict]:
     if not candidates:
         return []
     try:
-        sample = subprocess.run(["/usr/sbin/lsof", "-a", "-d", "cwd", "-Fn", "-p",
-                                 ",".join(str(pid) for pid in sorted(candidates))],
-                                capture_output=True, text=True, check=False, timeout=30).stdout
-    except (OSError, subprocess.SubprocessError) as exc:
-        return [{"pid": pid, "command": command, "cwd": f"uninspectable: {exc}"} for pid, command in candidates.items()]
-    cwds: dict[int, str] = {}
-    current = None
-    for line in sample.splitlines():
-        if line.startswith("p") and line[1:].isdigit():
-            current = int(line[1:])
-        elif line.startswith("n") and current is not None:
-            cwds[current] = line[1:]
+        sample = get_adapter().process_working_directories(sorted(candidates))
+    except Exception as exc:
+        return [{"pid": pid, "command": command, "cwd": f"uninspectable: {exc}"}
+                for pid, command in candidates.items()]
+    if getattr(sample, "status", None) != "OK":
+        detail = getattr(sample, "detail", None) or "unavailable"
+        return [{"pid": pid, "command": command, "cwd": f"uninspectable: {detail}"}
+                for pid, command in candidates.items()]
+    directories = (getattr(sample, "data", None) or {}).get("working_directories") or {}
+    if not isinstance(directories, dict):
+        directories = {}
     root = target.resolve()
     residual = []
     for pid, command in sorted(candidates.items()):
-        cwd = cwds.get(pid)
+        cwd = directories.get(str(pid))
         if cwd is None:
             if _alive(pid):
                 residual.append({"pid": pid, "command": command, "cwd": "uninspectable"})

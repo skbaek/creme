@@ -300,6 +300,93 @@ class LeanHostAdmissionTest(unittest.TestCase):
                 self.assertTrue(any(expected in refusal for refusal in refusals), refusals)
 
 
+class ResidualProcessesTest(unittest.TestCase):
+    """residual_processes attributes lean/lake processes via the platform adapter."""
+
+    def setUp(self):
+        import tempfile
+
+        self.base = Path(tempfile.mkdtemp(prefix="llr")).resolve()
+        self.target = self.base / "target"
+        (self.target / "sub").mkdir(parents=True)
+        self.other = self.base / "other"
+        self.other.mkdir()
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def sample(self, directories=None, status="OK", detail="sampled"):
+        data = {"working_directories": dict(directories or {})}
+        return SimpleNamespace(status=status, data=data, detail=detail)
+
+    def scan(self, rows, result, alive=None):
+        """Run residual_processes with a fake ps table; lsof stays unavailable.
+
+        The fake ``run`` raises on any lsof invocation (as on a Linux host
+        without lsof), so a regression to the inline lsof sample fails closed
+        for every candidate instead of attributing it.
+        """
+        ps_text = "".join(f"  {pid} {command}\n" for pid, command in rows)
+        calls: list[list[str]] = []
+        requested: list[list[int]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if any("lsof" in part for part in argv):
+                raise OSError(2, "No such file or directory")
+            return SimpleNamespace(stdout=ps_text)
+
+        def fake_cwds(pids):
+            requested.append(list(pids))
+            return result
+
+        adapter = SimpleNamespace(process_working_directories=fake_cwds)
+        patches = [mock.patch("creme.luna_lean.subprocess.run", side_effect=fake_run),
+                   mock.patch("creme.adapters.get_adapter", return_value=adapter)]
+        if alive is not None:
+            patches.append(mock.patch("creme.luna_lean._alive", side_effect=lambda pid: alive.get(pid, False)))
+        for patch in patches:
+            patch.start()
+        self.addCleanup(lambda: [patch.stop() for patch in reversed(patches)])
+        return LL.residual_processes(self.target), requested, calls
+
+    def assertNoLsof(self, calls):
+        self.assertFalse(any("lsof" in part for argv in calls for part in argv), calls)
+
+    def test_process_in_a_different_worktree_is_not_residual(self):
+        rows = [(101, "lean --server"), (102, "lake serve")]
+        residual, requested, calls = self.scan(
+            rows, self.sample({"101": str(self.other), "102": str(self.other)}))
+        self.assertEqual(residual, [])
+        self.assertEqual(requested, [[101, 102]])
+        self.assertNoLsof(calls)
+
+    def test_process_inside_the_target_is_residual(self):
+        rows = [(101, "lean --server"), (102, "lake serve")]
+        residual, _, calls = self.scan(rows, self.sample({"101": str(self.target),
+                                                         "102": str(self.target / "sub")}))
+        self.assertEqual([(entry["pid"], entry["cwd"]) for entry in residual],
+                         [(101, str(self.target)), (102, str(self.target / "sub"))])
+        self.assertNoLsof(calls)
+
+    def test_unavailable_adapter_marks_every_candidate_uninspectable(self):
+        rows = [(101, "lean --server"), (102, "lake serve")]
+        residual, _, calls = self.scan(
+            rows, SimpleNamespace(status="UNAVAILABLE", data=None, detail="no procfs"))
+        self.assertEqual(len(residual), 2)
+        for entry in residual:
+            self.assertEqual(entry["cwd"], "uninspectable: no procfs")
+        self.assertNoLsof(calls)
+
+    def test_missing_cwd_is_residual_only_when_alive(self):
+        rows = [(101, "lean --server"), (102, "lake serve")]
+        residual, _, calls = self.scan(rows, self.sample({}), alive={101: True, 102: False})
+        self.assertEqual(residual, [{"pid": 101, "command": "lean --server", "cwd": "uninspectable"}])
+        self.assertNoLsof(calls)
+
+
 class LeanPreambleTest(unittest.TestCase):
     def test_lean_preamble_carries_the_lean_rules(self):
         mode = LL.LeanMode("goal-v1", Path("/w/blanc/.worktrees/goal-v1"))

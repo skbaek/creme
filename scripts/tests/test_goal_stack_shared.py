@@ -61,7 +61,7 @@ class Host:
         return store.sync(self.record, writer=self.writer, host=self.name, **kw)
 
 
-class SharedStackTest(unittest.TestCase):
+class SharedFixture(unittest.TestCase):
     def setUp(self):
         patcher = mock.patch.dict(os.environ, GIT_ENV)
         patcher.start()
@@ -134,6 +134,8 @@ class SharedStackTest(unittest.TestCase):
         root = git(clone, "rev-list", "--max-parents=0", tip)
         return shared.verify_chain(clone, root, tip), clone, tip
 
+
+class SharedStackTest(SharedFixture):
     # -- R4/R5: migration publishes only the stack branch ----------------
 
     def test_migration_preserves_chain_and_publishes_no_private_history(self):
@@ -405,6 +407,85 @@ class SharedStackTest(unittest.TestCase):
         path.write_text(path.read_text().replace("shared-work", "shared-edit"))
         with self.assertRaisesRegex(store.StackStoreError, "differs from its committed revision"):
             self.mac.read()
+
+
+class SharedSurfaceTest(SharedFixture):
+    """Digest, list/show, reconciliation and history on a shared stack."""
+
+    def setUp(self):
+        super().setUp()
+        self.shared_ready()
+        self.mac.mutate("push", {"entry": entry(
+            "mac-owned", context="mac:.worktrees/x/STATE.md",
+            worktree="mac:/Users/agent/blanc/.worktrees/x")})
+        patcher = mock.patch.object(store, "local_host_name", return_value="wsl")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.wsl.sync()
+
+    def test_digest_shows_owner_and_filters_by_host(self):
+        from creme import master_operations
+        options = dict(lease_snapshot=lambda: {"schema_version": 4, "lease": None},
+                       lease_status=lambda: "master: none\n")
+        digest = master_operations.digest_record(self.wsl.record, **options)
+        self.assertEqual(digest["stack"]["mode"], "shared")
+        self.assertEqual(digest["stack"]["host"], "wsl")
+        owners = {row["goal_id"]: row["host"] for row in digest["goals"]["items"]}
+        self.assertEqual(owners["mac-owned"], "mac")
+        self.assertEqual(owners["wsl-work"], "wsl")
+        mine = master_operations.digest_record(self.wsl.record, goals_host="wsl", **options)
+        self.assertEqual([row["goal_id"] for row in mine["goals"]["items"]], ["wsl-work"])
+        human = master_operations.render_digest_human(digest)
+        self.assertIn("mac-owned [ready] @mac", human)
+
+    def test_list_and_show_mark_other_host_refs_unverifiable(self):
+        from creme import cli
+        stack = self.wsl.read()
+        listing = cli._format_stack_list_human(stack, owned="mac")
+        self.assertIn("1 owned by mac", listing)
+        self.assertIn("@mac", listing)
+        self.assertNotIn("wsl-work", listing)
+        selected = next(e for e in stack["entries"] if e["id"] == "mac-owned")
+        shown = cli._format_stack_entry_human(selected, "wsl", 2)
+        self.assertIn("context: mac:.worktrees/x/STATE.md  (file on host mac; unverifiable here)", shown)
+        own = next(e for e in stack["entries"] if e["id"] == "wsl-work")
+        self.assertNotIn("unverifiable", cli._format_stack_entry_human(own, "wsl", 2).split("worktree")[0])
+
+    def test_reconciliation_inspects_only_own_host_worktrees(self):
+        from creme import master_reconcile
+        view = runtime.read_record(self.wsl.record)
+        rows = master_reconcile._scheduling_goals(self.wsl.record, view)
+        self.assertEqual([(r["goal_id"], r["worktree"]) for r in rows],
+                         [("wsl-work", str(self.wsl.plans))])
+
+    def test_history_reads_the_shared_chain(self):
+        from creme import cli
+        report = cli.stack_history_report(self.wsl.record, self.wsl.plans, "mac-owned")
+        self.assertEqual([row["action"] for row in report["receipts"]], ["push"])
+        summary = cli.stack_history_report(self.wsl.record, self.wsl.plans)
+        self.assertEqual(summary["receipt_count"], 4)  # revisions 0..3
+        self.assertEqual(summary["unreadable_receipts"], 0)
+
+
+class HostNameProfileTest(unittest.TestCase):
+    def test_profile_host_name_validation_and_doctor(self):
+        from creme import doctor, profile
+        base = {"schema_version": 1, "facts": {"system": "Linux", "machine": "x86_64",
+                "logical_cores": 4, "physical_memory_bytes": 8 * 1024 ** 3},
+                "workspace": {"root": "/w", "jaune": "jaune", "blanc": "blanc", "goal_store": None},
+                "policy": {"task_memory_gib": 2, "heavy_workers": 1, "light_workers": 1},
+                "overrides": {"task_memory_gib": None, "heavy_workers": None, "light_workers": None}}
+        base["fingerprint"] = profile.fingerprint(base["facts"])
+        self.assertEqual(profile.validate_data(base).status, "VALID")
+        named = profile.with_host_name(base, "wsl")
+        self.assertEqual(profile.validate_data(named).status, "VALID")
+        self.assertEqual(profile.host_name(named), "wsl")
+        for bad in ("WSL", "1wsl", "w:x", "", "a" * 40):
+            self.assertEqual(profile.validate_data({**base, "host_name": bad}).status, "INVALID")
+            with self.assertRaises(ValueError):
+                profile.with_host_name(base, bad)
+        self.assertEqual(doctor.check_host_name(named, "VALID")[0].status, doctor.STATUS_OK)
+        self.assertEqual(doctor.check_host_name(base, "VALID")[0].status, doctor.STATUS_WARN)
 
 
 class OldCremeRefusesSchemaTwo(unittest.TestCase):

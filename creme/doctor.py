@@ -614,6 +614,32 @@ def check_host_name(profile: Optional[dict[str, Any]], status: str) -> list[Chec
     )]
 
 
+def check_shared_goal_stack(workspace: Path, profile: Optional[dict[str, Any]]) -> list[Check]:
+    """Report whether the goal stack is shared and its branch is wired."""
+    name = (profile or {}).get("workspace", {}).get("goal_store") if profile else None
+    if not name:
+        return []
+    store = (workspace / name).resolve()
+    if not store.is_dir():
+        return []
+    from . import goal_stack_store
+
+    try:
+        if not goal_stack_store.is_shared(store):
+            return [Check("goal stack", STATUS_OK, "single-host (schema 1) stack or none")]
+        detail = goal_stack_store.describe(store / "master", host_name(profile))
+    except (OSError, ValueError) as exc:
+        return [Check("goal stack", STATUS_FAIL, f"shared stack unreadable: {exc}")]
+    if "upstream_error" in detail:
+        return [Check("goal stack", STATUS_FAIL, f"shared stack: {detail['upstream_error']}")]
+    status = STATUS_OK if detail.get("host") else STATUS_FAIL
+    return [Check(
+        "goal stack", status,
+        f"shared via {detail.get('upstream')} at {str(detail.get('head'))[:12]}; "
+        f"this host: {detail.get('host') or '<unnamed: reads and writes refuse>'}",
+    )]
+
+
 def run_doctor(
     root: Path,
     cwd: Path,
@@ -643,6 +669,7 @@ def run_doctor(
     checks.extend(check_sibling("blanc", workspace / blanc_name, "github.com/skbaek/blanc"))
     checks.extend(check_goal_store(workspace, profile))
     checks.extend(check_host_name(profile, validated.status))
+    checks.extend(check_shared_goal_stack(workspace, profile))
     checks.extend(check_client_surface(root))
     checks.extend(Check(*row) for row in approval_checks(root))
     checks.extend(check_neutral_semaphore(root))

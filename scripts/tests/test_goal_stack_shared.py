@@ -330,6 +330,32 @@ class SharedStackTest(SharedFixture):
         with self.assertRaisesRegex(store.StackStoreError, "unreachable or rewritten"):
             self.mac.mutate("push", {"entry": entry("c")})
 
+    def test_merge_commit_on_canonical_branch_refuses(self):
+        self.shared_ready()
+        self.mac.mutate("push", {"entry": entry("a")})                   # rev 3 (T)
+        self.wsl.sync()
+        self.wsl.mutate("push", {"entry": entry("b")})                   # rev 4 (C)
+        _, clone, tip = self.canonical_receipts()
+        tree = git(clone, "rev-parse", f"{tip}^{{tree}}")
+        merge = git(clone, "commit-tree", tree, "-p", f"{tip}~1", "-p", f"{tip}~2", "-m", "merge")
+        git(clone, "push", "-q", "--force", "origin", f"{merge}:refs/heads/goal-stack")
+        # The Mac sits at T; the merge descends from T, so only the
+        # linear-chain check stands between it and a fast-forward.
+        with self.assertRaisesRegex(store.StackStoreError, "not one linear chain"):
+            self.mac.sync()
+
+    def test_unreceipted_commit_on_canonical_branch_refuses(self):
+        self.shared_ready()
+        _, clone, tip = self.canonical_receipts()
+        git(clone, "checkout", "-q", "-B", "goal-stack", tip)
+        path = clone / store.NAME
+        path.write_text(path.read_text().replace("revision = 2", "revision = 3"))
+        git(clone, "commit", "-q", "-am", "hand edit")
+        git(clone, "push", "-q", "origin", "HEAD:refs/heads/goal-stack")
+        with self.assertRaisesRegex(store.StackStoreError, "lacks receipt 00000003"):
+            self.mac.sync()
+        self.assertEqual(self.mac.read()["revision"], 2)
+
     def test_crash_after_commit_before_push_recovers(self):
         self.shared_ready()
 

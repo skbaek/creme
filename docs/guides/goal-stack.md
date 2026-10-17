@@ -1,12 +1,15 @@
 # One live goal stack
 
-`$GOAL_STORE/goal-stack.toml` is the scheduling authority. Read it through
+`$GOAL_STORE/goal-stack.toml` is the scheduling authority; once the stack is
+[shared across hosts](#one-stack-across-hosts) that file is a stub and the
+authority is the shared stack branch checked out at `$GOAL_STORE/.goal-stack/`.
+Read it through
 `python3 -m creme master stack list`, then `show ID` for the selected entry.
 The default list is compact; `--json` exposes structured data. Read the named
 goal and context documents before work. The regular master digest combines
 this same order with the record's open decisions and findings.
 
-The manifest has `schema_version = 1`, an increasing `revision`, and ordered
+The single-host manifest has `schema_version = 1` (shared: `2`), an increasing `revision`, and ordered
 `[[entries]]`. Each entry has `id`, `title`, and `status`, plus either `goal`
 (a Plans-relative file) or `done` (an inline completion condition). Optional
 `context`, `next`, `reason`, `trigger`, `depends_on`, `worktree`, `branch`, and
@@ -91,3 +94,119 @@ the live semaphore, the digest still exposes validated durable goals, decisions
 and findings, with lease state explicitly `unavailable` rather than absent.
 That descriptive view grants no master authority; normal lease acquisition and
 mutation checks remain mandatory.
+
+## One stack across hosts
+
+There is one canonical goal stack for the whole project. It describes work
+on every host, so each host accepts that some of it cannot be verified
+locally. Say which host a file is on: "the file X on host Y".
+
+**Host names.** Each host has a stable short name (`[a-z][a-z0-9-]{0,31}`,
+e.g. `wsl`, `mac`) in its ignored host profile: `python3 -m creme
+set-host-name NAME` (or `init --host-name NAME`). `doctor` reports it and the
+shared stack's wiring. A shared stack refuses reads and writes on an unnamed
+host. Renaming a host orphans its qualified references, so it needs
+`--replace`. Older Creme treats a profile with `host_name` as invalid; pull
+Creme before naming a host.
+
+**Schema 2 references.** A path-valued field is either an unqualified
+Plans-relative file that every host's goal store has (published on the goal
+store's shared default branch), or `HOST:PATH`, a file on host `HOST`:
+
+| Reference | On its own host | On another host |
+|---|---|---|
+| `goals/x.md` (shared) | must exist (fail closed) | must exist (fail closed) |
+| `wsl:states/x.md` | must exist (fail closed) | shape only; shown "unverifiable here" |
+| `worktree = "mac:/Users/.../x"` | never existence-checked; reconciled | skipped by reconciliation |
+
+`goal`/`context` paths stay goal-store-relative on their host; `worktree`
+must be qualified and absolute. An optional `host` field names the owning
+host; otherwise the worktree's qualifier does. `stack list --mine` or
+`--host NAME` (and the same options on `master digest`) show work owned by a
+host; listings mark entries `@host`. Write a goal file that only one host has
+as `HOST:goals/x.md`; publish it on the shared default branch before
+referring to it unqualified, or the other host's stack refuses to load.
+
+**Storage.** The stack lives on a stack-only branch (`goal-stack`) of the goal
+store's origin that shares no history with its default branch: it holds only
+`goal-stack.toml`, `archive/goal-stack/transitions/` and a `.gitignore` for the
+journal. Each host checks it out as a Git worktree at `$GOAL_STORE/.goal-stack/`
+(ignored on the default branch). Pushing it never pushes the default branch,
+so a host whose default branch carries private history still shares the
+stack. One commit is one revision with its receipt.
+
+**Writes are compare-and-swap.** Every mutation (under the host's own lease,
+lock and journal, as before) fetches the canonical branch, verifies that the
+incoming commits form one linear chain with exactly one bound receipt per
+revision (merges, skipped or repeated revisions, missing receipts and
+rewritten history refuse), fast-forwards, commits revision N+1 on that head
+and pushes without force. The write was prepared against the revision this
+host last read: `--expect-revision N`, else the local copy's revision. If the
+chain advanced since then, the write replays on the new head only when every
+entry it touches is field-for-field unchanged (a `push` ID still absent), and
+for `move`, `reorder` or a positioned `push` the live order is unchanged;
+otherwise it refuses with "stack advanced on host Y (revision A -> B): ...;
+re-read". The refusal leaves the local copy synced, so the re-read is local.
+A rejected push (another host won the race) drops the never-published local
+commit and re-prepares by the same rule. An unreachable origin refuses and
+writes nothing. Receipts carry `actor.host` and `prepared_revision`; published
+receipts are never edited or renumbered.
+
+**Reads never touch the network.** They show this host's copy at its last
+sync. `python3 -m creme master stack sync` (master only) fetches and
+fast-forwards; run it before deciding from the stack. Readers also refuse a
+copy whose manifest differs from its committed revision.
+
+**Recovery.** A crash leaves the journal in `.goal-stack/`; readers refuse and
+`master stack recover` finishes the commit and push. If another host
+advanced the chain first, the unpublished commit is preserved under
+`refs/goal-stack/unpublished/` and the write refuses for a re-read. Local
+commits that are not on the canonical branch (only after a crash) refuse every
+write until `master stack sync --preserve-unpublished` sets them aside the
+same way.
+
+### Migration (the first host, once)
+
+1. Pull Creme; `python3 -m creme set-host-name NAME`; fetch the goal store's
+   origin so `origin/HEAD` (the shared ref) is current.
+2. Plan without writing anything:
+   `python3 -m creme master stack migrate --dry-run --host-map /Users/agent/=mac`
+   (repeat `--host-map PREFIX=HOST` for every other host's paths). A ref present
+   locally and on the shared ref stays unqualified; one present only locally
+   becomes `THIS_HOST:`; anything else needs a host map or the plan refuses
+   and lists it. The plan also proves the receipts are exactly
+   `00000000..N`, linked, and bound to the live manifest.
+3. As the master, run the same command without `--dry-run`. It refuses if the
+   branch already exists on the origin (another host migrated: adopt instead).
+   It commits the schema-1 manifest and every receipt byte-for-byte as an
+   import commit, appends revision N+1 (`migrate`, recording each
+   qualification), pushes only that branch, checks it out at `.goal-stack/`,
+   adds `/.goal-stack/` to the goal store's `.gitignore`, replaces
+   `goal-stack.toml` with the stub, and records the
+   `master-goal-stack-multihost-v1` procedure event.
+4. Commit the stub and `.gitignore` on the goal store's default branch. The
+   default-branch `archive/goal-stack/transitions/` is now frozen history; the
+   shared branch holds the canonical chain (including those receipts).
+   On a later merge conflict there, keep either side: neither schedules work.
+
+Old Creme refuses both the stub and any schema-2 manifest, so a host that has
+not updated Creme stops scheduling rather than reading a stale queue.
+
+### Adoption (every other host, once)
+
+1. Pull Creme and the goal store's default branch (shared goal files);
+   `python3 -m creme set-host-name NAME`.
+2. Stop writing the local schema-1 stack. As that host's master, run
+   `python3 -m creme master stack adopt-shared`. It fetches the shared
+   branch, verifies the entire chain from the import commit, and checks that
+   the local schema-1 receipts are a byte-identical prefix of it and bind the
+   local manifest.
+3. If the local stack has revisions the shared chain lacks, it refuses and
+   lists them. Rerun with `--set-aside-local`; the result lists each local-only
+   revision's action and payload. Re-apply the ones that still matter with
+   ordinary stack commands (qualifying this host's paths as `NAME:...`) after
+   adoption. Their receipt files stay in the default branch's frozen archive.
+4. Adoption validates the canonical head as this host (shared and own-host
+   files must exist; pull the default branch if a shared file is missing),
+   then writes the stub and `.gitignore` entry and records the procedure
+   event. Commit those on the default branch.

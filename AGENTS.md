@@ -27,7 +27,9 @@ constraints govern how repository-prescribed gates run here.
   master record is `$GOAL_STORE/master/`: host-local, Git-ignored, and never
   staged, committed, or pushed.
 - `$GOAL_STORE/goal-stack.toml` is the sole live goal order and status after
-  stack adoption. Start with `python3 -m creme master stack list`; use the
+  stack adoption; once shared, it is one stack for all hosts on the branch
+  checked out at `$GOAL_STORE/.goal-stack/`, with host-local files written
+  `HOST:PATH`. Start with `python3 -m creme master stack list`; use the
   authenticated stack commands to change it. Old goal events and backlogs are
   history, never an alternative queue. Detailed goals still own semantics.
 - Blanc consumes Jaune through its Git-pinned Lake dependency. Never replace

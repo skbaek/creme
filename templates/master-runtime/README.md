@@ -52,5 +52,8 @@ configured goal store. It is not part of this private runtime template.
 `archive/goal-stack/transitions/` keeps immutable transition receipts.
 `.goal-stack-pending.json` is a transient publication journal, ignored by Git.
 Readers refuse while it is present; `master stack recover` finishes the bound
-transaction. The master digest reads the stack, never a stale goal board.
+transaction. The master digest reads the stack, never a stale goal board. After the
+multi-host migration `goal-stack.toml` is a stub and the one canonical stack
+(manifest, receipts, journal) lives in the `.goal-stack/` worktree of the
+shared stack branch; see `docs/guides/goal-stack.md`.
 See [goal-stack](../../docs/guides/goal-stack.md).

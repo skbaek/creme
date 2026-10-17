@@ -349,12 +349,15 @@ def _stack_row(entry: dict[str, Any]) -> dict[str, Any]:
     row.setdefault("checkpoint", "")
     row.setdefault("worktree", "")
     row["next_unit"] = entry.get("next", "")
+    # Owning host (schema 2): explicit `host`, else the worktree qualifier.
+    row["host"] = goal_stack.entry_owner(entry)
     return row
 
 
 def _stack_state_for(
     root: Path,
     events: Sequence[dict[str, Any]],
+    goals_host: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Read the live stack once, or return None before adoption.
 
@@ -365,11 +368,19 @@ def _stack_state_for(
     if not store.enabled(root, events):
         return None
     stack = store.read(root)
-    selected = goal_stack.select_next(stack)
+    entries = stack["entries"]
+    if goals_host is not None:
+        # "Work owned by this host": next is chosen among owned entries.
+        entries = [e for e in entries if goal_stack.entry_owner(e) == goals_host]
+    selected = goal_stack.select_next({"entries": entries})
+    rows = [_stack_row(entry) for entry in entries]
     return {
         "stack": stack,
-        "rows": [_stack_row(entry) for entry in stack["entries"]],
+        "rows": rows,
         "next": selected,
+        "mode": "shared" if store.is_shared(root.parent) else "legacy",
+        "host": store.local_host_name(),
+        "goals_host": goals_host,
     }
 
 
@@ -431,6 +442,7 @@ def digest_record(
     live_reconciliation: Optional[master_reconcile.ReconciliationResult] = None,
     lease_snapshot: Snapshot = semaphore.master_snapshot,
     lease_status: LeaseStatus = semaphore.status_text,
+    goals_host: Optional[str] = None,
     _view: Optional[master_runtime.RecordView] = None,
     _stack_state: Any = None,
 ) -> dict[str, Any]:
@@ -456,7 +468,7 @@ def digest_record(
     stack_state = (
         _stack_state
         if _stack_state is not None
-        else _stack_state_for(root, view.events)
+        else _stack_state_for(root, view.events, goals_host)
     )
     if stack_state is None:
         goals = [
@@ -472,7 +484,7 @@ def digest_record(
         goals = [
             {
                 key: row[key]
-                for key in ("goal_id", "status", "title", "branch", "checkpoint", "next_unit")
+                for key in ("goal_id", "status", "title", "host", "branch", "checkpoint", "next_unit")
             }
             for row in stack_state["rows"]
         ]
@@ -483,7 +495,11 @@ def digest_record(
             "revision": stack_state["stack"]["revision"],
             "count": len(stack_state["rows"]),
             "next_id": selected["id"] if selected is not None else None,
+            "mode": stack_state.get("mode", "legacy"),
+            "host": stack_state.get("host"),
         }
+        if stack_state.get("goals_host") is not None:
+            stack_summary["goals_host"] = stack_state["goals_host"]
     decisions = [
         {
             key: row[key]
@@ -556,11 +572,12 @@ def focused_digest_record(
     live_reconciliation: Optional[master_reconcile.ReconciliationResult] = None,
     lease_snapshot: Snapshot = semaphore.master_snapshot,
     lease_status: LeaseStatus = semaphore.status_text,
+    goals_host: Optional[str] = None,
 ) -> dict[str, Any]:
     """Return a prioritized, paged continuity view without changing the record."""
     view = master_runtime.read_record(root)
     board = view.expected_board
-    stack_state = _stack_state_for(root, view.events)
+    stack_state = _stack_state_for(root, view.events, goals_host)
     digest = digest_record(
         root,
         goals_limit=MAX_DIGEST_LIMIT,
@@ -587,7 +604,7 @@ def focused_digest_record(
         goals = [
             {
                 key: row[key]
-                for key in ("goal_id", "status", "title", "branch", "checkpoint", "next_unit")
+                for key in ("goal_id", "status", "title", "host", "branch", "checkpoint", "next_unit")
             }
             for row in stack_state["rows"]
         ]
@@ -709,14 +726,18 @@ def render_digest_human(digest: dict[str, Any]) -> str:
         )
     stack = digest.get("stack")
     if stack is not None:
+        where = f"; {stack['mode']} stack read on host {stack.get('host') or '<unnamed>'}" \
+            if stack.get("mode") == "shared" else ""
+        owned = f", owned by {stack['goals_host']}" if stack.get("goals_host") else ""
         lines.append(
             f"goal stack: revision {stack['revision']} "
-            f"({stack['count']} entries, canonical order)"
+            f"({stack['count']} entries{owned}, canonical order{where})"
         )
         for row in digest["goals"]["items"]:
             route = f"python3 -m creme master digest --goal {row['goal_id']}"
+            owner = f" @{row['host']}" if row.get("host") else ""
             lines.append(
-                f"- {row['goal_id']} [{row['status']}] "
+                f"- {row['goal_id']} [{row['status']}]{owner} "
                 f"{_human_preview(row.get('title'), route)}"
             )
             lines.append(f"  next: {_human_preview(row['next_unit'], route)}")

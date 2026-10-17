@@ -39,7 +39,8 @@ a genuine impasse, and `complete` only when every mandatory outcome has
 evidence on the exact delivered candidate.
 
 After goal-stack adoption, live status and order belong exclusively to
-`$GOAL_STORE/goal-stack.toml`, through `python3 -m creme master stack`.
+`$GOAL_STORE/goal-stack.toml` (shared across hosts: the stack branch at
+`$GOAL_STORE/.goal-stack/`), through `python3 -m creme master stack`.
 Status headers in detailed documents describe their authored checkpoint;
 they cannot schedule or reactivate work. Keep their semantics and evidence,
 and update the stack at execution boundaries. A small goal may instead live

@@ -48,7 +48,10 @@ local. The record contains:
 
 The event log owns role, decision, audit, procedure and merge history; the
 board is derived from it. After [goal-stack adoption](goal-stack.md),
-`$GOAL_STORE/goal-stack.toml` exclusively owns live goal status and order.
+`$GOAL_STORE/goal-stack.toml` exclusively owns live goal status and order
+(after the [multi-host migration](goal-stack.md#one-stack-across-hosts), the
+shared stack branch checked out at `$GOAL_STORE/.goal-stack/` does: one
+canonical stack for all hosts, with each host's own lease and record).
 Historical goal events stay readable but cannot schedule work; new goal
 events refuse. The board projects no goal queue after adoption. The digest
 reads the canonical stack and preserves open decisions and findings from the
@@ -126,7 +129,9 @@ log, user intent, independent audits, or raw evidence to reduce reading cost.
 Private master data stays private; this rule never authorizes committing it.
 
 Start with `python3 -m creme master stack list` and
-`python3 -m creme master digest --focused --human`. The stack lists all live
+`python3 -m creme master digest --focused --human`; on a shared stack run
+`python3 -m creme master stack sync` first (reads never fetch), and use
+`--mine` to see this host's work. The stack lists all live
 goals in their explicit order. The digest preserves that order, bounds prose
 previews, and lists every open decision/finding ID. `master stack next`
 selects active work first, otherwise the first ready goal without dependencies;
@@ -211,7 +216,9 @@ On the user's direction to start as master, the session runs:
    and this session respawns them from their briefs and worktrees.
 
 Reconciliation reads worktree/branch/checkpoint fields of live stack goals
-that declare a worktree (legacy board goals only before adoption), and both
+that declare a worktree (legacy board goals only before adoption; on a shared
+stack only worktrees qualified with this host's name, since other hosts'
+worktrees are unverifiable here), and both
 readings are deliberately narrow. A checkpoint field that is exactly one object
 name is asserted as a commit claim; any other checkpoint is prose, and only the
 full object names it cites are asserted, each against every configured
@@ -328,7 +335,8 @@ master does before its session ends for any reason it can foresee:
    Workers are the master's subagents and die with it; whatever they did not
    checkpoint is lost.
 2. Update each owned stack entry with its worktree, branch, checkpoint,
-   context and next unit, so a successor can continue from that alone. Mark
+   context and next unit, so a successor can continue from that alone. On a
+   shared stack, qualify host-local paths with this host (`wsl:/home/...`). Mark
    stopped execution ready unless a genuine blocker or parking trigger applies.
 3. If this session itself took a goal hold or opened a Lean server, run the
    goal-scoped `python3 -m creme reclaim --wind-down GOAL` for it. A

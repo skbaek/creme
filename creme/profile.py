@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +70,9 @@ LSP_WATCHDOG_RANGES = {"worker_ceiling_gib": (2, 1024)}
 LSP_WORKER_CEILING_FALLBACK_GIB = 16
 CONTAINMENT_MEMORY_MAX_DEFAULT_GIB = 8
 CONTAINMENT_RESERVE_GIB = 2
+# Stable short host name ("wsl", "mac") used to qualify goal-stack references
+# with the host they live on and to attribute shared stack writes.
+HOST_NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,7 @@ def propose(
     workspace_root: Optional[Path] = None,
     adapter: Optional[Adapter] = None,
     goal_store: Optional[str] = None,
+    host_name: Optional[str] = None,
 ) -> dict[str, Any]:
     selected = adapter or get_adapter()
     facts_result = selected.static_facts()
@@ -114,7 +119,7 @@ def propose(
         raise RuntimeError(f"cannot detect static host facts: {facts_result.detail}")
     facts = facts_result.data
     root = (workspace_root or creme_root.parent).expanduser().resolve()
-    return {
+    proposal = {
         "schema_version": SCHEMA_VERSION,
         "fingerprint": fingerprint(facts),
         "facts": facts,
@@ -131,6 +136,9 @@ def propose(
             "light_workers": None,
         },
     }
+    if host_name is not None:
+        proposal["host_name"] = host_name
+    return proposal
 
 
 def _is_positive_int(value: Any, maximum: Optional[int] = None) -> bool:
@@ -146,7 +154,7 @@ def validate_data(
     if not isinstance(data, dict):
         return ProfileValidation("INVALID", "profile root must be an object")
     required = {"schema_version", "fingerprint", "facts", "workspace", "policy", "overrides"}
-    optional = {"admission", "lsp_watchdog", "containment"}
+    optional = {"admission", "lsp_watchdog", "containment", "host_name"}
     if set(data) - optional != required:
         missing = sorted(required - set(data))
         extra = sorted(set(data) - required - optional)
@@ -166,6 +174,10 @@ def validate_data(
                 return ProfileValidation(
                     "INVALID", f"admission.{key} must be an integer in {low}..{high}"
                 )
+    if "host_name" in data and (
+        not isinstance(data["host_name"], str) or HOST_NAME_RE.fullmatch(data["host_name"]) is None
+    ):
+        return ProfileValidation("INVALID", "host_name must match [a-z][a-z0-9-]{0,31}")
     lsp_watchdog = data.get("lsp_watchdog")
     if lsp_watchdog is not None:
         if not isinstance(lsp_watchdog, dict):
@@ -399,3 +411,38 @@ def load_lsp_aggregate_ceiling(
         available = max(1.0, memory / 1024 ** 3 - CONTAINMENT_RESERVE_GIB)
         return min(available, float(configured)) if configured is not None else available
     return float(configured or CONTAINMENT_MEMORY_MAX_DEFAULT_GIB)
+
+
+def host_name(profile: Optional[dict[str, Any]]) -> Optional[str]:
+    """The configured host name, or None when absent or malformed."""
+    value = (profile or {}).get("host_name")
+    if isinstance(value, str) and HOST_NAME_RE.fullmatch(value):
+        return value
+    return None
+
+
+def load_host_name(creme_root: Optional[Path] = None, adapter: Optional[Adapter] = None) -> Optional[str]:
+    """Read this host's name from the canonical ignored host profile.
+
+    Returns None when the profile is missing, invalid, or names no host;
+    callers that need a host (shared goal-stack reads and writes) refuse.
+    """
+    from . import semaphore
+
+    try:
+        root = creme_root or semaphore.canonical_creme_root()
+        checked = load(root / DEFAULT_RELATIVE_PROFILE, adapter or get_adapter())
+    except Exception:
+        return None
+    if checked.status not in {"VALID", "LIMITED", "STALE"}:
+        return None
+    return host_name(checked.profile)
+
+
+def with_host_name(profile: dict[str, Any], name: str) -> dict[str, Any]:
+    """Return a copy of a reviewed profile naming this host."""
+    if not isinstance(name, str) or HOST_NAME_RE.fullmatch(name) is None:
+        raise ValueError("host name must match [a-z][a-z0-9-]{0,31}")
+    updated = dict(profile)
+    updated["host_name"] = name
+    return updated

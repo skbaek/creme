@@ -27,7 +27,7 @@ from .host_wrappers import (
     render_host_rules,
     render_host_wrappers,
 )
-from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
+from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, with_host_name, write_reviewed
 from . import idle_workers
 from . import lsp_watchdog
 from . import luna_broker, luna_reserve
@@ -148,6 +148,7 @@ def cmd_init(arguments: argparse.Namespace) -> int:
             Path(arguments.workspace_root).expanduser() if arguments.workspace_root else None,
             adapter,
             goal_store=arguments.goal_store,
+            host_name=arguments.host_name,
         )
     except RuntimeError as exc:
         _json({"status": "UNAVAILABLE", "detail": str(exc)})
@@ -166,6 +167,31 @@ def cmd_init(arguments: argparse.Namespace) -> int:
         return 1
     write_reviewed(path, candidate)
     _json({"status": "OK", "detail": "reviewed host profile written", "path": str(path)})
+    return 0
+
+
+def cmd_set_host_name(arguments: argparse.Namespace) -> int:
+    """Name this host in its reviewed profile (goal-stack host qualification)."""
+    path = _profile_path(arguments.profile)
+    checked = load(path, get_adapter())
+    if checked.status not in {"VALID", "LIMITED"} or checked.profile is None:
+        _json({"status": "REFUSED", "detail": f"profile is {checked.status}: {checked.detail}"})
+        return 1
+    current = checked.profile.get("host_name")
+    if current is not None and current != arguments.name and not arguments.replace:
+        _json({
+            "status": "REFUSED",
+            "detail": f"host is already named {current!r}; renaming orphans its "
+                      "host-qualified goal-stack references; use --replace after review",
+        })
+        return 1
+    try:
+        updated = with_host_name(checked.profile, arguments.name)
+        write_reviewed(path, updated)
+    except ValueError as exc:
+        _json({"status": "REFUSED", "detail": str(exc)})
+        return 1
+    _json({"status": "OK", "detail": f"host named {arguments.name}", "path": str(path)})
     return 0
 
 
@@ -791,6 +817,9 @@ def cmd_master_digest(arguments: argparse.Namespace) -> int:
         }
         if arguments.focused:
             digest_options["goals_after"] = arguments.after_goal
+        goals_host = _owned_host_filter(arguments)
+        if goals_host is not None:
+            digest_options["goals_host"] = goals_host
         digest = digest_function(location.record_root, **digest_options)
     except (
         master_operations.MasterOperationError,
@@ -880,27 +909,75 @@ def _stack_mutation_request(arguments: argparse.Namespace):
     raise master_runtime.MasterRecordError(f"unsupported stack action: {action}")
 
 
-def _format_stack_entry_human(entry: dict[str, Any]) -> str:
+def _owned_host_options(parser) -> None:
+    owned = parser.add_mutually_exclusive_group()
+    owned.add_argument(
+        "--host",
+        dest="owned_host",
+        metavar="NAME",
+        help="show only stack entries owned by host NAME (explicit host or worktree qualifier)",
+    )
+    owned.add_argument(
+        "--mine",
+        action="store_true",
+        help="show only stack entries owned by this host",
+    )
+
+
+def _owned_host_filter(arguments: argparse.Namespace) -> Optional[str]:
+    if getattr(arguments, "mine", False):
+        name = goal_stack_store.local_host_name()
+        if name is None:
+            raise master_runtime.MasterRecordError(
+                "--mine needs a host name (python3 -m creme set-host-name NAME)"
+            )
+        return name
+    return getattr(arguments, "owned_host", None)
+
+
+def _stack_host(stack: dict[str, Any]) -> Optional[str]:
+    return goal_stack_store.local_host_name() if stack.get("schema_version") == 2 else None
+
+
+def _format_stack_entry_human(entry: dict[str, Any], host: Optional[str] = None,
+                              schema: int = 1) -> str:
+    owner = goal_stack.entry_owner(entry) if schema == 2 else None
     lines = [
-        f"- {entry.get('id')} [{entry.get('status')}] {entry.get('title', '')}",
+        f"- {entry.get('id')} [{entry.get('status')}] {entry.get('title', '')}"
+        + (f" @{owner}" if owner else ""),
     ]
+    refs = goal_stack.ref_status(entry, host, schema)
     for key in ("goal", "done", "context", "next", "reason", "trigger",
-                "worktree", "branch", "checkpoint", "depends_on"):
+                "host", "worktree", "branch", "checkpoint", "depends_on"):
         if key in entry:
-            lines.append(f"  {key}: {entry[key]}")
+            line = f"  {key}: {entry[key]}"
+            qualifier = refs.get(key, (None, None, True))[0]
+            if qualifier is not None and qualifier != host:
+                line += f"  (file on host {qualifier}; unverifiable here)"
+            lines.append(line)
     return "\n".join(lines)
 
 
-def _format_stack_list_human(stack: dict[str, Any]) -> str:
+def _format_stack_list_human(stack: dict[str, Any], owned: Optional[str] = None) -> str:
     entries = stack.get("entries", [])
+    shared_stack = stack.get("schema_version") == 2
+    host = _stack_host(stack)
+    where = f", shared; read on host {host or '<unnamed>'}" if shared_stack else ""
+    shown = [
+        entry for entry in entries
+        if owned is None or goal_stack.entry_owner(entry) == owned
+    ]
+    scope = f", {len(shown)} owned by {owned}" if owned is not None else ""
     lines = [
         f"goal stack revision {stack.get('revision')} "
-        f"({len(entries)} entries, canonical order):",
+        f"({len(entries)} entries{scope}, canonical order{where}):",
     ]
-    if not entries:
+    if not shown:
         lines.append("- <none>")
-    for entry in entries:
-        line = f"- {entry['id']} [{entry['status']}] {entry.get('title', '')}"
+    for entry in shown:
+        owner = goal_stack.entry_owner(entry) if shared_stack else None
+        line = (f"- {entry['id']} [{entry['status']}]"
+                + (f" @{owner}" if owner else "") + f" {entry.get('title', '')}")
         if entry.get("next"):
             line += f" | next: {entry['next']}"
         lines.append(line)
@@ -968,8 +1045,13 @@ def stack_history_report(
         for event in view.events
         if event["kind"] == "goal"
     ]
-    archive_dir = goal_store.joinpath(*STACK_ARCHIVE_PARTS)
-    goal_stack_store._safe_path(goal_store, "/".join(STACK_ARCHIVE_PARTS))
+    # A shared stack's chain (which includes the imported schema-1 receipts)
+    # lives on the stack branch worktree; the default-branch copy is frozen.
+    history_root = goal_store
+    if goal_stack_store.is_shared(goal_store):
+        history_root = goal_stack_store.shared_root(goal_store)
+    archive_dir = history_root.joinpath(*STACK_ARCHIVE_PARTS)
+    goal_stack_store._safe_path(history_root, "/".join(STACK_ARCHIVE_PARTS))
     names: list[str] = []
     if archive_dir.is_dir():
         names = sorted(
@@ -1116,10 +1198,21 @@ def _run_stack_read(arguments: argparse.Namespace, read) -> int:
 def cmd_master_stack_list(arguments: argparse.Namespace) -> int:
     def read(location) -> int:
         stack = goal_stack_store.read(location.record_root)
+        owned = _owned_host_filter(arguments)
         if arguments.json:
-            _json({"schema_version": 1, "status": "OK", "stack": stack})
+            shown = dict(stack)
+            if owned is not None:
+                shown["entries"] = [
+                    entry for entry in stack["entries"]
+                    if goal_stack.entry_owner(entry) == owned
+                ]
+            _json({
+                "schema_version": 1, "status": "OK", "stack": shown,
+                "storage": goal_stack_store.describe(location.record_root),
+                **({"owned_by": owned} if owned is not None else {}),
+            })
         else:
-            print(_format_stack_list_human(stack), end="")
+            print(_format_stack_list_human(stack, owned), end="")
         return 0
 
     return _run_stack_read(arguments, read)
@@ -1158,10 +1251,17 @@ def cmd_master_stack_show(arguments: argparse.Namespace) -> int:
                 "detail": f"unknown stack entry ID: {arguments.entry_id}",
             })
             return 2
+        host = _stack_host(stack)
         if arguments.json:
-            _json({"schema_version": 1, "status": "OK", "entry": selected})
+            unverifiable = [
+                field for field, (qualifier, _, verified)
+                in goal_stack.ref_status(selected, host, stack["schema_version"]).items()
+                if qualifier is not None and qualifier != host
+            ]
+            _json({"schema_version": 1, "status": "OK", "entry": selected,
+                   "host": host, "unverifiable_here": unverifiable})
         else:
-            print(_format_stack_entry_human(selected))
+            print(_format_stack_entry_human(selected, host, stack["schema_version"]))
         return 0
 
     return _run_stack_read(arguments, read)
@@ -1220,6 +1320,112 @@ def cmd_master_stack_mutate(arguments: argparse.Namespace) -> int:
             f"revision {result['stack']['revision']}"
         )
     return 0
+
+
+def _stack_admin(arguments: argparse.Namespace, run) -> int:
+    location, failure = _stack_preamble()
+    if location is None:
+        _json(failure)
+        return 2
+    try:
+        result = run(location)
+    except (
+        ValueError,
+        OSError,
+        master_runtime.MasterRecordError,
+        master_operations.MasterOperationError,
+    ) as exc:
+        _json({"schema_version": 1, "status": "refused", "detail": str(exc)})
+        return 2
+    _json(result)
+    return 0 if result.get("status") == "OK" else 2
+
+
+def _profile_host_or_refuse() -> str:
+    name = goal_stack_store.local_host_name()
+    if name is None:
+        raise master_runtime.MasterRecordError(
+            "this host has no name (python3 -m creme set-host-name NAME)"
+        )
+    return name
+
+
+def cmd_master_stack_sync(arguments: argparse.Namespace) -> int:
+    def run(location):
+        result = goal_stack_store.sync(
+            location.record_root, preserve_unpublished=arguments.preserve_unpublished,
+        )
+        stack = result.pop("stack")
+        result["revision"] = stack["revision"]
+        return result
+
+    return _stack_admin(arguments, run)
+
+
+def _default_shared_ref(goal_store: Path, remote: str) -> Optional[str]:
+    from . import goal_stack_git
+
+    probe = goal_stack_git.git(goal_store, "rev-parse", "--abbrev-ref", f"{remote}/HEAD", check=False)
+    name = probe.stdout.decode().strip()
+    return name if probe.returncode == 0 and name else None
+
+
+def cmd_master_stack_migrate(arguments: argparse.Namespace) -> int:
+    from . import goal_stack_migrate
+
+    if arguments.dry_run:
+        try:
+            if arguments.migrate_store:
+                goal_store = Path(arguments.migrate_store).expanduser().resolve()
+            else:
+                location, error = _master_location()
+                if location is None:
+                    raise master_runtime.MasterRecordError(error)
+                goal_store = location.goal_store
+            host = arguments.migrate_host or _profile_host_or_refuse()
+            shared_ref = arguments.shared_ref or _default_shared_ref(goal_store, arguments.remote)
+            result = goal_stack_migrate.plan(
+                goal_store, host=host, host_map=arguments.host_map, shared_ref=shared_ref,
+            )
+        except (ValueError, OSError, master_runtime.MasterRecordError) as exc:
+            _json({"schema_version": 1, "status": "refused", "detail": str(exc)})
+            return 2
+        result.pop("_private", None)
+        result["dry_run"] = True
+        _json(result)
+        return 0 if result["status"] == "OK" else 2
+    if arguments.migrate_host or arguments.migrate_store:
+        _json({"schema_version": 1, "status": "refused",
+               "detail": "--host and --goal-store are dry-run only; a real migration uses this "
+                         "host's profile name and configured goal store"})
+        return 2
+
+    def run(location):
+        shared_ref = arguments.shared_ref or _default_shared_ref(location.goal_store, arguments.remote)
+        if shared_ref is None:
+            raise master_runtime.MasterRecordError(
+                "cannot resolve the shared ref; pass --shared-ref REMOTE/BRANCH"
+            )
+        return goal_stack_migrate.migrate(
+            location.record_root, host=_profile_host_or_refuse(),
+            host_map=arguments.host_map, shared_ref=shared_ref,
+            remote=arguments.remote, branch=arguments.branch,
+        )
+
+    return _stack_admin(arguments, run)
+
+
+def cmd_master_stack_adopt(arguments: argparse.Namespace) -> int:
+    from . import goal_stack_migrate
+
+    def run(location):
+        return goal_stack_migrate.adopt(
+            location.record_root, host=_profile_host_or_refuse(),
+            remote=arguments.remote, branch=arguments.branch,
+            set_aside_local=arguments.set_aside_local,
+        )
+
+    return _stack_admin(arguments, run)
 
 
 def cmd_master_stack_history(arguments: argparse.Namespace) -> int:
@@ -2054,7 +2260,21 @@ def parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="name of the private goal store beside the siblings (e.g. plans); optional",
     )
+    init_parser.add_argument(
+        "--host-name",
+        metavar="NAME",
+        help="stable short name of this host (e.g. wsl, mac) for goal-stack references",
+    )
     init_parser.set_defaults(func=cmd_init)
+
+    set_host = commands.add_parser(
+        "set-host-name",
+        help="name this host in the ignored host profile (goal-stack host qualification)",
+    )
+    set_host.add_argument("name", metavar="NAME")
+    set_host.add_argument("--profile")
+    set_host.add_argument("--replace", action="store_true")
+    set_host.set_defaults(func=cmd_set_host_name)
 
     validate = commands.add_parser("validate-profile")
     validate.add_argument("--profile")
@@ -2154,6 +2374,7 @@ def parser() -> argparse.ArgumentParser:
         help="compare the current board with configured Git/worktree facts without mutation",
     )
     master_digest.add_argument("--human", action="store_true")
+    _owned_host_options(master_digest)
     master_digest.set_defaults(func=cmd_master_digest)
 
     master_stack = master_commands.add_parser(
@@ -2179,6 +2400,7 @@ def parser() -> argparse.ArgumentParser:
 
     stack_list = stack_commands.add_parser("list", help="list entries in canonical order")
     _stack_json(stack_list)
+    _owned_host_options(stack_list)
     stack_list.set_defaults(func=cmd_master_stack_list)
 
     stack_next = stack_commands.add_parser("next", help="show the next eligible entry")
@@ -2247,6 +2469,52 @@ def parser() -> argparse.ArgumentParser:
     )
     _stack_json(stack_recover)
     stack_recover.set_defaults(func=cmd_master_stack_mutate)
+
+    stack_sync = stack_commands.add_parser(
+        "sync",
+        help="fetch the shared stack and fast-forward this host's copy (master only)",
+    )
+    stack_sync.add_argument(
+        "--preserve-unpublished",
+        action="store_true",
+        help="move local never-published revisions to a refs/goal-stack/unpublished/ ref first",
+    )
+    _stack_json(stack_sync)
+    stack_sync.set_defaults(func=cmd_master_stack_sync)
+
+    stack_migrate = stack_commands.add_parser(
+        "migrate",
+        help="move this host's schema-1 stack to a new shared stack branch (first host only)",
+    )
+    stack_migrate.add_argument("--dry-run", action="store_true",
+                               help="print the plan; write nothing and acquire nothing")
+    stack_migrate.add_argument("--host-map", action="append", default=[], metavar="PREFIX=HOST",
+                               help="owner host for references starting with PREFIX (repeatable)")
+    stack_migrate.add_argument("--shared-ref", metavar="REF", default=None,
+                               help="goal-store ref whose files every host has (default REMOTE/HEAD)")
+    stack_migrate.add_argument("--remote", default="origin")
+    stack_migrate.add_argument("--branch", default="goal-stack")
+    stack_migrate.add_argument("--host", dest="migrate_host", metavar="NAME",
+                               help="dry-run only: plan as host NAME instead of the profile's")
+    stack_migrate.add_argument("--goal-store", dest="migrate_store", metavar="PATH",
+                               help="dry-run only: plan against a copy of a goal store")
+    _stack_json(stack_migrate)
+    stack_migrate.set_defaults(func=cmd_master_stack_migrate)
+
+    stack_adopt = stack_commands.add_parser(
+        "adopt-shared",
+        help="adopt the shared stack branch another host published",
+    )
+    stack_adopt.add_argument("--remote", default="origin")
+    stack_adopt.add_argument("--branch", default="goal-stack")
+    stack_adopt.add_argument(
+        "--set-aside-local",
+        action="store_true",
+        help="adopt even though local schema-1 revisions are missing from the shared chain; "
+             "they are listed for re-application",
+    )
+    _stack_json(stack_adopt)
+    stack_adopt.set_defaults(func=cmd_master_stack_adopt)
 
     stack_history = stack_commands.add_parser(
         "history",

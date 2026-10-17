@@ -752,14 +752,25 @@ def _scheduling_goals(record_root: Path, view) -> list[dict[str, Any]]:
 
     if not _stack_store.enabled(record_root, view.events):
         return list(view.expected_board["goals"])
+    from . import goal_stack as _goal_stack
+
     stack = _stack_store.read(record_root)
+    shared = stack.get("schema_version") == _goal_stack.SHARED_SCHEMA_VERSION
+    host = _stack_store.local_host_name() if shared else None
     rows: list[dict[str, Any]] = []
     for entry in stack.get("entries", []):
         if not isinstance(entry, dict) or not entry.get("worktree"):
             continue
+        worktree = entry["worktree"]
+        if shared:
+            # A shared stack describes work on every host; this host can only
+            # inspect worktrees that live on it. Others are unverifiable here.
+            qualifier, worktree = _goal_stack.split_ref(worktree)
+            if qualifier != host:
+                continue
         rows.append({
             "goal_id": entry["id"],
-            "worktree": entry["worktree"],
+            "worktree": worktree,
             "branch": entry.get("branch") or "",
             "checkpoint": entry.get("checkpoint") or "",
         })

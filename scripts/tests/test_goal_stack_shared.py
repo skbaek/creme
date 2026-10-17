@@ -188,6 +188,38 @@ class SharedStackTest(SharedFixture):
         self.assertIn('worktree = "mac:/Users/agent/blanc/.worktrees/m"', ok["manifest"])
         self.assertEqual(sorted(p.name for p in self.wsl.plans.iterdir()), before)
 
+    def test_failed_migration_push_leaves_no_branch_or_upstream_config(self):
+        self.legacy_wsl()
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        with self.assertRaisesRegex(migration.MigrationError, "could not publish"):
+            self.migrate_wsl()
+        for key in ("remote", "merge"):
+            probe = subprocess.run(["git", "-C", str(self.wsl.plans), "config", f"branch.goal-stack.{key}"],
+                                   capture_output=True)
+            self.assertNotEqual(probe.returncode, 0, key)
+        probe = subprocess.run(["git", "-C", str(self.wsl.plans), "rev-parse", "--verify", "--quiet",
+                                "refs/heads/goal-stack"], capture_output=True)
+        self.assertNotEqual(probe.returncode, 0)
+
+    def test_adoption_refuses_an_incomplete_import(self):
+        self.legacy_wsl()
+        self.copy_legacy(self.wsl, self.mac)
+        self.migrate_wsl()
+        _, clone, tip = self.canonical_receipts()
+        root = git(clone, "rev-list", "--max-parents=0", tip)
+        git(clone, "checkout", "-q", "--orphan", "rewritten", root)
+        git(clone, "rm", "-q", "--cached", shared.receipt_path(0))
+        git(clone, "commit", "-q", "-m", "import missing receipt 0")
+        forged_root = git(clone, "rev-parse", "HEAD")
+        tree = git(clone, "rev-parse", f"{tip}^{{tree}}")
+        forged = git(clone, "commit-tree", tree, "-p", forged_root, "-m", "migrate")
+        git(clone, "push", "-q", "--force", "origin", f"{forged}:refs/heads/goal-stack")
+        with self.assertRaisesRegex(migration.MigrationError, "must hold exactly receipts"):
+            migration.adopt(self.mac.record, host="mac", writer=self.mac.writer)
+        self.assertFalse((self.mac.plans / shared.SHARED_DIR).exists())
+
     def test_migration_refuses_broken_receipt_chain(self):
         self.legacy_wsl()
         receipt = self.wsl.plans / shared.receipt_path(1)
@@ -356,6 +388,30 @@ class SharedStackTest(SharedFixture):
             self.mac.sync()
         self.assertEqual(self.mac.read()["revision"], 2)
 
+    def test_preserve_unpublished_verifies_the_canonical_extension(self):
+        self.shared_ready()
+        worktree = self.wsl.plans / shared.SHARED_DIR
+        path = worktree / store.NAME
+        path.write_text(path.read_text() + "# local-only\n")
+        git(worktree, "commit", "-q", "-am", "never published")
+        local = shared.head(worktree)
+        _, clone, tip = self.canonical_receipts()
+        git(clone, "checkout", "-q", "-B", "goal-stack", tip)
+        manifest = clone / store.NAME
+        manifest.write_text(manifest.read_text().replace("revision = 2", "revision = 3"))
+        git(clone, "commit", "-q", "-am", "unreceipted")
+        git(clone, "push", "-q", "origin", "HEAD:refs/heads/goal-stack")
+        with self.assertRaisesRegex(store.StackStoreError, "lacks receipt 00000003"):
+            self.wsl.sync(preserve_unpublished=True)
+        self.assertEqual(shared.head(worktree), local)
+        self.assertEqual(git(worktree, "for-each-ref", shared.UNPUBLISHED_PREFIX), "")
+
+    def test_untracked_path_is_named_when_blocking_writes(self):
+        self.shared_ready()
+        (self.mac.plans / shared.SHARED_DIR / "stray.txt").write_text("x")
+        with self.assertRaisesRegex(store.StackStoreError, r"stray\.txt"):
+            self.mac.mutate("push", {"entry": entry("x")})
+
     def test_crash_after_commit_before_push_recovers(self):
         self.shared_ready()
 
@@ -384,7 +440,7 @@ class SharedStackTest(SharedFixture):
             store.mutate(self.wsl.record, "push", {"entry": entry("lost")},
                          writer=self.wsl.writer, host="wsl", fault=crash)
         self.mac.mutate("push", {"entry": entry("winner")})
-        with self.assertRaisesRegex(store.StackStoreError, "superseded.*preserved at refs/goal-stack/"):
+        with self.assertRaisesRegex(store.StackStoreError, "superseded.*preserved at refs/goal-stack/unpublished/[0-9a-f]{40};"):
             self.wsl.mutate("recover")
         receipts, _, _ = self.canonical_receipts()
         self.assertEqual(receipts[-1]["payload"]["entry"]["id"], "winner")
@@ -426,6 +482,12 @@ class SharedStackTest(SharedFixture):
             self.mac.mutate("push", {"entry": entry("w", worktree="/Users/agent/x")})
         with self.assertRaisesRegex(goal_stack.GoalStackError, "absolute path"):
             self.mac.mutate("push", {"entry": entry("w", worktree="mac:relative/x")})
+        with self.assertRaisesRegex(goal_stack.GoalStackError, "absolute path"):
+            self.mac.mutate("push", {"entry": entry("w", worktree="mac:/")})
+        with self.assertRaisesRegex(goal_stack.GoalStackError, "invalid host qualifier 'MAC'"):
+            self.mac.mutate("push", {"entry": entry("w", worktree="MAC:/Users/x")})
+        with self.assertRaisesRegex(goal_stack.GoalStackError, "invalid host qualifier 'Mac'"):
+            self.mac.mutate("push", {"entry": entry("w", context="Mac:.worktrees/x/STATE.md")})
 
     def test_hand_edited_shared_manifest_refuses(self):
         self.shared_ready()
@@ -459,8 +521,10 @@ class SharedSurfaceTest(SharedFixture):
         owners = {row["goal_id"]: row["host"] for row in digest["goals"]["items"]}
         self.assertEqual(owners["mac-owned"], "mac")
         self.assertEqual(owners["wsl-work"], "wsl")
+        self.assertEqual(digest["stack"]["next_id"], "mac-owned")
         mine = master_operations.digest_record(self.wsl.record, goals_host="wsl", **options)
         self.assertEqual([row["goal_id"] for row in mine["goals"]["items"]], ["wsl-work"])
+        self.assertEqual(mine["stack"]["next_id"], "wsl-work")
         human = master_operations.render_digest_human(digest)
         self.assertIn("mac-owned [ready] @mac", human)
 

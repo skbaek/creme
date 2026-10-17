@@ -124,9 +124,23 @@ def is_ancestor(worktree: Path, older: str, newer: str) -> bool:
     return git(worktree, "merge-base", "--is-ancestor", older, newer, check=False).returncode == 0
 
 
+def dirty_paths(worktree: Path) -> list[str]:
+    status = git(worktree, "status", "--porcelain", "--untracked-files=all").stdout.decode(
+        "utf-8", "replace")
+    return [line[3:] for line in status.splitlines() if line.strip()]
+
+
 def clean(worktree: Path) -> bool:
-    status = out(worktree, "status", "--porcelain", "--untracked-files=all")
-    return status == ""
+    return not dirty_paths(worktree)
+
+
+def require_clean(worktree: Path) -> None:
+    paths = dirty_paths(worktree)
+    if paths:
+        shown = ", ".join(paths[:5]) + (" ..." if len(paths) > 5 else "")
+        raise SharedStackError(
+            f"stack worktree has uncommitted or untracked paths ({shown}); "
+            "master stack recover, or move them out of .goal-stack/")
 
 
 def fetch(worktree: Path) -> str:
@@ -207,8 +221,7 @@ def sync(worktree: Path) -> list[dict]:
     branch: those are unpublished writes that `master stack sync
     --preserve-unpublished` sets aside explicitly.
     """
-    if not clean(worktree):
-        raise SharedStackError("stack worktree has uncommitted changes; master stack recover")
+    require_clean(worktree)
     remote_head = fetch(worktree)
     local = head(worktree)
     if local == remote_head:
@@ -224,24 +237,33 @@ def sync(worktree: Path) -> list[dict]:
 
 def preserve_unpublished(worktree: Path) -> Optional[str]:
     """Move local-only commits to a preservation ref and reset to canonical."""
-    if not clean(worktree):
-        raise SharedStackError("stack worktree has uncommitted changes; master stack recover")
+    require_clean(worktree)
     remote_head = fetch(worktree)
     local = head(worktree)
     if local == remote_head or is_ancestor(worktree, local, remote_head):
         return None
-    ref = f"{UNPUBLISHED_PREFIX}{local[:16]}"
+    # The canonical extension past the last commit both sides share must be
+    # verified exactly as a fast-forward would be before it is installed.
+    base = git(worktree, "merge-base", local, remote_head, check=False).stdout.decode().strip()
+    if not base:
+        raise SharedStackError("local stack shares no history with the canonical branch; refusing")
+    verify_chain(worktree, base, remote_head)
+    ref = preservation_ref(local)
     git(worktree, "update-ref", ref, local)
     git(worktree, "reset", "--hard", "--quiet", remote_head)
     return ref
+
+
+def preservation_ref(commit_id: str) -> str:
+    """Full-hash ref, so distinct superseded commits never overwrite each other."""
+    return f"{UNPUBLISHED_PREFIX}{commit_id}"
 
 
 def commit(worktree: Path, revision: int, message: str) -> str:
     git(worktree, "add", "--", NAME, receipt_path(revision))
     git(worktree, "-c", "commit.gpgsign=false", "commit", "--no-verify", "--quiet",
         "-m", message)
-    if not clean(worktree):
-        raise SharedStackError("stack commit left the worktree dirty")
+    require_clean(worktree)
     return head(worktree)
 
 

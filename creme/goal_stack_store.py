@@ -379,7 +379,7 @@ def _recover_shared(root: Path, worktree: Path, host: str, *, fault=None) -> boo
             if shared.is_ancestor(worktree, remote_head, local):
                 published, _ = shared.push(worktree)
             if not published:
-                ref = f"{shared.UNPUBLISHED_PREFIX}{local[:16]}"
+                ref = shared.preservation_ref(local)
                 shared.git(worktree, "update-ref", ref, local)
                 shared.git(worktree, "reset", "--hard", "--quiet", remote_head)
                 _safe_path(worktree, PENDING).unlink()

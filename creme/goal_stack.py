@@ -83,6 +83,8 @@ ID_RE = re.compile(r"[a-z0-9][a-z0-9_.\-]*")
 # A host name: short, lowercase, and never confusable with a URL scheme use.
 HOST_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 QUALIFIED_RE = re.compile(r"([a-z][a-z0-9-]{0,31}):(.+)", re.S)
+# Anything shaped like a qualifier but not a valid lowercase host name.
+LOOSE_QUALIFIER_RE = re.compile(r"([A-Za-z][A-Za-z0-9_-]*):(?!//)", re.S)
 URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 
 MAX_ID_LEN = 128
@@ -277,6 +279,14 @@ def split_ref(value):
     return None, value
 
 
+def _check_qualifier_case(field, value, eid):
+    """Refuse ``MAC:path``-style qualifiers rather than reading them as paths."""
+    loose = LOOSE_QUALIFIER_RE.match(value) if isinstance(value, str) else None
+    if loose is not None and QUALIFIED_RE.match(value) is None:
+        _fail("entry %r field %r has invalid host qualifier %r (host names are "
+              "lowercase [a-z][a-z0-9-]{0,31})" % (eid, field, loose.group(1)))
+
+
 def _check_ref_shape(field, value, eid):
     if URL_RE.search(value):
         _fail("entry %r field %r must not be an external URL" % (eid, field))
@@ -309,12 +319,14 @@ def _check_foreign_ref(field, path, eid):
 
 
 def _check_worktree(value, eid, host):
+    _check_qualifier_case("worktree", value, eid)
     qualifier, path = split_ref(value)
     if qualifier is None:
         _fail("entry %r field 'worktree' must be host-qualified "
               "(HOST:/absolute/path)" % (eid,))
     _check_ref_shape("worktree", path, eid)
-    if not path.startswith("/") or ".." in Path(path).parts:
+    if (not path.startswith("/") or ".." in Path(path).parts
+            or not path.strip("/")):
         _fail("entry %r field 'worktree' must name an absolute path on host "
               "%r" % (eid, qualifier))
 
@@ -330,6 +342,7 @@ def _check_refs(by_id, root, schema=SCHEMA_VERSION, host=None):
             if schema == SCHEMA_VERSION:
                 _check_ref(field, value, root_path, resolved, eid)
                 continue
+            _check_qualifier_case(field, value, eid)
             qualifier, path = split_ref(value)
             if qualifier is None or qualifier == host:
                 # Shared and own-host files fail closed exactly as in schema 1.

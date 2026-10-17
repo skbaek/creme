@@ -368,10 +368,12 @@ def _stack_state_for(
     if not store.enabled(root, events):
         return None
     stack = store.read(root)
-    selected = goal_stack.select_next(stack)
-    rows = [_stack_row(entry) for entry in stack["entries"]]
+    entries = stack["entries"]
     if goals_host is not None:
-        rows = [row for row in rows if row["host"] == goals_host]
+        # "Work owned by this host": next is chosen among owned entries.
+        entries = [e for e in entries if goal_stack.entry_owner(e) == goals_host]
+    selected = goal_stack.select_next({"entries": entries})
+    rows = [_stack_row(entry) for entry in entries]
     return {
         "stack": stack,
         "rows": rows,

@@ -318,6 +318,8 @@ def migrate(record_root: Path, *, host: str, host_map=(), shared_ref: Optional[s
                                     f"refs/heads/{branch}:refs/heads/{branch}", check=False)
                 if pushed.returncode:
                     shared.git(root, "branch", "-D", branch, check=False)
+                    shared.git(root, "config", "--unset", f"branch.{branch}.remote", check=False)
+                    shared.git(root, "config", "--unset", f"branch.{branch}.merge", check=False)
                     raise MigrationError("could not publish the shared stack branch; nothing adopted: "
                                          + pushed.stderr.decode("utf-8", "replace").strip())
                 shared.git(root, "fetch", "--quiet", remote,
@@ -347,6 +349,22 @@ def _local_receipts(root: Path) -> dict[int, bytes]:
     return found
 
 
+def _require_complete_import(root: Path, commit: str) -> None:
+    """The import commit holds exactly receipts 00000000..N for its manifest."""
+    _, imported = shared.manifest_at(root, commit)
+    listed = shared.out(root, "ls-tree", "-r", "--name-only", commit, "--", shared.RECEIPTS)
+    names = sorted(line for line in listed.splitlines() if line)
+    expected = [shared.receipt_path(n) for n in range(imported["revision"] + 1)]
+    if names != expected:
+        raise MigrationError(
+            f"shared import commit must hold exactly receipts 00000000.."
+            f"{imported['revision']:08d}; found {len(names)}")
+    data = shared.show(root, commit, shared.NAME)
+    receipt = json.loads(shared.show(root, commit, expected[-1]).decode())
+    if receipt.get("after_sha256") != shared.digest(data):
+        raise MigrationError("shared import receipt does not bind the imported manifest")
+
+
 def adopt(record_root: Path, *, host: str, remote: str = shared.DEFAULT_REMOTE,
           branch: str = shared.DEFAULT_BRANCH, set_aside_local: bool = False,
           writer=None) -> dict[str, Any]:
@@ -372,6 +390,7 @@ def adopt(record_root: Path, *, host: str, remote: str = shared.DEFAULT_REMOTE,
                 roots = shared.out(root, "rev-list", "--max-parents=0", canonical).split()
                 if len(roots) != 1:
                     raise MigrationError("shared stack branch must have exactly one import root")
+                _require_complete_import(root, roots[0])
                 shared.verify_chain(root, roots[0], canonical)
                 _, head_stack = shared.manifest_at(root, canonical)
                 head_revision = head_stack["revision"]

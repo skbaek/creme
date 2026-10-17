@@ -29,6 +29,17 @@ Rules enforced by :func:`validate`:
 * Unknown keys, wrong types (including bools where ints are expected),
   duplicate IDs, and unreasonable sizes are rejected.
 
+Schema 2 (the shared, multi-host form) keeps the same keys and adds host
+qualification: a path-valued field is either an unqualified Plans-relative
+file in the shared goal store, or ``HOST:PATH`` naming a file on host
+``HOST``. ``goal``/``context`` qualified with the reading host, and every
+unqualified reference, are existence-checked exactly as in schema 1;
+qualified with another host they are shape-checked only (unverifiable
+here). ``worktree`` must be qualified with an absolute path and is never
+existence-checked. An optional ``host`` names the owning host. Schema-1
+documents never interpret ``HOST:`` prefixes, and schema-1 readers refuse
+schema 2.
+
 Entry list order is the only priority. :func:`select_next` returns the
 first ``active`` entry (active work is never preempted by pushes), else the
 first ``ready`` entry with no unsatisfied dependencies, else ``None``.
@@ -43,6 +54,8 @@ import re
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+SHARED_SCHEMA_VERSION = 2
+SCHEMA_VERSIONS = (SCHEMA_VERSION, SHARED_SCHEMA_VERSION)
 
 STATUSES = ("ready", "active", "blocked", "parked")
 
@@ -51,6 +64,7 @@ TOP_KEYS = frozenset({"schema_version", "revision", "entries"})
 ENTRY_KEYS = frozenset({
     "id", "title", "status", "goal", "done", "context", "next",
     "reason", "trigger", "depends_on", "worktree", "branch", "checkpoint",
+    "host",
 })
 
 UPDATABLE_KEYS = ENTRY_KEYS - {"id"}
@@ -61,11 +75,14 @@ REF_FIELDS = ("goal", "context")
 # Ordered emission for dumps().
 FIELD_ORDER = (
     "id", "title", "status", "goal", "done", "context", "next",
-    "reason", "trigger", "worktree", "branch", "checkpoint",
+    "reason", "trigger", "host", "worktree", "branch", "checkpoint",
     "depends_on",
 )
 
 ID_RE = re.compile(r"[a-z0-9][a-z0-9_.\-]*")
+# A host name: short, lowercase, and never confusable with a URL scheme use.
+HOST_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+QUALIFIED_RE = re.compile(r"([a-z][a-z0-9-]{0,31}):(.+)", re.S)
 URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 
 MAX_ID_LEN = 128
@@ -113,8 +130,8 @@ def _check_top(stack):
     if missing:
         _fail("missing top-level keys: %s" % sorted(missing))
     if (not _is_int(stack["schema_version"])
-            or stack["schema_version"] != SCHEMA_VERSION):
-        _fail("schema_version must be the integer 1")
+            or stack["schema_version"] not in SCHEMA_VERSIONS):
+        _fail("schema_version must be the integer 1 or 2")
     if not _is_int(stack["revision"]) or stack["revision"] < 0:
         _fail("revision must be a nonnegative integer")
     entries = stack["entries"]
@@ -148,7 +165,7 @@ def _check_entry_shape(entry, index):
     if entry["status"] not in STATUSES:
         _fail("%s has invalid status %r" % (where, entry["status"]))
     for key in ("goal", "done", "context", "next", "reason", "trigger",
-                "worktree", "branch", "checkpoint"):
+                "worktree", "branch", "checkpoint", "host"):
         if key in entry:
             _check_text(key, entry[key],
                         max_len=MAX_REF_LEN if key in REF_FIELDS
@@ -157,6 +174,9 @@ def _check_entry_shape(entry, index):
     for key in REF_FIELDS:
         if key in entry and not entry[key].strip():
             _fail("%s field %r must not be empty" % (where, key))
+    if "host" in entry and not HOST_RE.fullmatch(entry["host"]):
+        _fail("%s has invalid host %r (want [a-z][a-z0-9-]{0,31})"
+              % (where, entry["host"]))
     goal = entry.get("goal", "")
     done = entry.get("done", "")
     if not (isinstance(goal, str) and goal.strip()
@@ -189,9 +209,11 @@ def _check_entry_shape(entry, index):
             _fail("%s depends on itself" % where)
 
 
-def _check_entries_shape(entries):
+def _check_entries_shape(entries, schema=SCHEMA_VERSION):
     for index, entry in enumerate(entries):
         _check_entry_shape(entry, index)
+        if schema == SCHEMA_VERSION and "host" in entry:
+            _fail("entries[%d] key 'host' needs schema_version 2" % index)
     seen = {}
     for entry in entries:
         if entry["id"] in seen:
@@ -243,11 +265,27 @@ def _coerce_root(root):
     return root.resolve()
 
 
-def _check_ref(field, value, root, resolved_root, eid):
+def split_ref(value):
+    """Return ``(host, path)`` for ``HOST:PATH``, else ``(None, value)``.
+
+    Only meaningful for schema-2 stacks; schema 1 never interprets prefixes.
+    """
+    if isinstance(value, str) and not URL_RE.match(value):
+        match = QUALIFIED_RE.fullmatch(value)
+        if match is not None:
+            return match.group(1), match.group(2)
+    return None, value
+
+
+def _check_ref_shape(field, value, eid):
     if URL_RE.search(value):
         _fail("entry %r field %r must not be an external URL" % (eid, field))
     if "\x00" in value:
         _fail("entry %r field %r contains NUL" % (eid, field))
+
+
+def _check_ref(field, value, root, resolved_root, eid):
+    _check_ref_shape(field, value, eid)
     path = Path(value)
     if path.is_absolute():
         _fail("entry %r field %r must be Plans-relative" % (eid, field))
@@ -261,22 +299,111 @@ def _check_ref(field, value, root, resolved_root, eid):
               % (eid, field, value))
 
 
-def _check_refs(by_id, root):
+def _check_foreign_ref(field, path, eid):
+    """Shape-check a goal-store-relative file on another host."""
+    _check_ref_shape(field, path, eid)
+    parts = Path(path).parts
+    if Path(path).is_absolute() or ".." in parts or not path.strip():
+        _fail("entry %r field %r must be a goal-store-relative path on its "
+              "host" % (eid, field))
+
+
+def _check_worktree(value, eid, host):
+    qualifier, path = split_ref(value)
+    if qualifier is None:
+        _fail("entry %r field 'worktree' must be host-qualified "
+              "(HOST:/absolute/path)" % (eid,))
+    _check_ref_shape("worktree", path, eid)
+    if not path.startswith("/") or ".." in Path(path).parts:
+        _fail("entry %r field 'worktree' must name an absolute path on host "
+              "%r" % (eid, qualifier))
+
+
+def _check_refs(by_id, root, schema=SCHEMA_VERSION, host=None):
     resolved = _coerce_root(root)
     root_path = Path(root)
     for eid, entry in by_id.items():
         for field in REF_FIELDS:
-            if field in entry:
-                _check_ref(field, entry[field], root_path, resolved, eid)
+            if field not in entry:
+                continue
+            value = entry[field]
+            if schema == SCHEMA_VERSION:
+                _check_ref(field, value, root_path, resolved, eid)
+                continue
+            qualifier, path = split_ref(value)
+            if qualifier is None or qualifier == host:
+                # Shared and own-host files fail closed exactly as in schema 1.
+                _check_ref(field, path, root_path, resolved, eid)
+            else:
+                _check_foreign_ref(field, path, eid)
+        if schema != SCHEMA_VERSION and "worktree" in entry:
+            _check_worktree(entry["worktree"], eid, host)
 
 
-def validate(stack, root):
-    """Check a stack dict fully (structure, graph, file refs)."""
+def _check_host(host):
+    if host is not None and (not isinstance(host, str)
+                             or not HOST_RE.fullmatch(host)):
+        _fail("host name %r is invalid (want [a-z][a-z0-9-]{0,31})" % (host,))
+    return host
+
+
+def _check_schema(stack, schema):
+    if schema is not None and stack["schema_version"] != schema:
+        _fail("schema_version must be the integer %d here" % schema)
+
+
+def validate(stack, root, *, host=None, schema=None):
+    """Check a stack dict fully (structure, graph, file refs).
+
+    ``host`` is the reading host's name (schema 2 only): its qualified refs
+    are existence-checked; other hosts' are shape-checked. ``schema`` pins
+    the accepted schema version when given.
+    """
+    _check_host(host)
     entries = _check_top(stack)
-    by_id = _check_entries_shape(entries)
+    _check_schema(stack, schema)
+    by_id = _check_entries_shape(entries, stack["schema_version"])
     _check_graph(by_id)
-    _check_refs(by_id, root)
+    _check_refs(by_id, root, stack["schema_version"], host)
     return None
+
+
+def check_structure(stack, *, schema=None):
+    """Structure and graph only; never touches the filesystem."""
+    entries = _check_top(stack)
+    _check_schema(stack, schema)
+    by_id = _check_entries_shape(entries, stack["schema_version"])
+    _check_graph(by_id)
+    return None
+
+
+def ref_status(entry, host, schema=SHARED_SCHEMA_VERSION):
+    """Describe each path-valued field: ``{field: (qualifier, path, verified)}``.
+
+    ``verified`` is False only for refs on another host (or any qualified
+    ref when ``host`` is unknown): those are displayed, never checked here.
+    """
+    result = {}
+    for field in REF_FIELDS + ("worktree",):
+        if field not in entry:
+            continue
+        if schema == SCHEMA_VERSION:
+            result[field] = (None, entry[field], field != "worktree")
+            continue
+        qualifier, path = split_ref(entry[field])
+        verified = (qualifier is None or qualifier == host) and field != "worktree"
+        result[field] = (qualifier, path, verified)
+    return result
+
+
+def entry_owner(entry):
+    """The owning host: explicit ``host``, else the worktree's qualifier."""
+    if not isinstance(entry, dict):
+        return None
+    if isinstance(entry.get("host"), str):
+        return entry["host"]
+    qualifier, _ = split_ref(entry.get("worktree"))
+    return qualifier
 
 
 def _check_position(name, value, low, high):
@@ -294,9 +421,10 @@ def _toml_str(value):
 def dumps(stack):
     """Serialize a stack dict to canonical TOML text."""
     entries = _check_top(stack)
-    by_id = _check_entries_shape(entries)
+    schema = stack["schema_version"]
+    by_id = _check_entries_shape(entries, schema)
     _check_graph(by_id)
-    lines = ["schema_version = 1",
+    lines = ["schema_version = %d" % schema,
                "revision = %d" % stack["revision"], ""]
     for entry in entries:
         lines.append("[[entries]]")
@@ -312,7 +440,8 @@ def dumps(stack):
         lines.append("")
     if entries:
         return "\n".join(lines).rstrip("\n") + "\n"
-    return "schema_version = 1\nrevision = %d\nentries = []\n" % stack["revision"]
+    return "schema_version = %d\nrevision = %d\nentries = []\n" % (
+        schema, stack["revision"])
 
 
 def parse(text):
@@ -361,10 +490,10 @@ def parse(text):
     return data
 
 
-def loads(text, root):
+def loads(text, root, *, host=None, schema=None):
     """Parse and validate a stack, including its file references."""
     data = parse(text)
-    validate(data, root)
+    validate(data, root, host=host, schema=schema)
     return data
 
 
@@ -426,7 +555,7 @@ def _payload(payload, action, allowed):
     return payload
 
 
-def apply(stack, action, payload, root):
+def apply(stack, action, payload, root, *, host=None):
     """Apply one operation; return ``(new_stack, archive_record_or_None)``.
 
     The input is never mutated: work happens on a deep copy, and on any
@@ -446,7 +575,7 @@ def apply(stack, action, payload, root):
             _fail("bootstrap refuses a nonempty stack")
         fresh = {"schema_version": SCHEMA_VERSION, "revision": 0,
                  "entries": []}
-        validate(fresh, root)
+        validate(fresh, root, host=host)
         return fresh, None
     if action not in ("push", "move", "reorder", "update",
                       "complete", "retire"):
@@ -454,7 +583,7 @@ def apply(stack, action, payload, root):
     if not isinstance(payload, dict):
         _fail("%s payload must be a dict" % action)
     work = copy.deepcopy(stack)
-    validate(work, root)
+    validate(work, root, host=host)
     old_rev = work["revision"]
     entries = work["entries"]
     by_id = {e["id"]: e for e in entries}
@@ -469,7 +598,7 @@ def apply(stack, action, payload, root):
         _check_position("position", pos, 1, len(entries) + 1)
         entries.insert(pos - 1, new_entry)
         work["revision"] = old_rev + 1
-        validate(work, root)
+        validate(work, root, host=host)
     elif action == "move":
         _payload(payload, action, {"id", "position"})
         eid = payload.get("id")
@@ -482,7 +611,7 @@ def apply(stack, action, payload, root):
             return work, None
         entries.insert(pos - 1, entries.pop(current))
         work["revision"] = old_rev + 1
-        validate(work, root)
+        validate(work, root, host=host)
     elif action == "reorder":
         _payload(payload, action, {"ids"})
         ids = payload.get("ids")
@@ -496,7 +625,7 @@ def apply(stack, action, payload, root):
             return work, None
         entries[:] = [by_id[i] for i in ids]
         work["revision"] = old_rev + 1
-        validate(work, root)
+        validate(work, root, host=host)
     elif action == "update":
         _payload(payload, action, {"id", "changes"})
         eid = payload.get("id")
@@ -512,7 +641,7 @@ def apply(stack, action, payload, root):
         for key, value in changes.items():
             target[key] = copy.deepcopy(value)
         work["revision"] = old_rev + 1
-        validate(work, root)
+        validate(work, root, host=host)
     elif action == "complete":
         _payload(payload, action, {"id", "evidence"})
         eid = payload.get("id")
@@ -534,7 +663,7 @@ def apply(stack, action, payload, root):
                 else:
                     del other["depends_on"]
         work["revision"] = old_rev + 1
-        validate(work, root)
+        validate(work, root, host=host)
         record = {
             "id": eid,
             "status": "complete",
@@ -560,7 +689,7 @@ def apply(stack, action, payload, root):
         removed = by_id[eid]
         entries[:] = [e for e in entries if e["id"] != eid]
         work["revision"] = old_rev + 1
-        validate(work, root)
+        validate(work, root, host=host)
         record = {
             "id": eid,
             "status": "retired",
@@ -570,3 +699,45 @@ def apply(stack, action, payload, root):
             "new_revision": old_rev + 1,
         }
     return work, record
+
+
+def touched_ids(action, payload):
+    """The entry IDs whose prepared-against state a mutation depends on."""
+    if not isinstance(payload, dict):
+        _fail("%s payload must be a dict" % action)
+    if action == "push":
+        entry = payload.get("entry")
+        return [entry["id"]] if isinstance(entry, dict) and isinstance(
+            entry.get("id"), str) else []
+    if action in ("update", "complete", "retire", "move"):
+        return [payload["id"]] if isinstance(payload.get("id"), str) else []
+    if action == "reorder":
+        ids = payload.get("ids")
+        return [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else []
+    _fail("action %r cannot be replayed" % (action,))
+
+
+def replay_conflict(base, head, action, payload):
+    """Return why a mutation prepared against ``base`` cannot replay on ``head``.
+
+    ``None`` means the mutation's semantic preconditions are unchanged: every
+    entry it touches is field-for-field identical in both revisions (or, for
+    ``push``, absent from both), and order-sensitive mutations (``move``,
+    ``reorder``, ``push`` with an explicit position) see the same live order.
+    The caller still applies and validates the mutation against ``head``.
+    """
+    base_by = {e["id"]: e for e in base.get("entries", [])}
+    head_by = {e["id"]: e for e in head.get("entries", [])}
+    for eid in touched_ids(action, payload):
+        if action == "push":
+            if eid in head_by and eid not in base_by:
+                return "entry %r was pushed concurrently" % eid
+            continue
+        if base_by.get(eid) != head_by.get(eid):
+            return "entry %r changed since the prepared revision" % eid
+    order_sensitive = action in ("move", "reorder") or (
+        action == "push" and "position" in payload)
+    if order_sensitive and [e["id"] for e in base.get("entries", [])] != [
+            e["id"] for e in head.get("entries", [])]:
+        return "the live order changed since the prepared revision"
+    return None

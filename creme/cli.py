@@ -27,7 +27,7 @@ from .host_wrappers import (
     render_host_rules,
     render_host_wrappers,
 )
-from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, write_reviewed
+from .profile import DEFAULT_RELATIVE_PROFILE, load, propose, with_host_name, write_reviewed
 from . import idle_workers
 from . import lsp_watchdog
 from . import luna_broker, luna_reserve
@@ -148,6 +148,7 @@ def cmd_init(arguments: argparse.Namespace) -> int:
             Path(arguments.workspace_root).expanduser() if arguments.workspace_root else None,
             adapter,
             goal_store=arguments.goal_store,
+            host_name=arguments.host_name,
         )
     except RuntimeError as exc:
         _json({"status": "UNAVAILABLE", "detail": str(exc)})
@@ -166,6 +167,31 @@ def cmd_init(arguments: argparse.Namespace) -> int:
         return 1
     write_reviewed(path, candidate)
     _json({"status": "OK", "detail": "reviewed host profile written", "path": str(path)})
+    return 0
+
+
+def cmd_set_host_name(arguments: argparse.Namespace) -> int:
+    """Name this host in its reviewed profile (goal-stack host qualification)."""
+    path = _profile_path(arguments.profile)
+    checked = load(path, get_adapter())
+    if checked.status not in {"VALID", "LIMITED"} or checked.profile is None:
+        _json({"status": "REFUSED", "detail": f"profile is {checked.status}: {checked.detail}"})
+        return 1
+    current = checked.profile.get("host_name")
+    if current is not None and current != arguments.name and not arguments.replace:
+        _json({
+            "status": "REFUSED",
+            "detail": f"host is already named {current!r}; renaming orphans its "
+                      "host-qualified goal-stack references; use --replace after review",
+        })
+        return 1
+    try:
+        updated = with_host_name(checked.profile, arguments.name)
+        write_reviewed(path, updated)
+    except ValueError as exc:
+        _json({"status": "REFUSED", "detail": str(exc)})
+        return 1
+    _json({"status": "OK", "detail": f"host named {arguments.name}", "path": str(path)})
     return 0
 
 
@@ -2054,7 +2080,21 @@ def parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="name of the private goal store beside the siblings (e.g. plans); optional",
     )
+    init_parser.add_argument(
+        "--host-name",
+        metavar="NAME",
+        help="stable short name of this host (e.g. wsl, mac) for goal-stack references",
+    )
     init_parser.set_defaults(func=cmd_init)
+
+    set_host = commands.add_parser(
+        "set-host-name",
+        help="name this host in the ignored host profile (goal-stack host qualification)",
+    )
+    set_host.add_argument("name", metavar="NAME")
+    set_host.add_argument("--profile")
+    set_host.add_argument("--replace", action="store_true")
+    set_host.set_defaults(func=cmd_set_host_name)
 
     validate = commands.add_parser("validate-profile")
     validate.add_argument("--profile")

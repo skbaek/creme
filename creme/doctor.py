@@ -21,7 +21,7 @@ from .host_wrappers import (
     default_rules_dir,
     render_host_wrappers,
 )
-from .profile import DEFAULT_RELATIVE_PROFILE, ProfileValidation, effective_policy, load
+from .profile import DEFAULT_RELATIVE_PROFILE, ProfileValidation, effective_policy, host_name, load
 from .semaphore import canonical_creme_root
 
 
@@ -597,6 +597,23 @@ def check_public_runtime_boundary(root: Path) -> list[Check]:
     ]
 
 
+def check_host_name(profile: Optional[dict[str, Any]], status: str) -> list[Check]:
+    """Report the host name that qualifies goal-stack references and receipts.
+
+    A shared (multi-host) goal stack refuses reads and writes without one.
+    """
+    name = host_name(profile)
+    if name:
+        return [Check("host name", STATUS_OK, f"{name} (goal-stack refs on this host read {name}:PATH)")]
+    return [Check(
+        "host name",
+        STATUS_WARN,
+        "not configured; a shared goal stack refuses this host until "
+        "`python3 -m creme set-host-name NAME` (profile "
+        f"{status})",
+    )]
+
+
 def run_doctor(
     root: Path,
     cwd: Path,
@@ -625,6 +642,7 @@ def run_doctor(
     checks.extend(check_sibling("jaune", workspace / jaune_name, "github.com/skbaek/jaune"))
     checks.extend(check_sibling("blanc", workspace / blanc_name, "github.com/skbaek/blanc"))
     checks.extend(check_goal_store(workspace, profile))
+    checks.extend(check_host_name(profile, validated.status))
     checks.extend(check_client_surface(root))
     checks.extend(Check(*row) for row in approval_checks(root))
     checks.extend(check_neutral_semaphore(root))
@@ -640,6 +658,7 @@ def run_doctor(
     context = {
         "root": str(root), "workspace_root": str(workspace),
         "profile": validated.status, "platform": selected.system,
+        "host_name": host_name(profile),
         "effective_policy": policy, "host_guidance": guidance.status,
     }
     return checks, context

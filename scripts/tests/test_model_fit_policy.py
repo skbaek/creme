@@ -51,7 +51,7 @@ class ModelFitPolicyTests(unittest.TestCase):
 
     def test_cheapest_due_candidate_wins_and_expensive_never_candidate(self):
         results = [self.recommend() for _ in range(4)]
-        self.assertEqual(results[-1]["option"], "sonnet/low")
+        self.assertEqual(results[-1]["option"], "haiku/low")
         self.assertTrue(results[-1]["probe"])
         self.assertNotIn("opus/low", results[-1]["reason"])
         self.assertEqual(self.outcome(results[-1])["event"], "n-updated")

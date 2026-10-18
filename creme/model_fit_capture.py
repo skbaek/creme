@@ -182,7 +182,7 @@ def muse_turn(record: dict[str, Any], number: int) -> dict[str, Any]:
 # starts the next attempt).
 
 CLAUDE_FAMILIES = {"claude-fable-5-1": "fable", "claude-opus-5-5": "opus", "claude-opus-4-8": "opus",
-                   "claude-sonnet-5-5": "sonnet"}
+                   "claude-sonnet-5-5": "sonnet", "claude-haiku-5-5": "haiku"}
 CLAUDE_PROFILE_EFFORTS = {1: "low", 2: "medium", 3: "high", 4: "xhigh", 5: "max"}
 CLAUDE_AGENT_TOOLS = ("Agent", "Task")
 _SYNTHETIC = "<synthetic>"

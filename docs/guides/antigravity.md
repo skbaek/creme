@@ -17,8 +17,9 @@ python3 -m creme antigravity run --brief FILE|- --target DIR [--model M] \
     [--lean-goal GOAL] [--json]
 ```
 
-Three families are in use: `gemini-3.8-flash` (the default; user decision
-2026-09-25) and, since 2026-10-04, `claude-sonnet-5-5` and `claude-opus-5-5`.
+Four families are in use: `gemini-3.8-flash` (the default; user decision
+2026-09-25), since 2026-10-04 `claude-sonnet-5-5` and `claude-opus-5-5`, and
+since 2026-10-18 `gemini-4-argon` (user instruction: start its calibration).
 `--model` takes the family and `--effort` (`low`, `medium` or `high`, the only
 levels `agy` exposes) picks the level; the CLI builds the slug, e.g.
 `claude-opus-5-5-medium`. A conflicting full slug is refused, as `agy` itself
@@ -53,9 +54,12 @@ differences (2026-10-04, `agy` 1.2.16):
 
 `status` reads `agy -p /usage` and `/credits`, both zero-token, plus
 `useG1Credits` from `~/.gemini/antigravity-cli/settings.json`. `agy models` lists
-the slugs. A `gemini-*` model draws on the Gemini pool; `claude-*` and
-`gpt-oss-*` models draw on the "Claude and GPT" pool. Each pool has a 5-hour and
-a weekly window.
+the slugs. There are three pools. `gemini-4-argon-*` draws on its own "Gemini 4
+Argon" pool, which has only a weekly window (bucket `gemini-argon-wtu-weekly`).
+Every other `gemini-*` model draws on the Gemini pool, and `claude-*` and
+`gpt-oss-*` models draw on the "Claude and GPT" pool; each of those two has a
+5-hour and a weekly window. Admission checks only the windows the selected
+model's pool reports. Spread work across the pools rather than draining one.
 
 ## How a run stays bounded and on plan quota
 

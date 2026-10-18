@@ -92,6 +92,9 @@ else:
                 {"id": "3p-5h", "window": "5h", "remaining_fraction": 0.9, "reset_time": "2030-01-01T00:00:00Z"},
                 {"id": "3p-weekly", "window": "weekly", "remaining_fraction": 0.9, "reset_time": "2030-01-02T00:00:00Z"},
             ]},
+            {"name": "Gemini 4 Argon", "buckets": [
+                {"id": "gemini-argon-wtu-weekly", "window": "weekly", "remaining_fraction": 0.9, "reset_time": "2030-01-02T00:00:00Z"},
+            ]},
         ]}}}
         self.scenario_path.write_text(json.dumps({
             "usage": usage, "credits": {"command": {"data": {"remaining_credits": credits}}},
@@ -108,6 +111,8 @@ else:
         self.assertEqual(antigravity.pool_for_model("gemini-3-pro"), "gemini")
         self.assertEqual(antigravity.pool_for_model("claude-sonnet"), "3p")
         self.assertEqual(antigravity.pool_for_model("gpt-oss-20b"), "3p")
+        self.assertEqual(antigravity.pool_for_model("gemini-4-argon-high"), "argon")
+        self.assertEqual(antigravity.pool_for_model("gemini-3.8-flash-high"), "gemini")
         with self.assertRaises(ValueError):
             antigravity.pool_for_model("mystery-model")
 
@@ -139,6 +144,26 @@ else:
         reasons = antigravity.admission(quota, "gemini-model", .05)
         self.assertEqual(len(reasons), 1)
         self.assertIn("gemini 5h", reasons[0])
+
+    def test_admission_argon_pool_is_weekly_only(self) -> None:
+        quota = {"pools": {
+            "gemini": {"5h": {"remaining_fraction": .01}, "weekly": {"remaining_fraction": .01}},
+            "argon": {"weekly": {"remaining_fraction": .5}},
+        }, "remaining_credits": 0, "use_g1_credits": False}
+        # Argon ignores the Gemini pool and needs no 5-hour window.
+        self.assertEqual(antigravity.admission(quota, "gemini-4-argon-high", .05), [])
+        quota["pools"]["argon"]["weekly"]["remaining_fraction"] = .04
+        reasons = antigravity.admission(quota, "gemini-4-argon-high", .05)
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("argon weekly", reasons[0])
+        del quota["pools"]["argon"]
+        self.assertIn("argon pool is missing", antigravity.admission(quota, "gemini-4-argon-low", .05)[0])
+
+    def test_read_quota_reads_argon_group(self) -> None:
+        self._scenario()
+        quota = antigravity.read_quota(self.binary)
+        self.assertEqual(quota["pools"]["argon"]["weekly"]["remaining_fraction"], 0.9)
+        self.assertNotIn("5h", quota["pools"]["argon"])
 
     def test_guard_decision(self) -> None:
         self.assertEqual(antigravity.guard_decision({"modelName": "gemini-model", "toolCall": {"name": "view_file"}}, "gemini-model")["decision"], "allow")

@@ -55,6 +55,42 @@ Blanc retains zero service swap; Jaune retains 1 GiB. When LSP pressure telemetr
 is unavailable, its aggregate emergency fallback uses physical memory less
 2 GiB, bounded by this configured cap when present.
 
+## Disk headroom
+
+The optional `disk` object guards free space before work that writes large
+trees. Omitted, it means `host_mounts: []` and `min_free_gib: 50`.
+
+```json
+"disk": { "host_mounts": ["/mnt/d"], "min_free_gib": 50 }
+```
+
+- `host_mounts` lists absolute, normalized mount points of host drives that
+  back the Linux filesystem, at most 16. Each is measured with `statvfs`
+  beside the Creme root's own filesystem.
+- `min_free_gib` is an integer from 1 to 10000 (the floor in GiB).
+- Unknown keys are refused. A configured mount that is not a mount point, or
+  cannot be read, makes the verdict `UNKNOWN`, which enforcement refuses.
+
+The reader is `creme/disk_headroom.py`: the verdict is the minimum free space
+over all paths. `cache-copy --execute` refuses a copy whose full source size
+would leave the binding path below the floor (preview reports the projection
+without refusing). An owned `lake-build` refuses before admission when the
+verdict is `LOW` or `UNKNOWN`; `--probe` is exempt because it writes nothing.
+`doctor` reports every path as `disk headroom: OK|WARN|FAIL`.
+
+On WSL2, `/` reports the distro's virtual disk, while the ext4 VHDX grows
+inside a Windows drive. Set `host_mounts` to the `/mnt/<drive>` of the drive
+named by the distro's `BasePath`, read from the Lxss registry key:
+
+```sh
+# Lxss key for this distro; BasePath is e.g. D:\WSL\<distro>
+reg.exe query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss' /s /v BasePath
+```
+
+The drive letter `D` maps to `/mnt/d`. Confirm with `findmnt /mnt/d` before
+adding it. Use `min_free_gib` to set a floor above the largest copy you intend
+to make, since each lane worktree's `.lake` seed is a full copy on ext4.
+
 ## Local host guidance
 
 Machine-specific operational findings that do not fit the static JSON profile

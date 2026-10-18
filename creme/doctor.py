@@ -597,6 +597,29 @@ def check_public_runtime_boundary(root: Path) -> list[Check]:
     ]
 
 
+def check_disk_headroom(creme_root: Path, profile_path: Path) -> list[Check]:
+    """Report free space on the Linux root and every configured host mount.
+
+    LOW and UNKNOWN fail: enforcement refuses owned builds and cache copies
+    while they hold.  OK without any configured host mount warns, because a
+    WSL2 distro's virtual disk can report space the host drive does not have.
+    """
+    from . import disk_headroom
+
+    reading = disk_headroom.headroom(creme_root, profile_path)
+    detail = disk_headroom.describe(reading)
+    if reading["verdict"] == disk_headroom.OK:
+        if not reading["host_mounts"]:
+            return [Check(
+                "disk headroom", STATUS_WARN,
+                f"{detail}; no disk.host_mounts configured, so host drives are not measured",
+            )]
+        return [Check("disk headroom", STATUS_OK, detail)]
+    if reading["verdict"] == disk_headroom.LOW:
+        return [Check("disk headroom", STATUS_FAIL, f"{detail}; owned builds and cache copies are refused")]
+    return [Check("disk headroom", STATUS_FAIL, f"{reading['detail']}; owned builds and cache copies are refused")]
+
+
 def check_host_name(profile: Optional[dict[str, Any]], status: str) -> list[Check]:
     """Report the host name that qualifies goal-stack references and receipts.
 
@@ -654,6 +677,7 @@ def run_doctor(
     checks = check_launch_root(root, cwd)
     profile_checks, validated = check_profile(path, selected)
     checks.extend(profile_checks)
+    checks.extend(check_disk_headroom(shared_root, path))
     guidance_checks, guidance = check_host_guidance(default_guidance_path(root))
     checks.extend(guidance_checks)
     profile = validated.profile if validated.status in {"VALID", "LIMITED"} else None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import os
@@ -13,6 +14,7 @@ from typing import Any, Optional
 from . import __version__
 from .adapters import get_adapter
 from . import antigravity
+from . import disk_headroom
 from .doctor import exit_code as doctor_exit_code
 from .doctor import run_doctor
 from .guidance import default_path as default_guidance_path
@@ -1459,11 +1461,29 @@ def cmd_tempdir(arguments: argparse.Namespace) -> int:
 
 
 def cmd_cache_copy(arguments: argparse.Namespace) -> int:
-    result = get_adapter().copy_cache(
-        Path(arguments.source).expanduser().resolve(),
-        Path(arguments.destination).expanduser().resolve(),
-        arguments.execute,
-    )
+    adapter = get_adapter()
+    source = Path(arguments.source).expanduser().resolve()
+    destination = Path(arguments.destination).expanduser().resolve()
+    # Headroom is projected for every mode; only --execute refuses.  The copy
+    # is sized at its full source size, since ext4 shares no blocks on copy.
+    disk = None
+    if source.is_dir():
+        try:
+            disk = disk_headroom.assess(
+                disk_headroom.headroom(semaphore.canonical_creme_root(ROOT)),
+                disk_headroom.tree_bytes(source),
+            )
+        except OSError as exc:
+            disk = {"allowed": False, "detail": f"disk headroom cannot size the source: {exc}"}
+    if arguments.execute and disk is not None and not disk["allowed"]:
+        _json({
+            "capability": "cache_copy", "status": "REFUSED", "adapter": adapter.system,
+            "detail": disk["detail"], "data": {"source": str(source), "destination": str(destination), "disk": disk},
+        })
+        return 1
+    result = adapter.copy_cache(source, destination, arguments.execute)
+    if disk is not None:
+        result = dataclasses.replace(result, data={**(result.data or {}), "disk": disk})
     _json(result.to_dict())
     return 0 if result.status in {"OK", "PREVIEW"} else 1
 

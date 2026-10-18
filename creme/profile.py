@@ -67,6 +67,14 @@ ADMISSION_RANGES = {
 # memory (16 GiB on a 24 GiB host), since a worker past that pushes the host
 # into swap whatever else runs.
 LSP_WATCHDOG_RANGES = {"worker_ceiling_gib": (2, 1024)}
+# Disk headroom guard.  `host_mounts` names the host-drive mounts that back the
+# Linux filesystem (WSL2: the `/mnt/<drive>` of the distro's BasePath drive); the
+# Linux `statvfs` alone does not show the space left on those drives.  An absent
+# section means no extra mounts and the default floor.
+DISK_DEFAULT_FLOOR_GIB = 50
+DISK_FLOOR_RANGE = (1, 10000)
+DISK_KEYS = {"host_mounts", "min_free_gib"}
+DISK_MAX_MOUNTS = 16
 LSP_WORKER_CEILING_FALLBACK_GIB = 16
 CONTAINMENT_MEMORY_MAX_DEFAULT_GIB = 8
 CONTAINMENT_RESERVE_GIB = 2
@@ -147,6 +155,34 @@ def _is_positive_int(value: Any, maximum: Optional[int] = None) -> bool:
     )
 
 
+def _disk_shape_error(disk: Any) -> Optional[str]:
+    if not isinstance(disk, dict):
+        return "disk must be an object"
+    unknown = sorted(set(disk) - DISK_KEYS)
+    if unknown:
+        return f"unknown disk settings: {unknown}"
+    if "host_mounts" in disk:
+        mounts = disk["host_mounts"]
+        if not isinstance(mounts, list) or len(mounts) > DISK_MAX_MOUNTS:
+            return f"disk.host_mounts must be a list of at most {DISK_MAX_MOUNTS} absolute paths"
+        for mount in mounts:
+            if (
+                not isinstance(mount, str)
+                or not mount.startswith("/")
+                or "\0" in mount
+                or mount != os.path.normpath(mount)
+            ):
+                return "disk.host_mounts entries must be normalized absolute paths"
+        if len(set(mounts)) != len(mounts):
+            return "disk.host_mounts entries must be unique"
+    if "min_free_gib" in disk:
+        low, high = DISK_FLOOR_RANGE
+        value = disk["min_free_gib"]
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            return f"disk.min_free_gib must be an integer in {low}..{high}"
+    return None
+
+
 def validate_data(
     data: Any,
     current_facts: Optional[dict[str, Any]] = None,
@@ -154,7 +190,7 @@ def validate_data(
     if not isinstance(data, dict):
         return ProfileValidation("INVALID", "profile root must be an object")
     required = {"schema_version", "fingerprint", "facts", "workspace", "policy", "overrides"}
-    optional = {"admission", "lsp_watchdog", "containment", "host_name"}
+    optional = {"admission", "lsp_watchdog", "containment", "host_name", "disk"}
     if set(data) - optional != required:
         missing = sorted(required - set(data))
         extra = sorted(set(data) - required - optional)
@@ -204,6 +240,11 @@ def validate_data(
         return ProfileValidation("INVALID", "facts.machine must be non-empty")
     if not _is_positive_int(facts.get("logical_cores")) or not _is_positive_int(facts.get("physical_memory_bytes")):
         return ProfileValidation("INVALID", "static numeric facts must be positive integers")
+    disk = data.get("disk")
+    if "disk" in data:
+        error = _disk_shape_error(disk)
+        if error:
+            return ProfileValidation("INVALID", error)
     containment = data.get("containment")
     if "containment" in data:
         if not isinstance(containment, dict) or set(containment) != {"memory_max_gib"}:
@@ -411,6 +452,20 @@ def load_lsp_aggregate_ceiling(
         available = max(1.0, memory / 1024 ** 3 - CONTAINMENT_RESERVE_GIB)
         return min(available, float(configured)) if configured is not None else available
     return float(configured or CONTAINMENT_MEMORY_MAX_DEFAULT_GIB)
+
+
+def disk_settings(profile: Optional[dict[str, Any]]) -> tuple[list[str], int]:
+    """The configured host mounts and free-space floor, GiB, with defaults.
+
+    Callers validate the profile first; this reads only what the shape check
+    accepted, and falls back to the defaults for an absent key.
+    """
+    section = (profile or {}).get("disk")
+    if not isinstance(section, dict):
+        return [], DISK_DEFAULT_FLOOR_GIB
+    mounts = list(section.get("host_mounts", []))
+    floor = section.get("min_free_gib", DISK_DEFAULT_FLOOR_GIB)
+    return mounts, floor
 
 
 def host_name(profile: Optional[dict[str, Any]]) -> Optional[str]:

@@ -61,6 +61,16 @@ pass a smaller `--memory-gib` or a weaker class to get admitted. A manual human
 hold or swap/compressor pressure returns at once even under `--wait`; do light
 work.
 
+### Disk headroom before a write
+
+An owned `lake-build` (not `--probe`) refuses before admission, with exit 64
+and the binding path named, when the host profile's disk headroom is `LOW` or
+`UNKNOWN`; `cache-copy --execute` applies the same floor to the copy's full
+source size. Neither changes memory admission. The reader and the setup for
+WSL2 host drives are in [host profile](../host-profile.md#disk-headroom).
+`doctor` shows the `disk headroom` row; a `FAIL` there means a build will be
+refused until space is freed or the floor is reviewed.
+
 ### Wait in one call; never poll by hand
 
 `--wait SECS` on `adaptive-acquire` and on `creme lake-build` queues the

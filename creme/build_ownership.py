@@ -4353,6 +4353,15 @@ def run_lake_build(
                 ),
             }, sort_keys=True), file=output)
             return 2
+    if not probe:
+        # Pre-admission only: a build that would write into a nearly full host
+        # drive is refused before any hold or Lake start; memory admission is
+        # unchanged.  A probe elaborates and writes nothing, so it is exempt.
+        from . import disk_headroom
+        blocked = disk_headroom.guard_build()
+        if blocked:
+            print(json.dumps({"status": "REFUSED", "detail": blocked}, sort_keys=True), file=output)
+            return GUARD_REFUSAL_EXIT
     try:
         real_lake, real_lean, sysroot = resolve_toolchain(worktree)
     except RuntimeError as exc:

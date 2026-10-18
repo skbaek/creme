@@ -322,6 +322,27 @@ def cmd_antigravity_run(arguments: argparse.Namespace) -> int:
             else:
                 print(antigravity.format_summary(summary))
             return antigravity.EXIT_USAGE
+    fit = fit_dir = None
+    if getattr(arguments, "episode", None):
+        from . import model_fit, model_fit_adapters
+        fit_dir = Path(arguments.fit_dir).expanduser() if arguments.fit_dir else model_fit.default_dir(ROOT)
+        try:
+            fit = model_fit_adapters.binding(fit_dir, arguments.episode)
+            option = antigravity.model_fit_option(arguments.model, arguments.effort)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            reason = f"model-fit episode {arguments.episode!r}: {exc}"
+        else:
+            reason = None
+            if fit["option"] != option and not arguments.override_reason:
+                reason = (f"episode {arguments.episode!r} proposes {fit['option']}; launching {option} "
+                          "needs --override-reason")
+        if reason:
+            summary = {"verdict": "REFUSED", "exit": antigravity.EXIT_USAGE, "run": "-", "reasons": [reason]}
+            if arguments.json:
+                _json(summary)
+            else:
+                print(antigravity.format_summary(summary))
+            return antigravity.EXIT_USAGE
     code, summary = antigravity.run(
         brief=brief,
         target=arguments.target,
@@ -333,11 +354,32 @@ def cmd_antigravity_run(arguments: argparse.Namespace) -> int:
         allow_commands=arguments.allow_command,
         lean_goal=arguments.lean_goal,
     )
+    if fit is not None and summary.get("run_dir"):
+        summary["model_fit"] = _antigravity_fit_capture(fit_dir, fit, summary["run_dir"],
+                                                        arguments.override_reason or "")
     if arguments.json:
         _json(summary)
     else:
         print(antigravity.format_summary(summary))
     return code
+
+
+def _antigravity_fit_capture(fit_dir: Path, fit: dict, run_dir: str, override_reason: str) -> dict:
+    """Record a finished run against its declared episode; never changes the run's verdict."""
+    from . import model_fit_adapters, model_fit_runtime
+    try:
+        receipt = model_fit_adapters.antigravity_run(run_dir, fit["episode_id"], fit["harness_version"],
+                                                     override_reason=override_reason)
+        store = model_fit_runtime.open_runtime(fit_dir)
+        try:
+            result = model_fit_runtime.submit(store, receipt)
+        finally:
+            store.close()
+    except Exception as exc:  # capture must never turn a finished run into a failure
+        return {"episode_id": fit["episode_id"], "captured": False, "error": str(exc)}
+    return {"episode_id": fit["episode_id"], "captured": result.get("status") == "applied",
+            "receipt_id": receipt["receipt_id"], "status": result.get("status"),
+            "error": result.get("error", ""), "usage_complete": receipt["usage_complete"]}
 
 
 def cmd_luna_reserve_run(arguments: argparse.Namespace) -> int:
@@ -2070,6 +2112,8 @@ def cmd_model_fit_episode(arguments: argparse.Namespace) -> int:
                 if action == "accept":
                     request["kind"] = "accept"
                 result = runtime.submit(store, request)
+                if action == "accept" and request.get("episode_id"):
+                    result.update(runtime.closure(store, request["episode_id"]))
             elif action == "mode":
                 result = runtime.set_mode(store, **request)
             elif action == "cancel":
@@ -2858,6 +2902,10 @@ def parser() -> argparse.ArgumentParser:
     antigravity_run.add_argument("--write", action="store_true", help="enable guarded writes and commands")
     antigravity_run.add_argument("--allow-command", action="append", default=[], metavar="REGEX")
     antigravity_run.add_argument("--lean-goal", metavar="GOAL")
+    antigravity_run.add_argument("--episode", help="predeclared model-fit episode; automatic capture")
+    antigravity_run.add_argument("--fit-dir", help="private model-fit directory (default: configured goal store)")
+    antigravity_run.add_argument("--override-reason", default="",
+                                 help="required when launching an option other than the episode's proposal")
     antigravity_run.add_argument("--json", action="store_true", help="print the full JSON record")
     antigravity_run.set_defaults(func=cmd_antigravity_run)
 

@@ -26,10 +26,18 @@ levels `agy` exposes) picks the level; the CLI builds the slug, e.g.
 refuses it. The default effort is provisional (`medium`) until the effort-ladder
 experiment decides. Record a dispatch as an episode of the `antigravity` client
 ([model selection](model-fit.md)); the goal store's `model-fit/antigravity.md`
-is historical. The normal acceptance imports the run record by its directory
-(`antigravity_runs`, see [episode requests](model-fit-episodes.md)); a run with
+is historical. Launch with `--episode EPISODE` (and `--fit-dir` for a
+non-default store): the wrapper refuses an option other than the episode's
+proposal unless `--override-reason` says why, and after the run it records the
+run record against the episode itself, so the acceptance need not repeat it.
+Without `--episode`, the acceptance must import the run by its directory
+(`antigravity_runs`, see [episode requests](model-fit-episodes.md)). A run with
 a checkpoint step or an invoked subagent stays usage-incomplete, because those
-steps report no tokens.
+steps report no tokens; it is never scored, so a calibration brief must be small
+enough to finish before `agy` checkpoints its context. Every acceptance also
+needs the master's verification window (`claude_code_master_windows`); without
+it the episode stays open, and `accept` now prints `episode_status` and what is
+`missing`.
 
 The Claude families are separate model-fit options from Claude Code's
 `opus`/`sonnet` (user decision 2026-10-04): the harness, toolset and quota pool

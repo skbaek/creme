@@ -405,6 +405,32 @@ def cancel(store, episode_id, reason):
     return {"episode_id": episode_id, "status": "cancelled"}
 
 
+def closure(store, episode_id):
+    """Whether an episode closed, and if not, the evidence it still lacks.
+
+    An acceptance alone never scores a run: the selector counts only closed
+    episodes, which also need the worker's launch and final usage. Report the
+    gap at acceptance time so a missing run receipt is visible, not silent.
+    """
+    episode = E.get_episode(store, episode_id)
+    if episode["status"] == "closed":
+        return {"episode_status": "closed"}
+    missing = []
+    launches = store.conn.execute("SELECT run_id, usage_final_count FROM launches WHERE episode_id=?",
+                                  (episode_id,)).fetchall()
+    if not launches:
+        missing.append("no run receipt: pass the worker's run (claude_code_sources, antigravity_runs, "
+                       "codex_sources) or launch it with --episode so its broker or wrapper records it")
+    elif any(row["usage_final_count"] is None for row in launches):
+        missing.append("run usage not final")
+    if int(episode["verification_required"]) and not E._verification_known(store.conn, episode_id):
+        missing.append("no verification cost: pass the master's verification window "
+                       "(claude_code_master_windows, codex_master_windows or master_segments)")
+    if not store.conn.execute("SELECT 1 FROM acceptances WHERE episode_id=?", (episode_id,)).fetchone():
+        missing.append("no acceptance")
+    return {"episode_status": episode["status"], "missing": missing or ["see model-fit episode health"]}
+
+
 def health(store, limit=100):
     integrity = store.conn.execute("PRAGMA quick_check").fetchone()[0]
     pending = [dict(r) for r in store.conn.execute(

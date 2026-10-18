@@ -127,6 +127,13 @@ defaults to the acceptance's own:
 }
 ```
 
+An episode closes, and the selector counts it, only when it has the worker's
+run with final usage, a master verification window, and an acceptance. An
+acceptance that leaves one out still applies, but the episode stays open and
+is never scored; `accept` prints `episode_status` and, while open, the
+`missing` evidence, so the gap shows at acceptance time. Antigravity and Muse
+runs launched with `--episode` record their own run receipt.
+
 A Claude source names the subagent transcript; its `agent-ID.meta.json` must
 sit beside it. Optional fields: `run_id` (default `claude-agent:ID`), `route`
 (default `claude-agent-tool`), `family` (a cross-check), `profiles` (the agent

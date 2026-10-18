@@ -48,6 +48,12 @@ def resolve_model(model: str, effort: str) -> str:
     return f"{model}-{effort}"
 
 
+def model_fit_option(model: str, effort: str) -> str:
+    """The model-fit option (`family/effort`) a run of this model and effort launches."""
+    resolved = resolve_model(model, effort)
+    return resolved[: -len("-" + effort)] + "/" + effort
+
+
 # Quota windows each pool reports in `agy /usage`. Argon's pool is weekly only.
 POOL_WINDOWS = {"gemini": ("5h", "weekly"), "3p": ("5h", "weekly"), "argon": ("weekly",)}
 
@@ -831,6 +837,11 @@ def format_summary(summary: dict) -> str:
         f"edited_paths={json.dumps(summary.get('edited_paths') or [])} commands_run={json.dumps(summary.get('commands_run') or [])}",
         f"last_message={summary.get('last_message')}",
     ]
+    fit = summary.get("model_fit")
+    if fit:
+        state = "captured" if fit.get("captured") else "NOT captured"
+        lines.append(f"model_fit episode={fit.get('episode_id')} {state} "
+                     f"usage_complete={fit.get('usage_complete')} {fit.get('error') or ''}".rstrip())
     prefix = "refused" if summary.get("verdict") == "REFUSED" else "reason"
     lines.extend(f"{prefix}: {reason}" for reason in summary.get("reasons") or [])
     lines.extend(f"warning: {warning}" for warning in summary.get("warnings") or [])

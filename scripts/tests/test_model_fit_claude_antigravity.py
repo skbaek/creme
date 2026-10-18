@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 from pathlib import Path
 
 from creme import cli
@@ -431,6 +432,79 @@ class AntigravityCapture(unittest.TestCase):
             self.assertEqual(E.episode_accounting(store, "ep")["spend_uncapped_tokens"], 23341 + 15)
         finally:
             store.close()
+
+
+class AntigravityEpisodeBinding(unittest.TestCase):
+    """`antigravity run --episode` records its own run; acceptance names what is missing."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.fit = self.root / "fit"
+        store = R.open_runtime(self.fit)
+        try:
+            config = base_config(execution_client="antigravity", default="claude-sonnet-5-5/low", candidates=[{
+                "option": "claude-sonnet-5-5/low", "prior_tokens": 100, "release": "claude-sonnet-5-5-low",
+                "recipe_version": "r1", "route": "antigravity-run"}])
+            R.configure(store, "policy", config, "active")
+            R.prepare(store, "ep", "policy", [{"milestone": "done", "credit": 1}], "claude-code", "fixture")
+        finally:
+            store.close()
+        self.brief = self.root / "brief.md"
+        self.brief.write_text("brief")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *extra, run_dir=None):
+        summary = {"verdict": "PASS", "exit": 0, "run": "run1", "run_dir": str(run_dir) if run_dir else None,
+                   "reasons": [], "warnings": []}
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.object(cli.antigravity, "run", return_value=(0, summary)) as launched, \
+                redirect_stdout(output), redirect_stderr(errors):
+            code = cli.main(["antigravity", "run", "--brief", str(self.brief), "--target", str(self.root),
+                             "--fit-dir", str(self.fit), "--json", *extra])
+        return code, json.loads(output.getvalue()), launched
+
+    def test_bound_run_records_its_launch_and_final_usage(self):
+        code, summary, launched = self._run("--model", "claude-sonnet-5-5", "--effort", "low",
+                                            "--episode", "ep", run_dir=agy_run(self.root))
+        self.assertEqual(code, 0)
+        self.assertTrue(launched.called)
+        self.assertTrue(summary["model_fit"]["captured"], summary["model_fit"])
+        self.assertTrue(summary["model_fit"]["usage_complete"])
+        store = R.open_runtime(self.fit)
+        try:
+            launch = store.conn.execute("SELECT option, usage_final_count FROM launches WHERE episode_id='ep'").fetchone()
+            self.assertEqual(launch["option"], "claude-sonnet-5-5/low")
+            self.assertIsNotNone(launch["usage_final_count"])
+        finally:
+            store.close()
+
+    def test_option_other_than_the_proposal_refuses_before_launch(self):
+        code, summary, launched = self._run("--model", "gemini-4-argon", "--effort", "high", "--episode", "ep")
+        self.assertNotEqual(code, 0)
+        self.assertFalse(launched.called)
+        self.assertIn("needs --override-reason", summary["reasons"][0])
+
+    def test_unbound_run_records_nothing(self):
+        code, summary, launched = self._run("--model", "claude-sonnet-5-5", "--effort", "low",
+                                            run_dir=agy_run(self.root))
+        self.assertEqual(code, 0)
+        self.assertNotIn("model_fit", summary)
+
+    def test_acceptance_without_run_or_verification_reports_both_gaps(self):
+        request = {"receipt_id": "ep:accept", "episode_id": "ep", "verdict": "pass", "milestones": ["done"],
+                   "verifier": "master", "worker_ref": "run1", "verification_ref": "fixture"}
+        source = self.root / "accept.json"
+        source.write_text(json.dumps(request))
+        output = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(io.StringIO()):
+            code = cli.main(["model-fit", "episode", "accept", "--dir", str(self.fit), "--from", str(source)])
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(result["episode_status"], "open")
+        self.assertTrue(any("no run receipt" in m for m in result["missing"]), result["missing"])
 
 
 if __name__ == "__main__":

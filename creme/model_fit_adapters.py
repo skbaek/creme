@@ -318,7 +318,8 @@ def antigravity_run(run_dir, episode_id, harness_version, terminal=None, run_id=
                     route="antigravity-run", override_reason="", attempt_index=1):
     """Import one `creme antigravity run` record as a run of option family/effort.
 
-    Release is the init event's model slug. Usage is final only when the result
+    Release is the family, as every population names it; the init event's
+    model slug must be that family at that effort. Usage is final only when the result
     event is present and no step (checkpoint, subagent) consumed unreported usage.
     """
     record = C.antigravity_record(Path(run_dir))
@@ -338,7 +339,7 @@ def antigravity_run(run_dir, episode_id, harness_version, terminal=None, run_id=
     conversation = (record["result"] or {}).get("conversation_id") or init.get("conversation_id") or "none"
     receipt = {"receipt_id": "antigravity:" + run_id + ":" + R.digest(usage), "kind": "run",
                "episode_id": episode_id, "run_id": run_id, "attempt_index": attempt_index,
-               "option": family + "/" + effort, "release": init["model"], "route": route,
+               "option": family + "/" + effort, "release": family, "route": route,
                "harness_version": harness_version, "override_reason": override_reason,
                "terminal": terminal,
                "segments": [{"id": f"antigravity:{name}:{conversation}", "usage": usage}],

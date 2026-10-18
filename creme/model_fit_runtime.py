@@ -117,10 +117,28 @@ def generation(config, candidate):
                             config["harness_version"])
 
 
+def generations(config, candidate):
+    """The generation keys a candidate's episodes may carry.
+
+    Antigravity runs were recorded until 2026-10-19 with the effort-suffixed
+    model slug (`gemini-4-argon-high`) as their release, while every population
+    names the family (`gemini-4-argon`); those episodes count under the family.
+    """
+    keys = [generation(config, candidate)]
+    if candidate["route"] == "antigravity-run":
+        effort = candidate["option"].rsplit("/", 1)[-1]
+        keys.append(E.generation_key(candidate["release"] + "-" + effort, candidate["route"],
+                                     candidate["recipe_version"],
+                                     E.material_descriptor(context_descriptor(config)),
+                                     config["harness_version"]))
+    return keys
+
+
 def statistics(store, config, candidate):
     """Aggregate only the joined prefix; never load the historical corpus into a prompt."""
-    args = (config["execution_client"], config["task_type"], candidate["option"],
-            generation(config, candidate))
+    keys = generations(config, candidate)
+    keys += keys[-1:] * (2 - len(keys))  # fixed arity for the IN list
+    args = (config["execution_client"], config["task_type"], candidate["option"], *keys)
     # Native receipts can arrive in completion order. The episode's SQLite
     # rowid was fixed by prepare before any outcome; use that order, not the
     # order in which adapters happened to register their completed launches.
@@ -138,7 +156,7 @@ def statistics(store, config, candidate):
           WHERE s.episode_id=e.episode_id AND s.amount_tokens!='null'),0) AS cost,
           COALESCE((SELECT SUM(a.accepted_work) FROM acceptances a WHERE a.episode_id=e.episode_id
           AND NOT EXISTS (SELECT 1 FROM acceptances b WHERE b.correction_of=a.accept_id)),0) AS work
-        FROM episodes e WHERE execution_client=? AND task_type=? AND owner_option=? AND owner_generation=?
+        FROM episodes e WHERE execution_client=? AND task_type=? AND owner_option=? AND owner_generation IN (?,?)
       ), prefix AS (SELECT * FROM population WHERE dispatch_order < MIN(?,COALESCE(
           (SELECT MIN(dispatch_order) FROM population WHERE status!='closed' OR usage_complete!=1), 9223372036854775807)))
       SELECT COUNT(*) AS n, COALESCE(SUM(work),0) AS work, COALESCE(SUM(cost),0) AS cost,
@@ -373,21 +391,27 @@ def reconcile(store, limit=100):
         episode = row["episode_id"]
         with E._write_txn(store.conn):
             store.conn.execute("UPDATE fit_opportunities SET reconciled_at=? WHERE episode_id=?", (E._now(), episode))
-        if store.conn.execute("SELECT 1 FROM fit_inbox WHERE status='pending' AND json_extract(payload,'$.episode_id')=?",
-                               (episode,)).fetchone():
-            continue
-        try:
-            with E._write_txn(store.conn):
-                if not store.conn.execute("SELECT 1 FROM launches WHERE episode_id=?", (episode,)).fetchone():
-                    continue
-                revision = store.conn.execute("SELECT COUNT(*) FROM fit_inbox WHERE json_extract(payload,'$.episode_id')=?", (episode,)).fetchone()[0]
-                E.finalize_episode(store, episode, "master-acceptance-reconciler", "joined normal master acceptance",
-                                   event_id=f"runtime-close:{episode}:{revision}")
-                if store.conn.execute("SELECT 1 FROM reservations WHERE reservation_id=? AND status='open'", (episode,)).fetchone():
-                    E.release_reservation(store, episode, "consumed")
-        except E.EpisodeError:
-            pass  # Compact health exposes the incomplete join, never a fake zero.
+        _try_close(store, episode)
     return health(store, limit)
+
+
+def _try_close(store, episode):
+    """Close one accepted episode if its evidence is complete; return the refusal, if any."""
+    if store.conn.execute("SELECT 1 FROM fit_inbox WHERE status='pending' AND json_extract(payload,'$.episode_id')=?",
+                           (episode,)).fetchone():
+        return "a receipt for this episode is still pending"
+    try:
+        with E._write_txn(store.conn):
+            if not store.conn.execute("SELECT 1 FROM launches WHERE episode_id=?", (episode,)).fetchone():
+                return "no run receipt"
+            revision = store.conn.execute("SELECT COUNT(*) FROM fit_inbox WHERE json_extract(payload,'$.episode_id')=?", (episode,)).fetchone()[0]
+            E.finalize_episode(store, episode, "master-acceptance-reconciler", "joined normal master acceptance",
+                               event_id=f"runtime-close:{episode}:{revision}")
+            if store.conn.execute("SELECT 1 FROM reservations WHERE reservation_id=? AND status='open'", (episode,)).fetchone():
+                E.release_reservation(store, episode, "consumed")
+    except E.EpisodeError as exc:
+        return str(exc)  # Compact health exposes the incomplete join, never a fake zero.
+    return None
 
 
 def cancel(store, episode_id, reason):
@@ -413,6 +437,12 @@ def closure(store, episode_id):
     gap at acceptance time so a missing run receipt is visible, not silent.
     """
     episode = E.get_episode(store, episode_id)
+    if episode["status"] != "closed" and store.conn.execute(
+            "SELECT 1 FROM acceptances WHERE episode_id=?", (episode_id,)).fetchone():
+        refusal = _try_close(store, episode_id)  # do not wait for the bounded reconciler pass
+        episode = E.get_episode(store, episode_id)
+    else:
+        refusal = None
     if episode["status"] == "closed":
         return {"episode_status": "closed"}
     missing = []
@@ -428,7 +458,7 @@ def closure(store, episode_id):
                        "(claude_code_master_windows, codex_master_windows or master_segments)")
     if not store.conn.execute("SELECT 1 FROM acceptances WHERE episode_id=?", (episode_id,)).fetchone():
         missing.append("no acceptance")
-    return {"episode_status": episode["status"], "missing": missing or ["see model-fit episode health"]}
+    return {"episode_status": episode["status"], "missing": missing or [refusal or "see model-fit episode health"]}
 
 
 def health(store, limit=100):

@@ -377,7 +377,7 @@ class AntigravityCapture(unittest.TestCase):
         usage = receipt["segments"][0]["usage"]
         self.assertTrue(receipt["usage_complete"])
         self.assertEqual((receipt["option"], receipt["release"], receipt["route"], receipt["terminal"]),
-                         ("claude-sonnet-5-5/low", "claude-sonnet-5-5-low", "antigravity-run", "completed"))
+                         ("claude-sonnet-5-5/low", "claude-sonnet-5-5", "antigravity-run", "completed"))
         self.assertEqual(E.normalize_usage(usage), {"input": 23096, "output": 245, "total": 23341})
 
     def test_missing_result_and_unreported_steps_are_gaps(self):
@@ -444,7 +444,7 @@ class AntigravityEpisodeBinding(unittest.TestCase):
         store = R.open_runtime(self.fit)
         try:
             config = base_config(execution_client="antigravity", default="claude-sonnet-5-5/low", candidates=[{
-                "option": "claude-sonnet-5-5/low", "prior_tokens": 100, "release": "claude-sonnet-5-5-low",
+                "option": "claude-sonnet-5-5/low", "prior_tokens": 100, "release": "claude-sonnet-5-5",
                 "recipe_version": "r1", "route": "antigravity-run"}])
             R.configure(store, "policy", config, "active")
             R.prepare(store, "ep", "policy", [{"milestone": "done", "credit": 1}], "claude-code", "fixture")
@@ -492,6 +492,39 @@ class AntigravityEpisodeBinding(unittest.TestCase):
                                             run_dir=agy_run(self.root))
         self.assertEqual(code, 0)
         self.assertNotIn("model_fit", summary)
+
+    def test_complete_acceptance_after_a_bound_run_reports_closed(self):
+        self._run("--model", "claude-sonnet-5-5", "--effort", "low", "--episode", "ep", run_dir=agy_run(self.root))
+        request = {"receipt_id": "ep:accept", "episode_id": "ep", "verdict": "pass", "milestones": ["done"],
+                   "verifier": "master", "worker_ref": "run1", "verification_ref": "fixture",
+                   "master_segments": [{"id": "m", "client": "claude-code", "weight": 1,
+                                        "usage": {"total_input": 10, "total_output": 5}}]}
+        source = self.root / "accept.json"
+        source.write_text(json.dumps(request))
+        output = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(io.StringIO()):
+            code = cli.main(["model-fit", "episode", "accept", "--dir", str(self.fit), "--from", str(source)])
+        self.assertEqual((code, json.loads(output.getvalue())["episode_status"]), (0, "closed"))
+
+    def test_scored_episodes_count_under_family_and_legacy_slug_release(self):
+        store = R.open_runtime(self.fit)
+        try:
+            R.prepare(store, "ep2", "policy", [{"milestone": "done", "credit": 1}], "claude-code", "fixture")
+            new = A.antigravity_run(agy_run(self.root, "new"), "ep", "h1")
+            legacy = dict(A.antigravity_run(agy_run(self.root, "old"), "ep2", "h1"), release="claude-sonnet-5-5-low")
+            legacy["receipt_id"] += ":legacy"
+            for receipt, episode in ((new, "ep"), (legacy, "ep2")):
+                self.assertEqual(R.submit(store, receipt)["status"], "applied")
+                R.submit(store, {"receipt_id": episode + ":accept", "kind": "accept", "episode_id": episode,
+                                 "verdict": "pass", "milestones": ["done"], "verifier": "master",
+                                 "worker_ref": receipt["run_id"], "verification_ref": "fixture",
+                                 "master_segments": [{"id": "m-" + episode, "client": "claude-code", "weight": 1,
+                                                      "usage": {"total_input": 10, "total_output": 5}}]})
+            self.assertEqual(R.closure(store, "ep2"), {"episode_status": "closed"})
+            moments = {c["option"]: c["moments"] for c in R.table(store, "policy")["candidates"]}
+            self.assertEqual(moments["claude-sonnet-5-5/low"]["n"], 2)
+        finally:
+            store.close()
 
     def test_acceptance_without_run_or_verification_reports_both_gaps(self):
         request = {"receipt_id": "ep:accept", "episode_id": "ep", "verdict": "pass", "milestones": ["done"],

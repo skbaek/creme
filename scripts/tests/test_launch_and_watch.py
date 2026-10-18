@@ -467,6 +467,7 @@ probe = {{"roots": ["Hog"], "package_roots": ["Hog"], "resolution": "fixture",
 with patch("creme.build_ownership._worktree_identity", return_value=(Path.cwd(), "g")), \
      patch("creme.build_ownership.resolve_toolchain", return_value=(Path({lake!r}), Path("/bin/sh"), Path("/"))), \
      patch("creme.build_ownership.guard_bin", return_value=Path({bin!r})), \
+     patch("creme.disk_headroom.guard_build", return_value=None), \
      patch("creme.build_ownership.stale_evidence", return_value=probe), \
      patch("creme.build_ownership.semaphore.adaptive_acquire", return_value=(True, "ADMITTED_SOFT")), \
      patch("creme.build_ownership.semaphore.adaptive_release", return_value=(True, "released")):

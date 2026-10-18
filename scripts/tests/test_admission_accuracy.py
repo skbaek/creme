@@ -1211,6 +1211,8 @@ class _Harness:
             patch("creme.build_ownership.RenewalThread", FakeRenewer),
             # The real watchdog samples the real host; these builds are fakes.
             patch("creme.build_ownership.Watchdog", _QuietWatchdog),
+            # The real disk guard measures the real host drive; these builds are fakes.
+            patch("creme.disk_headroom.guard_build", return_value=None),
             patch("creme.build_ownership._process_group_alive", return_value=False),
             patch("creme.build_ownership._module_hashes", return_value={}),
             patch("creme.build_ownership._parse_build_output",

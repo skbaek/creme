@@ -229,6 +229,8 @@ class _FakeHost:
                 ("walk_isolated_modules", Mock(side_effect=self.isolated)),
             ]:
                 stack.enter_context(patch(f"creme.build_ownership.{target}", value))
+            # The real disk guard measures the real host drive; these builds are fakes.
+            stack.enter_context(patch("creme.disk_headroom.guard_build", return_value=None))
             return owned.run_lake_build("g", targets, stdout=self.output, **kwargs)
 
     def watchdog_class(self):

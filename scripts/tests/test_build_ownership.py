@@ -82,6 +82,20 @@ def _write_log(path: Path, rows: list[tuple[str, str, str, str, str]]) -> None:
     )
 
 
+# The real disk guard measures the real host drive, so a CI runner with less
+# free space than the default floor would refuse these fake builds before the
+# code under test runs.  The guard has its own tests (test_disk_headroom.py).
+_DISK_GUARD = patch("creme.disk_headroom.guard_build", return_value=None)
+
+
+def setUpModule() -> None:
+    _DISK_GUARD.start()
+
+
+def tearDownModule() -> None:
+    _DISK_GUARD.stop()
+
+
 class LakeCacheEnvironmentTest(unittest.TestCase):
     def test_cache_overrides_host_defaults_without_mutating_caller(self) -> None:
         base = {"LAKE_CACHE_DIR": "/outside/cache", "KEEP": "value"}
@@ -982,6 +996,7 @@ def release(_goal):
 with patch('creme.build_ownership._worktree_identity', return_value=(Path.cwd(), 'g')), \\
      patch('creme.build_ownership.resolve_toolchain', return_value=(Path({str(fake_lake)!r}), Path('/bin/sh'), Path('/'))), \\
      patch('creme.build_ownership.guard_bin', return_value=Path({str(fake_bin)!r})), \\
+     patch('creme.disk_headroom.guard_build', return_value=None), \\
      patch('creme.build_ownership.semaphore.adaptive_acquire', return_value=(True, 'ADMITTED_HARD')), \\
      patch('creme.build_ownership.semaphore.adaptive_release', side_effect=release):
     raise SystemExit(owned.run_lake_build('g', ['T'], contention='sensitive', memory_gib=8, watchdog=False))

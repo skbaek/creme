@@ -48,7 +48,14 @@ def resolve_model(model: str, effort: str) -> str:
     return f"{model}-{effort}"
 
 
+# Quota windows each pool reports in `agy /usage`. Argon's pool is weekly only.
+POOL_WINDOWS = {"gemini": ("5h", "weekly"), "3p": ("5h", "weekly"), "argon": ("weekly",)}
+
+
 def pool_for_model(model: str) -> str:
+    # Gemini 4 Argon draws on its own pool (group "Gemini 4 Argon"), not the Gemini Models pool.
+    if model.startswith("gemini-4-argon"):
+        return "argon"
     if model.startswith("gemini-"):
         return "gemini"
     if model.startswith("claude-") or model.startswith("gpt-oss-"):
@@ -120,9 +127,10 @@ def read_quota(bin: Any) -> dict:
     groups = usage.get("groups")
     if not isinstance(groups, list):
         raise AntigravityError("agy /usage JSON has no groups list")
-    pools = {"gemini": {}, "3p": {}}
-    group_names = {"Gemini Models": "gemini", "Claude and GPT models": "3p"}
-    bucket_ids = {"gemini-weekly": "weekly", "gemini-5h": "5h", "3p-weekly": "weekly", "3p-5h": "5h"}
+    pools = {"gemini": {}, "3p": {}, "argon": {}}
+    group_names = {"Gemini Models": "gemini", "Claude and GPT models": "3p", "Gemini 4 Argon": "argon"}
+    bucket_ids = {"gemini-weekly": "weekly", "gemini-5h": "5h", "3p-weekly": "weekly", "3p-5h": "5h",
+                  "gemini-argon-wtu-weekly": "weekly"}
     for group in groups:
         if not isinstance(group, dict):
             raise AntigravityError("agy /usage contains a malformed group")
@@ -158,7 +166,7 @@ def admission(quota: dict, model: str, floor: float) -> list[str]:
     selected = ((quota.get("pools") or {}).get(pool)) if isinstance(quota, dict) else None
     if not isinstance(selected, dict):
         return [f"{pool} pool is missing"]
-    for window in ("5h", "weekly"):
+    for window in POOL_WINDOWS[pool]:
         bucket = selected.get(window)
         if not isinstance(bucket, dict):
             reasons.append(f"{pool} {window} window is missing")

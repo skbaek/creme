@@ -60,7 +60,7 @@ CLIENTS: dict[str, Client] = {
         name="claude-code",
         prefix="cc",
         title="Claude Code",
-        families={family: STANDARD_EFFORTS for family in ("fable", "opus", "sonnet")},
+        families={family: STANDARD_EFFORTS for family in ("fable", "opus", "sonnet", "haiku")},
         routes={
             "claude-agent-tool": "Claude subagent spawned through the Agent tool by a Claude Code master",
             "claude-session": "a separate Claude Code session the master briefed",
@@ -116,6 +116,7 @@ def default_weights(client: Any) -> dict[str, Any]:
     selected = CLIENTS[client] if isinstance(client, str) else client
     family_weights = {
         "sonnet": 1.0,
+        "haiku": 1.0,
         "opus": 1.7,
         "fable": 5.0,
         "astra": 4.0,

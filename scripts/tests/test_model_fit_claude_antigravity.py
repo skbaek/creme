@@ -253,6 +253,13 @@ class ClaudeCodeCapture(unittest.TestCase):
         self.assertEqual(E.get_episode(self.store, "ep")["status"], "closed")
         self.assertEqual(E.episode_accounting(self.store, "ep")["spend_uncapped_tokens"], 372 + 622 + 120)
 
+    def test_haiku_release_maps_to_haiku_option(self):
+        rows = complete_call("m1", 1, model="claude-haiku-5-5")
+        receipt = self.run_receipt(self.agent("a1", rows, "worker-xhigh", model="haiku"))
+        self.assertEqual(receipt["option"], "haiku/xhigh")
+        with self.assertRaises(C.CaptureError):
+            self.run_receipt(self.agent("a1", rows, "worker-xhigh", model="opus"))
+
     def test_effort_comes_from_profile_and_disagreement_refuses(self):
         rows = complete_call("m1", 1)
         self.assertEqual(self.run_receipt(self.agent("a1", rows, "worker-xhigh"))["option"], "opus/xhigh")

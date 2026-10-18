@@ -88,7 +88,9 @@ class DiskReaderTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name) / "creme"
+        # Resolved, as headroom() resolves it: macOS temp directories sit under
+        # the /var -> /private/var symlink.
+        self.root = Path(self.tmp.name).resolve() / "creme"
         self.root.mkdir()
         base = propose(self.root, self.root.parent, get_adapter())
         base["disk"] = {"host_mounts": ["/mnt/d"], "min_free_gib": 50}

@@ -88,6 +88,12 @@ compilation owner: build only through
 `lake build`; the wrapper sizes and admits the build. If MCP is unavailable or
 stale, repair it rather than editing blind.
 
+Build lazily, on need. An edit to a shared module never triggers an immediate
+rebuild of everything downstream. Batch shared edits, rebuild their
+dependents once, in the background, and keep working while it runs. Build the
+whole tree only for a landing proposal. See
+[downstream rebuilds](docs/guides/execution.md#downstream-rebuilds).
+
 ## Verification and evidence
 
 Run commands from the repository worktree under test and record exact commands

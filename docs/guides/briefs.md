@@ -15,6 +15,12 @@ it; [the master guide](master.md#workers) covers how workers are run.
 - the **resource class** and any hold the work is expected to take;
 - the **gates** that must be green on the exact candidate, by their entry in
   the owning repository's `scripts/GATES.md`;
+- for Lean work, the **build plan**:
+  - which narrow target the inner loop may build;
+  - when shared edits are batched into one background downstream rebuild;
+  - where the whole tree is built, normally only for the landing candidate.
+
+  See [downstream rebuilds](execution.md#downstream-rebuilds).
 - the **decisions the worker may make alone**, and what it must return
   unresolved;
 - where its **report and state brief** go, and what its return value must
@@ -59,8 +65,9 @@ ownership. An observation timeout alone never authorizes a restart.
 - **Claude Code.** The harness does the liveness work: `run_in_background`
   and `Monitor` notify on completion, `sleep N; cmd` is blocked, contexts
   auto-compact, and a stalled subagent returns as a failed task that a message
-  to the same agent resumes. A worker that idles on a background command
-  returns an interim result and is resumed by message. Briefs carry no poll
+  to the same agent resumes. A worker idles on a background command only when
+  no known-red or design work outside that command's subtree remains. When it
+  does idle, it returns an interim result and is resumed by message. Briefs carry no poll
   caps, heartbeat files or hand-off rule.
 - **Codex.** Native collaboration messages and worker-completion delivery
   reach the master. For a healthy tracked worker, briefs do not require

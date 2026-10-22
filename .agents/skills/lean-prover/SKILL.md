@@ -24,6 +24,13 @@ the first error and stops; `lean_diagnostic_messages` reports the whole file.
 Rebuilding after each edit turns the compiler into a slow error enumerator and
 takes a host hold that another session is waiting for.
 
+The same holds one level up. After editing a shared module:
+- do not rebuild everything downstream of it straight away;
+- batch the shared edits, then rebuild their dependents once in the
+  background, and keep working on other known-red files while that runs.
+
+See `docs/guides/execution.md` "Downstream rebuilds".
+
 **A clean `lean_diagnostic_messages` pass on a file whose imports are current
 is loop evidence.** Within the loop it is complete on its own: do not follow
 each edit with a build "to confirm for real". A checkpoint or commit is

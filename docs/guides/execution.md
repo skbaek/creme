@@ -287,6 +287,38 @@ how to refresh a worker — is in the `lean-prover` skill. `hint: REPEAT_FAIL`
 after two failing builds of the same targets is the signature of compiling to
 enumerate errors one at a time; switch to diagnostics.
 
+### Downstream rebuilds
+
+Build per need. A changed module's dependents are rebuilt only when something
+consumes the result:
+- a target the current task must build;
+- a checkpoint that names them;
+- a landing proposal.
+
+They are never rebuilt as a reflex after each edit. The 2026-10-21/22 Blanc C3 passes
+showed the cost. After each fix to a deep shared module (`Lift/Quiet`, about
+700 dependents) a worker rebuilt "X and its dependents" in the foreground and
+then waited. The same subtrees were rebuilt once per edit, and the model sat
+idle for about 70% of each pass.
+
+1. **Inner loop.** Use language-server diagnostics on the edited file. Build
+   only the one narrow target that refreshes a stale import or that a
+   checkpoint needs.
+2. **Batch shared edits.** When several shared modules need changes, make
+   them all, then rebuild their dependents once. One `--walk` over the union
+   replaces one rebuild per edit.
+3. **Run downstream rebuilds in the background and keep working.** While one
+   runs, work on modules already known to be red outside its subtree, or on
+   proof design and prose. Its failed-module list becomes the next to-do
+   list. End a turn to wait only when nothing useful remains.
+4. **Whole tree and full catalogue at the end.** Run them once, on the
+   candidate for a landing proposal. Do not use them as an error-discovery
+   loop in the middle of a pass.
+5. **Plan trials of very deep edits.** Before editing a module whose
+   dependents are most of the tree, count its reverse dependencies. Then
+   decide what one rebuild must show, and run the trial in a disposable
+   worktree.
+
 Bare `lake build`, MCP `lean_build`, `lean_profile_proof`, language-server
 dependency builds, and startup cache downloads are refused or disabled. The
 server guard makes stale imports an explicit `Imports are out of date`

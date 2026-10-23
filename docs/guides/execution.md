@@ -287,37 +287,59 @@ how to refresh a worker — is in the `lean-prover` skill. `hint: REPEAT_FAIL`
 after two failing builds of the same targets is the signature of compiling to
 enumerate errors one at a time; switch to diagnostics.
 
-### Downstream rebuilds
+### Builds and throughput
 
-Build per need. A changed module's dependents are rebuilt only when something
-consumes the result:
-- a target the current task must build;
-- a checkpoint that names them;
-- a landing proposal.
+The objective is useful work done per unit of time. A build costs throughput
+in two ways only: an agent waits on it, or it takes host capacity that a build
+or gate someone is waiting on needs. A build that runs on idle capacity while
+agents do other work costs almost nothing, and it pays twice: it surfaces
+breakage while the fix is still small, and its artifacts are current when
+someone needs them. Laziness is therefore a means, not the rule; pushing every
+downstream build to landing turns breakage into one serial fix loop at the end.
 
-They are never rebuilt as a reflex after each edit. The 2026-10-21/22 Blanc C3 passes
-showed the cost. After each fix to a deep shared module (`Lift/Quiet`, about
-700 dependents) a worker rebuilt "X and its dependents" in the foreground and
-then waited. The same subtrees were rebuilt once per edit, and the model sat
-idle for about 70% of each pass.
+The 2026-10-21/22 Blanc C3 passes showed the blocking cost. After each fix to a
+deep shared module (`Lift/Quiet`, about 700 dependents) a worker rebuilt "X and
+its dependents" in the foreground and then waited, and the model sat idle for
+about 70% of each pass. The 2026-10-23 Jaune pin move showed the other cost:
+nothing downstream had been built speculatively, so the landing build was the
+first to find the breakage, and it took three whole-tree iterations.
 
-1. **Inner loop.** Use language-server diagnostics on the edited file. Build
-   only the one narrow target that refreshes a stale import or that a
-   checkpoint needs.
-2. **Batch shared edits.** When several shared modules need changes, make
-   them all, then rebuild their dependents once. One `--walk` over the union
-   replaces one rebuild per edit.
-3. **Run downstream rebuilds in the background and keep working.** While one
-   runs, work on modules already known to be red outside its subtree, or on
-   proof design and prose. Its failed-module list becomes the next to-do
-   list. End a turn to wait only when nothing useful remains.
-4. **Whole tree and full catalogue at the end.** Run them once, on the
-   candidate for a landing proposal. Do not use them as an error-discovery
-   loop in the middle of a pass.
-5. **Plan trials of very deep edits.** Before editing a module whose
-   dependents are most of the tree, count its reverse dependencies. Then
-   decide what one rebuild must show, and run the trial in a disposable
-   worktree.
+Classify each build by who waits on it.
+
+1. **Blocking builds are narrow.** A build that you or another agent will wait
+   on builds only the narrowest target that unblocks the next step: the stale
+   import of the file being edited, or the inputs of the gate about to run.
+   In the inner loop, language-server diagnostics come first; compiling to
+   enumerate errors is never the loop.
+2. **Never wait while useful work remains.** Run every build that takes more
+   than a minute or two in the background, and work meanwhile on known-red
+   modules outside its subtree, on proof design, prose, reviews or the next
+   unit. End a turn to wait only when nothing useful remains.
+3. **Speculative builds run on idle capacity.** After a batch of shared edits,
+   one background `--walk` over their dependents is worth starting, because it
+   finds breakage early and warms artifacts. Start it without `--wait`: on a
+   `DEFER_*` or `LIGHT_ONLY` refusal, skip it and retry at the next natural
+   boundary, so it never queues ahead of blocking work. Batch edits first; one
+   walk over the union replaces one rebuild per edit. Its failed-module list
+   becomes the next to-do list.
+4. **Landing confirms; it does not discover.** The whole tree and full
+   catalogue run once, on the landing candidate. With speculative walks done,
+   they should pass. If the landing build fails anyway, fix the failures and
+   build only the failed modules until they are green, then run the landing
+   build once more. Do not iterate whole-tree builds. A fresh probe of the
+   exact candidate is verification enough; do not rebuild to confirm it.
+5. **The master keeps work in flight.** Keep enough independent units running
+   (workers, pseudo-subagents, the other host) that one build, gate or catalogue
+   never stalls the whole operation. Before launching a long build, name what
+   proceeds while it runs.
+6. **Reduce build cost by construction.** Before editing a module whose
+   dependents are most of the tree, count its reverse dependencies; prefer an
+   additive owner or twin downstream of it; if the deep edit is still needed,
+   decide what one rebuild must show and run the trial in a disposable
+   worktree. Elaboration-time cures shorten every later build.
+7. **Measure.** A pass report states how long its agents were blocked on
+   builds, holds or gates, so a change of practice can be judged by its
+   effect on throughput.
 
 Bare `lake build`, MCP `lean_build`, `lean_profile_proof`, language-server
 dependency builds, and startup cache downloads are refused or disabled. The

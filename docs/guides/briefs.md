@@ -16,11 +16,12 @@ it; [the master guide](master.md#workers) covers how workers are run.
 - the **gates** that must be green on the exact candidate, by their entry in
   the owning repository's `scripts/GATES.md`;
 - for Lean work, the **build plan**:
-  - which narrow target the inner loop may build;
-  - when shared edits are batched into one background downstream rebuild;
+  - which narrow targets blocking builds may name;
+  - when batched shared edits get a speculative background `--walk`;
+  - what the worker does while a build runs;
   - where the whole tree is built, normally only for the landing candidate.
 
-  See [downstream rebuilds](execution.md#downstream-rebuilds).
+  See [builds and throughput](execution.md#builds-and-throughput).
 - the **decisions the worker may make alone**, and what it must return
   unresolved;
 - where its **report and state brief** go, and what its return value must

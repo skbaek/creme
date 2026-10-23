@@ -25,11 +25,14 @@ Rebuilding after each edit turns the compiler into a slow error enumerator and
 takes a host hold that another session is waiting for.
 
 The same holds one level up. After editing a shared module:
-- do not rebuild everything downstream of it straight away;
-- batch the shared edits, then rebuild their dependents once in the
-  background, and keep working on other known-red files while that runs.
+- never rebuild everything downstream of it in the foreground and wait;
+- batch the shared edits, then start one speculative background `--walk` over
+  their dependents without `--wait`, and keep working on other known-red files
+  while it runs;
+- if a landing build fails, build only the failed modules until green, then
+  rerun the landing build once.
 
-See `docs/guides/execution.md` "Downstream rebuilds".
+See `docs/guides/execution.md` "Builds and throughput".
 
 **A clean `lean_diagnostic_messages` pass on a file whose imports are current
 is loop evidence.** Within the loop it is complete on its own: do not follow

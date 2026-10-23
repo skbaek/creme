@@ -103,7 +103,7 @@ def upstream(worktree: Path) -> tuple[str, str]:
     merge_ref = merge.stdout.decode().strip()
     if remote.returncode or merge.returncode or not remote_name or merge_ref != f"refs/heads/{branch}":
         raise SharedStackError(
-            f"stack branch {branch!r} has no canonical upstream; refusing to fork the stack")
+            f"shared branch {branch!r} has no canonical upstream; refusing to fork it")
     return remote_name, branch
 
 
@@ -134,13 +134,13 @@ def clean(worktree: Path) -> bool:
     return not dirty_paths(worktree)
 
 
-def require_clean(worktree: Path) -> None:
+def require_clean(worktree: Path, remedy: str = (
+        "master stack recover, or move them out of " + SHARED_DIR + "/")) -> None:
     paths = dirty_paths(worktree)
     if paths:
         shown = ", ".join(paths[:5]) + (" ..." if len(paths) > 5 else "")
         raise SharedStackError(
-            f"stack worktree has uncommitted or untracked paths ({shown}); "
-            "master stack recover, or move them out of .goal-stack/")
+            f"{worktree.name} worktree has uncommitted or untracked paths ({shown}); {remedy}")
 
 
 def fetch(worktree: Path) -> str:
@@ -151,7 +151,7 @@ def fetch(worktree: Path) -> str:
                  f"refs/heads/{branch}:{tracking_ref(remote, branch)}", check=False)
     if result.returncode:
         detail = result.stderr.decode("utf-8", "replace").strip()
-        raise SharedStackError(f"canonical stack unreachable or rewritten ({remote}/{branch}): {detail}")
+        raise SharedStackError(f"canonical {branch} unreachable or rewritten ({remote}/{branch}): {detail}")
     return out(worktree, "rev-parse", "--verify", tracking_ref(remote, branch))
 
 
@@ -252,6 +252,37 @@ def preserve_unpublished(worktree: Path) -> Optional[str]:
     git(worktree, "update-ref", ref, local)
     git(worktree, "reset", "--hard", "--quiet", remote_head)
     return ref
+
+
+def remote_branch_exists(root: Path, remote: str, branch: str) -> bool:
+    result = git(root, "ls-remote", "--exit-code", "--heads", remote,
+                 f"refs/heads/{branch}", check=False)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 2:
+        return False
+    raise SharedStackError(f"cannot reach {remote}: {result.stderr.decode('utf-8', 'replace').strip()}")
+
+
+def configure_upstream(root: Path, remote: str, branch: str) -> None:
+    git(root, "config", f"branch.{branch}.remote", remote)
+    git(root, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")
+
+
+def write_tree(root: Path, files: dict[str, bytes], env: dict) -> str:
+    """A tree of exactly ``files``, built in the index named by ``env``."""
+    git(root, "read-tree", "--empty", env=env)
+    for path, content in sorted(files.items()):
+        blob = git(root, "hash-object", "-w", "--stdin", input_bytes=content).stdout.decode().strip()
+        git(root, "update-index", "--add", "--cacheinfo", f"100644,{blob},{path}", env=env)
+    return git(root, "write-tree", env=env).stdout.decode().strip()
+
+
+def commit_tree(root: Path, tree: str, message: str, parent: Optional[str] = None) -> str:
+    args = ["-c", "commit.gpgsign=false", "commit-tree", tree, "-m", message]
+    if parent:
+        args += ["-p", parent]
+    return git(root, *args).stdout.decode().strip()
 
 
 def preservation_ref(commit_id: str) -> str:

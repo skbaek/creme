@@ -180,21 +180,6 @@ def plan(goal_store: Path, *, host: str, host_map=(), shared_ref: Optional[str] 
     return result
 
 
-def _write_tree(root: Path, files: dict[str, bytes], env: dict) -> str:
-    shared.git(root, "read-tree", "--empty", env=env)
-    for path, content in sorted(files.items()):
-        blob = shared.git(root, "hash-object", "-w", "--stdin", input_bytes=content).stdout.decode().strip()
-        shared.git(root, "update-index", "--add", "--cacheinfo", f"100644,{blob},{path}", env=env)
-    return shared.git(root, "write-tree", env=env).stdout.decode().strip()
-
-
-def _commit_tree(root: Path, tree: str, message: str, parent: Optional[str] = None) -> str:
-    args = ["-c", "commit.gpgsign=false", "commit-tree", tree, "-m", message]
-    if parent:
-        args += ["-p", parent]
-    return shared.git(root, *args).stdout.decode().strip()
-
-
 def _ensure_ignored(root: Path) -> bool:
     """Ignore the stack worktree on the goal store's default branch."""
     probe = shared.git(root, "check-ignore", "-q", "--no-index", "--",
@@ -211,18 +196,10 @@ def _ensure_ignored(root: Path) -> bool:
 
 
 def _remote_branch_exists(root: Path, remote: str, branch: str) -> bool:
-    result = shared.git(root, "ls-remote", "--exit-code", "--heads", remote,
-                        f"refs/heads/{branch}", check=False)
-    if result.returncode == 0:
-        return True
-    if result.returncode == 2:
-        return False
-    raise MigrationError(f"cannot reach {remote}: {result.stderr.decode('utf-8', 'replace').strip()}")
-
-
-def _configure_upstream(root: Path, remote: str, branch: str) -> None:
-    shared.git(root, "config", f"branch.{branch}.remote", remote)
-    shared.git(root, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")
+    try:
+        return shared.remote_branch_exists(root, remote, branch)
+    except shared.SharedStackError as exc:
+        raise MigrationError(str(exc)) from exc
 
 
 def _finish_adoption(writer, lease, root: Path, procedure_payload: dict) -> None:
@@ -302,18 +279,18 @@ def migrate(record_root: Path, *, host: str, host_map=(), shared_ref: Optional[s
                     files = dict(receipts)
                     files[shared.NAME] = data
                     files[".gitignore"] = shared.BRANCH_IGNORE.encode()
-                    tree = _write_tree(root, files, env)
-                    first = _commit_tree(root, tree, (
+                    tree = shared.write_tree(root, files, env)
+                    first = shared.commit_tree(root, tree, (
                         f"goal-stack import: schema-1 chain through revision {result['revision']} "
                         f"(host {host}), bytes preserved"))
                     files[shared.NAME] = after
                     files[shared.receipt_path(candidate["revision"])] = store._json(receipt)
-                    tree = _write_tree(root, files, env)
-                    second = _commit_tree(root, tree, (
+                    tree = shared.write_tree(root, files, env)
+                    second = shared.commit_tree(root, tree, (
                         f"goal-stack revision {candidate['revision']}: migrate to schema 2 (host {host})"),
                         parent=first)
                 shared.git(root, "branch", branch, second)
-                _configure_upstream(root, remote, branch)
+                shared.configure_upstream(root, remote, branch)
                 pushed = shared.git(root, "push", "--quiet", remote,
                                     f"refs/heads/{branch}:refs/heads/{branch}", check=False)
                 if pushed.returncode:
@@ -434,7 +411,7 @@ def adopt(record_root: Path, *, host: str, remote: str = shared.DEFAULT_REMOTE,
                     shared.git(root, "branch", "-f", branch, canonical)
                 else:
                     shared.git(root, "branch", branch, canonical)
-                _configure_upstream(root, remote, branch)
+                shared.configure_upstream(root, remote, branch)
                 shared.git(root, "worktree", "add", "--quiet", shared.SHARED_DIR, branch)
                 try:
                     stack = store._read_shared(root, host)

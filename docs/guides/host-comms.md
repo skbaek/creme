@@ -30,6 +30,15 @@ of times). A write that cannot be published is dropped: it either reached
 the origin or nothing was sent. Malformed files, and published files that a
 later commit changed, are reported by `inbox` and `watch`, never fatal.
 
+## Privacy
+
+Message and ack contents live only on the private goal store's `host-comms`
+branch. Never copy them into Creme, Jaune, Blanc or any other public
+repository or surface: commit messages, code comments, docs, public
+reports or issues. Where a public artifact needs the substance of an
+exchange, restate the technical fact in the artifact's own words and keep
+any pointer to the message in the private goal store.
+
 ## Commands
 
 The host name is the profile's (`python3 -m creme set-host-name NAME`), as

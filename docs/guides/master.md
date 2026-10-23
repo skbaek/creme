@@ -217,6 +217,8 @@ On the user's direction to start as master, the session runs:
 5. On a shared stack, start `python3 -m creme master comms watch` under the
    client's background watcher and read `master comms inbox`; check the inbox
    again at every boundary. See [host comms](host-comms.md#master-practice).
+   Message contents stay in the private goal store; never quote them in a
+   public repository ([privacy](host-comms.md#privacy)).
 
 Reconciliation reads worktree/branch/checkpoint fields of live stack goals
 that declare a worktree (legacy board goals only before adoption; on a shared

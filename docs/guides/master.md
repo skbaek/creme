@@ -214,6 +214,9 @@ On the user's direction to start as master, the session runs:
    discrepancy as a `note` event. A previous
    master's workers did not survive it; the stack says what each was doing,
    and this session respawns them from their briefs and worktrees.
+5. On a shared stack, start `python3 -m creme master comms watch` under the
+   client's background watcher and read `master comms inbox`; check the inbox
+   again at every boundary. See [host comms](host-comms.md#master-practice).
 
 Reconciliation reads worktree/branch/checkpoint fields of live stack goals
 that declare a worktree (legacy board goals only before adoption; on a shared

@@ -38,6 +38,7 @@ from . import model_fit
 from . import model_fit_policy
 from . import goal_stack
 from . import goal_stack_store
+from . import host_comms
 from . import master_operations
 from . import master_reconcile
 from . import master_retire
@@ -1488,6 +1489,171 @@ def cmd_master_stack_history(arguments: argparse.Namespace) -> int:
     return _run_stack_read(arguments, read)
 
 
+def _comms_body(arguments: argparse.Namespace) -> str:
+    if arguments.body is not None:
+        return arguments.body
+    try:
+        return _read_stack_input(arguments.body_file).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise host_comms.CommsError(f"message body is not UTF-8: {exc}") from exc
+
+
+def _comms_refused(detail: str) -> int:
+    _json({"schema_version": 1, "status": "refused", "detail": detail})
+    return 2
+
+
+def _comms_channel(arguments: argparse.Namespace):
+    """(goal store, host, channel) for the read-only comms commands."""
+    location, error = _master_location()
+    if location is None:
+        raise host_comms.CommsError(error or "goal store unavailable")
+    host = host_comms.require_host()
+    root = location.record_root.parent
+    return root, host, host_comms.read_channel(root, host)
+
+
+def _format_comms_message(message, channel, now=None) -> str:
+    lines = [f"{message.id}  from={message.sender} to={message.to}  "
+             f"{message.created} ({host_comms.age(message.created, now)} ago)",
+             f"subject: {message.subject}"]
+    if message.in_reply_to is not None:
+        lines.append(f"in_reply_to: {message.in_reply_to}")
+    if message.goal is not None:
+        lines.append(f"goal: {message.goal}")
+    for host, item in sorted(channel.acks.get(message.id, {}).items()):
+        note = f": {host_comms.one_line(item.note)}" if item.note else ""
+        lines.append(f"acked by {host} at {item.acked}{note}")
+    lines.append("")
+    lines.append(message.body.rstrip("\n"))
+    return "\n".join(lines) + "\n"
+
+
+def _comms_problem_lines(channel) -> list[str]:
+    return [f"malformed: {path}: {reason}" for path, reason in channel.problems]
+
+
+def _comms_read(arguments: argparse.Namespace, read) -> int:
+    try:
+        root, host, channel = _comms_channel(arguments)
+        return read(host, channel)
+    except (ValueError, OSError, master_runtime.MasterRecordError,
+            master_operations.MasterOperationError) as exc:
+        _json({"schema_version": 1, "status": "unavailable", "detail": str(exc)})
+        return 2
+
+
+def cmd_master_comms_inbox(arguments: argparse.Namespace) -> int:
+    def read(host, channel) -> int:
+        shown = host_comms.inbox(channel, host, include_all=arguments.all)
+        if arguments.json:
+            _json({"schema_version": 1, "status": "OK", "host": host,
+                   "channel": channel.attached,
+                   "messages": [dict(m.to_dict(), acked_by=sorted(channel.acks.get(m.id, {})))
+                                for m in shown],
+                   "problems": [{"path": p, "detail": d} for p, d in channel.problems]})
+            return 0
+        what = "all messages" if arguments.all else "unacknowledged messages"
+        lines = [f"host comms inbox for {host}: {len(shown)} {what}"
+                 + ("" if channel.attached else " (channel not opened yet)")]
+        for message in shown:
+            acked = sorted(channel.acks.get(message.id, {}))
+            mark = f" acked={','.join(acked)}" if arguments.all and acked else ""
+            lines.append(f"  {message.id}  from={message.sender} to={message.to} "
+                         f"age={host_comms.age(message.created)}{mark}  "
+                         f"{host_comms.one_line(message.subject)}")
+        lines += _comms_problem_lines(channel)
+        if shown:
+            lines.append("show: python3 -m creme master comms show ID")
+        print("\n".join(lines))
+        return 0
+
+    return _comms_read(arguments, read)
+
+
+def cmd_master_comms_show(arguments: argparse.Namespace) -> int:
+    def read(host, channel) -> int:
+        message = channel.messages.get(arguments.message_id)
+        if message is None:
+            _json({"schema_version": 1, "status": "unavailable",
+                   "detail": f"unknown message id: {arguments.message_id}"})
+            return 2
+        if arguments.json:
+            _json({"schema_version": 1, "status": "OK", "message": message.to_dict(),
+                   "acks": [a.to_dict() for _, a in
+                            sorted(channel.acks.get(message.id, {}).items())]})
+        else:
+            print(_format_comms_message(message, channel), end="")
+        return 0
+
+    return _comms_read(arguments, read)
+
+
+def cmd_master_comms_thread(arguments: argparse.Namespace) -> int:
+    def read(host, channel) -> int:
+        messages = host_comms.thread(channel, arguments.message_id)
+        if arguments.json:
+            _json({"schema_version": 1, "status": "OK",
+                   "messages": [m.to_dict() for m in messages]})
+        else:
+            print("\n".join(_format_comms_message(m, channel) for m in messages), end="")
+        return 0
+
+    return _comms_read(arguments, read)
+
+
+def cmd_master_comms_send(arguments: argparse.Namespace) -> int:
+    location, failure = _stack_preamble()
+    if location is None:
+        _json(failure)
+        return 2
+    try:
+        # host_comms.send authenticates through the master lease transaction.
+        result = host_comms.send(
+            location.record_root, to=arguments.to, subject=arguments.subject,
+            body=_comms_body(arguments), goal=arguments.goal,
+            in_reply_to=arguments.in_reply_to,
+        )
+    except (ValueError, OSError, master_runtime.MasterRecordError,
+            master_operations.MasterOperationError) as exc:
+        return _comms_refused(str(exc))
+    if arguments.json:
+        _json(result)
+    else:
+        print(f"comms send OK: {result['id']} to={result['to']}")
+    return 0
+
+
+def cmd_master_comms_ack(arguments: argparse.Namespace) -> int:
+    location, failure = _stack_preamble()
+    if location is None:
+        _json(failure)
+        return 2
+    try:
+        result = host_comms.ack(location.record_root, arguments.message_id, note=arguments.note)
+    except (ValueError, OSError, master_runtime.MasterRecordError,
+            master_operations.MasterOperationError) as exc:
+        return _comms_refused(str(exc))
+    if arguments.json:
+        _json(result)
+    else:
+        changed = "acknowledged" if result["changed"] else "already acknowledged"
+        print(f"comms ack OK: {result['id']} {changed} by {result['host']}")
+    return 0
+
+
+def cmd_master_comms_watch(arguments: argparse.Namespace) -> int:
+    def emit(line: str) -> None:
+        print(line, flush=True)
+
+    location, error = _master_location()
+    if location is None:
+        emit(f"COMMS-ERROR {host_comms.one_line(error or 'goal store unavailable')}")
+        return 2
+    return host_comms.watch(location.record_root.parent, interval=arguments.interval,
+                            once=arguments.once, emit=emit)
+
+
 def cmd_tempdir(arguments: argparse.Namespace) -> int:
     adapter = get_adapter()
     root = adapter.temp_root()
@@ -2587,6 +2753,57 @@ def parser() -> argparse.ArgumentParser:
     stack_history.add_argument("entry_id", nargs="?", metavar="ID", default=None)
     _stack_json(stack_history)
     stack_history.set_defaults(func=cmd_master_stack_history)
+
+    master_comms = master_commands.add_parser(
+        "comms",
+        help="messages between the masters of different hosts (never goal state)",
+    )
+    comms_commands = master_comms.add_subparsers(dest="comms_action", required=True)
+
+    comms_send = comms_commands.add_parser("send", help="publish one message (master only)")
+    comms_send.add_argument("--to", required=True, metavar="HOST|all")
+    comms_send.add_argument("--subject", required=True, metavar="TEXT")
+    comms_body = comms_send.add_mutually_exclusive_group(required=True)
+    comms_body.add_argument("--body-file", metavar="FILE", help="Markdown body; '-' reads stdin")
+    comms_body.add_argument("--body", metavar="TEXT")
+    comms_send.add_argument("--goal", metavar="ID", help="goal stack ID this message concerns")
+    comms_send.add_argument("--in-reply-to", metavar="ID", help="message ID this answers")
+    _stack_json(comms_send)
+    comms_send.set_defaults(func=cmd_master_comms_send)
+
+    comms_inbox = comms_commands.add_parser(
+        "inbox", help="fetch and list unacknowledged messages for this host, oldest first")
+    comms_inbox.add_argument("--all", action="store_true",
+                             help="every message on the channel, with who acknowledged it")
+    _stack_json(comms_inbox)
+    comms_inbox.set_defaults(func=cmd_master_comms_inbox)
+
+    comms_show = comms_commands.add_parser("show", help="show one message and its acks")
+    comms_show.add_argument("message_id", metavar="ID")
+    _stack_json(comms_show)
+    comms_show.set_defaults(func=cmd_master_comms_show)
+
+    comms_ack = comms_commands.add_parser(
+        "ack", help="acknowledge a message once acted on (master only)")
+    comms_ack.add_argument("message_id", metavar="ID")
+    comms_ack.add_argument("--note", metavar="TEXT")
+    _stack_json(comms_ack)
+    comms_ack.set_defaults(func=cmd_master_comms_ack)
+
+    comms_thread = comms_commands.add_parser(
+        "thread", help="show the whole in_reply_to conversation containing a message")
+    comms_thread.add_argument("message_id", metavar="ID")
+    _stack_json(comms_thread)
+    comms_thread.set_defaults(func=cmd_master_comms_thread)
+
+    comms_watch = comms_commands.add_parser(
+        "watch",
+        help="print one COMMS line per newly arrived unacknowledged message; for a background watcher",
+    )
+    comms_watch.add_argument("--interval", type=_positive, default=host_comms.DEFAULT_INTERVAL,
+                             metavar="SECS")
+    comms_watch.add_argument("--once", action="store_true", help="one pass, then exit")
+    comms_watch.set_defaults(func=cmd_master_comms_watch)
 
     telemetry = commands.add_parser("telemetry", help="sample dynamic host state through the selected adapter")
     telemetry.set_defaults(func=cmd_telemetry)

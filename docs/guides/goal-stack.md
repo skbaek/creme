@@ -165,6 +165,11 @@ commits that are not on the canonical branch (only after a crash) refuse every
 write until `master stack sync --preserve-unpublished` sets them aside the
 same way.
 
+**Talking to the other host.** Requests, answers and notices between
+masters go on the separate [host comms](host-comms.md) channel
+(`python3 -m creme master comms`), never in free-text stack fields. Messages
+never change goal order or status; decisions and status stay here.
+
 ### Migration (the first host, once)
 
 1. Pull Creme; `python3 -m creme set-host-name NAME`; fetch the goal store's

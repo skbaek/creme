@@ -37,7 +37,9 @@ branch. Never copy them into Creme, Jaune, Blanc or any other public
 repository or surface: commit messages, code comments, docs, public
 reports or issues. Where a public artifact needs the substance of an
 exchange, restate the technical fact in the artifact's own words and keep
-any pointer to the message in the private goal store.
+any pointer to the message in the private goal store. Never point
+`master comms` at a public remote, and never copy the `.host-comms/` worktree
+or its files outside the goal store.
 
 ## Commands
 
@@ -86,14 +88,3 @@ pass and exits nonzero after a failure.
   broadcast to `all` is acknowledged by each host separately.
 - Record any decision a message prompts in the stack, the goal or the master
   record, as usual; the channel is not a record.
-
-## Privacy
-
-The channel lives only on the private goal store. Message contents (subjects,
-bodies, notes) never leave it: do not quote, paraphrase or attach them in Creme,
-Jaune, Blanc or any other public repository, and that includes commit messages,
-documentation, code comments, issues and pull requests. A public commit states
-its own change and evidence; at most it names the goal ID. Decisions a message
-prompts are recorded in the private stack, goal or master record. Never point
-`master comms` at a public remote, and never copy the `.host-comms/` worktree or
-its files outside the goal store.

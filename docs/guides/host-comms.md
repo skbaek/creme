@@ -37,7 +37,9 @@ branch. Never copy them into Creme, Jaune, Blanc or any other public
 repository or surface: commit messages, code comments, docs, public
 reports or issues. Where a public artifact needs the substance of an
 exchange, restate the technical fact in the artifact's own words and keep
-any pointer to the message in the private goal store.
+any pointer to the message in the private goal store. Never point
+`master comms` at a public remote, and never copy the `.host-comms/` worktree
+or its files outside the goal store.
 
 ## Commands
 

@@ -60,6 +60,11 @@ differences (2026-10-04, `agy` 1.2.16):
   the 5-hour window on `claude-sonnet-5-5-low` and about 5% on
   `claude-opus-5-5-low`.
 
+A recorded `agy` 1.4.2 Opus run used `read_file` with a `Path` argument.
+The guard supports this read alias with the same resolved-path containment
+check, and requires a nonempty string `Path` and a configured target root.
+Claude review briefs should name exact files and permit this current read tool.
+
 `status` reads `agy -p /usage` and `/credits`, both zero-token, plus
 `useG1Credits` from `~/.gemini/antigravity-cli/settings.json`. `agy models` lists
 the slugs. There are three pools. `gemini-4-argon-*` draws on its own "Gemini 4
@@ -80,7 +85,7 @@ model's pool reports. Spread work across the pools rather than draining one.
 - **Guard.** Each run gets a directory under `.creme/antigravity/runs/` (override
   `CREME_ANTIGRAVITY_RUNS`, which the tests set), passed
   as a second `--add-dir`. Its `.agents/hooks.json` installs a PreToolUse guard.
-  In read-only mode it allows only `view_file`, `list_dir`, `grep_search`,
+  In read-only mode it allows only `read_file`, `view_file`, `list_dir`, `grep_search`,
   `find_by_name` and `finish`; write mode adds only guarded file writes and
   explicitly allowed commands. Every tool is denied when the payload's
   `modelName` differs from `--model`, so a silent model fallback cannot act.

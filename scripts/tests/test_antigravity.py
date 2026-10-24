@@ -181,6 +181,42 @@ else:
         self.assertEqual(antigravity.guard_decision(inside, "m", roots)["decision"], "allow")
         self.assertEqual(antigravity.guard_decision(escape, "m", roots)["decision"], "deny")
 
+    def test_read_file_alias_is_scoped_and_fails_closed(self) -> None:
+        agents = self.root / "read-file-guard"
+        agents.mkdir()
+        script = agents / "guard.py"
+        script.write_text(antigravity.GUARD_SCRIPT, encoding="utf-8")
+        outside = self.root / "outside.txt"
+        outside.write_text("outside", encoding="utf-8")
+        (self.target / "escape").symlink_to(outside)
+        roots = [str(self.target.resolve())]
+        cases = [
+            ({"Path": str(self.target / "inside.lean")}, roots, "m", "allow"),
+            ({"Path": "inside.lean"}, roots, "m", "allow"),
+            ({"Path": str(outside)}, roots, "m", "deny"),
+            ({"Path": "../outside.txt"}, roots, "m", "deny"),
+            ({"Path": "escape"}, roots, "m", "deny"),
+            ({"Path": "inside.lean"}, roots, "other", "deny"),
+            ({"Path": "inside.lean"}, [], "m", "deny"),
+            ({}, roots, "m", "deny"),
+            ({"Path": ""}, roots, "m", "deny"),
+            ({"Path": "  "}, roots, "m", "deny"),
+            ({"Path": 1}, roots, "m", "deny"),
+            (None, roots, "m", "deny"),
+        ]
+        for args, allowed_roots, model, expected in cases:
+            with self.subTest(args=args, roots=allowed_roots, model=model):
+                payload = {"modelName": model, "toolCall": {"name": "read_file", "args": args}}
+                (agents / "guard.json").write_text(json.dumps({
+                    "pinned_model": "m", "roots": allowed_roots,
+                }), encoding="utf-8")
+                direct = antigravity.guard_decision(payload, "m", allowed_roots)
+                result = subprocess.run([sys.executable, str(script)], cwd=agents,
+                                        input=json.dumps(payload), text=True, check=True,
+                                        stdout=subprocess.PIPE)
+                self.assertEqual(direct["decision"], expected)
+                self.assertEqual(json.loads(result.stdout), direct)
+
     def test_write_guard_accepts_only_paths_inside_root(self) -> None:
         roots = (str(self.target),)
         def decision(path):

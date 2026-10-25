@@ -181,6 +181,41 @@ else:
         self.assertEqual(antigravity.guard_decision(inside, "m", roots)["decision"], "allow")
         self.assertEqual(antigravity.guard_decision(escape, "m", roots)["decision"], "deny")
 
+    def test_read_file_requires_bounded_path_and_pinned_model(self) -> None:
+        # agy 1.4.7 emits read_file with Path, rather than view_file.
+        agents = self.root / "read-file-guard"
+        agents.mkdir()
+        (agents / "guard.py").write_text(antigravity.GUARD_SCRIPT)
+        (self.target / "escape").symlink_to(self.root / "outside")
+        cases = [
+            (str(self.target / "inside"), "m", True, "allow"),
+            ("inside", "m", True, "allow"),
+            ("../outside", "m", True, "deny"),
+            (str(self.root / "target-extra/file"), "m", True, "deny"),
+            ("escape", "m", True, "deny"),
+            (None, "m", True, "deny"),
+            ("", "m", True, "deny"),
+            (7, "m", True, "deny"),
+            ("inside", "other", True, "deny"),
+            ("inside", "m", False, "deny"),
+        ]
+        for path, model, bounded, expected in cases:
+            with self.subTest(path=path, model=model, bounded=bounded):
+                roots = [str(self.target)] if bounded else []
+                (agents / "guard.json").write_text(json.dumps({
+                    "pinned_model": "m", "roots": roots,
+                }))
+                payload = {"modelName": model, "toolCall": {
+                    "name": "read_file", "args": {} if path is None else {"Path": path},
+                }}
+                decision = antigravity.guard_decision(payload, "m", roots)
+                self.assertEqual(decision["decision"], expected)
+                checked = subprocess.run(
+                    [sys.executable, str(agents / "guard.py")],
+                    input=json.dumps(payload), text=True, capture_output=True, check=True,
+                )
+                self.assertEqual(json.loads(checked.stdout), decision)
+
     def test_write_guard_accepts_only_paths_inside_root(self) -> None:
         roots = (str(self.target),)
         def decision(path):

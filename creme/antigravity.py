@@ -15,7 +15,7 @@ from typing import Any, Optional
 from . import pseudo_broker as PB
 
 
-READ_ONLY_TOOLS = ("view_file", "list_dir", "grep_search", "find_by_name", "finish")
+READ_ONLY_TOOLS = ("read_file", "view_file", "list_dir", "grep_search", "find_by_name", "finish")
 WRITE_TOOLS = ("write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file")
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -300,6 +300,11 @@ def guard_decision(
     tool_call = payload.get("toolCall")
     name = tool_call.get("name") if isinstance(tool_call, dict) else None
     if name in READ_ONLY_TOOLS:
+        if name == "read_file":
+            args = tool_call.get("args")
+            path = args.get("Path") if isinstance(args, dict) else None
+            if not roots or not isinstance(path, str) or not path.strip():
+                return {"decision": "deny", "reason": "creme read_file requires Path and target roots"}
         for path in _guard_paths(tool_call):
             outside = _outside_guard_roots(path, roots)
             if outside is not None:
@@ -344,7 +349,7 @@ import re
 from pathlib import Path
 import sys
 
-READ_ONLY_TOOLS = ("view_file", "list_dir", "grep_search", "find_by_name", "finish")
+READ_ONLY_TOOLS = ("read_file", "view_file", "list_dir", "grep_search", "find_by_name", "finish")
 WRITE_TOOLS = ("write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file")
 PATH_KEYS = {
     "AbsolutePath", "DirectoryPath", "SearchPath", "SearchDirectory", "Path",
@@ -433,7 +438,13 @@ if model != pinned_model:
 else:
     tool_call = payload.get("toolCall")
     name = tool_call.get("name") if isinstance(tool_call, dict) else None
-    if name in READ_ONLY_TOOLS:
+    if name == "read_file" and (
+        not roots or not isinstance(tool_call.get("args"), dict)
+        or not isinstance(tool_call["args"].get("Path"), str)
+        or not tool_call["args"]["Path"].strip()
+    ):
+        decision = {"decision": "deny", "reason": "creme read_file requires Path and target roots"}
+    elif name in READ_ONLY_TOOLS:
         outside_path = None
         for path in paths_for(tool_call):
             outside_path = outside(path)

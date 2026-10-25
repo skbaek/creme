@@ -80,13 +80,16 @@ model's pool reports. Spread work across the pools rather than draining one.
 - **Guard.** Each run gets a directory under `.creme/antigravity/runs/` (override
   `CREME_ANTIGRAVITY_RUNS`, which the tests set), passed
   as a second `--add-dir`. Its `.agents/hooks.json` installs a PreToolUse guard.
-  In read-only mode it allows only `view_file`, `list_dir`, `grep_search`,
+  In read-only mode it allows only `read_file`, `view_file`, `list_dir`, `grep_search`,
   `find_by_name` and `finish`; write mode adds only guarded file writes and
   explicitly allowed commands. Every tool is denied when the payload's
   `modelName` differs from `--model`, so a silent model fallback cannot act.
   Reads and writes outside the target are denied by the guard. A deny holds in
   headless mode. In read-only mode, the target repository and the shared
   `~/.gemini/config` are not touched by the harness.
+  Version 1.4.7 uses `read_file` with a `Path` argument; that tool requires
+  a nonempty string path and configured target roots before the usual path
+  and model checks can admit it.
 - **Verdict.** `PASS` requires all of: exit 0, result `SUCCESS`, `init.model`
   equal to `--model`, every guarded payload on that model, and, for a Git target,
   an unchanged `HEAD` and porcelain status (ignored files included, the run

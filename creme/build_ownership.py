@@ -4303,6 +4303,15 @@ def run_lake_build(
     if any(not target or target.startswith("-") for target in targets):
         print(json.dumps({"status": "REFUSED", "detail": "targets must be explicit Lake target names, not options"}, sort_keys=True), file=output)
         return 2
+    # Checked here, before any probe or walk unit: the semaphore refuses an
+    # out-of-range wait only when a unit first asks for admission, which in a
+    # walk can be hundreds of units in.
+    if wait_seconds is not None and not 1 <= wait_seconds <= semaphore.MAX_WAIT_SECONDS:
+        print(json.dumps({
+            "status": "REFUSED",
+            "detail": f"--wait must be 1..{semaphore.MAX_WAIT_SECONDS} seconds",
+        }, sort_keys=True), file=output)
+        return 2
     worktree, actual_goal = _worktree_identity(cwd, goal)
     if actual_goal != goal:
         print(json.dumps({

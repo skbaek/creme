@@ -60,6 +60,11 @@ differences (2026-10-04, `agy` 1.2.16):
   the 5-hour window on `claude-sonnet-5-5-low` and about 5% on
   `claude-opus-5-5-low`.
 
+A recorded `agy` 1.4.2 Opus run used `read_file` with a `Path` argument.
+The guard supports this read alias with the same resolved-path containment
+check, and requires a nonempty string `Path` and a configured target root.
+Claude review briefs should name exact files and permit this current read tool.
+
 `status` reads `agy -p /usage` and `/credits`, both zero-token, plus
 `useG1Credits` from `~/.gemini/antigravity-cli/settings.json`. `agy models` lists
 the slugs. There are three pools. `gemini-4-argon-*` draws on its own "Gemini 4
@@ -87,9 +92,6 @@ model's pool reports. Spread work across the pools rather than draining one.
   Reads and writes outside the target are denied by the guard. A deny holds in
   headless mode. In read-only mode, the target repository and the shared
   `~/.gemini/config` are not touched by the harness.
-  Version 1.4.7 uses `read_file` with a `Path` argument; that tool requires
-  a nonempty string path and configured target roots before the usual path
-  and model checks can admit it.
 - **Verdict.** `PASS` requires all of: exit 0, result `SUCCESS`, `init.model`
   equal to `--model`, every guarded payload on that model, and, for a Git target,
   an unchanged `HEAD` and porcelain status (ignored files included, the run

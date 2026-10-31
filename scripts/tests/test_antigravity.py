@@ -181,40 +181,41 @@ else:
         self.assertEqual(antigravity.guard_decision(inside, "m", roots)["decision"], "allow")
         self.assertEqual(antigravity.guard_decision(escape, "m", roots)["decision"], "deny")
 
-    def test_read_file_requires_bounded_path_and_pinned_model(self) -> None:
-        # agy 1.4.7 emits read_file with Path, rather than view_file.
+    def test_read_file_alias_is_scoped_and_fails_closed(self) -> None:
         agents = self.root / "read-file-guard"
         agents.mkdir()
-        (agents / "guard.py").write_text(antigravity.GUARD_SCRIPT)
-        (self.target / "escape").symlink_to(self.root / "outside")
+        script = agents / "guard.py"
+        script.write_text(antigravity.GUARD_SCRIPT, encoding="utf-8")
+        outside = self.root / "outside.txt"
+        outside.write_text("outside", encoding="utf-8")
+        (self.target / "escape").symlink_to(outside)
+        roots = [str(self.target.resolve())]
         cases = [
-            (str(self.target / "inside"), "m", True, "allow"),
-            ("inside", "m", True, "allow"),
-            ("../outside", "m", True, "deny"),
-            (str(self.root / "target-extra/file"), "m", True, "deny"),
-            ("escape", "m", True, "deny"),
-            (None, "m", True, "deny"),
-            ("", "m", True, "deny"),
-            (7, "m", True, "deny"),
-            ("inside", "other", True, "deny"),
-            ("inside", "m", False, "deny"),
+            ({"Path": str(self.target / "inside.lean")}, roots, "m", "allow"),
+            ({"Path": "inside.lean"}, roots, "m", "allow"),
+            ({"Path": str(outside)}, roots, "m", "deny"),
+            ({"Path": "../outside.txt"}, roots, "m", "deny"),
+            ({"Path": "escape"}, roots, "m", "deny"),
+            ({"Path": "inside.lean"}, roots, "other", "deny"),
+            ({"Path": "inside.lean"}, [], "m", "deny"),
+            ({}, roots, "m", "deny"),
+            ({"Path": ""}, roots, "m", "deny"),
+            ({"Path": "  "}, roots, "m", "deny"),
+            ({"Path": 1}, roots, "m", "deny"),
+            (None, roots, "m", "deny"),
         ]
-        for path, model, bounded, expected in cases:
-            with self.subTest(path=path, model=model, bounded=bounded):
-                roots = [str(self.target)] if bounded else []
+        for args, allowed_roots, model, expected in cases:
+            with self.subTest(args=args, roots=allowed_roots, model=model):
+                payload = {"modelName": model, "toolCall": {"name": "read_file", "args": args}}
                 (agents / "guard.json").write_text(json.dumps({
-                    "pinned_model": "m", "roots": roots,
-                }))
-                payload = {"modelName": model, "toolCall": {
-                    "name": "read_file", "args": {} if path is None else {"Path": path},
-                }}
-                decision = antigravity.guard_decision(payload, "m", roots)
-                self.assertEqual(decision["decision"], expected)
-                checked = subprocess.run(
-                    [sys.executable, str(agents / "guard.py")],
-                    input=json.dumps(payload), text=True, capture_output=True, check=True,
-                )
-                self.assertEqual(json.loads(checked.stdout), decision)
+                    "pinned_model": "m", "roots": allowed_roots,
+                }), encoding="utf-8")
+                direct = antigravity.guard_decision(payload, "m", allowed_roots)
+                result = subprocess.run([sys.executable, str(script)], cwd=agents,
+                                        input=json.dumps(payload), text=True, check=True,
+                                        stdout=subprocess.PIPE)
+                self.assertEqual(direct["decision"], expected)
+                self.assertEqual(json.loads(result.stdout), direct)
 
     def test_write_guard_accepts_only_paths_inside_root(self) -> None:
         roots = (str(self.target),)

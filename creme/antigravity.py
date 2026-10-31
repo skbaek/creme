@@ -299,12 +299,11 @@ def guard_decision(
         }
     tool_call = payload.get("toolCall")
     name = tool_call.get("name") if isinstance(tool_call, dict) else None
+    if name == "read_file":
+        args = tool_call.get("args")
+        if not roots or not isinstance(args, dict) or not isinstance(args.get("Path"), str) or not args["Path"].strip():
+            return {"decision": "deny", "reason": "creme read-only run: read_file requires a target root and Path"}
     if name in READ_ONLY_TOOLS:
-        if name == "read_file":
-            args = tool_call.get("args")
-            path = args.get("Path") if isinstance(args, dict) else None
-            if not roots or not isinstance(path, str) or not path.strip():
-                return {"decision": "deny", "reason": "creme read_file requires Path and target roots"}
         for path in _guard_paths(tool_call):
             outside = _outside_guard_roots(path, roots)
             if outside is not None:
@@ -438,12 +437,9 @@ if model != pinned_model:
 else:
     tool_call = payload.get("toolCall")
     name = tool_call.get("name") if isinstance(tool_call, dict) else None
-    if name == "read_file" and (
-        not roots or not isinstance(tool_call.get("args"), dict)
-        or not isinstance(tool_call["args"].get("Path"), str)
-        or not tool_call["args"]["Path"].strip()
-    ):
-        decision = {"decision": "deny", "reason": "creme read_file requires Path and target roots"}
+    args = tool_call.get("args") if isinstance(tool_call, dict) else None
+    if name == "read_file" and (not roots or not isinstance(args, dict) or not isinstance(args.get("Path"), str) or not args["Path"].strip()):
+        decision = {"decision": "deny", "reason": "creme read-only run: read_file requires a target root and Path"}
     elif name in READ_ONLY_TOOLS:
         outside_path = None
         for path in paths_for(tool_call):

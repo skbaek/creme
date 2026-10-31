@@ -62,6 +62,28 @@ renewal.
 Generated output never makes a reserved change autonomous; see the master
 guide's [registered-provenance rule](../../docs/guides/master.md#registered-provenance-is-a-narrow-exception).
 
+## Reuse, placement and growth (mandatory)
+
+Bloat recurs when a brief leaves these to memory, so state them in every brief.
+The 2026-10-30 consolidation found shared lemmas, kits and kernel routes that already
+existed while copies were written next to them.
+
+- **Search before writing** anything generic-shaped: the repository's shared-library map
+  (Blanc `docs/COMMON_API.md`, by grep), its recipe lookup (Blanc `blanc_suggest` needs
+  `import Blanc.ProofRecipeTactic`), its tactic and tool table (Blanc `docs/TOOLS.md`),
+  and the dependency's supported API (Jaune `API.md` section 6). The report names what
+  was searched for each new generic declaration.
+- **Closure pass at every checkpoint.** Hoist generically applicable helpers to the
+  narrowest shared owner, a low module imported only by its consumers, never a hub
+  without the master's approval. Delete what the change left unused (leaf rule). If this
+  brief says "no shared helper", list each helper kept local and why under **Hoist debt**
+  in the report.
+- **Growth report.** Net lines added and removed per file family, and any near-copies
+  (declarations that differ only by names or literals) or one-instruction-per-line walks
+  the change adds, against any net-line budget the brief sets. The master reads this report before merging.
+- **Prevention.** For bloat removed or avoided, say what should have prevented it and why
+  it did not.
+
 ## Expected checkpoints
 
 | Boundary | Required commit/state update | Required evidence |

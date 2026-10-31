@@ -484,6 +484,14 @@ class WalkBehaviourTest(unittest.TestCase):
         self.assertEqual(host.lake_calls, [])
         self.assertEqual(host.acquires, [])
 
+    def test_an_out_of_range_wait_is_refused_before_any_unit(self) -> None:
+        host = _FakeHost(DIAMOND, limit_gib=2)
+        self.assertEqual(
+            host.run(["Pkg.Top"], walk=True, wait_seconds=semaphore.MAX_WAIT_SECONDS + 1), 2)
+        self.assertEqual(host.lake_calls, [])
+        self.assertEqual(host.acquires, [])
+        self.assertIn("--wait must be", host.summary()["detail"])
+
     def test_the_targets_unit_is_last(self) -> None:
         host = _FakeHost(_wide(4, mid=2), limit_gib=8)
         self.assertEqual(host.run(["Pkg.Top"], walk=True, threads=2), 0)

@@ -102,7 +102,7 @@ class DurableRecoveryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             path = Path(base) / "session.jsonl"
             path.write_text("".join(json.dumps(r) + "\n" for r in self.records()))
-            host = SimpleNamespace(durable=DurableLog(path))
+            host = SimpleNamespace(model=C.PINNED_MODEL, durable=DurableLog(path))
             outcome = C.TurnOutcome(turn_id="t-1")
             outcome.tokens["prompt"] = 999
             errors = []
@@ -126,7 +126,7 @@ class DurableRecoveryTest(unittest.TestCase):
         log = DelayedLog(None)
         errors = []
         outcome = C.TurnOutcome(turn_id="t-1")
-        M.finalize_durable(SimpleNamespace(durable=log), outcome, errors)
+        M.finalize_durable(SimpleNamespace(model=C.PINNED_MODEL, durable=log), outcome, errors)
         self.assertEqual(log.polls, 3)
         self.assertEqual(errors, [])
         self.assertEqual(outcome.models, {C.PINNED_MODEL: 1})
@@ -144,7 +144,7 @@ class DurableRecoveryTest(unittest.TestCase):
                     self._take(records[0])
                 return 0
         outcome, errors = C.TurnOutcome(turn_id="t-1"), []
-        M.finalize_durable(SimpleNamespace(durable=LateCompletionLog(None)), outcome, errors)
+        M.finalize_durable(SimpleNamespace(model=C.PINNED_MODEL, durable=LateCompletionLog(None)), outcome, errors)
         self.assertEqual(errors, [])
         self.assertEqual(outcome.tokens["completions"], 2)
         self.assertEqual(outcome.tokens["total"], 24)
@@ -160,7 +160,7 @@ class DurableRecoveryTest(unittest.TestCase):
                     path.write_text(("bad JSON\n" if shape == "corrupt" else "") +
                                     "".join(json.dumps(r) + "\n" for r in records))
                 errors = []
-                M.finalize_durable(SimpleNamespace(durable=DurableLog(path)), C.TurnOutcome(turn_id="t-1"), errors)
+                M.finalize_durable(SimpleNamespace(model=C.PINNED_MODEL, durable=DurableLog(path)), C.TurnOutcome(turn_id="t-1"), errors)
                 self.assertTrue(errors)
 
     def test_partial_append_is_buffered_and_conflicting_decisions_fail_closed(self):
@@ -203,7 +203,7 @@ class DurableRecoveryTest(unittest.TestCase):
                 exc = AppServerError("fence", rpc_error={"code": -32603, "data": {"retryable": True},
                     "message": "approval ledger durability fence"})
                 exc.approval_request = request
-                host = SimpleNamespace(durable=log, guard=SimpleNamespace(active_turn="t-1"))
+                host = SimpleNamespace(model=C.PINNED_MODEL, durable=log, guard=SimpleNamespace(active_turn="t-1"))
                 self.assertEqual(M.recover_decision(host, exc, "approved"), shape == "match")
 
 
@@ -225,6 +225,23 @@ class ModelPinGuardTest(unittest.TestCase):
                 C.pinned_catalogue_route({**listing, "models": rows}, "low")
         with self.assertRaises(AppServerError):
             C.pinned_catalogue_route(listing, "max")
+
+    def test_guards_pin_allowed_models_per_session_and_reject_cross_model_evidence(self):
+        for model in C.ALLOWED_MODELS:
+            with self.subTest(model=model):
+                g = C.MuseGuard(FakeProcess(), "s-1", "low", "read-only", model=model)
+                g.command("session/setModel", {"model": {"modelId": model}})
+                for other in C.ALLOWED_MODELS:
+                    if other != model:
+                        with self.assertRaises(PinViolation):
+                            g.command("session/setModel", {"model": {"modelId": other}})
+                for method in ("session/modelChanged", "session/tokenUsage"):
+                    wrong = next(other for other in C.ALLOWED_MODELS if other != model)
+                    self.assertTrue(g.observe({"method": method, "params": {
+                        "sessionId": "s-1", "modelId": wrong}}))
+        for model in ("muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor", "other", None):
+            with self.subTest(model=model), self.assertRaises(PinViolation):
+                C.MuseGuard(FakeProcess(), "s-1", "low", "read-only", model=model)
 
     def test_only_the_pinned_model_may_be_selected(self):
         g = guard()
@@ -502,6 +519,39 @@ class FakeMuseHarness(unittest.TestCase):
 
 
 class RunTest(FakeMuseHarness):
+    def test_explicit_wonder_models_use_exact_route_and_durable_attribution(self):
+        for model in ("muse-wonder-1.0", "muse-wonder-full-1.0"):
+            with self.subTest(model=model):
+                code, record = self.run_brief(model=model)
+                self.assertEqual((code, record["verdict"], record["model"]), (0, "PASS", model), record)
+                self.assertEqual(record["models"], {model: 1})
+                self.assertEqual(record["tokens"]["total"], 107)
+                route = self.sent("session/setModel")[-1]["model"]
+                self.assertEqual(route, {"modelId": model, "providerId": "meta", "profileId": "tbh"})
+                self.assertEqual(json.loads((Path(record["run_dir"]) / "audit.json").read_text())["attributed"], 1)
+
+    def test_wonder_pin_rejects_served_spark_before_a_turn(self):
+        self.scenario["served_model"] = C.PINNED_MODEL
+        self.write_scenario()
+        code, record = self.run_brief(model="muse-wonder-1.0")
+        self.assertEqual((code, record["verdict"]), (M.EXIT_PIN_FAILED, "PIN_FAILED"), record)
+        self.assertEqual(self.sent("turn/start"), [])
+        self.assertTrue(M.tripwire_path(self.state).is_file())
+
+    def test_full_pin_rejects_wonder_in_durable_log(self):
+        self.scenario["turn"]["log_model"] = "muse-wonder-1.0"
+        self.write_scenario()
+        code, record = self.run_brief(model="muse-wonder-full-1.0")
+        self.assertEqual((code, record["verdict"]), (M.EXIT_PIN_FAILED, "PIN_FAILED"), record)
+        self.assertTrue(M.tripwire_path(self.state).is_file())
+
+    def test_contributor_and_unknown_model_selection_refuses_without_processes(self):
+        for model in ("muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor", "other", None):
+            with self.subTest(model=model):
+                code, record = self.run_brief(model=model)
+                self.assertEqual((code, record["verdict"]), (M.EXIT_PREFLIGHT_REFUSED, "REFUSED"), record)
+        self.assertEqual(self.calls(), [])
+
     def test_run_uses_null_row_profile_instead_of_catalogue_context(self):
         self.scenario.update(profile_id=None, variants=["minimal", "low", "medium", "high", "xhigh"])
         self.write_scenario()
@@ -710,11 +760,15 @@ class RunTest(FakeMuseHarness):
     def test_status_reports_the_pin_and_never_the_default(self):
         code, report = M.status(ROOT, self.environ)
         self.assertEqual(code, 0, report)
-        self.assertEqual(report["catalogue_default"], "muse-spark-1.3-contributor")
+        self.assertEqual(report["catalogue_default"], "muse-wonder-1.0")
         self.assertEqual(report["pinned_model"], C.PINNED_MODEL)
         self.assertEqual(report["pinned_route"],
                          {"modelId": C.PINNED_MODEL, "providerId": "meta", "profileId": "tbh"})
         self.assertEqual(self.sent("turn/start"), [])
+        self.assertEqual(report["allowed_models"], list(C.ALLOWED_MODELS))
+        self.assertEqual([route["modelId"] for route in report["allowed_routes"]], list(C.ALLOWED_MODELS))
+        self.assertTrue(all(route["available"] for route in report["allowed_routes"]))
+        self.assertIn("allowed model=muse-wonder-full-1.0 available=True", M.format_status(report))
 
     def test_stream_idle_timeout_default_reaches_every_child(self):
         code, record = self.run_brief()
@@ -763,6 +817,61 @@ class BrokerTest(FakeMuseHarness):
                                            **extra)
         self.assertEqual(code, 0, lines)
         return answer["session"]
+
+    def test_simultaneous_wonder_sessions_keep_distinct_pins_and_resume_them(self):
+        self.scenario["turn"]["wait_for_steer"] = True
+        self.write_scenario()
+        models = ("muse-wonder-1.0", "muse-wonder-full-1.0")
+        sessions = [(self.start(model=model), model) for model in models]
+        for session, model in sessions:
+            record = MB.load_record(self.state, session)
+            self.assertEqual((record["state"], record["model"]), ("running", model))
+            self.assertEqual(record["profile"], M.PROFILES["read-only"])
+            self.assertEqual(record["serve_flags"], list(M.SERVE_FLAGS["read-only"]))
+        for session, model in sessions:
+            code, lines, _ = MB.cmd_simple(ROOT, self.environ, "send", session, text="finish", steer=True)
+            self.assertEqual(code, 0, lines)
+        for session, model in sessions:
+            code, lines, record = self.wait(session)
+            self.assertEqual((code, record["turns"][0]["verdict"]), (0, "PASS"), lines)
+            self.assertEqual(record["turns"][0]["models"], {model: 1})
+            self.assertEqual(MB.cmd_simple(ROOT, self.environ, "stop", session)[0], 0)
+        for session, model in sessions:
+            prior = MB.load_record(self.state, session)
+            code, lines, answer = MB.cmd_resume(ROOT, self.environ, prior["muse_session"], None, False,
+                                                None, "silent", 60)
+            self.assertEqual((code, answer["model"]), (0, model), lines)
+            resumed = answer["session"]
+            self.assertEqual(MB.load_record(self.state, resumed)["model"], model)
+            self.assertEqual(self.sent("session/setModel")[-1]["model"]["modelId"], model)
+            self.assertEqual(MB.cmd_simple(ROOT, self.environ, "send", resumed, text="next")[0], 0)
+            self.assertEqual(MB.cmd_simple(ROOT, self.environ, "send", resumed, text="finish", steer=True)[0], 0)
+            code, lines, record = self.wait(resumed)
+            self.assertEqual((code, record["turns"][0]["models"]), (0, {model: 1}), lines)
+            self.assertEqual(MB.cmd_simple(ROOT, self.environ, "stop", resumed)[0], 0)
+        self.assertEqual(C.PINNED_MODEL, "muse-spark-1.3")
+
+    def test_resume_refuses_a_different_explicit_pin(self):
+        session = self.start(model="muse-wonder-1.0")
+        self.wait(session)
+        MB.cmd_simple(ROOT, self.environ, "stop", session)
+        prior = MB.load_record(self.state, session)
+        answer = MB._call(ROOT, self.environ, "resume", True, muse_session=prior["muse_session"],
+                          model="muse-wonder-full-1.0")
+        self.assertEqual(answer["code"], M.EXIT_PREFLIGHT_REFUSED, answer)
+        self.assertIn("resume keeps the recorded model pin", answer["refusals"])
+
+    def test_stale_broker_with_live_sessions_cannot_silently_select_default(self):
+        from unittest.mock import patch
+        session = self.start(model="muse-wonder-1.0")
+        self.wait(session)
+        count = len(self.sent("session/setModel"))
+        with patch.object(MB, "code_digest", return_value="changed-code"):
+            code, lines, _ = MB.cmd_start(ROOT, self.environ, "x", str(self.target), False, "low", "silent", 60,
+                                           model="muse-wonder-full-1.0")
+        self.assertEqual(code, M.EXIT_MUSE_FAILED, lines)
+        self.assertIn("holds open sessions", " ".join(lines))
+        self.assertEqual(len(self.sent("session/setModel")), count)
 
     def test_session_record_carries_the_stream_idle_timeout(self):
         session = self.start()

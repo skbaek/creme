@@ -61,12 +61,13 @@ class AdapterControls(unittest.TestCase):
         return A.codex_run(path, episode, run, "sol", "codex-subagent", "h1",
                            "completed", **extra)
 
-    def prepare(self, client="codex", episode="ep"):
+    def prepare(self, client="codex", episode="ep", model="muse-spark-1.3"):
         muse = client == "muse"
-        option = "muse-spark/high" if muse else "sol/high"
+        from creme.muse_client import MODEL_FAMILIES
+        option = MODEL_FAMILIES[model] + "/high" if muse else "sol/high"
         config = base_config(execution_client=client, default=option, candidates=[{
             "option": option, "prior_tokens": 100,
-            "release": "muse-spark-1.3" if muse else "gpt-6.1-sol",
+            "release": model if muse else "gpt-6.1-sol",
             "recipe_version": "r1", "route": "muse-broker" if muse else "codex-subagent"}])
         R.configure(self.store, "policy", config, "active")
         R.prepare(self.store, episode, "policy", [{"milestone": "done", "credit": 1}],
@@ -79,17 +80,17 @@ class AdapterControls(unittest.TestCase):
             segment["client"] = "codex"
         return receipt
 
-    def session(self):
-        self.prepare("muse")
+    def session(self, model="muse-spark-1.3"):
+        self.prepare("muse", model=model)
         session = SessionRecord()
         session.dir = self.directory / "broker"
         session.dir.mkdir()
         session.data_lock = threading.RLock()
         session.seq = 0
-        session.record = {"id": "session", "model": "muse-spark-1.3", "effort": "high",
+        session.record = {"id": "session", "model": model, "effort": "high",
                           "model_fit": A.binding(self.directory, "ep"), "turns": [{
                               "n": 1, "turn_id": "turn", "status": "completed", "verdict": "PASS",
-                              "models": {"muse-spark-1.3": 1}, "tokens": {
+                              "models": {model: 1}, "tokens": {
                                   "prompt": 100, "cached": 90, "output": 20,
                                   "reasoning": 15, "total": 120}}]}
         return session
@@ -180,6 +181,22 @@ class AdapterControls(unittest.TestCase):
         self.assertIn("overlaps", result["error"])
         self.assertEqual(E.episode_accounting(self.store, "ep")["spend_uncapped_tokens"], 15)
         self.assertEqual(self.store.conn.execute("SELECT COUNT(*) FROM master_segments").fetchone()[0], 0)
+
+    def assert_muse_release_attribution(self, model, family):
+        session = self.session(model=model)
+        session.persist()
+        self.assertEqual(session.record["model_fit_capture"], {"status": "captured", "inbox_pending": 0})
+        launch = dict(self.store.conn.execute("SELECT * FROM launches").fetchone())
+        self.assertEqual((launch["option"], launch["release"], launch["route"], launch["status"]),
+                         (family + "/high", model, "muse-broker", "completed"))
+        self.assertIsNone(launch["usage_final_count"])
+        self.assertEqual(E.episode_accounting(self.store, "ep")["spend_uncapped_tokens"], 120)
+
+    def test_wonder_episode_uses_wonder_release_family_and_muse_route(self):
+        self.assert_muse_release_attribution("muse-wonder-1.0", "muse-wonder")
+
+    def test_wonder_full_episode_uses_its_own_release_family_and_muse_route(self):
+        self.assert_muse_release_attribution("muse-wonder-full-1.0", "muse-wonder-full")
 
     def test_persist_automatically_captures_binding_and_retains_muse_auxiliary_gap(self):
         session = self.session()

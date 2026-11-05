@@ -65,16 +65,17 @@ def broker_capture(record):
     binding = record.get("model_fit")
     if not binding:
         return
+    from .muse_client import MODEL_FAMILIES
     store = R.open_runtime(Path(binding["directory"]))
     try:
         for turn in record.get("turns", []):
             if not turn.get("turn_id"):
                 continue
             run_id = record["id"] + ":" + str(turn["turn_id"])
-            muse = record.get("model") == "muse-spark-1.3"
+            muse = record.get("model") in MODEL_FAMILIES
             actual = {"episode_id": binding["episode_id"], "run_id": run_id,
                       "attempt_index": binding.get("attempt_offset", 0) + turn["n"],
-                      "option": ("muse-spark" if muse else "luna-reserve") + "/" + record["effort"],
+                      "option": (MODEL_FAMILIES[record["model"]] if muse else "luna-reserve") + "/" + record["effort"],
                       "release": record.get("model"),
                       "route": "muse-broker" if muse else "luna-reserve-broker",
                       "harness_version": binding["harness_version"],

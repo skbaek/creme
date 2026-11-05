@@ -286,7 +286,8 @@ for line in sys.stdin:
                           "experimentalApi": False, "sessionDurability": "durable"})
     elif method == "model/list":
         rows = []
-        for model_id, default in (("muse-spark-1.3", False), ("muse-spark-1.3-contributor", True)):
+        for model_id, default in (("muse-spark-1.3", False), ("muse-wonder-1.0", True),
+                                  ("muse-wonder-full-1.0", False), ("muse-spark-1.3-contributor", False)):
             rows.append({"modelId": model_id, "isDefault": default, "isActive": model_id == served()
                          and params.get("sessionId") == state["session"] and state["session"] is not None,
                          "variants": SCENARIO.get("variants", ["minimal", "low", "medium", "high", "xhigh", "max"]),
@@ -308,9 +309,9 @@ for line in sys.stdin:
                           "history": {"mode": "none"},
                           "pendingRequests": []})
     elif method == "session/setModel":
-        expected = {"modelId": "muse-spark-1.3", "providerId": "meta",
+        expected = {"modelId": params["model"]["modelId"], "providerId": "meta",
                     "profileId": SCENARIO.get("profile_id", "tbh")}
-        if params["model"] != expected:
+        if params["model"]["modelId"] not in ("muse-spark-1.3", "muse-wonder-1.0", "muse-wonder-full-1.0") or params["model"] != expected:
             respond(message, error={"code": -32030, "message": "provider route is not in the catalog",
                                     "data": {"reason": "unsupported_route", "retryable": False}})
             continue

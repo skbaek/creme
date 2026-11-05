@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 from . import muse as M
 from . import muse_broker as MB
-from .muse_client import EFFORTS
+from .muse_client import ALLOWED_MODELS, EFFORTS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,7 +59,7 @@ def cmd_run(arguments: argparse.Namespace) -> int:
         return _refused(arguments, error)
     request = M.RunRequest(brief=brief, target=Path(arguments.target).expanduser(),
                            mode="write" if arguments.write else "read-only", effort=arguments.effort,
-                           timeout_seconds=arguments.timeout_seconds, lean_goal=arguments.lean)
+                           timeout_seconds=arguments.timeout_seconds, lean_goal=arguments.lean, model=arguments.model)
     code, record = M.run(ROOT, request)
     return _print(arguments, code, M.format_run(record).splitlines(), record)
 
@@ -75,7 +75,7 @@ def cmd_start(arguments: argparse.Namespace) -> int:
         fit = model_fit_adapters.binding(directory, arguments.episode)
     code, lines, record = MB.cmd_start(ROOT, dict(os.environ), brief, arguments.target, arguments.write,
                                        arguments.effort, arguments.detail, arguments.timeout_seconds,
-                                       lean=arguments.lean, model_fit=fit)
+                                       lean=arguments.lean, model_fit=fit, model=arguments.model)
     return _print(arguments, code, lines, record)
 
 
@@ -149,7 +149,7 @@ def cmd_broker_serve(arguments: argparse.Namespace) -> int:
 
 
 def register(commands: Any) -> None:
-    muse = commands.add_parser("muse", help="guarded, steerable Muse (muse-spark-1.3) pseudo-subagent sessions")
+    muse = commands.add_parser("muse", help="guarded, steerable Muse pseudo-subagent sessions")
     actions = muse.add_subparsers(dest="muse_action", required=True)
 
     def sub(name: str, text: str) -> argparse.ArgumentParser:
@@ -165,6 +165,7 @@ def register(commands: Any) -> None:
     run.add_argument("--target", required=True)
     run.add_argument("--write", action="store_true", help="writes confined to the target (sandboxed)")
     run.add_argument("--lean", metavar="GOAL", help=argparse.SUPPRESS)  # refused: Lean work is brokered only
+    run.add_argument("--model", choices=ALLOWED_MODELS, default=M.PINNED_MODEL)
     run.add_argument("--effort", choices=EFFORTS, default=M.DEFAULT_EFFORT)
     run.add_argument("--timeout-seconds", type=_positive, default=M.DEFAULT_TIMEOUT_SECONDS)
     run.set_defaults(func=cmd_run)
@@ -173,6 +174,7 @@ def register(commands: Any) -> None:
                        ("resume", "attach a new brokered session to a recorded Muse session")):
         item = sub(name, text)
         if name == "start":
+            item.add_argument("--model", choices=ALLOWED_MODELS, default=M.PINNED_MODEL)
             item.add_argument("--episode", help="predeclared model-fit episode; automatic run capture")
             item.add_argument("--fit-dir", help="model-fit directory; defaults to configured goal store")
             item.add_argument("--brief", required=True, help="brief file, or - for stdin")

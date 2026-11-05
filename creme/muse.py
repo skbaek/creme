@@ -1,6 +1,6 @@
 """Muse pseudo-subagents: bounded, model-pinned Muse sessions a Creme master drives.
 
-``python3 -m creme muse`` hands a brief to Muse (``muse-spark-1.3``, never a
+``python3 -m creme muse`` hands a brief to Muse (an explicit allowed release, never a
 ``contributor`` variant) and keeps the run bounded. ``status`` and ``run`` live
 here; the brokered, steerable sessions (``start``/``send``/``steer``/...) live
 in ``creme.muse_broker`` and use the same host and guard.
@@ -47,8 +47,8 @@ from . import pseudo_broker as PB
 from .codex_app_server import AppServerError, PinViolation
 from .muse_log import DurableLog
 from .muse_client import (
-    EFFORTS, PINNED_MODEL, ApprovalDecision, MuseGuard, MuseServeProcess, TurnOutcome, audit_session_log,
-    decide_approval, describe_approval, log_length, model_failures, pinned_catalogue_route, receipt_handler, uuid7,
+    ALLOWED_MODELS, EFFORTS, PINNED_MODEL, ApprovalDecision, MuseGuard, MuseServeProcess, TurnOutcome, audit_session_log,
+    decide_approval, describe_approval, log_length, pinned_catalogue_route, receipt_handler, selection_failures, uuid7,
 )
 
 BINARY_ENV = "CREME_MUSE_BIN"
@@ -58,7 +58,7 @@ DEFAULT_BINARY = Path("~/.local/bin/muse")
 PREAMBLE_RELATIVE = Path("templates/muse/preamble.md")
 LEAN_PREAMBLE_RELATIVE = Path("templates/muse/lean-preamble.md")
 TRIPWIRE_NAME = "MODEL_PIN_FAILURE"
-STOP_MESSAGE = ("MODEL PIN FAILURE: Muse served or selected a model other than muse-spark-1.3. "
+STOP_MESSAGE = ("MODEL PIN FAILURE: Muse served or selected a model other than its requested session pin. "
                 "Stop using Muse pseudo-subagents and tell the user.")
 
 EXIT_OK = 0
@@ -494,7 +494,11 @@ class MuseHost:
 
     def __init__(self, record_dir: Path, target: Path, mode: str, effort: str, environ: dict,
                  lean_goal: Optional[str] = None, session_id: Optional[str] = None,
-                 server_request_handler: Callable = receipt_handler) -> None:
+                 server_request_handler: Callable = receipt_handler, model: str = PINNED_MODEL) -> None:
+        failures = selection_failures(model)
+        if failures:
+            raise PinViolation(failures[0])
+        self.model = model
         self.dir = record_dir
         self.target = target.resolve()
         self.mode = mode
@@ -559,7 +563,7 @@ class MuseHost:
                             "serve_flags": flags}
         if result.get("sessionDurability") not in (None, "durable"):
             return [f"muse serve host is {result.get('sessionDurability')}; resume needs durable sessions"]
-        self.guard = MuseGuard(self.process, str(self.session_id), self.effort, self.mode, self.lean_goal)
+        self.guard = MuseGuard(self.process, str(self.session_id), self.effort, self.mode, self.lean_goal, model=self.model)
         resumed = self.guard.command("session/resume", {"excludeItems": True}, timeout=120) or {}
         self.view_cursor = resumed.get("viewCursor") or self.view_head()
         session = resumed.get("session") or {}
@@ -861,7 +865,7 @@ def finalize_durable(host: "MuseHost", outcome: TurnOutcome, errors: list[str]) 
     for attempt in range(3):
         host.durable.poll()
         logged = host.durable.terminal(outcome.turn_id)
-        totals, usage_error = host.durable.usage(outcome.turn_id, PINNED_MODEL)
+        totals, usage_error = host.durable.usage(outcome.turn_id, host.model)
         if host.durable.error:
             break  # unreadable or malformed evidence fails closed at this boundary
         # Use the full bounded window even when earlier usage/text already exist:
@@ -881,11 +885,11 @@ def finalize_durable(host: "MuseHost", outcome: TurnOutcome, errors: list[str]) 
         text = select_last_message(turn_messages(host.durable, outcome.turn_id))
         if text is not None:
             outcome.final_message = text
-        totals, usage_error = host.durable.usage(outcome.turn_id, PINNED_MODEL)
+        totals, usage_error = host.durable.usage(outcome.turn_id, host.model)
         if totals is not None:
             outcome.tokens = totals  # authoritative replacement; repeated finalization is idempotent
-            if all(model == PINNED_MODEL for model in outcome.models):
-                outcome.models = {PINNED_MODEL: totals["completions"]}
+            if all(model == host.model for model in outcome.models):
+                outcome.models = {host.model: totals["completions"]}
         if outcome.status == "completed":
             failure = usage_error or ("durable final assistant text is missing" if text is None else None)
     if failure:
@@ -965,10 +969,10 @@ def handle_approval(host: MuseHost, params: dict, turn: TurnState, emit: Callabl
 
 
 def verdict_for(outcome: Optional[TurnOutcome], audit: dict, guard_failures: list[str], errors: list[str],
-                timed_out: bool, git_failure: Optional[str]) -> str:
+                timed_out: bool, git_failure: Optional[str], model: str = PINNED_MODEL) -> str:
     models = (outcome.models if outcome else {}) or {}
     pin_failures = list(guard_failures) + list(audit.get("failures") or [])
-    if any(model != PINNED_MODEL for model in models):
+    if any(observed != model for observed in models):
         pin_failures.append(f"observed models {sorted(models)}")
     if outcome is not None and outcome.unattributed_usage and not audit.get("attributed"):
         # Model-less usage for this turn, and the durable log names no pinned completion of it.
@@ -1002,13 +1006,13 @@ def status(module_root: Path, environ: Optional[dict] = None) -> tuple[int, dict
         env, scrubbed = child_environment(environ)
         stream_idle = stream_idle_timeout_seconds(environ)
     except MuseError as exc:
-        report: dict = {"binary": str(binary), "state": str(state), "pinned_model": PINNED_MODEL,
+        report: dict = {"binary": str(binary), "state": str(state), "pinned_model": PINNED_MODEL, "allowed_models": list(ALLOWED_MODELS),
                         "tripwire": tripwire_path(state).exists(), "scrubbed_env": [],
                         "postures": {mode: {"profile": PROFILES[mode], "serve_flags": list(SERVE_FLAGS[mode]),
                                             "approval_mode": "promptUnmatched"} for mode in MODES}}
         report.update(verdict="REFUSED", reasons=[str(exc)])
         return EXIT_PREFLIGHT_REFUSED, report
-    report = {"binary": str(binary), "state": str(state), "pinned_model": PINNED_MODEL,
+    report = {"binary": str(binary), "state": str(state), "pinned_model": PINNED_MODEL, "allowed_models": list(ALLOWED_MODELS),
               "tripwire": tripwire_path(state).exists(), "scrubbed_env": scrubbed,
               "stream_idle_timeout_secs": stream_idle,
               "postures": {mode: {"profile": PROFILES[mode], "serve_flags": list(SERVE_FLAGS[mode]),
@@ -1039,20 +1043,25 @@ def status(module_root: Path, environ: Optional[dict] = None) -> tuple[int, dict
     report["models"] = [{"modelId": row.get("modelId"), "isDefault": row.get("isDefault"),
                          "providerId": row.get("providerId"), "profileId": row.get("profileId"),
                          "variants": row.get("variants")} for row in rows]
-    try:
-        report["pinned_route"] = pinned_catalogue_route(listing)
-    except AppServerError as exc:
-        reasons.append(str(exc))
-    pinned = next((row for row in rows if row.get("modelId") == PINNED_MODEL), None)
-    default = next((row.get("modelId") for row in rows if row.get("isDefault")), None)
-    report["catalogue_default"] = default
-    if pinned is None:
-        reasons.append(f"{PINNED_MODEL} is not in model/list")
-    else:
-        missing = [effort for effort in EFFORTS if effort not in (pinned.get("variants") or [])]
-        if missing:
-            reasons.append(f"{PINNED_MODEL} lacks efforts {missing}")
-    reasons += model_failures(PINNED_MODEL, "pin")   # the constant itself must never be a contributor id
+    report["allowed_routes"] = []
+    for model in ALLOWED_MODELS:
+        route = {"modelId": model, "available": False}
+        try:
+            route.update(pinned_catalogue_route(listing, model=model))
+            row = next(row for row in rows if row.get("modelId") == model)
+            route["variants"] = row.get("variants") or []
+            missing = [effort for effort in EFFORTS if effort not in route["variants"]]
+            if missing:
+                raise AppServerError(f"{model} lacks efforts {missing}")
+            route["available"] = True
+        except AppServerError as exc:
+            route["reason"] = str(exc)
+            if model == PINNED_MODEL:
+                reasons.append(str(exc))
+        report["allowed_routes"].append(route)
+        if model == PINNED_MODEL and route["available"]:
+            report["pinned_route"] = {key: route[key] for key in ("modelId", "providerId", "profileId")}
+    report["catalogue_default"] = next((row.get("modelId") for row in rows if row.get("isDefault")), None)
     reasons += usage_refusals(report.get("usage"))
     if report["tripwire"]:
         reasons.append(f"model-pin failure tripwire present: {tripwire_path(state)}")
@@ -1079,6 +1088,10 @@ def format_status(report: dict) -> str:
         f"lean_mcp={report.get('lean_mcp') if isinstance(report.get('lean_mcp'), str) else 'FAIL'} "
         f"tripwire={'PRESENT' if report.get('tripwire') else 'absent'}",
     ]
+    for route in report.get("allowed_routes") or []:
+        lines.append(f"allowed model={route['modelId']} available={route['available']} "
+                     f"provider={route.get('providerId')} profile={route.get('profileId')} "
+                     f"efforts={route.get('variants')}" + (f" reason={route['reason']}" if route.get("reason") else ""))
     for mode, posture in (report.get("postures") or {}).items():
         lines.append(f"posture {mode}: profile={posture['profile']} serve={' '.join(posture['serve_flags'])} "
                      f"approval={posture['approval_mode']}")
@@ -1100,6 +1113,7 @@ class RunRequest:
     effort: str = DEFAULT_EFFORT
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     lean_goal: Optional[str] = None
+    model: str = PINNED_MODEL
 
 
 def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
@@ -1108,7 +1122,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
     state = state_root(module_root, environ)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_id = f"{stamp}-{secrets.token_hex(3)}"
-    summary: dict = {"run": run_id, "mode": request.mode, "effort": request.effort, "model": PINNED_MODEL,
+    summary: dict = {"run": run_id, "mode": request.mode, "effort": request.effort, "model": request.model,
                      "target": str(request.target)}
     try:
         summary["stream_idle_timeout_secs"] = stream_idle_timeout_seconds(environ)
@@ -1117,6 +1131,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
         return EXIT_PREFLIGHT_REFUSED, summary
     refusals = early_refusals(state, request.effort, request.brief, module_root, str(request.target),
                               request.mode, request.lean_goal)
+    refusals += selection_failures(request.model)
     refusals += quota_reset_refusals(state, now)
     if request.lean_goal is not None:
         refusals.append("run has no Lean mode; use a brokered `start --lean GOAL` session")
@@ -1137,7 +1152,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
                                  "text": PB.one_line(text, 400)}) + "\n")
         events.flush()
 
-    host = MuseHost(run_dir, target, request.mode, request.effort, environ)
+    host = MuseHost(run_dir, target, request.mode, request.effort, environ, model=request.model)
     turn = TurnState()
     outcome: Optional[TurnOutcome] = None
     timed_out = False
@@ -1280,7 +1295,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
             note_terminal_reason(state, errors, host.durable.terminal(outcome.turn_id),
                                  outcome.error if isinstance(outcome.error, str) else None)
         audit = audit_session_log(host.log_path, host.log_start, outcome.turn_id if outcome else None,
-                                  host.session_id)
+                                  host.session_id, request.model)
     except PinViolation as exc:
         errors.append(f"pin violation: {exc}")
     except (AppServerError, MuseError, OSError) as exc:
@@ -1298,7 +1313,7 @@ def run(module_root: Path, request: RunRequest, environ: Optional[dict] = None,
         if request.mode == "read-only" and git_after != git_before:
             git_failure = "read-only run changed the target's HEAD or porcelain status"
     verdict = verdict_for(outcome, audit, guard_failures, [e for e in errors if not e.startswith("pin")],
-                          timed_out, git_failure)
+                          timed_out, git_failure, request.model)
     if outcome is not None and outcome.final_message is not None:
         _write(run_dir / "last-message.md", outcome.final_message.rstrip("\n") + "\n")
     committed = turn_messages(host.durable, outcome.turn_id) if outcome is not None else []

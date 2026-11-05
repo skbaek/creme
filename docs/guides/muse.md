@@ -12,11 +12,15 @@ uses one recipe for both.
 - **On user instruction, like Luna reserve and Antigravity.** The user
   instructed use on 2026-09-28: for model-fit calibration and to save Claude
   tokens. It is not a fallback when another client is busy.
-- **One model: `muse-spark-1.3`.** Every session is pinned to it explicitly.
-  A model id containing `contributor` is never selected, and the server's
-  catalogue default *is* the contributor variant (its content may be used for
-  product improvement), so an omitted model anywhere is a bug. Any served-model
-  evidence of another model (`session/modelChanged`, `session/tokenUsage`,
+- **Explicit session model pins.** Allowed releases are `muse-spark-1.3`,
+  `muse-wonder-1.0`, and `muse-wonder-full-1.0`. Creme defaults to Spark for
+  compatibility; `start --model MODEL` and `run --model MODEL` select Wonder
+  or Full explicitly. Each session persists its own exact release, and resume
+  restores that pin. A model id containing `contributor` is never selected
+  (its content may be used for product improvement). Catalogue defaults are
+  never used, including the Wonder default advertised by Muse 1.4.14. Any
+  served-model evidence differing from that session's requested pin
+  (`session/modelChanged`, `session/tokenUsage`,
   `session/modelRouteUnserved`, the durable session log) fails the turn closed,
   records the `MODEL_PIN_FAILURE` tripwire, and stops every session. Clearing
   it is an explicit master action after reviewing the run (see
@@ -35,7 +39,9 @@ work in a Lean-mode session (a named edit, a diagnostics sweep, a narrow
 build). Poor fits: anything needing the network, hard proof strategy, or work
 whose correctness the master cannot cheaply confirm. Effort comes from the
 [episode runtime](model-fit.md) (`start --episode ID`; routes `muse-broker`,
-`muse-run`); `$GOAL_STORE/model-fit/muse.md` is historical. As a cold default,
+`muse-run`); model-fit families are `muse-spark`, `muse-wonder`, and
+`muse-wonder-full`, and receipts retain the exact actual release.
+`$GOAL_STORE/model-fit/muse.md` is historical. As a cold default,
 start read-only work at `low` or `medium` and write or Lean work at `high`.
 
 ## Commands
@@ -43,8 +49,10 @@ start read-only work at `low` or `medium` and write or Lean work at `high`.
 ```sh
 python3 -m creme muse status [--json]
 python3 -m creme muse run --brief FILE|- --target DIR [--write] \
+    [--model muse-spark-1.3|muse-wonder-1.0|muse-wonder-full-1.0] \
     [--effort minimal|low|medium|high|xhigh|max] [--timeout-seconds N] [--json]
 python3 -m creme muse start --brief FILE|- --target DIR [--write | --lean GOAL] \
+    [--model muse-spark-1.3|muse-wonder-1.0|muse-wonder-full-1.0] \
     [--effort E] [--detail silent|summary|live] [--timeout-seconds N]
 python3 -m creme muse send SESSION (--text TEXT | --brief FILE|-)
 python3 -m creme muse steer SESSION (--text TEXT | --brief FILE|-)
@@ -65,17 +73,18 @@ and steers a running one, `steer` only steers, `wait` blocks until idle, an
 approval is pending, or the session ended, and every command prints a few
 bounded lines (`--json` prints the full record). `resume` attaches a new broker
 session to a Muse session this state directory recorded, with the same target,
-mode (its permission profile was fixed at bootstrap), and pins; `--effort`
-may change the effort. `run` is one turn with no master to ask and has no
-Lean mode.
+mode (its permission profile was fixed at bootstrap), and recorded model pin;
+`--effort` may change the effort. Model changes require a new session. `run` is
+one turn with no master to ask and has no Lean mode.
 
 Exit codes: `0` pass, `10` refused before any model call, `11` Muse failure
 (turn failed, timed out, host lost, or a read-only target changed), `12`
 model-pin failure (tripwire recorded: stop and tell the user), and for `wait`
 also `20` (approval pending), `21` (interrupted), `124` (timeout).
 
-`status` spends no model tokens: binary and version, `model/list` (the pin
-present with every effort, and which row is the catalogue default, never used),
+`status` spends no model tokens: binary and version, `model/list` (each
+allowed release's exact provider/profile route, available efforts and availability,
+and which row is the catalogue default, never used),
 `usage/read`, the Lean MCP definition check, and the fixed posture of each mode.
 
 ## How a session is built
@@ -96,8 +105,8 @@ store report `reports/creme-muse-pseudo-v1.md`):
    durable, so `session/resume` on a serve host reuses it.
 2. **Attach and pin.** A `muse serve` host with the mode's sandbox flags
    resumes the session. The guard reads `model/list` and requires exactly one
-   `muse-spark-1.3` row with provider `meta`, an explicit profile route field, and the
-   requested effort. It sends that row's route in `session/setModel`, including
+   row for the session's requested release with provider `meta`, an explicit
+   profile route field, and the requested effort. It sends that row's route in `session/setModel`, including
    a null profile when advertised; catalogue-level context fields and defaults
    are never route fallbacks. Missing, ambiguous, or contributor routes refuse
    before model selection. The guard then sends `session/setApprovalMode`
@@ -106,6 +115,11 @@ store report `reports/creme-muse-pseudo-v1.md`):
    the effort, and `session/read` must report the pin and the approval mode.
    Only then may a turn start. `turn/start` and `turn/steer` carry the effort
    explicitly (MSP turns carry no model field; the model is the session's).
+   Muse 1.4.14 advertises the three allowed releases with profile `tbh`; the
+   explicit row remains authoritative if a supported version advertises null.
+   Concurrent sessions may use different pins. A live broker running older
+   code refuses new starts until its sessions are stopped; it cannot silently
+   replace a requested Wonder route with its former Spark default.
 3. **Environment.** The Muse child's environment drops `MUSE_*` (including
    `MUSE_MODEL`), `TBH_*`, `META_*`, and other providers' keys, and sets
    `MUSE_NO_AUTO_UPDATE=1` so the launcher never swaps the binary under a

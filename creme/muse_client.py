@@ -20,8 +20,8 @@ or a native subagent is a guard failure. ``decide_approval`` is the broker's
 approval allowlist; ``audit_session_log`` re-reads the durable session log
 after each turn.
 
-The module names the pinned model once (``PINNED_MODEL``); nothing here falls
-back to a server default, because the server's default is a contributor model.
+Each guard owns one explicit model from ``ALLOWED_MODELS``; nothing here falls
+back to a server default. ``PINNED_MODEL`` remains the compatibility default.
 """
 
 from __future__ import annotations
@@ -39,7 +39,13 @@ from typing import Any, Callable, Optional
 from . import luna_lean
 from .codex_app_server import AppServerError, AppServerProcess, PinViolation
 
-PINNED_MODEL = "muse-spark-1.3"
+PINNED_MODEL = "muse-spark-1.3"  # compatibility default, never a process-global session pin
+MODEL_FAMILIES = {
+    PINNED_MODEL: "muse-spark",
+    "muse-wonder-1.0": "muse-wonder",
+    "muse-wonder-full-1.0": "muse-wonder-full",
+}
+ALLOWED_MODELS = tuple(MODEL_FAMILIES)
 PINNED_PROVIDER = "meta"
 # The catalogue's effort ladder for the pinned model; admission re-checks it
 # against the live ``model/list`` variants.
@@ -47,16 +53,19 @@ EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 CLIENT_NAME = "creme_muse"
 
 
-def pinned_catalogue_route(listing: dict, effort: Optional[str] = None) -> dict:
+def pinned_catalogue_route(listing: dict, effort: Optional[str] = None, model: str = PINNED_MODEL) -> dict:
     """Use the exact model row's route, never the catalogue's context/default.
 
     Muse 1.4.2 advertises profileId=null on the pin even when the catalogue
     context says tbh. Null is an explicit route value, not a missing field.
     """
+    failures = selection_failures(model)
+    if failures:
+        raise AppServerError(failures[0])
     rows = [row for row in listing.get("models") or []
-            if isinstance(row, dict) and row.get("modelId") == PINNED_MODEL]
+            if isinstance(row, dict) and row.get("modelId") == model]
     if len(rows) != 1:
-        raise AppServerError(f"pinned catalogue route requires exactly one {PINNED_MODEL} row; found {len(rows)}")
+        raise AppServerError(f"pinned catalogue route requires exactly one {model} row; found {len(rows)}")
     row = rows[0]
     provider, profile = row.get("providerId"), row.get("profileId")
     if (provider != PINNED_PROVIDER or "profileId" not in row
@@ -64,8 +73,8 @@ def pinned_catalogue_route(listing: dict, effort: Optional[str] = None) -> dict:
             or any(_CONTRIBUTOR.search(value) for value in (provider, profile) if isinstance(value, str))):
         raise AppServerError("pinned catalogue route is missing or unsafe; no default route may be used")
     if effort is not None and effort not in (row.get("variants") or []):
-        raise AppServerError(f"effort {effort} is not offered for {PINNED_MODEL}")
-    return {"modelId": PINNED_MODEL, "providerId": provider, "profileId": profile}
+        raise AppServerError(f"effort {effort} is not offered for {model}")
+    return {"modelId": model, "providerId": provider, "profileId": profile}
 
 # Session approval modes (MSP ``ApprovalMode``). Every pseudo-subagent session
 # uses ``promptUnmatched`` so that each unmatched action reaches the broker's
@@ -95,13 +104,25 @@ def uuid7() -> str:
     return str(uuid.UUID(bytes=bytes(raw)))
 
 
-def model_failures(model: Any, where: str) -> list[str]:
+def selection_failures(model: Any) -> list[str]:
+    """Only exact authorized releases can become a session pin."""
+    if isinstance(model, str) and _CONTRIBUTOR.search(model):
+        return [f"contributor model {model!r} (never permitted)"]
+    if model not in ALLOWED_MODELS:
+        return [f"model {model!r} is not one of {', '.join(ALLOWED_MODELS)}"]
+    return []
+
+
+def model_failures(model: Any, where: str, pinned_model: str = PINNED_MODEL) -> list[str]:
     """Why a served or requested model id is not the pin (empty when it is)."""
-    if model == PINNED_MODEL:
+    invalid_pin = selection_failures(pinned_model)
+    if invalid_pin:
+        return [f"{where}: invalid session pin: {invalid_pin[0]}"]
+    if model == pinned_model:
         return []
     if isinstance(model, str) and _CONTRIBUTOR.search(model):
         return [f"{where}: contributor model {model!r} (never permitted)"]
-    return [f"{where}: model {model!r} is not the pinned {PINNED_MODEL}"]
+    return [f"{where}: model {model!r} is not the pinned {pinned_model}"]
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +279,11 @@ class MuseGuard:
     """Pins and checks every MSP request and notification of one Muse session."""
 
     def __init__(self, process: AppServerProcess, session_id: str, effort: str, mode: str,
-                 lean_goal: Optional[str] = None) -> None:
+                 lean_goal: Optional[str] = None, model: str = PINNED_MODEL) -> None:
+        failures = selection_failures(model)
+        if failures:
+            raise PinViolation(failures[0])
+        self.model = model
         if effort not in EFFORTS:
             raise PinViolation(f"effort {effort!r} is not one of {EFFORTS}")
         self.process = process
@@ -281,7 +306,7 @@ class MuseGuard:
             raise PinViolation(f"{method} names another session")
         if method == "session/setModel":
             model = (params.get("model") or {}).get("modelId")
-            failures = model_failures(model, "session/setModel")
+            failures = model_failures(model, "session/setModel", self.model)
             if failures:
                 raise PinViolation(failures[0])
         elif method == "session/setApprovalMode":
@@ -311,7 +336,7 @@ class MuseGuard:
     def pin(self) -> list[str]:
         """Select the pinned model, the approval mode, and the effort; return failures of the read-back."""
         listing = self.request("model/list", {"sessionId": self.session_id}) or {}
-        self.command("session/setModel", {"model": pinned_catalogue_route(listing, self.effort)})
+        self.command("session/setModel", {"model": pinned_catalogue_route(listing, self.effort, self.model)})
         self.command("session/setApprovalMode", {"mode": APPROVAL_MODE})
         self.command("session/setReasoningEffort", {"reasoningEffort": self.effort})
         return self.verify_pins()
@@ -323,12 +348,12 @@ class MuseGuard:
         if len(active) != 1:
             failures.append(f"model/list shows {len(active)} active models; exactly the pin is required")
         for row in active:
-            failures += model_failures(row.get("modelId"), "model/list active row")
+            failures += model_failures(row.get("modelId"), "model/list active row", self.model)
             if self.effort not in (row.get("variants") or []):
                 failures.append(f"effort {self.effort} is not offered for {row.get('modelId')}")
         read = self.request("session/read", {"sessionId": self.session_id}) or {}
         session = read.get("session") or {}
-        failures += model_failures(session.get("modelId"), "session/read")
+        failures += model_failures(session.get("modelId"), "session/read", self.model)
         mode = (session.get("approvalMode") or {}).get("mode")
         if mode != APPROVAL_MODE:
             failures.append(f"session approval mode is {mode!r}, not {APPROVAL_MODE}")
@@ -393,7 +418,7 @@ class MuseGuard:
         self.models_seen[str(model)] = self.models_seen.get(str(model), 0) + 1
         if self.outcome is not None:
             self.outcome.models[str(model)] = self.outcome.models.get(str(model), 0) + 1
-        failures = model_failures(model, where)
+        failures = model_failures(model, where, self.model)
         for failure in failures:
             self.fail(failure)
         return failures
@@ -497,7 +522,7 @@ def _run_id(record: dict) -> Optional[str]:
 
 
 def audit_session_log(path: Optional[Path], start_line: int, turn_id: Optional[str] = None,
-                      session_id: Optional[str] = None) -> dict:
+                      session_id: Optional[str] = None, pinned_model: str = PINNED_MODEL) -> dict:
     """Positive attribution from the durable session log after ``start_line``.
 
     * Every model id the log names must be the pin, except the literal
@@ -533,20 +558,20 @@ def audit_session_log(path: Optional[Path], start_line: int, turn_id: Optional[s
             if isinstance(kind, str) and kind.endswith("child_session_linked") \
                     and (event.get("parent_session_id") or payload.get("parent_session_id")) == session_id:
                 result["child_links"] += 1
-            if kind == "model_completed" and (event.get("model") or payload.get("model")) == PINNED_MODEL:
+            if kind == "model_completed" and (event.get("model") or payload.get("model")) == pinned_model:
                 result["attributed_any"] += 1
             if turn_id is not None and payload.get("kind") == "run" and kind == "model_completed" \
                     and payload.get("run_id") == turn_id:
                 result["completions"] += 1
                 model = event.get("model") or payload.get("model")
-                if model == PINNED_MODEL:
+                if model == pinned_model:
                     result["attributed"] += 1
                 elif model is None:
                     result["unattributed"] += 1
     for model in result["models"]:
         if model == "same-as-main":
             continue
-        result["failures"] += model_failures(model, "session log")
+        result["failures"] += model_failures(model, "session log", pinned_model)
     if result["models"].get("same-as-main") and not result["child_links"] and not result["attributed_any"]:
         result["failures"].append("same-as-main appears with no child link to this session and no pinned "
                                   "completion; its model cannot be attributed")

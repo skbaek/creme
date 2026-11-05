@@ -86,7 +86,8 @@ CLIENTS: dict[str, Client] = {
         name="muse",
         prefix="mu",
         title="Muse",
-        families={"muse-spark": ("none", "minimal", "low", "medium", "high", "xhigh", "max")},
+        families={family: ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+                  for family in ("muse-spark", "muse-wonder", "muse-wonder-full")},
         routes={
             "muse-worker": "worker inheriting its Muse master's session route",
             "muse-session": "a separate Muse session launched at the named route",
@@ -124,6 +125,8 @@ def default_weights(client: Any) -> dict[str, Any]:
         "luna": 1.0,
         "luna-reserve": 0.2,
         "muse-spark": 1.0,
+        "muse-wonder": 1.0,  # uncalibrated; no measured relative cost yet
+        "muse-wonder-full": 1.0,
         "gemini-3.8-flash": 1.0,
         # Uncalibrated prior (2026-10-18); Argon has its own weekly-only pool.
         "gemini-4-argon": 4.0,

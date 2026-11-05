@@ -38,7 +38,7 @@ from . import luna_lean
 from . import muse as M
 from . import pseudo_broker as PB
 from .codex_app_server import AppServerError, PinViolation
-from .muse_client import EFFORTS, PINNED_MODEL, audit_session_log, uuid7
+from .muse_client import EFFORTS, MODEL_FAMILIES, PINNED_MODEL, audit_session_log, selection_failures, uuid7
 
 TERMINAL_STATES = ("stopped", "refused", "failed", "tripped", "lost", "unclean")
 OPEN_STATES = ("starting", "idle", "running", "stopping")
@@ -58,7 +58,7 @@ _MUSE_SESSION = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f
 def code_digest(module_root: Path) -> str:
     return PB.file_digest(module_root, (
         "creme/muse_broker.py", "creme/muse.py", "creme/muse_client.py", "creme/pseudo_broker.py", "creme/model_fit_adapters.py", "creme/model_fit_runtime.py",
-        "creme/model_fit_episodes.py", "creme/model_fit_capture.py",
+        "creme/model_fit.py", "creme/model_fit_episodes.py", "creme/model_fit_capture.py",
         "creme/codex_app_server.py", "creme/luna_lean.py", "templates/muse/preamble.md",
         "templates/muse/lean-preamble.md", "templates/shared/library-first.md"))
 
@@ -126,7 +126,7 @@ class MuseSession(PB.SessionRecord):
         PB.private_dir(self.dir)
         self.set_state("starting")
         host = M.MuseHost(self.dir, Path(record["target"]), record["mode"], record["effort"], self.broker.environ,
-                          (record.get("lean") or {}).get("goal"), session_id=resume)
+                          (record.get("lean") or {}).get("goal"), session_id=resume, model=record["model"])
         self.host = host
         try:
             if resume is None:
@@ -154,7 +154,7 @@ class MuseSession(PB.SessionRecord):
         self.tracker = M.ViewTracker(host.view_cursor)
         self.set_state("idle")
         self.emit("attention" if not brief else "live", "opened",
-                  f"muse session {host.session_id} {'resumed' if resume else 'started'} model={PINNED_MODEL} "
+                  f"muse session {host.session_id} {'resumed' if resume else 'started'} model={record['model']} "
                   f"effort={record['effort']} mode={record['mode']}")
         self.pump_thread = threading.Thread(target=self.pump, name=f"pump-{self.id}", daemon=True)
         self.pump_thread.start()
@@ -312,7 +312,8 @@ class MuseSession(PB.SessionRecord):
             M.finalize_durable(self.host, outcome, errors)
             M.note_terminal_reason(self.broker.state, errors, self.host.durable.terminal(outcome.turn_id),
                                    outcome.error if isinstance(outcome.error, str) else None)
-            audit = audit_session_log(self.host.log_path, self.host.log_start, outcome.turn_id, self.host.session_id)
+            audit = audit_session_log(self.host.log_path, self.host.log_start, outcome.turn_id, self.host.session_id,
+                                      self.host.model)
             PB.write_private_json(turn_dir / "audit.json", audit)
             PB.write_private_json(turn_dir / "approvals.json", state.approvals)
             git_failure = None
@@ -324,7 +325,8 @@ class MuseSession(PB.SessionRecord):
                 M._write(last_message, outcome.final_message.rstrip("\n") + "\n")
             messages_path = M.write_messages(turn_dir / "messages.md",
                                              M.turn_messages(self.host.durable, outcome.turn_id))
-            verdict = M.verdict_for(outcome, audit, list(outcome.guard_failures), errors, self.timed_out, git_failure)
+            verdict = M.verdict_for(outcome, audit, list(outcome.guard_failures), errors, self.timed_out,
+                                    git_failure, self.host.model)
             failures = list(outcome.guard_failures) + list(audit.get("failures") or [])
             with self.data_lock:
                 turn.update({
@@ -695,7 +697,8 @@ class MuseSession(PB.SessionRecord):
                     self.record["turns"][-1].update({"status": "abandoned", "verdict": "FAILED",
                                                      "errors": ["no completion after interrupt at stop"]})
                 self.guard.finish_turn()
-            audit = audit_session_log(self.host.log_path, self.host.log_start, None, self.host.session_id)
+            audit = audit_session_log(self.host.log_path, self.host.log_start, None, self.host.session_id,
+                                      self.host.model)
             PB.write_private_json(self.dir / "stop-audit.json", audit)
             self.closed = True
             self.host.close()
@@ -922,6 +925,7 @@ class Broker:
         lean_goal = request.get("lean")
         mode = "lean" if lean_goal is not None else ("write" if request.get("write") else "read-only")
         effort = request.get("effort") or M.DEFAULT_EFFORT
+        model = request.get("model", PINNED_MODEL)
         resume: Optional[str] = None
         prior: Optional[dict] = None
         refusals: list[str] = []
@@ -939,6 +943,9 @@ class Broker:
                 if target is not None and Path(str(target)).expanduser().resolve() != Path(prior["target"]):
                     refusals.append("resume keeps the recorded target")
                 target = prior["target"]
+                model = prior.get("model")
+                if request.get("model") is not None and request["model"] != model:
+                    refusals.append("resume keeps the recorded model pin")
                 recorded_mode = prior.get("mode")
                 if request.get("mode_explicit") and mode != recorded_mode:
                     refusals.append(f"resume keeps the recorded mode {recorded_mode}; the session's permission "
@@ -950,6 +957,7 @@ class Broker:
                 if any(session.is_open() and session.record.get("muse_session") == resume
                        for session in self.sessions.values()):
                     refusals.append(f"Muse session {resume} is already open in this broker")
+        refusals += selection_failures(model)
         if target is None:
             refusals.append("no target")
         else:
@@ -972,7 +980,7 @@ class Broker:
             "detail": detail, "broker_instance": self.instance, "turns": [], "pending_approvals": [],
             "last_event": None, "last_attention_seq": 0, "resumed_from": (prior or {}).get("id"),
             "turn_timeout_seconds": int(request.get("turn_timeout_seconds") or M.DEFAULT_TIMEOUT_SECONDS),
-            "model": PINNED_MODEL, "profile": M.PROFILES[mode], "serve_flags": list(M.SERVE_FLAGS[mode]),
+            "model": model, "profile": M.PROFILES[mode], "serve_flags": list(M.SERVE_FLAGS[mode]),
         }
         if lean_goal is not None:
             record["lean"] = {"goal": str(lean_goal)}
@@ -993,7 +1001,7 @@ class Broker:
             self.sessions[session_id] = session
         code, result = session.open(brief, resume)
         return {"ok": code == 0, "code": code, "session": session_id, "state": session.state,
-                "muse_session": record.get("muse_session"), "mode": mode, "effort": effort, "detail": detail,
+                "muse_session": record.get("muse_session"), "mode": mode, "effort": effort, "model": model, "detail": detail,
                 "resumed_from": record.get("resumed_from"), "lean": lean_goal, **result}
 
     def lean_admission(self, goal: str, target: Path, record: dict) -> list[str]:
@@ -1121,7 +1129,7 @@ def _open_output(answer: dict) -> tuple[int, list[str], dict]:
     if not answer.get("session"):
         return code, PB.refusal_lines(SPEC, answer), answer
     lines = [f"session={answer['session']} state={answer.get('state')} muse_session={answer.get('muse_session')} "
-             f"mode={answer.get('mode')} effort={answer.get('effort')} model={PINNED_MODEL} "
+             f"mode={answer.get('mode')} effort={answer.get('effort')} model={answer.get('model')} "
              f"detail={answer.get('detail')}" + (f" lean={answer['lean']}" if answer.get("lean") else "")
              + (f" resumed_from={answer['resumed_from']}" if answer.get("resumed_from") else "")]
     if code == 0:
@@ -1145,9 +1153,14 @@ def _client_refusals(module_root: Path, environ: dict, effort: str, brief: Optio
 
 
 def cmd_start(module_root: Path, environ: dict, brief: str, target: str, write: bool, effort: str, detail: str,
-              turn_timeout_seconds: int, lean: Optional[str] = None, model_fit: Optional[dict] = None) -> tuple[int, list[str], dict]:
-    if model_fit and model_fit.get("option") != "muse-spark/" + effort:
-        raise ValueError("model-fit proposal differs from requested broker effort")
+              turn_timeout_seconds: int, lean: Optional[str] = None, model_fit: Optional[dict] = None,
+              model: str = PINNED_MODEL) -> tuple[int, list[str], dict]:
+    model_refusals = selection_failures(model)
+    if model_refusals:
+        answer = {"ok": False, "code": M.EXIT_PREFLIGHT_REFUSED, "verdict": "REFUSED", "refusals": model_refusals}
+        return answer["code"], PB.refusal_lines(SPEC, answer), answer
+    if model_fit and model_fit.get("option") != MODEL_FAMILIES[model] + "/" + effort:
+        raise ValueError("model-fit proposal differs from requested broker model/effort")
     mode = "lean" if lean is not None else ("write" if write else "read-only")
     refused = _client_refusals(module_root, environ, effort, brief, target, mode, lean)
     if refused:
@@ -1156,7 +1169,7 @@ def cmd_start(module_root: Path, environ: dict, brief: str, target: str, write: 
     if model_fit:
         arguments["model_fit"] = model_fit
     return _open_output(_call(module_root, environ, "start", True, brief=brief, target=target, write=write,
-                              effort=effort, detail=detail, turn_timeout_seconds=turn_timeout_seconds, **arguments))
+                              effort=effort, model=model, detail=detail, turn_timeout_seconds=turn_timeout_seconds, **arguments))
 
 
 def cmd_resume(module_root: Path, environ: dict, muse_session: str, target: Optional[str], write: bool,

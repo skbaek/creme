@@ -3,9 +3,10 @@
 One agent session at a time represents the user for all Jaune and Blanc work
 on a host. The user talks to it about what to build, asks it for status, and
 answers the few decisions it cannot resolve. Everything below that level —
-goals, briefs, branches, worktrees, gates, merges, pushes, and the procedures
-that make them safe — is the master's job and is not surfaced to the user
-unless the master needs a decision only the user can make.
+goals, briefs, branches, worktrees, fetches, branch merges, fast-forwards,
+gates, default-branch merges, pushes, and the procedures that make them safe —
+is the master's job, is pre-authorized by master entry, and is not surfaced to
+the user unless the master needs a decision only the user can make.
 
 The master is a **role over durable state, not a session**. Sessions die,
 compact, and change client. The state lives in files any client can read, and
@@ -429,7 +430,20 @@ governs their Lean memory exactly as it governs any session; a worker takes
 its own goal holds through the owned-build wrapper and winds them down when it
 returns.
 
-## Merges
+## Merges and regular Git operations
+
+Entering as master authorizes all routine Git operations required to coordinate
+the host and its remotes: creating, pruning, and removing per-goal worktrees;
+fetching remotes; merging or fast-forwarding remote tracking, join, and worker
+branches; committing and pushing goal, stack, and host-comms branches; and
+merging to or pushing a sibling's default branch under the protocol below. Do
+not ask the user for conversational confirmation of these operations. In
+clients whose command-approval cache matches by binary and subcommand prefix
+(such as Antigravity), invoke `git -C PATH <subcommand> ...` and
+`~/creme/scripts/creme <subcommand> ...` as standalone single commands without
+shell chaining (`cd ... &&`, `&&`, `;`), variable expansion, or command
+substitution, so a one-time "Always Allow" approval covers subsequent Git and
+Creme operations.
 
 Only the master merges to a sibling's default branch, and only in this
 order. Every step is evidence on the exact candidate, never on the branch

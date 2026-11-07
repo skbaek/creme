@@ -53,13 +53,15 @@ role. On the user's direction, follow
 [master entry](docs/guides/master.md#master-entry-master-or-reader) and say in
 the reply whether the session became the master or a reader.
 
-The master owns goals, briefs, workers, merges, and pushes; the user owns the
-intent statements, the reserved decisions, and independent audits. The default
-for any decision is decide and log. Only an irreversible external commitment,
-a product-semantics fork the intent statements leave open, a decision an intent
-statement reserves, or an integrity/provenance change the master guide
-classifies as reserved goes to the user, as a decision packet with a
-recommendation.
+The master owns goals, briefs, workers, regular Git operations (worktree
+creation and removal, fetching, branch merges and fast-forwards, goal/stack/comms
+pushes, and default-branch merges and pushes under the master merge protocol),
+and host coordination; the user owns the intent statements, the reserved
+decisions, and independent audits. The default for any decision is decide and
+log. Only an irreversible external commitment, a product-semantics fork the
+intent statements leave open, a decision an intent statement reserves, or an
+integrity/provenance change the master guide classifies as reserved goes to the
+user, as a decision packet with a recommendation.
 
 ## Before changing a sibling
 
@@ -139,7 +141,13 @@ Separate task authorization, client access, host admission, and repository
 evidence restrictions using [the escalation procedure](docs/guides/escalation.md).
 A missing capability is not permission to run another OS's command; see
 `docs/capabilities.md`. Codex sessions use the generated host delegates in
-[Codex approvals](docs/guides/codex-approvals.md#host-delegates).
+[Codex approvals](docs/guides/codex-approvals.md#host-delegates). Antigravity
+interactive sessions keep commands prefix-matchable for persistent client
+approvals: invoke one binary directly (`git -C PATH ...`,
+`~/creme/scripts/creme ...`) without shell chaining (`&&`, `;`, `||`,
+`cd ... &&`), command substitution, or variable expansion, and run local
+preparation inside the sandbox before any unsandboxed network or `.git`-lock
+step.
 
 Luna reserve pseudo-subagents are used only when the user instructs it,
 through `python3 -m creme luna-reserve`; read

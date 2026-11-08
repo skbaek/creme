@@ -16,7 +16,7 @@ from . import pseudo_broker as PB
 
 
 READ_ONLY_TOOLS = ("read_file", "view_file", "list_dir", "grep_search", "find_by_name", "finish")
-WRITE_TOOLS = ("write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file")
+WRITE_TOOLS = ("write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file", "edit_file", "write_file")
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_PREFLIGHT_REFUSED = 10
@@ -349,7 +349,7 @@ from pathlib import Path
 import sys
 
 READ_ONLY_TOOLS = ("read_file", "view_file", "list_dir", "grep_search", "find_by_name", "finish")
-WRITE_TOOLS = ("write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file")
+WRITE_TOOLS = ("write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file", "edit_file", "write_file")
 PATH_KEYS = {
     "AbsolutePath", "DirectoryPath", "SearchPath", "SearchDirectory", "Path",
     "Directory", "File", "FilePath", "TargetFile",

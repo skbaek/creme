@@ -237,6 +237,35 @@ else:
             "m", roots,
         )["decision"], "deny")
 
+    def test_write_guard_scopes_agy_147_edit_and_write_file(self) -> None:
+        agents = self.root / "edit-file-guard"
+        agents.mkdir()
+        script = agents / "guard.py"
+        script.write_text(antigravity.GUARD_SCRIPT, encoding="utf-8")
+        roots = [str(self.target.resolve())]
+        inside = str(self.target / "inside.lean")
+        outside = str(self.root / "outside.lean")
+        cases = [
+            ("edit_file", {"Path": inside, "Target": "a", "Replacement": "/b"}, "write", "allow"),
+            ("write_file", {"Path": inside, "Content": "/x", "Overwrite": True}, "write", "allow"),
+            ("edit_file", {"Path": outside, "Target": "a", "Replacement": "b"}, "write", "deny"),
+            ("write_file", {"Path": "../outside.lean", "Content": "x"}, "write", "deny"),
+            ("write_file", {"Content": inside}, "write", "deny"),
+            ("edit_file", {"Path": inside, "Target": "a", "Replacement": "b"}, "read-only", "deny"),
+        ]
+        for name, args, mode, expected in cases:
+            with self.subTest(name=name, args=args, mode=mode):
+                payload = {"modelName": "m", "toolCall": {"name": name, "args": args}}
+                (agents / "guard.json").write_text(json.dumps({
+                    "pinned_model": "m", "roots": roots, "mode": mode,
+                }), encoding="utf-8")
+                direct = antigravity.guard_decision(payload, "m", roots, mode=mode)
+                result = subprocess.run([sys.executable, str(script)], cwd=agents,
+                                        input=json.dumps(payload), text=True, check=True,
+                                        stdout=subprocess.PIPE)
+                self.assertEqual(direct["decision"], expected)
+                self.assertEqual(json.loads(result.stdout), direct)
+
     def test_write_guard_allows_only_matching_commands_in_root(self) -> None:
         roots = (str(self.target),)
         payload = {"modelName": "m", "toolCall": {"name": "run_command", "args": {

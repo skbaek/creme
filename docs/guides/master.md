@@ -473,6 +473,29 @@ order. Every step is evidence on the exact candidate, never on the branch
 Publication surfaces — the sites, counts quoted in documentation, licenses,
 release notes — are not merged by this policy. They are reserved decisions.
 
+## Live corpus
+
+Blanc keeps a whitelist live corpus (user, 2026-11-08). Main holds only the
+working set: the contracts current goals verify, plus includes whose machinery
+those goals will refactor. Blanc's `scripts/live-set.toml` lists the live keys
+with a reason each, and `scripts/check-layering.py` holds it equal to the
+contract registry. A finished contract does not stay on main by default. The
+master tags it at a green commit (`release/<key>-<yyyymmdd>`, an annotated tag
+carrying the manifest) and pushes the tag. Once `ls-remote` shows it, Blanc's
+registered release operation removes the contract with everything it alone
+used: modules, compositions, claim pins, its claim-map section, baseline rows,
+and shared declarations no live code uses. A shared declaration that completes
+an obvious paired API stays, under the theorem-necessity rule (a). Under the
+user's standing decision this is routine. It needs no packet, and the tag
+carries every departed row byte-identical. Public pages quote no
+corpus counts; counts live in Blanc's `scripts/GATES.md`.
+
+A goal names its live set ([goal shape](goal.md), item 11). Restoring a
+released contract (`restore` from its tag, then repairing what no longer
+builds) is ordinary goal work, priced in the goal. At goal completion the
+master either releases the goal's contracts or records why they stay live.
+Not being on main is the normal state of a finished contract, not a gap.
+
 ## Decisions
 
 The default is **decide and log**. Escalating a decision costs the user

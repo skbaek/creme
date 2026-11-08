@@ -32,6 +32,11 @@ coordination method [the master](master.md) already owns.
    the user.
 10. Completion-report requirements: where the report goes and what its
     condition-to-evidence table must contain.
+11. For a repository with a whitelist live corpus (Blanc since 2026-11-08), the
+    **live set**: the contract keys the goal needs on main, each with its reason
+    (the subject, or an include whose machinery the work will refactor). A key
+    not listed is assumed released; restoring one is part of the goal's work.
+    See [the master guide](master.md#live-corpus).
 
 Use `ready` only when a competent worker can begin without inventing product
 semantics. Use `active` while a live execution owns the goal, `blocked` only at

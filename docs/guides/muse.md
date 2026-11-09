@@ -51,7 +51,7 @@ python3 -m creme muse status [--json]
 python3 -m creme muse run --brief FILE|- --target DIR [--write] \
     [--model muse-spark-1.3|muse-wonder-1.0|muse-wonder-full-1.0] \
     [--effort minimal|low|medium|high|xhigh|max] [--timeout-seconds N] [--json]
-python3 -m creme muse start --brief FILE|- --target DIR [--write | --lean GOAL] \
+python3 -m creme muse start --brief FILE|- --target DIR [--write | --lean GOAL [--read-root DIR]...] \
     [--model muse-spark-1.3|muse-wonder-1.0|muse-wonder-full-1.0] \
     [--effort E] [--detail silent|summary|live] [--timeout-seconds N]
 python3 -m creme muse send SESSION (--text TEXT | --brief FILE|-)
@@ -154,29 +154,95 @@ would write standing rules) are never taken.
 - read-only and write: a shell command is approved once (the sandbox is the
   control); every MCP tool, network, file-access, protected-write, subagent, or
   unknown subject is aborted.
-- lean: the only shell command approved by rule is the exact owned build
+- lean: the semaphore, reclaim, and wind-down commands are aborted (the Luna
+  Lean guard, reused). The exact owned build
   `~/creme/scripts/creme lake-build GOAL [--walk] [--wait N] -- MODULES` (N 1–900, no
-  sizing flags, no shell metacharacters, workspace = target). Semaphore,
-  reclaim, and wind-down commands are aborted (the Luna Lean guard, reused).
-  **Every other shell command, including plain reads such as `git status`,
-  waits for the master** (`approve SESSION aN accept|decline`): the host is
-  unsandboxed, and an argv allowlist of "read-only" commands was shown to be
-  bypassable (`git diff -o FILE` writes anywhere, `git --exec-path=DIR` and
-  `rg --pre CMD` run programs, `cat`/`git -C` read outside the target; review
-  of 2026-09-28). Reading and searching go through Muse's own file tools,
-  which stay confined to the workspace on the unsandboxed host too (see
-  below). The `lean-lsp-mcp` tools are approved once except the
-  network-reaching search tools and `lean_build`/`lean_profile_proof`.
-  Answer a master approval only after reading the whole command: it runs
-  unsandboxed with the user's privileges.
+  sizing flags, workspace = target) is approved, and so is any shell command the
+  **Lean shell policy** accepts (below). Every other shell command waits for the
+  master (`approve SESSION aN accept|decline`). The `lean-lsp-mcp` tools are
+  approved once except the network-reaching search tools and
+  `lean_build`/`lean_profile_proof`. Answer a master approval only after reading
+  the whole command: it runs unsandboxed with the user's privileges.
+
+### The Lean shell policy
+
+`creme/muse_lean_policy.py` approves, by rule, the commands a Lean unit runs
+all day; it replaced a master-side auto-approver after the 2026-11-09 Lean
+units raised about 60 master interventions. Over the 233 distinct commands of
+those units, with the read roots that master used, 224 auto-approve and 9 still
+go to the master. Its approval reason starts `lean-shell-policy-v1:` and names the rule of each stage (`read grep`,
+`sed -i (workspace)`, `git log`, `owned build`, ...); it is recorded in the
+turn's `approvals.json` like every other decision, and a master-bound command
+carries the policy's refusal reason.
+
+**Roots.** Commands may read inside the *read roots*: the workspace,
+`~/.elan/toolchains`, `~/.local/share/muse/sessions` (Muse's own tool-output
+files), plus each `muse start --lean GOAL --read-root DIR` (an absolute existing
+directory, not `/` or the home directory or above it; recorded in the session
+and kept on resume). Two narrow file patterns are also readable: the session's own
+build logs `~/creme/.creme/lean-build-ownership/logs/GOAL-<stamp>.log` and
+top-level `/tmp/NAME.log`. Writes are allowed only inside the workspace and never
+under `.git`; read roots are never writable. Every path argument is resolved
+with `realpath` (symlinks followed, globs expanded) from every directory the
+shell may be in at that point (`cd` adds one; it never removes the starting one,
+because `cd` may fail), so `..`, `~`, and symlinks cannot leave a root.
+
+**Parsing.** The policy lexes the raw command itself, because Muse's `stages`
+drop redirections (`2>&1` and `> FILE` vanish from `argv`), environment prefixes,
+and heredoc bodies. It accepts a small bash subset: words with single and double
+quotes and backslash escapes; `;`, `&&`, `||`, `|`, and newlines; `N>&M`
+(descriptors 1 and 2); `>`/`>>`/`&>` to a writable path or `/dev/null`; `<`
+from a readable path; quoted `<<DELIM` heredocs into `python3` (an unquoted one
+only without `$`, backticks, or backslashes); `$?` in `echo`; and `VAR=PATH;`
+assignments (a plain path inside the roots; not `PATH`, `IFS`, `LD_*`,
+`PYTHON*`, `GIT_*`, `BASH*`, and similar) used later as `$VAR`, `${VAR}`, or
+`"$VAR"`. The one command substitution allowed is the newest-own-build-log idiom
+at the start of a command: `L=$(ls -t <build-log dir>/GOAL-*.log | head -1);`.
+Muse's stages must then agree: the same number of simple commands and programs,
+and the same argv for every stage Muse marks `argvComplete` (backslashes
+ignored); empty stages are accepted only when a word uses a variable, which is
+when Muse sends none.
+
+**Programs.**
+
+| program | rule |
+|---|---|
+| `ls cat head tail grep wc sort uniq cut tr nl diff date` | every operand and `--opt=VALUE` inside the read roots; no path glued to a short option; no `grep -R`, `sort -o/-T/--compress-program`, second `uniq` operand, `tail -f`, `date -s` |
+| `echo true pwd`, `sleep N` (N ≤ 600) | no path checks |
+| `cd DIR` | a directory inside the read roots; not inside a pipeline |
+| `mkdir [-p] DIR...` | inside the workspace |
+| `sed` | the script only uses addresses and `p P d D n N = q Q l g G h H x z { }`, `s` (flags `g p i I m M` and digits), and `y`; no `e`, `w`, `r`, `a/i/c`, labels, or `-f`. `-i` (exactly) needs workspace files; otherwise files must be readable |
+| `awk` | options `-v NAME=VALUE` and `-F` only; outside string and regex literals the program has no `system`, `getline`, `close`, `fflush`, `ENVIRON`, `PROCINFO`, `@`, single `\|`, or `>` in a `print`/`printf` statement; files readable |
+| `find` | no `-exec* -ok* -delete -fprint* -fls -files0-from -L -H -follow`; paths readable |
+| `git [--no-pager] [-C DIR] VERB` | VERB one of `log show diff status grep ls-files ls-tree merge-base rev-parse blame rev-list cat-file show-ref`; no other global option (`-c`, `--exec-path`, ...); no `--output`, `-O`, `--ext-diff`, `--no-index`, or `-o` on `diff/log/show`; arguments readable. The repository git discovers must keep its git directory outside the workspace (a worktree's `.git` file must point outside it), because git runs programs its config names |
+| `python3 -c CODE`, `python3 - <<'EOF'` | parsed with `ast`: imports only `re json collections textwrap`; names only locals and a fixed builtin set (no `eval exec compile getattr globals vars __import__ input help`); no attribute or name starting with `_`; `open()` only as a direct call on a string-constant path (literal, or a name assigned exactly once to a literal) with a constant mode: reads inside the roots, writes relative and inside the workspace. The directory python3 runs in must hold no `*.py`/`*.pyc`/`*.so`/`*.pth` file or package that could shadow a module |
+| the owned build | as above, also as one pipeline stage, with `2>&1` and `> /tmp/NAME.log` |
+| `scripts/check-hygiene.sh`, `scripts/check-integrity.sh` (bare, `./`, or after `bash`), `python3 [-B] scripts/check-assurance-manifest.py` | the workspace's own script, no arguments, and `git status --ignored` of `scripts/` shows nothing but `__pycache__` bytecode (the model can write the workspace, so a modified gate would run its code unsandboxed) |
+
+**Left to the master, by design:** every other program (`cp`, `mv`, `rm`, `tee`,
+`xargs`, `rg` (its `--pre` runs programs), `bash -c`, `sh`, `curl`, `wget`, `ssh`, `git` mutations and network
+verbs, other scripts, `python3 FILE`, `lake`, `lean`); `for`/`while`/`if`, shell
+functions, subshells, braces, backgrounding, process substitution, here-strings;
+command substitution and backticks except the build-log idiom; variables the
+command did not assign; environment prefixes (`PYTHONPATH=. python3 ...`); reads
+outside the roots; writes outside the workspace; and any command whose parse
+disagrees with Muse's stages. Network shell commands are not aborted, as before:
+they reach the master, which declines them.
+
+**Residual exposure.** Files under the read roots can be read in full,
+including other sessions' Muse tool outputs. The gate scripts run Python that
+loads `scripts/__pycache__` bytecode, which the check does not verify against the
+source. A heredoc or `python3 -c` write can replace any workspace file, exactly
+as Muse's file tools can. Lean elaboration of workspace files remains
+unbounded (below).
 
 Why Lean mode is unsandboxed: the owned build's priority launcher calls
 `os.nice(10)`, which Muse's sandbox denies in both profiles (measured:
 `PermissionError: [Errno 1] Operation not permitted`), exactly as Codex's does.
 With `--disable-sandbox`, `os.nice` works, the network is reachable from the
 shell, and a shell command can write outside the target; each shell command
-still raises an approval, so the allowlist (the exact build only) and the
-master's decisions are what bound the session's shell. The file tools refuse
+still raises an approval, so the allowlist (the owned build and the Lean shell
+policy) and the master's decisions are what bound the session's shell. The file tools refuse
 paths outside the workspace in every mode, the unsandboxed Lean host included
 (measured: writes and reads; see the report). What the allowlist does not
 bound: Lean elaboration itself. A file the model writes in the target can run
@@ -387,7 +453,8 @@ starts a new turn on the same session.
 
 `start --lean GOAL` requires the target to be exactly the goal's worktree
 `<jaune|blanc>/.worktrees/GOAL` (or a sanctioned `-control`/`-mutation`/
-`-rehearsal` tree), refuses when host headroom or the semaphore would not admit
+`-rehearsal` tree), accepts `--read-root DIR` for the Lean shell policy
+(refused without `--lean`), refuses when host headroom or the semaphore would not admit
 heavy work or a `lean`/`lake` process already runs in the target, holds at most
 two live Lean sessions with distinct goal labels (`CREME_MUSE_MAX_LEAN_SESSIONS`
 1–4), and runs `python3 -m creme reclaim --wind-down GOAL` on every end of the

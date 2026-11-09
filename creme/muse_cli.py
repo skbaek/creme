@@ -75,7 +75,8 @@ def cmd_start(arguments: argparse.Namespace) -> int:
         fit = model_fit_adapters.binding(directory, arguments.episode)
     code, lines, record = MB.cmd_start(ROOT, dict(os.environ), brief, arguments.target, arguments.write,
                                        arguments.effort, arguments.detail, arguments.timeout_seconds,
-                                       lean=arguments.lean, model_fit=fit, model=arguments.model)
+                                       lean=arguments.lean, model_fit=fit, model=arguments.model,
+                                       read_roots=arguments.read_root)
     return _print(arguments, code, lines, record)
 
 
@@ -179,6 +180,10 @@ def register(commands: Any) -> None:
             item.add_argument("--fit-dir", help="model-fit directory; defaults to configured goal store")
             item.add_argument("--brief", required=True, help="brief file, or - for stdin")
             item.add_argument("--target", required=True)
+            item.add_argument("--read-root", action="append", default=[], metavar="DIR",
+                              help="Lean mode: an extra directory the Lean shell policy lets commands read "
+                                   "(repeatable; the workspace, ~/.elan/toolchains and the Muse session "
+                                   "directory are always readable)")
         else:
             item.add_argument("muse_session", help="the recorded Muse session id")
             item.add_argument("--target")

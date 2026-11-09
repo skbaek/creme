@@ -1,0 +1,3614 @@
+{
+ "note": "Real Muse Lean-unit shell approvals (eip7002 units, 2026-11-09), paths templated: {home} is the home directory.",
+ "extra_read_roots": [
+  "{home}/jaune/JauneConsensus",
+  "{home}/jaune/Jaune",
+  "{home}/creme/.creme/lean-build-ownership/logs"
+ ],
+ "approve": [
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "L={home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2e-20261109T102258.797893Z-2749276.log; grep -n \"WithdrawalOrder.lean:406:14\" $L | head -2; awk '/WithdrawalOrder.lean:406:14/{found=1} found{print} found&&/^(error|warning):/{count++} count>1{exit}' $L | head -40",
+   "stages": []
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "L={home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2e-20261109T103633.188668Z-2758466.log; grep -n \"WithdrawalOrder.lean:169:\\|WithdrawalOrder.lean:224:\\|WithdrawalOrder.lean:234:\\|lean:244:\\|lean:267:\" $L | head; echo ===; awk '/WithdrawalOrder.lean:169:53/{f=1} f{print} f&&/^warning:|^error: JauneConsensus\\/Facts\\/WithdrawalOrder.lean:(53|55|127)/{c++} c>0{exit}' $L | head -30",
+   "stages": []
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "L={home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2e-20261109T103633.188668Z-2758466.log; grep -o \"WithdrawalOrder.lean:[0-9]*:[0-9]*: [a-z]*\" $L | sort -t: -k2 -n | uniq | head -80",
+   "stages": []
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "L={home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2e-20261109T103633.188668Z-2758466.log; sed -n '1292,1330p' $L",
+   "stages": []
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "awk 'NR==119 || NR==157 || NR==239 || NR==784 {print NR\": [\"substr($0,50,20)\"]\"}' {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean; echo ===; sed -n '780,786p' {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean",
+   "stages": [
+    {
+     "argv": [
+      "awk",
+      "NR==119 || NR==157 || NR==239 || NR==784 {print NR\": [\"substr($0,50,20)\"]\"}",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "780,786p",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && awk 'NR>=502 && NR<=507' JauneConsensus/Facts/WithdrawalOrder.lean | cut -c1-100; echo ====; awk 'NR==504' JauneConsensus/Facts/WithdrawalOrder.lean | wc -c",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "awk",
+      "NR>=502 && NR<=507",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cut",
+      "-c1-100"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "===="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "awk",
+      "NR==504",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "wc",
+      "-c"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && awk 'NR==504 || NR==506 || NR==550' JauneConsensus/Facts/WithdrawalOrder.lean | wc -c; awk 'NR==506' JauneConsensus/Facts/WithdrawalOrder.lean",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "awk",
+      "NR==504 || NR==506 || NR==550",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "wc",
+      "-c"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "awk",
+      "NR==506",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2a && git status --short | head -20 && git log --oneline -3",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "git",
+      "status",
+      "--short"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-20"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "git",
+      "log",
+      "--oneline",
+      "-3"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && python3 - <<'EOF'\nimport re\np = 'JauneConsensus/Facts/WithdrawalOrder.lean'\nsrc = open(p).read()\nsrc = src.replace(\"\"\"    {q : SszList PendingPartialWithdrawal P.PENDING_PARTIAL_WITHDRAWALS_LIMIT}\n    {cur period actSum pb : Epoch}\n    (hq : s.pendingPartialWithdrawals = .ok q)\n    (hempty : (q.length == P.PENDING_PARTIAL_WITHDRAWALS_LIMIT &&\n      !(wr.amount == FULL_EXIT_REQUEST_AMOUNT)) = false)\n    (hlook : validatorIndexOf s wr.validator_pubkey = .ok (some V))\n    (hget : s.validators.get V.toNat \"process_withdrawal_request\" = .ok v)\n    (hgood : (hasExecutionWithdrawalCredential v &&\n      v.withdrawal_credentials.toBytes.drop 12 ==\n        wr.source_address.toBytes) = true)\n    (hcur : getCurrentEpoch s = .ok cur)\n    (hact : (isActiveValidator v cur) = true)\n    (hnoexit : (v.exit_epoch != FAR_FUTURE_EPOCH) = false)\n    (hper : c64 cfg.SHARD_COMMITTEE_PERIOD = .ok period)\n    (hsum : U64.add? v.activation_epoch period\n      \"process_withdrawal_request\" = .ok actSum)\n    (hearly : ¬ cur < actSum)\n    (hpend : getPendingBalanceToWithdraw s V = .ok pb)\n    (hfull : (wr.amount == FULL_EXIT_REQUEST_AMOUNT) = true)\"\"\",\n\"\"\"    {q : SszList PendingPartialWithdrawal P.PENDING_PARTIAL_WITHDRAWALS_LIMIT}\n    {cur period actSum : Epoch} {pb : Gwei}\n    (hq : s.pendingPartialWithdrawals = .ok q)\n    (hempty : (q.length == P.PENDING_PARTIAL_WITHDRAWALS_LIMIT &&\n      !(wr.amount == FULL_EXIT_REQUEST_AMOUNT)) = false)\n    (hlook : validatorIndexOf s wr.validator_pubkey = .ok (some V))\n    (hget : s.validators.get V.toNat \"process_withdrawal_request\" = .ok v)\n    (hgood : (hasExecutionWithdrawalCredential v &&\n      v.withdrawal_credentials.toBytes.drop 12 ==\n        wr.source_address.toBytes) = true)\n    (hcur : getCurrentEpoch s = .ok cur)\n    (hact : (isActiveValidator v cur) = true)\n    (hnoexit : (v.exit_epoch != FAR_FUTURE_EPOCH) = false)\n    (hper : c64 cfg.SHARD_COMMITTEE_PERIOD = .ok period)\n    (hsum : U64.add? v.activation_epoch period\n      \"process_withdrawal_request\" = .ok actSum)\n    (hearly : ¬ cur < actSum)\n    (hpend : getPendingBalanceToWithdraw s V = .ok pb)\n    (hfull : (wr.amount == FULL_EXIT_REQUEST_AMOUNT) = true)\"\"\")\nsrc = src.replace(\"\"\"    {q : SszList PendingPartialWithdrawal P.PENDING_PARTIAL_WITHDRAWALS_LIMIT}\n    {cur period actSum pb minAct balance sum : Gwei}\"\"\",\n\"\"\"    {q : SszList PendingPartialWithdrawal P.PENDING_PARTIAL_WITHDRAWALS_LIMIT}\n    {cur period actSum : Epoch} {pb minAct balance sum : Gwei}\"\"\")\nopen(p, 'w').write(src)\nprint(\"done\")\nEOF",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && python3 - <<'PYEOF'\nimport re\np = 'JauneConsensus/Facts/WithdrawalOrder.lean'\nsrc = open(p).read()\n\nQF = \"¬(((q.length == P.PENDING_PARTIAL_WITHDRAWALS_LIMIT && !(wr.amount == FULL_EXIT_REQUEST_AMOUNT))) = true)\"\nCT = \"((!((hasExecutionWithdrawalCredential v) && (v.withdrawal_credentials.toBytes.drop 12 == wr.source_address.toBytes)))) = true)\"\nCF = \"¬((!((hasExecutionWithdrawalCredential v) && (v.withdrawal_credentials.toBytes.drop 12 == wr.source_address.toBytes)))) = true)\"\nAT = \"(((!(isActiveValidator v cur))) = true)\"\nAF = \"¬(((!(isActiveValidator v cur))) = true)\"\nEF = \"¬((((v.exit_epoch != FAR_FUTURE_EPOCH))) = true)\"\nFF = \"¬((((wr.amount == FULL_EXIT_REQUEST_AMOUNT))) = true)\"\nPF = \"¬((((pb == U64.zero))) = true)\"\nGF = \"¬((((hasCompoundingWithdrawalCredential v) && (decide (minAct ≤ v.effective_balance)) && (decide (sum < balance)))) = true)\"\nC2T = \"(((!(hasCompoundingWithdrawalCredential v))) = true)\"\nC2F = \"¬(((!(hasCompoundingWithdrawalCredential v))) = true)\"\nS2T = \"(((!(decide (minAct ≤ v.effective_balance)))) = true)\"\nS2F = \"¬(((!(decide (minAct ≤ v.effective_balance)))) = true)\"\n\ndef rep(old, new, count=0):\n    global src\n    n = src.count(old)\n    assert n > 0, f\"NOT FOUND: {old[:70]!r}\"\n    if count: assert n == count, f\"COUNT {n} != {count} for {old[:70]!r}\"\n    src = src.replace(old, new)\n\n# global unambiguous Bool-if side proofs\nrep(\"rw [if_neg (by simp [hempty])]\",\n    f\"rw [ite_eq_right (show {QF} from by simp [hempty])]\")\nrep(\"rw [if_pos (by simp [hbad])]\",\n    f\"rw [ite_eq_left (show {CT} from by simp [hbad])]\")\nrep(\"rw [if_neg (by simp [hgood])]\",\n    f\"rw [ite_eq_right (show {CF} from by simp [hgood])]\")\nrep(\"rw [if_pos (by simp [hact])]\",\n    f\"rw [ite_eq_left (show {AT} from by simp [hact])]\")\nrep(\"rw [if_neg (by simp [hact])]\",\n    f\"rw [ite_eq_right (show {AF} from by simp [hact])]\")\nrep(\"rw [if_neg (by simp [hnoexit])]\",\n    f\"rw [ite_eq_right (show {EF} from by simp [hnoexit])]\")\nrep(\"rw [if_neg (by simp [hnofull])]\",\n    f\"rw [ite_eq_right (show {FF} from by simp [hnofull])]\")\nrep(\"rw [if_neg (by simp [hpb])]\",\n    f\"rw [ite_eq_right (show {PF} from by simp [hpb])]\")\nrep(\"rw [if_neg (by simp [hcomp, hsuff])]\",\n    f\"rw [ite_eq_right (show {GF} from by simp [hcomp, hsuff])]\")\nrep(\"rw [if_neg (by simp [hcomp, hsuff, hexc])]\",\n    f\"rw [ite_eq_right (show {GF} from by simp [hcomp, hsuff, hexc])]\")\nrep(\"rw [if_pos (by simp [hcomp])]\",\n    f\"rw [ite_eq_left (show {C2T} from by simp [hcomp])]\")\nrep(\"rw [if_pos (by simp [hsuff])]\",\n    f\"rw [ite_eq_left (show {S2T} from by simp [hsuff])]\")\nrep(\"rw [if_neg (by simp [hsuff])]\",\n    f\"rw [ite_eq_right (show {S2F} from by simp [hsuff])]\")\n\n# per-witness ambiguous line: notCompounding gate (G-false) vs insuf/noExcess inner1 (C2-false)\nparts = src.split(\"/-- \")\nfor i, part in enumerate(parts):\n    if part.startswith(\"The not-compounding reason\"):\n        assert part.count(\"rw [if_neg (by simp [hcomp])]\") == 1\n        parts[i] = part.replace(\"rw [if_neg (by simp [hcomp])]\",\n            f\"rw [ite_eq_right (show {GF} from by simp [hcomp])]\")\n    if part.startswith(\"The insufficient-effective-balance reason\") or \\\n       part.startswith(\"The no-excess reason\"):\n        assert part.count(\"rw [if_neg (by simp [hcomp])]\") == 1, part[:60]\n        parts[i] = part.replace(\"rw [if_neg (by simp [hcomp])]\",\n            f\"rw [ite_eq_right (show {C2F} from by simp [hcomp])]\")\nsrc = \"/-- \".join(parts)\n\n# direct-hyp rws: rename only\nrep(\"rw [if_pos hfull]\", \"rw [ite_eq_left hfull]\")\nrep(\"rw [if_pos hexit]\", \"rw [ite_eq_left hexit]\")\nrep(\"rw [if_pos hlt]\", \"rw [ite_eq_left hlt]\")\nrep(\"rw [if_neg hearly]\", \"rw [ite_eq_right hearly]\")\nrep(\"rw [if_neg hret]\", \"rw [ite_eq_right hret]\")\nrep(\"rw [if_pos hret]\", \"rw [ite_eq_left hret]\")\nrep(\"rw [if_neg hcond\", \"rw [ite_eq_right hcond\")\nrep(\"rw [if_pos rfl]\", \"rw [ite_eq_left rfl]\")\nrep(\"rw [if_pos he]\", \"rw [ite_eq_left he]\")\n\n# leftovers with direct hyps or bound proofs: global word-boundary rename\nsrc = re.sub(r'\\bif_pos\\b', 'ite_eq_left', src)\nsrc = re.sub(r'\\bif_neg\\b', 'ite_eq_right', src)\nassert 'if_pos' not in src and 'if_neg' not in src, \"leftover if_pos/if_neg\"\n\nopen(p, 'w').write(src)\nprint(\"ok\")\nPYEOF\ngrep -c \"ite_eq_left\\|ite_eq_right\" {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-c",
+      "ite_eq_left\\|ite_eq_right",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && python3 - <<'PYEOF'\nimport re\np = 'JauneConsensus/Facts/WithdrawalOrder.lean'\nsrc = open(p).read()\n\ndef rep(old, new, count=0):\n    global src\n    n = src.count(old)\n    assert n > 0, f\"NOT FOUND: {old[:70]!r}\"\n    if count: assert n == count, f\"COUNT {n} != {count} for {old[:70]!r}\"\n    src = src.replace(old, new)\n\nn = src.count(\"= true) from by simp\")\nassert n > 0, \"no show paren\"\nsrc = src.replace(\"= true) from by simp\", \"= true from by simp\")\n\nrep(\"  | none => simp at h\", \"  | none => simp [harr] at h\")\nrep(\"  | some y =>\\n    simp only [] at h\\n    exact congrArg some (Except.ok.inj h)\",\n    \"  | some y =>\\n    exact congrArg some (Except.ok.inj h)\")\nrep(\"    rw [hfoldS] at hcon\\n    simp at hcon\",\n    \"    rw [hfoldS, bind_err_cons] at hcon\\n    cases hcon\")\nrep(\"rw [ite_eq_left rfl] at hstep\",\n    \"rw [ite_eq_left (show True from trivial)] at hstep\")\nrep(\"rw [ite_eq_left beq_self_eq_true]\",\n    \"rw [ite_eq_left (beq_self_eq_true V)]\")\nrep(\"    rw [← hfoldSeq]\\n    exact hpendP\",\n    \"    exact hfoldSeq.symm.trans hpendP\")\nrep(\"    rw [h1f, hfoldP]\\n    exact hadd\",\n    \"    exact h1f.trans (hfoldP.trans hadd)\")\nrep(\"      unfold getPendingBalanceToWithdraw\\n      rw [hr]\",\n    \"      unfold getPendingBalanceToWithdraw\\n      rw [hr]\\n      simp only [bind_ok_cons]\", count=2)\nrep(\"    unfold getPendingBalanceToWithdraw\\n    rw [hs1r]\",\n    \"    unfold getPendingBalanceToWithdraw\\n    rw [hs1r]\\n    simp only [bind_ok_cons]\")\nrep(\"  · rw [ite_eq_left htc'] at h5\\n\",\n    \"  · rw [ite_eq_left htc'] at h5\\n    dsimp only at h5\\n\")\nrep(\"  · rw [ite_eq_right htc'] at h5\\n\",\n    \"  · rw [ite_eq_right htc'] at h5\\n    dsimp only at h5\\n\")\nrep(\"  subst hvv\", \"  subst hvv.symm\")\nrep(\"\"\"/-- `bind` on an `error` result, as a rewrite (cf `WithdrawalRequest.bind_err_cons`). -/\"\"\",\n\"\"\"/-- Injection from `pure` into `ok` (forward elaboration avoids the\nbackwards unification that `Except.ok.inj` runs into on `pure` left-hand\nsides). -/\nprivate theorem ok_inj_of_pure {ε α : Type} {a b : α}\n    (h : pure a = Except.ok b) : a = b :=\n  Except.ok.inj h\n\n/-- `bind` on an `error` result, as a rewrite (cf `WithdrawalRequest.bind_err_cons`). -/\"\"\")\nrep(\"    have hww := Except.ok.inj h\", \"    have hww := ok_inj_of_pure h\")\nrep(\"    have hs2 : s2 = s := Except.ok.inj h1\",\n    \"    have hs2 : s2 = s := (ok_inj_of_pure h1).symm\")\nrep(\"  have hs2 : s2 = { mid with validators := vl } := (Except.ok.inj h5).symm\",\n    \"  have hs2 : s2 = { mid with validators := vl } := (ok_inj_of_pure h5).symm\")\nrep(\"      have hs1 : s1 = { mid with pending_partial_withdrawals := pushed } :=\\n        (Except.ok.inj hs1eq).symm\",\n    \"      have hs1 : s1 = { mid with pending_partial_withdrawals := pushed } :=\\n        (ok_inj_of_pure hs1eq).symm\")\nrep(\"      have hwval : wval = pushed := (Except.ok.inj hwrite2).symm\",\n    \"      have hwval : wval = pushed := (ok_inj_of_pure hwrite2).symm\")\nrep(\"    obtain ⟨hmid, -⟩ := Prod.mk.inj (Except.ok.inj h12)\",\n    \"    obtain ⟨hmid, -⟩ := Prod.mk.inj (ok_inj_of_pure h12)\", count=2)\nrep(\"\"\"    bne_eq_true_of_ne (by rw [show ({ vcF with exit_epoch := eqE2, withdrawable_epoch := wd2 } :\n      Validator).exit_epoch = eqE2 from rfl];\n      exact hne2)\"\"\",\n\"\"\"    bne_eq_true_of_ne (by\n      have hst : (({ vcF with exit_epoch := eqE2, withdrawable_epoch := wd2 } :\n        Validator).exit_epoch = eqE2) := rfl\n      rw [hst]\n      exact hne2)\"\"\")\n\n# append rfl to witness proof ends only\nouts = []\npos = 0\nfor m in re.finditer(r'theorem (classify_ignored_\\w+)', src):\n    outs.append(src[pos:m.start()])\n    nm = m.group(1)\n    nxt = re.search(r'\\n(?=/--|/-!|theorem |end JauneConsensus)', src[m.end():])\n    seg = src[m.start(): m.end() + nxt.start()] if nxt else src[m.start():]\n    tail = src[m.end() + nxt.start():] if nxt else ''\n    lines = seg.rstrip('\\n').split('\\n')\n    if lines[-1].strip() == 'rfl':\n        pass\n    else:\n        assert lines[-1].strip().startswith('rw ['), (nm, lines[-1])\n        lines.append('  rfl')\n    outs.append('\\n'.join(lines) + '\\n')\n    pos = m.end() + (nxt.start() if nxt else len(src))\n    # careful: pos math; simpler below\nouts = []\npos = 0\nfor m in re.finditer(r'theorem (classify_ignored_\\w+)', src):\n    start = m.start()\n    rest = src[m.end():]\n    nx = re.search(r'\\n(?=/-!|theorem (?!classify_ignored)|end JauneConsensus)', rest)\n    end = m.end() + (nx.start() if nx else len(rest))\n    seg = src[start:end]\n    lines = seg.rstrip('\\n').split('\\n')\n    if lines[-1].strip() != 'rfl':\n        assert lines[-1].strip().startswith('rw ['), (m.group(1), lines[-1])\n        lines.append('  rfl')\n    outs.append(src[pos:start])\n    outs.append('\\n'.join(lines) + '\\n')\n    pos = end\nouts.append(src[pos:])\nsrc = ''.join(outs)\n\nopen(p, 'w').write(src)\nprint(\"ok\")\nPYEOF\ngrep -n \"  rfl$\" {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean | head -20",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "  rfl$",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-20"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && python3 - <<'PYEOF'\np = 'JauneConsensus/Facts/WithdrawalOrder.lean'\nlines = open(p).read().split('\\n')\nassert lines[721].strip() == 'rfl', repr(lines[721][:60])\nassert lines[722].startswith('theorem classify_ignored_unknownPubkey'), lines[722][:60]\nassert lines[2766].strip() == '', repr(lines[2766][:60])\nassert lines[2767].startswith('/-! ## The composed'), lines[2767][:60]\nthms = [l for l in lines[722:2767] if l.startswith('theorem ')]\nassert thms and all(t.startswith('theorem classify_ignored_') for t in thms)\nprint(\"junk theorems:\", len(thms))\ndel lines[722:2767]\nopen(p, 'w').write('\\n'.join(lines))\nprint(\"new lines:\", len(lines))\nPYEOF\ngrep -n \"^theorem \" {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean | tail -14; wc -l {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "^theorem ",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-14"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "wc",
+      "-l",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && python3 - <<'PYEOF'\nimport re\np = 'JauneConsensus/Facts/WithdrawalOrder.lean'\nsrc = open(p).read()\nouts = []\npos = 0\nn = 0\nfor m in re.finditer(r'theorem (classify_ignored_\\w+)', src):\n    start = m.start()\n    rest = src[m.end():]\n    nx = re.search(r'\\n(?=/-!|theorem |end JauneConsensus)', rest)\n    end = m.end() + (nx.start() if nx else len(rest))\n    seg = src[start:end]\n    lines = seg.rstrip('\\n').split('\\n')\n    if lines[-1].strip() != 'rfl':\n        assert lines[-1].strip().startswith('rw ['), (m.group(1), lines[-1][:60])\n        lines.append('  rfl')\n        n += 1\n    outs.append(src[pos:start])\n    outs.append('\\n'.join(lines) + '\\n')\n    pos = end\nouts.append(src[pos:])\nopen(p, 'w').write(''.join(outs))\nprint(\"appended:\", n)\nPYEOF\nwc -l {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "wc",
+      "-l",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && grep -n \"^theorem \\|^private theorem \\|^/-! \" JauneConsensus/Facts/WithdrawalOrder.lean",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "^theorem \\|^private theorem \\|^/-! ",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && grep -n '^theorem \\|^private theorem ' JauneConsensus/Facts/WithdrawalOrder.lean && echo --- && tail -5 JauneConsensus/Facts/WithdrawalOrder.lean && echo --- && wc -l JauneConsensus/Facts/WithdrawalOrder.lean && git status --short | head",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "^theorem \\|^private theorem ",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-5",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "wc",
+      "-l",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "git",
+      "status",
+      "--short"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && grep -n \"^/-! \\|^end JauneConsensus\" JauneConsensus/Facts/WithdrawalOrder.lean; echo ===; sed -n '705,725p' JauneConsensus/Facts/WithdrawalOrder.lean | cut -c1-80",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "^/-! \\|^end JauneConsensus",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "705,725p",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cut",
+      "-c1-80"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && grep -c 'rw \\[ite_eq' JauneConsensus/Facts/WithdrawalOrder.lean && python3 -c \"\nimport re\nn=0\nfor i,l in enumerate(open('JauneConsensus/Facts/WithdrawalOrder.lean'),1):\n    if 'ite_eq_' in l and 'show' in l:\n        d=0\n        for ch in l:\n            if ch=='(':d+=1\n            elif ch==')':\n                d-=1\n                assert d>=0,(i,l)\n        assert d==0,(i,l); n+=1\nprint('balanced show-lines:',n)\" && grep -n 'show .* from by' JauneConsensus/Facts/WithdrawalOrder.lean | awk -F: '{print $1}' | head -40",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-c",
+      "rw \\[ite_eq",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "python3",
+      "-c",
+      "\nimport re\nn=0\nfor i,l in enumerate(open('JauneConsensus/Facts/WithdrawalOrder.lean'),1):\n    if 'ite_eq_' in l and 'show' in l:\n        d=0\n        for ch in l:\n            if ch=='(':d+=1\n            elif ch==')':\n                d-=1\n                assert d>=0,(i,l)\n        assert d==0,(i,l); n+=1\nprint('balanced show-lines:',n)"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "show .* from by",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "awk",
+      "-F:",
+      "{print $1}"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-40"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && grep -n 'rw \\[hget\\]\\|rw \\[hcur\\]\\|rw \\[hper\\]\\|rw \\[hsum\\]\\|rw \\[hpend\\]\\|rw \\[hmin' JauneConsensus/Facts/WithdrawalOrder.lean | head -40",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "rw \\[hget\\]\\|rw \\[hcur\\]\\|rw \\[hper\\]\\|rw \\[hsum\\]\\|rw \\[hpend\\]\\|rw \\[hmin",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-40"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && grep -n 'bind_ok_cons\\|bind_ok_inv\\|ok.inj\\|ite_eq\\|dsimp only\\|simp only \\[bind' JauneConsensus/Facts/WithdrawalRequest.lean | head -50; echo ---; grep -n 'theorem bind_ok\\|lemma bind_ok\\|bind_err' JauneConsensus/Facts/WithdrawalRequest.lean JauneConsensus/Facts/Operations.lean | head",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "bind_ok_cons\\|bind_ok_inv\\|ok.inj\\|ite_eq\\|dsimp only\\|simp only \\[bind",
+      "JauneConsensus/Facts/WithdrawalRequest.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-50"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "theorem bind_ok\\|lemma bind_ok\\|bind_err",
+      "JauneConsensus/Facts/WithdrawalRequest.lean",
+      "JauneConsensus/Facts/Operations.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && grep -n 'ite_eq_right (show' JauneConsensus/Facts/WithdrawalOrder.lean | head -20; echo ---; grep -n '^theorem order_sensitive\\|^/-! ## The composed\\|^end JauneConsensus' JauneConsensus/Facts/WithdrawalOrder.lean; echo ---; wc -l JauneConsensus/Facts/WithdrawalOrder.lean",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "ite_eq_right (show",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-20"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "^theorem order_sensitive\\|^/-! ## The composed\\|^end JauneConsensus",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "wc",
+      "-l",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && grep -n \"rw \\[hs1r\\]\\|rw \\[hr\\]\" JauneConsensus/Facts/WithdrawalOrder.lean | head; sed -n '/have hps1/,/U64.zero := by/p' JauneConsensus/Facts/WithdrawalOrder.lean | head -12 | cat -A | head -14",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "rw \\[hs1r\\]\\|rw \\[hr\\]",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "/have hps1/,/U64.zero := by/p",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-12"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cat",
+      "-A"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-14"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && grep -n \"hcomp\\|hsuff\\|hexc\" JauneConsensus/Facts/WithdrawalOrder.lean | sed -n '1,40p' | cut -c1-110",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "hcomp\\|hsuff\\|hexc",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "1,40p"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cut",
+      "-c1-110"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && wc -l JauneConsensus/Facts/WithdrawalOrder.lean; grep -c \"theorem computeExitEpoch_mid\\|theorem partial_applied_pending_pos\\|theorem order_sensitive\" JauneConsensus/Facts/WithdrawalOrder.lean",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "wc",
+      "-l",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-c",
+      "theorem computeExitEpoch_mid\\|theorem partial_applied_pending_pos\\|theorem order_sensitive",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && sed -n '876,884p' JauneConsensus/Facts/WithdrawalOrder.lean; echo ====; grep -n \"exact hpendP\\|rw \\[\\xe2\\x86\\x90 hfoldSeq\\]\\|simp only \\[hs1r\" JauneConsensus/Facts/WithdrawalOrder.lean | head",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "876,884p",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "===="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "exact hpendP\\|rw \\[\\xe2\\x86\\x90 hfoldSeq\\]\\|simp only \\[hs1r",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && sed -n '718,724p' JauneConsensus/Facts/WithdrawalOrder.lean | cat -A | cut -c1-60; echo ===; sed -n '2764,2770p' JauneConsensus/Facts/WithdrawalOrder.lean | cut -c1-60",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "718,724p",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cat",
+      "-A"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cut",
+      "-c1-60"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "2764,2770p",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cut",
+      "-c1-60"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && sed -n '500,510p' JauneConsensus/Facts/WithdrawalOrder.lean | cut -c1-160",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "500,510p",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cut",
+      "-c1-160"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && sed -n '169p;224p;234p;244p;267p;277,278p;336p;359p' JauneConsensus/Facts/WithdrawalOrder.lean | cut -c1-160; echo ===406===; sed -n '406p' JauneConsensus/Facts/WithdrawalOrder.lean | cut -c1-200; echo ===880===; sed -n '880p' JauneConsensus/Facts/WithdrawalOrder.lean | cut -c1-200",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "169p;224p;234p;244p;267p;277,278p;336p;359p",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cut",
+      "-c1-160"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "===406==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "406p",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cut",
+      "-c1-200"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "===880==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "880p",
+      "JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cut",
+      "-c1-200"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "python3 scripts/check-assurance-manifest.py",
+   "stages": [
+    {
+     "argv": [
+      "python3",
+      "scripts/check-assurance-manifest.py"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "scripts/check-hygiene.sh",
+   "stages": [
+    {
+     "argv": [
+      "scripts/check-hygiene.sh"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "scripts/check-hygiene.sh 2>&1 | tail -n 5",
+   "stages": [
+    {
+     "argv": [
+      "scripts/check-hygiene.sh"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-n",
+      "5"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "scripts/check-hygiene.sh 2>&1 | tail -5; echo \"=== integrity ===\"; scripts/check-integrity.sh 2>&1 | tail -5",
+   "stages": [
+    {
+     "argv": [
+      "scripts/check-hygiene.sh"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-5"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "=== integrity ==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "scripts/check-integrity.sh"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-5"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "scripts/check-hygiene.sh 2>&1 | tail -n 2 && scripts/check-integrity.sh 2>&1 | tail -n 2",
+   "stages": [
+    {
+     "argv": [
+      "scripts/check-hygiene.sh"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-n",
+      "2"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "scripts/check-integrity.sh"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-n",
+      "2"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "scripts/check-integrity.sh",
+   "stages": [
+    {
+     "argv": [
+      "scripts/check-integrity.sh"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "scripts/check-integrity.sh 2>&1 | tail -n 8",
+   "stages": [
+    {
+     "argv": [
+      "scripts/check-integrity.sh"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-n",
+      "8"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "git status --short && echo --- && git diff --stat",
+   "stages": [
+    {
+     "argv": [
+      "git",
+      "status",
+      "--short"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "git",
+      "diff",
+      "--stat"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "git status --short; git diff --stat",
+   "stages": [
+    {
+     "argv": [
+      "git",
+      "status",
+      "--short"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "git",
+      "diff",
+      "--stat"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "git status --short && git log --oneline -3",
+   "stages": [
+    {
+     "argv": [
+      "git",
+      "status",
+      "--short"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "git",
+      "log",
+      "--oneline",
+      "-3"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "mkdir -p JauneConsensus/Facts && ls JauneConsensus/",
+   "stages": [
+    {
+     "argv": [
+      "mkdir",
+      "-p",
+      "JauneConsensus/Facts"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "JauneConsensus/"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "L=$(ls -t {home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-*.log | head -1); echo \"$L\"; grep -n \"error: JauneConsensus\" \"$L\"",
+   "stages": []
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "L=$(ls -t {home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-*.log | head -1); echo \"$L\"; tail -3 \"$L\" | cut -c1-600; grep -c \"error: JauneConsensus\" \"$L\"",
+   "stages": []
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "~/creme/scripts/creme lake-build eip7002-xl-w2b --wait 900 -- JauneConsensus.Facts.ExpectedWithdrawals > /tmp/w2b-b.log 2>&1; grep -o '\"status\": *\"[^\"]*\"' /tmp/w2b-b.log",
+   "stages": [
+    {
+     "argv": [
+      "~/creme/scripts/creme",
+      "lake-build",
+      "eip7002-xl-w2b",
+      "--wait",
+      "900",
+      "--",
+      "JauneConsensus.Facts.ExpectedWithdrawals"
+     ],
+     "argvComplete": false
+    },
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "\"status\": *\"[^\"]*\"",
+      "/tmp/w2b-b.log"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "~/creme/scripts/creme lake-build eip7002-xl-w2b --wait 900 -- JauneConsensus.Facts.ExpectedWithdrawals > /tmp/w2b-d.log 2>&1; grep -o '\"status\": *\"[^\"]*\"' /tmp/w2b-d.log; python3 -c \"\nimport re\nlog = open('/tmp/w2b-d.log').read()\nseen = set()\nfor m in re.finditer(r'error: JauneConsensus/Facts/ExpectedWithdrawals\\.lean:\\d+:\\d+: ([^\\\"]{0,140})', log):\n    key = m.group(0)[:140]\n    if key not in seen:\n        seen.add(key)\n        print(m.group(0)[:140])\n\"",
+   "stages": [
+    {
+     "argv": [
+      "~/creme/scripts/creme",
+      "lake-build",
+      "eip7002-xl-w2b",
+      "--wait",
+      "900",
+      "--",
+      "JauneConsensus.Facts.ExpectedWithdrawals"
+     ],
+     "argvComplete": false
+    },
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "\"status\": *\"[^\"]*\"",
+      "/tmp/w2b-d.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "python3",
+      "-c",
+      "\nimport re\nlog = open('/tmp/w2b-d.log').read()\nseen = set()\nfor m in re.finditer(r'error: JauneConsensus/Facts/ExpectedWithdrawals\\.lean:\\d+:\\d+: ([^\\\"]{0,140})', log):\n    key = m.group(0)[:140]\n    if key not in seen:\n        seen.add(key)\n        print(m.group(0)[:140])\n"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "~/creme/scripts/creme lake-build eip7002-xl-w2b --wait 900 -- JauneConsensus.Facts.ExpectedWithdrawals > /tmp/w2b-c.log 2>&1; grep -o '\"status\": *\"[^\"]*\"' /tmp/w2b-c.log; python3 -c \"\nimport re\nlog = open('/tmp/w2b-c.log').read()\nseen = set()\nfor m in re.finditer(r'error: JauneConsensus/Facts/ExpectedWithdrawals\\.lean:\\d+:\\d+: ([^\\\"]{0,160})', log):\n    key = m.group(0)[:150]\n    if key not in seen:\n        seen.add(key)\n        print(m.group(0)[:150])\n\" | head -n 30",
+   "stages": [
+    {
+     "argv": [
+      "~/creme/scripts/creme",
+      "lake-build",
+      "eip7002-xl-w2b",
+      "--wait",
+      "900",
+      "--",
+      "JauneConsensus.Facts.ExpectedWithdrawals"
+     ],
+     "argvComplete": false
+    },
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "\"status\": *\"[^\"]*\"",
+      "/tmp/w2b-c.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "python3",
+      "-c",
+      "\nimport re\nlog = open('/tmp/w2b-c.log').read()\nseen = set()\nfor m in re.finditer(r'error: JauneConsensus/Facts/ExpectedWithdrawals\\.lean:\\d+:\\d+: ([^\\\"]{0,160})', log):\n    key = m.group(0)[:150]\n    if key not in seen:\n        seen.add(key)\n        print(m.group(0)[:150])\n"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "30"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "~/creme/scripts/creme lake-build eip7002-xl-w2b --wait 900 -- JauneConsensus.Facts.ExpectedWithdrawals 2>&1 | grep -E \"error|Build completed|\\\"status\\\"\" | head -n 40",
+   "stages": [
+    {
+     "argv": [
+      "~/creme/scripts/creme",
+      "lake-build",
+      "eip7002-xl-w2b",
+      "--wait",
+      "900",
+      "--",
+      "JauneConsensus.Facts.ExpectedWithdrawals"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-E",
+      "error|Build completed|\\\"status\\\""
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "40"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "~/creme/scripts/creme lake-build eip7002-xl-w2b --wait 900 -- JauneConsensus.Facts.ExpectedWithdrawals 2>&1 | grep -E \"^(error|warning: JauneConsensus/Facts)\" | head -n 30; echo \"EXIT: done\"",
+   "stages": [
+    {
+     "argv": [
+      "~/creme/scripts/creme",
+      "lake-build",
+      "eip7002-xl-w2b",
+      "--wait",
+      "900",
+      "--",
+      "JauneConsensus.Facts.ExpectedWithdrawals"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-E",
+      "^(error|warning: JauneConsensus/Facts)"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "30"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "EXIT: done"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "~/creme/scripts/creme lake-build eip7002-xl-w2b --wait 900 -- JauneConsensus.Facts.ExpectedWithdrawals > /tmp/w2b-build6.log 2>&1; grep -o '\"status\": *\"[^\"]*\"' /tmp/w2b-build6.log; grep -o 'Build completed[^\\\\]*' /tmp/w2b-build6.log | head -n 1; grep -o 'error: [^\\\\]*' /tmp/w2b-build6.log | sort -u | head -n 10",
+   "stages": [
+    {
+     "argv": [
+      "~/creme/scripts/creme",
+      "lake-build",
+      "eip7002-xl-w2b",
+      "--wait",
+      "900",
+      "--",
+      "JauneConsensus.Facts.ExpectedWithdrawals"
+     ],
+     "argvComplete": false
+    },
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "\"status\": *\"[^\"]*\"",
+      "/tmp/w2b-build6.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "Build completed[^\\\\]*",
+      "/tmp/w2b-build6.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "1"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "error: [^\\\\]*",
+      "/tmp/w2b-build6.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sort",
+      "-u"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "10"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "~/creme/scripts/creme lake-build eip7002-xl-w2b --wait 900 -- JauneConsensus.Facts.ExpectedWithdrawals 2>&1 | tail -n 5",
+   "stages": [
+    {
+     "argv": [
+      "~/creme/scripts/creme",
+      "lake-build",
+      "eip7002-xl-w2b",
+      "--wait",
+      "900",
+      "--",
+      "JauneConsensus.Facts.ExpectedWithdrawals"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-n",
+      "5"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "~/creme/scripts/creme lake-build eip7002-xl-w2b --wait 900 -- JauneConsensus 2>&1 | tail -5 | cut -c1-400",
+   "stages": [
+    {
+     "argv": [
+      "~/creme/scripts/creme",
+      "lake-build",
+      "eip7002-xl-w2b",
+      "--wait",
+      "900",
+      "--",
+      "JauneConsensus"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-5"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cut",
+      "-c1-400"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "python3 -c \"\nd = open('/tmp/w2b-b.log').read()\ni = d.find('error: JauneConsensus')\nprint(d[i:i+3000] if i>=0 else d[-2000:])\n\"",
+   "stages": [
+    {
+     "argv": [
+      "python3",
+      "-c",
+      "\nd = open('/tmp/w2b-b.log').read()\ni = d.find('error: JauneConsensus')\nprint(d[i:i+3000] if i>=0 else d[-2000:])\n"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "python3 -c \"\nimport json\nm = json.load(open('{home}/jaune/.worktrees/eip7002-xl-w2a/scripts/assurance-manifest.json'))\nprint(list(m.keys()))\nprint('coverage_modules:', m.get('coverage_modules'))\nprint('entries:', len(m.get('entries', [])))\n\"; echo ===; grep -n \"def check_union_coverage\" -A 25 {home}/jaune/.worktrees/eip7002-xl-w2a/scripts/check-assurance-manifest.py",
+   "stages": [
+    {
+     "argv": [
+      "python3",
+      "-c",
+      "\nimport json\nm = json.load(open('{home}/jaune/.worktrees/eip7002-xl-w2a/scripts/assurance-manifest.json'))\nprint(list(m.keys()))\nprint('coverage_modules:', m.get('coverage_modules'))\nprint('entries:', len(m.get('entries', [])))\n"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "def check_union_coverage",
+      "-A",
+      "25",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/scripts/check-assurance-manifest.py"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "python3 -c \"\nimport json\nlog = open('/tmp/w2b-build7.log').read()\ni = log.find('{')\nd = json.loads(log[i:])\nprint(json.dumps({k:v for k,v in d.items() if k in ('status','failed','exit','target_verdicts')}, indent=1))\n\" 2>/dev/null || tail -c 2500 /tmp/w2b-build7.log",
+   "stages": [
+    {
+     "argv": [
+      "python3",
+      "-c",
+      "\nimport json\nlog = open('/tmp/w2b-build7.log').read()\ni = log.find('{')\nd = json.loads(log[i:])\nprint(json.dumps({k:v for k,v in d.items() if k in ('status','failed','exit','target_verdicts')}, indent=1))\n"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-c",
+      "2500",
+      "/tmp/w2b-build7.log"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "python3 - <<'EOF'\nimport re\nlog = open(\"{home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-20261109T100231.843761Z-2723588.log\").read()\n# error lines appear as: error: FILE:LINE:COL: MSG possibly with \\n escapes; print each, truncated\nfor m in re.finditer(r'error: JauneConsensus/Facts/ExpectedWithdrawals\\.lean:\\d+:\\d+: ', log):\n    s = m.start()\n    print('=== ' + log[s:s+120].split('\\\\n')[0])\n    # print continuation (escaped newlines) up to ~1500 chars\n    chunk = log[s:s+2600].replace('\\\\n', '\\n')\n    print(chunk[:1500])\n    print()\nEOF",
+   "stages": [
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "python3 - <<'EOF'\np = 'JauneConsensus/Facts/ExpectedWithdrawals.lean'\ns = open(p).read().split('\\n')\nstart = next(i for i,l in enumerate(s) if l.startswith('/-! ## Sweep top-up'))\nend = next(i for i,l in enumerate(s) if l == 'end Sweep')\nprint('deleting lines', start+1, 'to', end+1, 'count:', end-start+1)\nprint('first:', s[start][:60]); print('last:', s[end])\ndel s[start:end+1]\nopen(p,'w').write('\\n'.join(s))\nEOF\ngrep -c \"SweepEntryOk\\|getExpected_sweep_topup\\|?hyS\\|?hdS\\|?hyF\\|?hdF\\|hEpochEq\\|hSweep\\|hNewFact\" JauneConsensus/Facts/ExpectedWithdrawals.lean || echo \"sweep fully removed\"",
+   "stages": [
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-c",
+      "SweepEntryOk\\|getExpected_sweep_topup\\|?hyS\\|?hdS\\|?hyF\\|?hdF\\|hEpochEq\\|hSweep\\|hNewFact",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "sweep fully removed"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "python3 - <<'EOF'\nimport re, json\nlog = open('/tmp/w2b-f.log').read()\nfor k in ['\"target_verdicts\"', '\"modules_rebuilt\"', '\"status\"', '\"exit\"']:\n    i = log.find(k)\n    print(k, '=>', log[i:i+120].split('},')[0][:120])\nprint('---sorry warnings---')\nfor m in re.finditer(r'warning: JauneConsensus/Facts/ExpectedWithdrawals[^\\\"]{0,80}sorry[^\\\"]{0,40}', log):\n    print(m.group(0)[:120])\nprint('(none above = clean)')\nEOF\ngrep -c \"sorry\" JauneConsensus/Facts/ExpectedWithdrawals.lean || true",
+   "stages": [
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-c",
+      "sorry",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "true"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "python3 - <<'EOF'\nlog = open(\"{home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-20261109T101229.523852Z-2735667.log\").read()\ni = log.find('error: JauneConsensus/Facts/ExpectedWithdrawals.lean:847')\nprint(log[i:i+1600].replace('\\\\n','\\n')[:1600])\nEOF\nsed -n '830,860p' JauneConsensus/Facts/ExpectedWithdrawals.lean",
+   "stages": [
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "830,860p",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "cat lean-toolchain 2>/dev/null; echo ---; grep -n \"ForIn\\|forIn\" JauneConsensus/*.lean | head -n 30; echo ---; cat lakefile* 2>/dev/null | head -n 80",
+   "stages": [
+    {
+     "argv": [
+      "cat",
+      "lean-toolchain"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "ForIn\\|forIn",
+      "JauneConsensus/*.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "30"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cat",
+      "lakefile*"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "80"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "cat {home}/jaune/.worktrees/eip7002-xl-w2b/scripts/check-hygiene.sh 2>/dev/null | head -60; echo ===; ls {home}/jaune/.worktrees/eip7002-xl-w2b/scripts/ | head -20",
+   "stages": [
+    {
+     "argv": [
+      "cat",
+      "{home}/jaune/.worktrees/eip7002-xl-w2b/scripts/check-hygiene.sh"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-60"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "{home}/jaune/.worktrees/eip7002-xl-w2b/scripts/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-20"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "cat /tmp/w2b-build2.log | head -c 1200; echo; echo \"---SIZE---\"; wc -c /tmp/w2b-build2.log",
+   "stages": [
+    {
+     "argv": [
+      "cat",
+      "/tmp/w2b-build2.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-c",
+      "1200"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---SIZE---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "wc",
+      "-c",
+      "/tmp/w2b-build2.log"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "grep -n '】' JauneConsensus/Facts/ExpectedWithdrawals.lean",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "】",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "grep -n \"validators :\" {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Containers.lean; echo ===; grep -n \"balances :\" {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Containers.lean",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "validators :",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Containers.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "balances :",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Containers.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "grep -n \"def decreaseBalance\\|def getMaxEffectiveBalance\\|def hasExecutionWithdrawal\" JauneConsensus/*.lean; echo ---; grep -n \"pendingPartialWithdrawals\\|next_withdrawal\" JauneConsensus/Containers.lean | head",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "def decreaseBalance\\|def getMaxEffectiveBalance\\|def hasExecutionWithdrawal",
+      "JauneConsensus/*.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "pendingPartialWithdrawals\\|next_withdrawal",
+      "JauneConsensus/Containers.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "grep -n \"sorry\\|admit\\|axiom\\|native_decide\\|partial def\\|#print\" {home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/WithdrawalsFloor.lean; echo ---; grep -c \"\" {home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/WithdrawalsFloor.lean; grep -n \"processWithdrawals_floor\\|getExpected_floorInv\\|theorem \\|lemma \\|def \" {home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/WithdrawalsFloor.lean | tail -20",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "sorry\\|admit\\|axiom\\|native_decide\\|partial def\\|#print",
+      "{home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/WithdrawalsFloor.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-c",
+      "",
+      "{home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/WithdrawalsFloor.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "processWithdrawals_floor\\|getExpected_floorInv\\|theorem \\|lemma \\|def ",
+      "{home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/WithdrawalsFloor.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-20"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "grep -n \"SweepEntryOk\\|getExpected_sweep_topup\\|?hyS\\|?hdS\\|?hyF\\|?hdF\\|hEpochEq\\|hSweep\\|hNewFact\" JauneConsensus/Facts/ExpectedWithdrawals.lean; echo ---; sed -n '1140,1165p' JauneConsensus/Facts/ExpectedWithdrawals.lean",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "SweepEntryOk\\|getExpected_sweep_topup\\|?hyS\\|?hdS\\|?hyF\\|?hdF\\|hEpochEq\\|hSweep\\|hNewFact",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "1140,1165p",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "grep -n \"toList_toArray\\|toArray_toList\" JauneConsensus/Facts/ExpectedWithdrawals.lean; echo ---; grep -n \"def Loop1Floor\\|theorem loop1_emissions\\|theorem getExpected_loop1_floor\" JauneConsensus/Facts/ExpectedWithdrawals.lean; echo ---; grep -cn \"sorry\" JauneConsensus/Facts/ExpectedWithdrawals.lean || true",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "toList_toArray\\|toArray_toList",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "def Loop1Floor\\|theorem loop1_emissions\\|theorem getExpected_loop1_floor",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-cn",
+      "sorry",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "true"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "grep -rn \"theorem min_eq_left\\|theorem min_eq_right\\|theorem not_lt \\|def bne \\|theorem of_decide_eq_true\\|theorem of_decide_eq_false\" ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/ 2>&1 | head -20",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-rn",
+      "theorem min_eq_left\\|theorem min_eq_right\\|theorem not_lt \\|def bne \\|theorem of_decide_eq_true\\|theorem of_decide_eq_false",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-20"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "grep -rn \"HAnd\" ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Core.lean 2>&1 | head -20; echo ===; grep -rn \"instance.*HAnd\\|HAnd.*Bool.*Prop\\|decide.*HAnd\" ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/ 2>&1 | head -20",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-rn",
+      "HAnd",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Core.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-20"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-rn",
+      "instance.*HAnd\\|HAnd.*Bool.*Prop\\|decide.*HAnd",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-20"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "grep -rn \"forIn_eq_forIn_range\" ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/ | head; echo ---; find ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Data/Range -type f | head",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-rn",
+      "forIn_eq_forIn_range",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "find",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Data/Range",
+      "-type",
+      "f"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "grep -n \"transitive\\|import.*every\\|JauneConsensus\" {home}/jaune/.worktrees/eip7002-xl-w2a/scripts/check-assurance-manifest.py | head -20; echo ===; grep -n \"ConsensusAssurance\\|ConsensusUnion\" {home}/jaune/.worktrees/eip7002-xl-w2a/scripts/assurance-manifest.json | head; echo ===; ls {home}/jaune/.worktrees/eip7002-xl-w2a/JauneConsensus/Harness/ | head -30",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "transitive\\|import.*every\\|JauneConsensus",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/scripts/check-assurance-manifest.py"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-20"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "ConsensusAssurance\\|ConsensusUnion",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/scripts/assurance-manifest.json"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/JauneConsensus/Harness/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-30"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "grep -o '\"failed\": *\\[[^]]*\\]' /tmp/w2b-build5.log | head -c 500; echo; grep -o 'error[^\"]*' /tmp/w2b-build5.log | sort -u | head -n 20",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "\"failed\": *\\[[^]]*\\]",
+      "/tmp/w2b-build5.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-c",
+      "500"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "error[^\"]*",
+      "/tmp/w2b-build5.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sort",
+      "-u"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "20"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "grep -n \"error:\" {home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2e-20261109T102258.797893Z-2749276.log | head -60; echo ===; wc -l {home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2e-20261109T102258.797893Z-2749276.log",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "error:",
+      "{home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2e-20261109T102258.797893Z-2749276.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-60"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "wc",
+      "-l",
+      "{home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2e-20261109T102258.797893Z-2749276.log"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "grep -rn \"AndOp\" ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Prelude.lean 2>&1 | head; echo ===; sed -n '1790,1840p' ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Prelude.lean 2>&1",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-rn",
+      "AndOp",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Prelude.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "1790,1840p",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Prelude.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "grep -rn \"theorem ite_eq_left\\|theorem ite_eq_right\\|theorem beq_iff_eq\\|theorem beq_self_eq_true\" {home}/jaune/.worktrees/eip7002-xl-w2e/ --include=*.lean 2>/dev/null | grep -v \".lake\" | head; echo ===; sed -n '55,75p' {home}/jaune/.worktrees/eip7002-xl-w2e/lakefile.lean 2>/dev/null || sed -n '55,75p' {home}/jaune/.worktrees/eip7002-xl-w2e/lakefile.toml 2>/dev/null; echo ===; ls {home}/jaune/.worktrees/eip7002-xl-w2e/*.lean 2>/dev/null; grep -rn \"ConsensusAssurance\" {home}/jaune/.worktrees/eip7002-xl-w2e/lakefile* | head",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-rn",
+      "theorem ite_eq_left\\|theorem ite_eq_right\\|theorem beq_iff_eq\\|theorem beq_self_eq_true",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/",
+      "--include=*.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-v",
+      ".lake"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "55,75p",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/lakefile.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "55,75p",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/lakefile.toml"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/*.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-rn",
+      "ConsensusAssurance",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/lakefile*"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "grep -o 'error: [^\\\\n]*' {home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-20261109T100105.710363Z-2720756.log | sort -u | head -n 20; echo ===; grep -o 'ExpectedWithdrawals.lean:[0-9]*:[0-9]*[^\\\\n]*' {home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-20261109T100105.710363Z-2720756.log | head -n 20",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "error: [^\\\\n]*",
+      "{home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-20261109T100105.710363Z-2720756.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sort",
+      "-u"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "20"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "ExpectedWithdrawals.lean:[0-9]*:[0-9]*[^\\\\n]*",
+      "{home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-20261109T100105.710363Z-2720756.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "20"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "grep -n \"theorem\\|W2a\\|namespace\\|^end\" JauneConsensus/UInt.lean | tail -20",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "theorem\\|W2a\\|namespace\\|^end",
+      "JauneConsensus/UInt.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-20"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "head -c 2000 /tmp/w2b-build1.log",
+   "stages": [
+    {
+     "argv": [
+      "head",
+      "-c",
+      "2000",
+      "/tmp/w2b-build1.log"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "head -c 800 /tmp/w2b-build3.log; echo; grep -o '\"admission\": *\"[^\"]*\"' /tmp/w2b-build3.log",
+   "stages": [
+    {
+     "argv": [
+      "head",
+      "-c",
+      "800",
+      "/tmp/w2b-build3.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-o",
+      "\"admission\": *\"[^\"]*\"",
+      "/tmp/w2b-build3.log"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "ls JauneConsensus/",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "JauneConsensus/"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "ls {home}/jaune/.worktrees/eip7002-xl-w2a/JauneConsensus/ {home}/jaune/.worktrees/eip7002-xl-w2a/JauneConsensus/Facts/ 2>&1; echo ---; ls {home}/jaune/.worktrees/eip7002-xl-w2a/docs/ 2>&1; echo ---; ls {home}/jaune/.worktrees/eip7002-xl-w2a/scripts/ 2>&1",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/JauneConsensus/",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/JauneConsensus/Facts/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/docs/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/scripts/"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "ls {home}/jaune/.worktrees/eip7002-xl-w2a/*.lean {home}/jaune/.worktrees/eip7002-xl-w2a/JauneConsensus.lean 2>&1; echo ---; cat {home}/jaune/.worktrees/eip7002-xl-w2a/scripts/check-hygiene.sh 2>&1 | head -50; echo ===; cat {home}/jaune/.worktrees/eip7002-xl-w2a/scripts/check-integrity.sh 2>&1 | head -80",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/*.lean",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/JauneConsensus.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cat",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/scripts/check-hygiene.sh"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-50"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cat",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/scripts/check-integrity.sh"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-80"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "ls .lake/packages/ 2>/dev/null; echo ---; ls .lake/packages/batteries 2>/dev/null | head",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      ".lake/packages/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      ".lake/packages/batteries"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "ls docs/ 2>/dev/null; echo ---; ls scripts/*.py | head; echo ---; cat JauneConsensus.lean | head -n 5; echo ---; ls JauneConsensus/*.lean | head -n 30",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "docs/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "scripts/*.py"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cat",
+      "JauneConsensus.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "5"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "JauneConsensus/*.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "30"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "ls ~/.elan/toolchains/ 2>/dev/null; ls {home}/.elan/toolchains/ 2>/dev/null; echo ---; ls {home}/jaune/.worktrees/eip7002-xl-w2e/.lake 2>/dev/null | head; echo ---; grep -n \"Facts\" {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus.lean",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "~/.elan/toolchains/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "{home}/.elan/toolchains/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/.lake"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "Facts",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "ls scripts/ | grep -iE \"layer|duplic|surface|axiom|admit|sorry\"",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "scripts/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-iE",
+      "layer|duplic|surface|axiom|admit|sorry"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "ls scripts/ | grep -i \"layer\\|proof\\|trust\"; echo ---; cat scripts/GATES.md 2>/dev/null | head -n 100",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "scripts/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-i",
+      "layer\\|proof\\|trust"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "cat",
+      "scripts/GATES.md"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "100"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "ls scripts/ | grep -i \"dupl\\|trust\\|layer\\|proof\" ; ls *.sh scripts/*.sh 2>/dev/null | head",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "scripts/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-i",
+      "dupl\\|trust\\|layer\\|proof"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "*.sh",
+      "scripts/*.sh"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "ls {home}/jaune/.worktrees/eip7002-xl-w2a/.creme-brief/ && head -30 {home}/jaune/.worktrees/eip7002-xl-w2a/.creme-brief/brief.md 2>/dev/null",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/.creme-brief/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-30",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/.creme-brief/brief.md"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "ls ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/ 2>&1 | head; echo ---; grep -rn \"HAnd Bool\" ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/ 2>&1 | head -20",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-rn",
+      "HAnd Bool",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-20"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "ls -t {home}/creme/.creme/lean-build-ownership/logs/ 2>/dev/null | head; echo ===; grep -n \"lean:169:\" {home}/creme/.creme/lean-build-ownership/logs/*.log 2>/dev/null | tail -3",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "-t",
+      "{home}/creme/.creme/lean-build-ownership/logs/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "lean:169:",
+      "{home}/creme/.creme/lean-build-ownership/logs/*.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-3"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "ls {home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/ && wc -l {home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/ExpectedWithdrawals.lean {home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/UInt.lean",
+   "stages": [
+    {
+     "argv": [
+      "ls",
+      "{home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "wc",
+      "-l",
+      "{home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/ExpectedWithdrawals.lean",
+      "{home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/UInt.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "wc -l {home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean",
+   "stages": [
+    {
+     "argv": [
+      "wc",
+      "-l",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e/JauneConsensus/Facts/WithdrawalOrder.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "wc -l {home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/WithdrawalsFloor.lean; tail -n 30 {home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/WithdrawalsFloor.lean",
+   "stages": [
+    {
+     "argv": [
+      "wc",
+      "-l",
+      "{home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/WithdrawalsFloor.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "tail",
+      "-n",
+      "30",
+      "{home}/jaune/.worktrees/eip7002-xl-w2b/JauneConsensus/Facts/WithdrawalsFloor.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "sed -n '1740,1790p' ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Prelude.lean 2>&1",
+   "stages": [
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "1740,1790p",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Prelude.lean"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "sed -i 's/hMapEq】/hMapEq⟩/' JauneConsensus/Facts/ExpectedWithdrawals.lean && grep -c '】' JauneConsensus/Facts/ExpectedWithdrawals.lean; echo \"fixed\"",
+   "stages": [
+    {
+     "argv": [
+      "sed",
+      "-i",
+      "s/hMapEq】/hMapEq⟩/",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-c",
+      "】",
+      "JauneConsensus/Facts/ExpectedWithdrawals.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "fixed"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "sed -n '300,315p' ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Coe.lean 2>&1; echo ===; sed -n '1,60p' {home}/jaune/.worktrees/eip7002-xl-w2a/scripts/check-assurance-manifest.py 2>&1",
+   "stages": [
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "300,315p",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Coe.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "1,60p",
+      "{home}/jaune/.worktrees/eip7002-xl-w2a/scripts/check-assurance-manifest.py"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2a",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2a",
+   "command": "sed -n '770,778p' ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Core.lean; echo ===; grep -rn \"beq_self_eq_true\\|theorem not_true \\|theorem not_false \\|theorem false_and\\|theorem true_and \\|theorem if_true\\|theorem if_false\\|LawfulBEq UInt8\\|instance.*LawfulBEq.*UInt\" ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/ 2>&1 | head -20",
+   "stages": [
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "770,778p",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Core.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "==="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-rn",
+      "beq_self_eq_true\\|theorem not_true \\|theorem not_false \\|theorem false_and\\|theorem true_and \\|theorem if_true\\|theorem if_false\\|LawfulBEq UInt8\\|instance.*LawfulBEq.*UInt",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-20"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "sed -n '1787,1830p' {home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-20261109T115839.536724Z-2946891.log; echo =====; sed -n '1827,1880p' {home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-20261109T115839.536724Z-2946891.log | head -60",
+   "stages": [
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "1787,1830p",
+      "{home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-20261109T115839.536724Z-2946891.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "====="
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "1827,1880p",
+      "{home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2b-20261109T115839.536724Z-2946891.log"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-60"
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "sed -n '80,135p' ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Data/Array/Basic.lean | grep -n \"namespace\\|theorem toArray_toList\\|theorem toList_toArray\\|end \"",
+   "stages": [
+    {
+     "argv": [
+      "sed",
+      "-n",
+      "80,135p",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Init/Data/Array/Basic.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "grep",
+      "-n",
+      "namespace\\|theorem toArray_toList\\|theorem toList_toArray\\|end "
+     ],
+     "argvComplete": true
+    }
+   ]
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "sleep 280 && echo AWAKE",
+   "stages": [
+    {
+     "argv": [
+      "sleep",
+      "280"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "AWAKE"
+     ],
+     "argvComplete": true
+    }
+   ]
+  }
+ ],
+ "master": [
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "find ~/.elan/toolchains/leanprover--lean4---v4.35.0/src -name \"*.lean\" | xargs grep -ln \"instance.*ForIn.*Array\" 2>/dev/null | head; echo ---; ls ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/ 2>/dev/null | head",
+   "stages": [
+    {
+     "argv": [
+      "find",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src",
+      "-name",
+      "*.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "xargs",
+      "grep",
+      "-ln",
+      "instance.*ForIn.*Array"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "ls",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    }
+   ],
+   "reason": "'xargs' is not a command the Lean policy runs"
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "grep -rn \"forIn_eq_forIn_range\\|forIn'_eq_forIn\" ~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Std/ ~/jaune/.worktrees/eip7002-xl-w2b/.lake/packages/ 2>/dev/null | head -n 20; echo ---; find ~/.elan -name \"*.lean\" | xargs grep -ln \"Legacy.Range.*forIn\" 2>/dev/null | head",
+   "stages": [
+    {
+     "argv": [
+      "grep",
+      "-rn",
+      "forIn_eq_forIn_range\\|forIn'_eq_forIn",
+      "~/.elan/toolchains/leanprover--lean4---v4.35.0/src/lean/Std/",
+      "~/jaune/.worktrees/eip7002-xl-w2b/.lake/packages/"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head",
+      "-n",
+      "20"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "echo",
+      "---"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "find",
+      "~/.elan",
+      "-name",
+      "*.lean"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "xargs",
+      "grep",
+      "-ln",
+      "Legacy.Range.*forIn"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "head"
+     ],
+     "argvComplete": true
+    }
+   ],
+   "reason": "'~/.elan' is outside the read roots"
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "python3 - <<'EOF'\nimport re, glob, os\nlog = open('/tmp/w2b-e.log').read()\nm = re.search(r'\"log\":\\s*\"([^\"]+)\"', log)\nprint('LOG:', m.group(1) if m else None)\nEOF",
+   "stages": [
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    }
+   ],
+   "reason": "python: import glob"
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cat {home}/jaune/.worktrees/eip7002-xl-w2e/lean-toolchain; echo ---; TC=$(cat {home}/jaune/.worktrees/eip7002-xl-w2e/lean-toolchain); ls ~/.elan/toolchains/ | head; echo ---; grep -rn \"foldlM_push\\|foldlM_append\" ~/.elan/toolchains/$TC/src/lean/Init/Data/Array/ 2>/dev/null | head; ls ~/.elan/toolchains/$TC/src/lean/Init/Data/Array/ 2>/dev/null | head -30",
+   "stages": [],
+   "reason": "a $ expansion other than $?, $NAME or ${NAME} (command substitution, arithmetic, positional or special parameters)"
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "L={home}/jaune/.worktrees/eip7002-xl-w2e-20261109T103633.188668Z-2758466.log; for n in 169 224 234 244 267 277 278 336 359 777 880; do echo \"=== $n ===\"; awk -v N=\"WithdrawalOrder.lean:$n:\" '$0 ~ N {found=1} found{print} found && /^error: JauneConsensus/{count++} count>1{exit}' $L | head -22; done 2>/dev/null | head -150",
+   "stages": [],
+   "reason": "'{home}/jaune/.worktrees/eip7002-xl-w2e-20261109T103633.188668Z-2758466.log' is outside the read roots"
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "L={home}/jaune/.worktrees/eip7002-xl-w2e-20261109T103633.188668Z-2758466.log; grep -n \"lean:169:\\|lean:224:\\|lean:234:\\|lean:244:\\|lean:267:\\|lean:277:\\|lean:278:\\|lean:336:\\|lean:359:\\|lean:777:\\|lean:880:\" $L",
+   "stages": [],
+   "reason": "'{home}/jaune/.worktrees/eip7002-xl-w2e-20261109T103633.188668Z-2758466.log' is outside the read roots"
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && for n in 169 224 234 244 267 336 359 777 880; do echo \"=== $n ===\"; sed -n \"${n}p\" JauneConsensus/Facts/WithdrawalOrder.lean | cut -c1-150; done; echo \"=== 277-278 ===\"; sed -n '277,278p' JauneConsensus/Facts/WithdrawalOrder.lean | cut -c1-150",
+   "stages": [],
+   "reason": "'for' is not a command the Lean policy runs"
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "L={home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2e-20261109T103633.188668Z-2758466.log; python3 - <<PYEOF\nimport re\nlog = open(\"$L\".replace(\"$L\", \"{home}/creme/.creme/lean-build-ownership/logs/eip7002-xl-w2e-20261109T103633.188668Z-2758466.log\")).read()\n# split into error blocks\nblocks = re.split(r'(?m)^(?=error: )', log)\nwant = [267, 277, 278, 336, 359, 777, 127, 234, 244]\nfor b in blocks:\n    m = re.match(r'error: JauneConsensus/Facts/WithdrawalOrder\\.lean:(\\d+):(\\d+): ([^\\n]*)', b)\n    if m and int(m.group(1)) in want:\n        print(\"=\" * 30)\n        print(b[:2200])\nPYEOF",
+   "stages": [],
+   "reason": "Muse sent no parsed stages for a command without variables"
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && python3 - <<'PYEOF'\nimport re\np = 'JauneConsensus/Facts/WithdrawalOrder.lean'\nsrc = open(p).read()\n\ndef bal(s):\n    d = 0\n    for ch in s:\n        if ch == '(': d += 1\n        elif ch == ')':\n            d -= 1\n            if d < 0: return False\n    return d == 0\n\nQ  = \"((q.length == P.PENDING_PARTIAL_WITHDRAWALS_LIMIT && !(wr.amount == FULL_EXIT_REQUEST_AMOUNT)) = true)\"\nC  = \"((!((hasExecutionWithdrawalCredential v) && (v.withdrawal_credentials.toBytes.drop 12 == wr.source_address.toBytes))) = true)\"\nA  = \"(((!(isActiveValidator v cur))) = true)\"\nE  = \"(((v.exit_epoch != FAR_FUTURE_EPOCH)) = true)\"\nF  = \"(((wr.amount == FULL_EXIT_REQUEST_AMOUNT)) = true)\"\nPb = \"(((pb == U64.zero)) = true)\"\nG  = \"((((hasCompoundingWithdrawalCredential v) && (decide (minAct ≤ v.effective_balance)) && (decide (sum < balance)))) = true)\"\nC2 = \"(((!(hasCompoundingWithdrawalCredential v))) = true)\"\nS2 = \"(((!(decide (minAct ≤ v.effective_balance)))) = true)\"\ndef neg(t): return \"¬(\" + t + \")\"\n\ncount = [0]\ndef fix_one(m, seg_is_notcomp_gate):\n    global count\n    direction, args = m.group(1), m.group(2)\n    a = args.strip()\n    if a == \"hempty\":\n        assert direction == \"right\"; T = neg(Q)\n    elif a == \"hbad\":\n        assert direction == \"left\"; T = C\n    elif a == \"hgood\":\n        assert direction == \"right\"; T = neg(C)\n    elif a == \"hact\":\n        T = A if direction == \"left\" else neg(A)\n    elif a == \"hnoexit\":\n        assert direction == \"right\"; T = neg(E)\n    elif a == \"hnofull\":\n        assert direction == \"right\"; T = neg(F)\n    elif a == \"hpb\":\n        assert direction == \"right\"; T = neg(Pb)\n    elif a == \"hcomp\":\n        if direction == \"left\": T = C2\n        else: T = neg(G) if seg_is_notcomp_gate else neg(C2)\n    elif a == \"hcomp, hsuff\":\n        assert direction == \"right\"; T = neg(G)\n    elif a == \"hcomp, hsuff, hexc\":\n        assert direction == \"right\"; T = neg(G)\n    elif a == \"hsuff\":\n        T = S2 if direction == \"left\" else neg(S2)\n    else:\n        raise AssertionError(f\"unknown args: {a}\")\n    line = f\"rw [ite_eq_{direction} (show {T} from by simp [{a}])]\"\n    assert bal(line), line\n    count[0] += 1\n    return line\n\npat = re.compile(r'rw \\[ite_eq_(left|right) \\(show .*? from by simp \\[(.*?)\\]\\)\\]')\nouts = []\npos = 0\n# process per witness segment for the notComp gate disambiguation\nfor m in list(re.finditer(r'theorem (classify_ignored_\\w+)', src)) + [None]:\n    start = m.start() if m else len(src)\n    seg = src[pos:start]\n    def subfn(mm):\n        nm = None\n        # find enclosing witness by scanning backwards for theorem header\n        return mm.group(0)\n    outs.append(seg)\n    pos = start\n# simpler: global replace with segment check via lookbehind on notCompounding\nsrc2 = src\ndef repl(mm):\n    # determine enclosing witness: last 'theorem classify_ignored_X' before match\n    prev = src2.rfind('theorem classify_ignored_', 0, mm.start() if hasattr(mm, 'start') else 0)\n    return mm.group(0)\n# manual approach: split into regions, transform each\nregions = []\nbounds = [m.start() for m in re.finditer(r'theorem classify_ignored_\\w+', src)] + [len(src)]\nprev_end = 0\nnewsrc = []\nfor i, b in enumerate(bounds[:-1]):\n    rest = src[b:]\n    nx = re.search(r'\\n(?=/-!|theorem |end JauneConsensus)', rest)\n    end = b + (nx.start() if nx else len(rest))\n    seg = src[b:end]\n    # is this the notCompounding witness?\n    is_notcomp = 'The not-compounding reason' in src[max(0,b-400):b]\n    def repfn(mm, is_notcomp=is_notcomp):\n        return fix_one(mm, is_notcomp)\n    seg2 = pat.sub(repfn, seg)\n    newsrc.append(src[prev_end:b])\n    newsrc.append(seg2)\n    prev_end = end\nnewsrc.append(src[prev_end:])\nsrc = ''.join(newsrc)\nopen(p, 'w').write(src)\nprint(\"fixed:\", count[0])\nPYEOF",
+   "stages": [
+    {
+     "argv": [
+      "cd",
+      "{home}/jaune/.worktrees/eip7002-xl-w2e"
+     ],
+     "argvComplete": true
+    },
+    {
+     "argv": [
+      "python3"
+     ],
+     "argvComplete": true
+    }
+   ],
+   "reason": "python: the name hasattr"
+  },
+  {
+   "goal": "eip7002-xl-w2e",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2e",
+   "command": "cd {home}/jaune/.worktrees/eip7002-xl-w2e && grep-n() { grep -rn \"$1\" JauneConsensus/ --include=*.lean | grep -v Facts/ | head -8; }; grep-n 'def Gated\\|abbrev Gated\\|inductive Gated'; echo ---; sed -n '1,60p' JauneConsensus/Accessors.lean | grep -n 'Gated' ",
+   "stages": [],
+   "reason": "a subshell or grouping parenthesis"
+  },
+  {
+   "goal": "eip7002-xl-w2b",
+   "workspace": "{home}/jaune/.worktrees/eip7002-xl-w2b",
+   "command": "bash scripts/check-proof-duplication.sh",
+   "stages": [
+    {
+     "argv": [
+      "bash",
+      "scripts/check-proof-duplication.sh"
+     ],
+     "argvComplete": true
+    }
+   ],
+   "reason": "scripts/check-proof-duplication.sh is not one of the static gate scripts"
+  }
+ ]
+}

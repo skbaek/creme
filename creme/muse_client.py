@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Optional
 
-from . import luna_lean
+from . import luna_lean, muse_lean_policy
 from .codex_app_server import AppServerError, AppServerProcess, PinViolation
 
 PINNED_MODEL = "muse-spark-1.3"  # compatibility default, never a process-global session pin
@@ -198,17 +198,20 @@ def _choice(params: dict, decision: str) -> Optional[str]:
     return None
 
 
-def decide_approval(params: dict, mode: str, lean_goal: Optional[str], target: Path) -> ApprovalDecision:
+def decide_approval(params: dict, mode: str, lean_goal: Optional[str], target: Path,
+                    read_roots: tuple = (), lean_policy_context: Optional[Any] = None) -> ApprovalDecision:
     """The broker's approval allowlist. Never an LLM judge, never a session-wide or persistent choice.
 
     * read-only and write sessions run shell commands inside Muse's sandbox
       (read-only, or writes confined to the workspace and temporary
       directories, no network), so a shell command is approved once and the
       sandbox is the control;
-    * a Lean session's host is unsandboxed: of shell commands only the exact
-      owned build is approved; the semaphore and reclamation commands are
-      aborted; any other command goes to the master. The non-open-world Lean
-      tools are approved;
+    * a Lean session's host is unsandboxed: the semaphore and reclamation
+      commands are aborted; the exact owned build, and any command the Lean
+      shell policy (``muse_lean_policy``: reads inside the read roots, writes
+      inside the workspace, restricted Python/awk/sed, read-only git, the
+      static gates) accepts, is approved with the policy's reason; any other
+      command goes to the master. The non-open-world Lean tools are approved;
     * every other subject (MCP outside Lean mode, network, file access outside
       the workspace, protected writes, unknown kinds) is aborted.
     """
@@ -248,8 +251,18 @@ def decide_approval(params: dict, mode: str, lean_goal: Optional[str], target: P
     failure = build_command_failure(command, lean_goal, subject.get("workspaceRoot"), target)
     if failure is None:
         return ApprovalDecision("approve", "the owned narrow build", approve)
-    return ApprovalDecision("master", f"unsandboxed command; only the exact owned build is approved by rule "
-                                      f"({failure})")
+    workspace = subject.get("workspaceRoot")
+    try:
+        same_workspace = workspace is not None and Path(workspace).resolve() == target.resolve()
+    except (OSError, RuntimeError):
+        same_workspace = False
+    if not same_workspace:
+        return ApprovalDecision("master", "unsandboxed command; the command's workspace is not the session target")
+    ctx = lean_policy_context or muse_lean_policy.context(target, lean_goal, read_roots)
+    accepted, why = muse_lean_policy.evaluate(command, subject.get("stages"), ctx)
+    if accepted:
+        return ApprovalDecision("approve", why, approve)
+    return ApprovalDecision("master", f"unsandboxed command outside the Lean shell policy ({why})")
 
 
 # ---------------------------------------------------------------------------

@@ -494,7 +494,8 @@ class MuseHost:
 
     def __init__(self, record_dir: Path, target: Path, mode: str, effort: str, environ: dict,
                  lean_goal: Optional[str] = None, session_id: Optional[str] = None,
-                 server_request_handler: Callable = receipt_handler, model: str = PINNED_MODEL) -> None:
+                 server_request_handler: Callable = receipt_handler, model: str = PINNED_MODEL,
+                 read_roots: tuple = ()) -> None:
         failures = selection_failures(model)
         if failures:
             raise PinViolation(failures[0])
@@ -504,6 +505,7 @@ class MuseHost:
         self.mode = mode
         self.effort = effort
         self.lean_goal = lean_goal
+        self.read_roots = tuple(read_roots)      # extra Lean-policy read roots (muse start --read-root)
         self.binary = resolve_binary(environ)
         self.env, self.scrubbed = child_environment(environ)
         self.session_id = session_id
@@ -952,7 +954,8 @@ def handle_approval(host: MuseHost, params: dict, turn: TurnState, emit: Callabl
     if policy is not None:
         decide_stages(host, params, policy["decision"], policy["reason"] + "; same decision for every stage", turn, emit)
         return None
-    decision: ApprovalDecision = decide_approval(params, host.mode, host.lean_goal, host.target)
+    decision: ApprovalDecision = decide_approval(params, host.mode, host.lean_goal, host.target,
+                                                 getattr(host, "read_roots", ()))
     if decision.action == "master" and not master_available:
         decision = ApprovalDecision("abort", decision.reason + "; a one-shot run has no master to ask",
                                     once_choice(params, "abort"))

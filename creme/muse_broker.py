@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import luna_lean
+from . import luna_lean, muse_lean_policy
 from . import muse as M
 from . import pseudo_broker as PB
 from .codex_app_server import AppServerError, PinViolation
@@ -126,7 +126,8 @@ class MuseSession(PB.SessionRecord):
         PB.private_dir(self.dir)
         self.set_state("starting")
         host = M.MuseHost(self.dir, Path(record["target"]), record["mode"], record["effort"], self.broker.environ,
-                          (record.get("lean") or {}).get("goal"), session_id=resume, model=record["model"])
+                          (record.get("lean") or {}).get("goal"), session_id=resume, model=record["model"],
+                          read_roots=tuple((record.get("lean") or {}).get("read_roots") or ()))
         self.host = host
         try:
             if resume is None:
@@ -929,6 +930,13 @@ class Broker:
         resume: Optional[str] = None
         prior: Optional[dict] = None
         refusals: list[str] = []
+        read_roots = [str(root) for root in request.get("read_roots") or []]
+        if read_roots and lean_goal is None and op == "start":
+            refusals.append("--read-root applies to Lean sessions only")
+        for root in read_roots if op == "start" else []:
+            failure = muse_lean_policy.read_root_failure(root)
+            if failure:
+                refusals.append(failure)
         if op == "start" and brief is None:
             refusals.append("start needs a brief")
         if op == "resume":
@@ -952,6 +960,9 @@ class Broker:
                                     f"profile was fixed at bootstrap")
                 mode = recorded_mode
                 lean_goal = (prior.get("lean") or {}).get("goal")
+                if request.get("read_roots"):
+                    refusals.append("resume keeps the recorded read roots")
+                read_roots = list((prior.get("lean") or {}).get("read_roots") or [])
                 effort = request.get("effort") or prior.get("effort") or effort
             with self.lock:
                 if any(session.is_open() and session.record.get("muse_session") == resume
@@ -984,6 +995,8 @@ class Broker:
         }
         if lean_goal is not None:
             record["lean"] = {"goal": str(lean_goal)}
+            if read_roots:
+                record["lean"]["read_roots"] = [os.path.realpath(os.path.expanduser(root)) for root in read_roots]
         fit_binding = request.get("model_fit") or (prior or {}).get("model_fit")
         if fit_binding:
             record["model_fit"] = dict(fit_binding)
@@ -1154,7 +1167,7 @@ def _client_refusals(module_root: Path, environ: dict, effort: str, brief: Optio
 
 def cmd_start(module_root: Path, environ: dict, brief: str, target: str, write: bool, effort: str, detail: str,
               turn_timeout_seconds: int, lean: Optional[str] = None, model_fit: Optional[dict] = None,
-              model: str = PINNED_MODEL) -> tuple[int, list[str], dict]:
+              model: str = PINNED_MODEL, read_roots: Optional[list[str]] = None) -> tuple[int, list[str], dict]:
     model_refusals = selection_failures(model)
     if model_refusals:
         answer = {"ok": False, "code": M.EXIT_PREFLIGHT_REFUSED, "verdict": "REFUSED", "refusals": model_refusals}
@@ -1166,6 +1179,8 @@ def cmd_start(module_root: Path, environ: dict, brief: str, target: str, write: 
     if refused:
         return refused
     arguments = {"lean": lean} if lean is not None else {}
+    if read_roots:
+        arguments["read_roots"] = list(read_roots)
     if model_fit:
         arguments["model_fit"] = model_fit
     return _open_output(_call(module_root, environ, "start", True, brief=brief, target=target, write=write,

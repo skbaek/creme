@@ -434,9 +434,11 @@ class ApprovalAllowlistTest(unittest.TestCase):
 
 
 class LeanShellBypassTest(unittest.TestCase):
-    """The Lean host is unsandboxed: no shell command but the exact owned build is approved by rule.
+    """The Lean host is unsandboxed: these commands are never approved by rule.
 
-    Each case was auto-approved by the 0340d04 read-only allowlist (review of 2026-09-28).
+    Each case was auto-approved by the 0340d04 read-only allowlist (review of 2026-09-28); the Lean shell
+    policy (``creme/muse_lean_policy.py``, tests in ``test_muse_lean_policy.py``) still leaves all of them
+    to the master.
     """
 
     BYPASSES = (
@@ -451,7 +453,6 @@ class LeanShellBypassTest(unittest.TestCase):
         ["rg", "-z", "x"],
         ["cat", str(Path.home() / ".ssh/id_rsa")],        # unconfined read
         ["ls", "/"],
-        ["git", "status"],                                # even a benign read goes to the master
     )
 
     def test_every_bypass_goes_to_the_master(self):
@@ -850,6 +851,15 @@ class BrokerTest(FakeMuseHarness):
             self.assertEqual((code, record["turns"][0]["models"]), (0, {model: 1}), lines)
             self.assertEqual(MB.cmd_simple(ROOT, self.environ, "stop", resumed)[0], 0)
         self.assertEqual(C.PINNED_MODEL, "muse-spark-1.3")
+
+    def test_read_roots_are_refused_outside_lean_mode(self):
+        code, lines, answer = MB.cmd_start(ROOT, self.environ, "Say OK.", str(self.target), False, "low", "live", 60,
+                                           read_roots=[str(self.base)])
+        self.assertEqual(code, M.EXIT_PREFLIGHT_REFUSED, lines)
+        self.assertIn("--read-root applies to Lean sessions only", answer["refusals"])
+        code, lines, answer = MB.cmd_start(ROOT, self.environ, "Say OK.", str(self.target), False, "low", "live", 60,
+                                           read_roots=["/"])
+        self.assertTrue(any("too broad" in refusal for refusal in answer["refusals"]), answer)
 
     def test_resume_refuses_a_different_explicit_pin(self):
         session = self.start(model="muse-wonder-1.0")

@@ -395,6 +395,16 @@ Read `table`/`health` for compact evidence and gaps. Legacy narrative exceptions
 at `$GOAL_STORE/model-fit/<client>.md` are historical, never statistical
 denominators; workers never accept themselves.
 
+Workers are native by default: a master uses its own client's subagents, and
+when that client's tokens run low the master winds down and a session of
+another client continues as master through the usual handoff. Pseudo-subagents
+of another vendor ([Muse](muse.md), [Antigravity](antigravity.md),
+[Luna reserve](luna-reserve.md)) serve only read-only work: hostile review at
+decision points, recon, and plan critique, where cross-vendor calls need no
+approvals and add model diversity. Write and Lean work does not go to them;
+their approval and verification overhead outweighed the saving (user decision
+2026-11-10, after `$GOAL_STORE/reports/pseudo-subagent-eval-v1.md`).
+
 A worker dies with the master. It therefore checkpoints to Git and its state
 brief at every green boundary, so that a successor master can respawn it from
 those files and lose only the work since the last checkpoint. Unfinished work

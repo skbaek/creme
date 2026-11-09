@@ -11,7 +11,10 @@ uses one recipe for both.
 
 - **On user instruction, like Luna reserve and Antigravity.** The user
   instructed use on 2026-09-28: for model-fit calibration and to save Claude
-  tokens. It is not a fallback when another client is busy.
+  tokens. Since 2026-11-10 that use is narrowed to read-only work (review,
+  recon, plan critique); write and Lean runs need the user's explicit word
+  (see the master guide's [Workers](master.md#workers) section). It is not a
+  fallback when another client is busy.
 - **Explicit session model pins.** Allowed releases are `muse-spark-1.3`,
   `muse-wonder-1.0`, and `muse-wonder-full-1.0`. Creme defaults to Spark for
   compatibility; `start --model MODEL` and `run --model MODEL` select Wonder

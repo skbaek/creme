@@ -187,10 +187,16 @@ class BuildOwnershipTest(unittest.TestCase):
             joined = " ".join(surface.read_text(encoding="utf-8").split())
             self.assertNotIn("restart the Lean server", joined, surface)
             self.assertNotIn("restart the server", joined, surface)
-        # The refresh mechanism is stated in the skill a proof worker loads.
-        skill = " ".join(surfaces[3].read_text(encoding="utf-8").split())
-        self.assertIn("two other Lean files", skill)
-        self.assertIn("LEAN_LSP_MAX_OPEN_FILES", skill)
+        # The refresh mechanism is stated where it applies, not in a skill a
+        # session may never load: the wrapper's `restart:` line after a build,
+        # and the description of the tool whose answer goes stale.
+        wrapper = (ROOT / "creme" / "build_ownership.py").read_text(encoding="utf-8")
+        self.assertIn("two other Lean files", wrapper)
+        shim = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
+        descriptions = json.loads(
+            shim["mcpServers"]["lean-lsp-mcp"]["env"]["LEAN_MCP_TOOL_DESCRIPTIONS"]
+        )
+        self.assertIn("two other Lean files", descriptions["lean_diagnostic_messages"])
 
     def test_the_guide_forbids_a_sleep_loop_on_your_own_process_too(self) -> None:
         joined = " ".join(

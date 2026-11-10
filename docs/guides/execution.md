@@ -281,11 +281,11 @@ commands its broker approves by rule.
 The wrapper prints failed and warning jobs (bounded), Lake's verdict, and a
 JSON summary with per-target verdicts, failed modules, and the `log:` path of
 the full stream (`--full-output` prints it all). Its `restart:` line lists
-rebuilt modules; a file's language-server worker keeps its old imports until
-refreshed. The edit loop — diagnostics first, the build is not a type-checker,
-how to refresh a worker — is in the `lean-prover` skill. `hint: REPEAT_FAIL`
-after two failing builds of the same targets is the signature of compiling to
-enumerate errors one at a time; switch to diagnostics.
+rebuilt modules and says how to refresh a file's language-server worker, which
+keeps its old imports until then. What a check costs and what its answer is
+worth as evidence are in the `lean-prover` skill. `hint: REPEAT_FAIL` after two
+failing builds of the same targets is the signature of compiling to enumerate
+errors one at a time; switch to diagnostics.
 
 ### Builds and throughput
 

@@ -1,55 +1,11 @@
 # Lean edit loops
 
-Most Lean edits should be made directly after inspecting the exact goal, then
-verified with a current goal and clean diagnostics. Do not build a scratch
-loop merely because one exists.
+Reference for two uncommon cases: a Lean file the language server cannot hold,
+and measuring an edit loop. Ordinary proof work needs neither. What a proof
+session needs is in the `lean-prover` skill; builds, admission, and wind-down
+are in [execution](execution.md).
 
-## Choose the loop before editing
-
-Use the persistent Lean language server for goal inspection and ordinary proof
-repair. Use a one-shot CLI check at loop boundaries or when the result being
-tested is explicitly command-line behavior. Use a fabricated prefix only when
-repeated whole-module work is genuinely expensive and the target's preserved
-environment can be proven faithful.
-
-### The loop is edit, diagnostics, goal — not edit, build
-
-The default inner loop never builds:
-
-1. edit;
-2. `lean_diagnostic_messages` on the edited file — it reports every error in
-   the file at once, where a build reports the first and stops;
-3. `lean_goal` at the tactic and `lean_hover_info` on the symbol for a type
-   mismatch, which is the most common error and the one a build explains
-   worst;
-4. repeat from the exact position of whatever remains.
-
-Build only when a module is registered or an import changes, at a checkpoint
-or commit, or when the repository catalogue requires it. **A clean
-`lean_diagnostic_messages` pass on a file whose imports are current is loop
-evidence**; it does not need confirming with a build, and confirming it with
-one costs a hold that another session is waiting for.
-
-There is one compilation owner. When diagnostics report stale imports, do not
-ask the language server or MCP to build: `lean_build` and the shelling proof
-profiler are deliberately absent.
-From the goal worktree, probe the narrow target with `~/creme/scripts/creme
-lake-build GOAL --probe -- TARGET`; on exit 3, run the same narrow target
-through the admitted wrapper, refresh the file's worker as the `lean-prover`
-skill describes, and recheck the exact goal and diagnostics. Use the repository
-catalogue's full target at a green checkpoint, also through the wrapper. Never
-use bare `lake build` in either loop. Admission, waiting and renewal follow
-[execution](execution.md#resource-classes). `YIELD_HEAVY` or `DRAIN_HEAVY` ends the heavy loop at the current
-safe boundary: checkpoint, wind down, then work on non-elaborating inventory,
-prose, or static analysis. A cold/broad rebuild or indivisible spike is
-contention-sensitive and should request a hard hold before it starts. A hold
-covers one elaborating command, not a whole gate script; release between gates
-and reacquire.
-
-The `lean-prover` skill carries the operational proof workflow. Its tools live
-under `.agents/skills/lean-prover/tools/`.
-
-### Keep concrete machine images out of unfolding
+## Keep concrete machine images out of unfolding
 
 Never let a concrete memory image, storage map, or long write chain reach
 definitional unfolding or kernel evaluation: a kernel `decide` over concrete
@@ -61,7 +17,13 @@ and evaluate only small code windows. A missing import can hide the same
 blow-up behind a slow elaboration instead of a fast error; check imports first
 when a module's memory climbs.
 
-## Fidelity before speed
+## A file the language server cannot hold
+
+Try the plain routes first: edit with a placeholder for the heavy term and
+verify through a narrow owned build, or split the heavy check into its own
+module. A faithful prefix, a copy of the module through one target declaration
+with its suffix truncated, is for a file where repeated whole-module work stays
+expensive after that. Its tools live under `.agents/skills/lean-prover/tools/`.
 
 A fabricated prefix is evidence only after:
 
@@ -74,6 +36,11 @@ local comparison can miss a broken suffix. `check-fidelity.py` requires an
 explicit worktree; no developer path is inferred. At transfer time,
 `check-drift.py --strict` proves the real context did not change.
 
+To transfer, apply the candidate to the real file, check its goal and
+diagnostics there, run the relevant cheap repository gate, and confirm
+source/artifact freshness. Remove scratch outputs. Wind-down is the same as for
+any Lean work; see [execution](execution.md#wind-down-lean-work).
+
 ## Measurement rules
 
 Measure the complete interaction being optimized, keep success and failure
@@ -82,18 +49,9 @@ see host modes. Time the language server through its protocol completion—not
 the first diagnostic notification or an un-timestamped client wrapper. Any
 timing-authoritative run owns the hard semaphore and records host telemetry.
 
+No committed resource ceiling or boundary claim may rest on language-server
+output.
+
 The measurement tools are instruments, not public constants. Repository- and
 host-specific campaign values stay with reviewed evidence. A toolchain change
 requires re-deriving protocol assumptions.
-
-## Transfer and teardown
-
-Make the smallest real-file edit, inspect the resulting goal and diagnostics,
-run the relevant cheap repository gate, and confirm source/artifact freshness.
-Remove scratch outputs. Ordinary hold releases may retain a useful server at an
-intermediate boundary. Before pause, restart, transfer, or completion, use
-`python3 -m creme reclaim --wind-down GOAL`; this verifies that servers inside
-the configured per-goal worktree are gone before releasing only the matching
-hold. Other goals' holds and servers do not block or join that scoped
-transaction. A bare release is not teardown evidence. If reclamation is
-unavailable, keep the hold, checkpoint, and restart the client instead.

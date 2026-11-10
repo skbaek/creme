@@ -1,9 +1,9 @@
 # Lean edit-loop tooling
 
 Supporting tools for `../../../../docs/guides/lean-edit-loops.md`, which is the authority
-on **when** to use any of this. Nothing here should be reached for before the
-guide's pre-edit question has been answered — for almost every Lean edit the
-answer is "edit directly and verify", and none of these tools apply.
+on **when** to use any of this. They serve a file the language server cannot
+hold and the measurement of an edit loop; for almost every Lean edit none of
+them apply.
 
 All are Python 3, no third-party dependencies, and none of them writes outside
 the paths you give it.

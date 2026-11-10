@@ -29,7 +29,7 @@ not substitutes for, the machine ledger.
 | `.agents/mcp_config.json` | split | `.agents/mcp_config.json` | Keep the Antigravity-compatible pinned MCP surface; remove host wording. | L1 / E0 |
 | `.agents/skills/lean-inspector/SKILL.md` | split | same path | Keep inspection workflow; replace private-root assumptions with Creme/sibling authority. | L1 / E0 |
 | `.agents/skills/lean-prover/SKILL.md` | split | same path | Keep reusable proof workflow; point project doctrine back to Jaune/Blanc. | L1 / E0 |
-| `.agents/skills/lean-prover/resources/proof-checklist.md` | split | same path | Keep generic tactic hygiene; leave dated Blanc proof-performance evidence in Blanc. | L1 / E1 |
+| `.agents/skills/lean-prover/resources/proof-checklist.md` | split | `.agents/skills/lean-prover/SKILL.md` | Fold the surviving cost note and the Blanc proof-performance pointer into the prover skill; generic tactic hygiene is no longer carried. | L1 / E1 |
 | `.agents/skills/lean-prover/tools/README.md` | split | same path | Remove private paths and the superseded cost-only selector; retain lifecycle guidance. | L1 / E1 |
 | `.agents/skills/lean-prover/tools/check-drift.py` | move | same path | Exact copy; SHA-256 `9d2277aa…4b09f6`. | L1 / E0 |
 | `.agents/skills/lean-prover/tools/check-fidelity.py` | split | same path | Retain semantic-fidelity checks under the revised verdict-first method. | L1 / E1 |

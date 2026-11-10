@@ -52,6 +52,16 @@ the pin, launcher, and all three settings in every shim. The Antigravity
 surface stays configuration-compatible but remains
 outside acceptance support as described below.
 
+All shims also set one `LEAN_MCP_TOOL_DESCRIPTIONS` value, which replaces the
+pinned server's description of each tool it names. A replacement restates what
+the tool does and adds what its result means on this host: when it is stale,
+when an empty result is not a clean one, what it does not establish. It never
+says when or how often to call the tool. A fact about a tool's result belongs
+there, and a fact a command can print when it applies belongs in that command's
+output, rather than in a skill: it then reaches a session that never loads the
+skill, and is read at the point it applies. A test holds the Codex and Claude
+values equal.
+
 ## Codex discovery
 
 Codex constructs its instruction chain once when a run starts. It finds the

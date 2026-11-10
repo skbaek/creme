@@ -90,6 +90,23 @@ class ProfileValidation:
     profile: Optional[dict[str, Any]] = None
 
 
+# A Linux VM's MemTotal can move by a page or so across reboots (seen on WSL2:
+# 25199005696 <-> 25199001600 bytes). That is the same host, not a hardware
+# change, so it must not mark a reviewed profile stale.
+MEMORY_DRIFT_TOLERANCE_BYTES = 64 * 1024 ** 2
+
+
+def same_host(recorded: dict[str, Any], current: dict[str, Any]) -> bool:
+    """Recorded static facts still describe the current host."""
+    for key in ("system", "machine", "logical_cores"):
+        if recorded.get(key) != current.get(key):
+            return False
+    old, new = recorded.get("physical_memory_bytes"), current.get("physical_memory_bytes")
+    if not (_is_positive_int(old) and _is_positive_int(new)):
+        return old == new
+    return abs(int(old) - int(new)) <= MEMORY_DRIFT_TOLERANCE_BYTES
+
+
 def fingerprint(facts: dict[str, Any]) -> str:
     stable = {
         "system": facts.get("system"),
@@ -280,7 +297,7 @@ def validate_data(
         override = overrides[key]
         if override is not None and not _is_positive_int(override, maximum):
             return ProfileValidation("INVALID", f"overrides.{key} is outside its safe range")
-    if current_facts is not None and data["fingerprint"] != fingerprint(current_facts):
+    if current_facts is not None and not same_host(facts, current_facts):
         return ProfileValidation("STALE", "static host fingerprint changed; regenerate and review the profile", data)
     return ProfileValidation("VALID", "profile is valid and current", data)
 

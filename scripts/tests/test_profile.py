@@ -47,6 +47,16 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(load(path, self.adapter).status, "VALID")
         self.assertEqual(load(path, FakeAdapter(memory_gib=24)).status, "STALE")
 
+    def test_page_sized_memory_drift_is_the_same_host(self):
+        data = self.candidate()
+        current = dict(data["facts"])
+        current["physical_memory_bytes"] -= 4096
+        self.assertEqual(validate_data(data, current).status, "VALID")
+        current["physical_memory_bytes"] = data["facts"]["physical_memory_bytes"] + 128 * 1024 ** 2
+        self.assertEqual(validate_data(data, current).status, "STALE")
+        current = dict(data["facts"], logical_cores=data["facts"]["logical_cores"] + 1)
+        self.assertEqual(validate_data(data, current).status, "STALE")
+
     def test_dynamic_fact_is_rejected_even_if_fingerprint_is_recomputed(self):
         data = self.candidate()
         data["facts"]["memory_free_percent"] = 88

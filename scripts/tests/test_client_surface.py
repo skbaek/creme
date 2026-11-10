@@ -329,6 +329,14 @@ class ClientSurfaceTest(unittest.TestCase):
             json.loads(claude_server["env"]["LEAN_MCP_TOOL_DESCRIPTIONS"]),
         )
 
+        # The server's instructions block is replaced too, and names no tool:
+        # the pinned text advertises the two tools these shims disable.
+        instructions = claude_server["env"]["LEAN_MCP_INSTRUCTIONS"]
+        codex_instructions = re.search(r'(?m)^LEAN_MCP_INSTRUCTIONS\s*=\s*"(.*)"\s*$', codex)
+        self.assertIsNotNone(codex_instructions)
+        self.assertEqual(codex_instructions.group(1), instructions)
+        self.assertNotIn("lean_", instructions)
+
     def test_claude_skills_are_documented_per_skill_symlinks(self) -> None:
         for skill in SKILLS:
             canonical = ROOT / ".agents/skills" / skill

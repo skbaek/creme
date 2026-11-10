@@ -62,6 +62,13 @@ output, rather than in a skill: it then reaches a session that never loads the
 skill, and is read at the point it applies. A test holds the Codex and Claude
 values equal.
 
+All shims set `LEAN_MCP_INSTRUCTIONS` as well, which replaces the pinned
+server's instructions block. A client may load that block into every session,
+Lean or not, and the pinned text is usage advice that also advertises the two
+disabled tools. The replacement states only what holds for every tool
+(read-only, 1-indexed positions, how a failed call differs from an empty
+result) and names no tool; the same test holds it equal across shims.
+
 ## Codex discovery
 
 Codex constructs its instruction chain once when a run starts. It finds the

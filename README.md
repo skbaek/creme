@@ -157,5 +157,6 @@ another.
 - [Goal contracts](docs/guides/goal.md)
 - [Worker briefs, model, and effort](docs/guides/briefs.md)
 - [Lean edit loops](docs/guides/lean-edit-loops.md)
+- [Blanc task map](docs/guides/blanc-task-map.md)
 - [Migration from Elanc/Plans (archived)](docs/archive/migration.md)
 - [Provenance](docs/provenance.md)

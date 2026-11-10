@@ -15,6 +15,8 @@ it; [the master guide](master.md#workers) covers how workers are run.
 - the **resource class** and any hold the work is expected to take;
 - the **gates** that must be green on the exact candidate, by their entry in
   the owning repository's `scripts/GATES.md`;
+- for Blanc work, [the Blanc task map](blanc-task-map.md) among the sources
+  to read first: the siblings track no instruction file of their own;
 - for Lean work, the **build plan**:
   - which narrow targets blocking builds may name;
   - when batched shared edits get a speculative background `--walk`;

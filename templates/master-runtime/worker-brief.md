@@ -22,6 +22,13 @@ Dependency relationship and required ancestry:
 Read in full before acting, in this authority order: `{{PRIMARY_AUTHORITY}}`,
 `{{REPOSITORY_INSTRUCTIONS}}`, `{{GATE_CATALOGUE}}`.
 
+Jaune and Blanc track no instruction file of their own. For Blanc work the
+repository instructions are
+[the Blanc task map](../../docs/guides/blanc-task-map.md), which routes each
+task to the Blanc document that owns it; for Jaune work they are the Jaune
+documents the brief names. The gate catalogue is the repository's
+`scripts/GATES.md`.
+
 ## Owned repositories and paths
 
 | Repository | Owned paths | Explicit exclusions |
@@ -71,8 +78,9 @@ existed while copies were written next to them.
 - **Search before writing** anything generic-shaped: the repository's shared-library map
   (Blanc `docs/COMMON_API.md`, by grep), its recipe lookup (Blanc `blanc_suggest` needs
   `import Blanc.ProofRecipeTactic`), its tactic and tool table (Blanc `docs/TOOLS.md`),
-  and the dependency's supported API (Jaune `API.md` section 6). The report names what
-  was searched for each new generic declaration.
+  and the dependency's supported API (Jaune `API.md` section 6). The
+  [Blanc task map](../../docs/guides/blanc-task-map.md) lists these by task. The report
+  names what was searched for each new generic declaration.
 - **Closure pass at every checkpoint.** Hoist generically applicable helpers to the
   narrowest shared owner, a low module imported only by its consumers, never a hub
   without the master's approval. Delete what the change left unused (leaf rule). If this

@@ -76,7 +76,8 @@ user, as a decision packet with a recommendation.
 4. Read Jaune's or Blanc's `scripts/GATES.md` before editing or testing there.
 5. For Blanc, follow its `docs/COMMON_API.md` and `docs/PROOF_RECIPES.md`;
    generic-shaped definitions, lemmas, tactics, and instances go through its
-   common-library-first workflow.
+   common-library-first workflow; see the
+   [Blanc task map](docs/guides/blanc-task-map.md).
 
 Muse sessions only: the edit/create tools admit only this workspace, so edit a
 sibling with `scripts/muse-edit-file` (see `--help`).

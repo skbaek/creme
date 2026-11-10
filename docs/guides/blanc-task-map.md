@@ -31,9 +31,10 @@ points at Creme. Commands and pass criteria for every gate are in Blanc's
 - **The recipe lookup.** `docs/PROOF_RECIPES.md`, generated from
   `scripts/proof-recipes.toml`: edit the TOML and regenerate as README "Proof
   recipe lookup" says, never the generated files. Few recipes match
-  lifted-program goals, so under `Blanc/Lift/` expect `blanc_suggest` to
-  print nothing for a run or walk goal (`SFunc.RunExact`, `SProg.RunExact`,
-  `RunP`) and use the next two entries.
+  lifted-program goals (`docs/LIFT_WORKFLOW.md` says so in its opening
+  paragraph), so under `Blanc/Lift/` expect `blanc_suggest` to print nothing
+  for a run or walk goal (`SFunc.RunExact`, `SProg.RunExact`, `RunP`) and
+  use the next two entries.
 - **Lifting or certifying deployed bytecode.** `docs/LIFT_WORKFLOW.md`
   (producer, registry rows, assembly modes, gates), then `docs/COMMON_API.md`
   section C9 for the proof kits.
@@ -55,9 +56,10 @@ points at Creme. Commands and pass criteria for every gate are in Blanc's
   what `scripts/check-proof-debt.sh` rejects.
 - **Kernel deep recursion in a `decide +kernel` over an artifact.**
   `docs/COMMON_API.md` C8, and `kernel_rfl_and` in `docs/TOOLS.md`.
-- **A gate you do not know how to run.** `scripts/GATES.md`: the table near
-  the top that begins "Choose the gate by what you changed, cheapest falsifier
-  first" maps a change to the gate to run first, then to the full set.
+- **A gate you do not know how to run.** `scripts/GATES.md`, "Which gate to
+  run first": the table that begins "Choose the gate by what you changed,
+  cheapest falsifier first" maps a change to the gate to run first, then to
+  the full set.
 - **A published number or claim.** `scripts/check-doc-counts.sh` and
   `docs/DEPLOYED_BYTECODE_CLAIM_MAP.md`. Never edit the claim map,
   `scripts/ClaimCheck.lean`, `scripts/leaf-count.json`, or a pinned statement
@@ -111,20 +113,18 @@ before running one. Timing runs, mutation campaigns, and long gates follow
 - **Placement.** New shared code goes in the narrowest shared owner: a new
   low module imported only by its consumers, registered in `SHARED` in
   `scripts/check-layering.py` (a contract-neutral module names no contract;
-  contracts stay siblings). A hub is a module most of the tree imports
-  (`docs/COMMON_API.md` defines it in step 4 of the workflow): the common
-  core (`Basic`, `Semantics`, `CommonCore`, `Tactics`, the `CommonProofs`
-  pieces), the ladder, `Forward*`, the execution substrate
-  (`ExecutionSettlement`, `ExecutionOccurrence`), and the lift core
-  (`Lift/Basic`, `Lift/Transfer`, `Lift/Check*`). Add to a hub only by
-  design and with the master's approval, after
+  contracts stay siblings). A hub is a module most of the tree imports;
+  `docs/COMMON_API.md` defines it in step 4 of the workflow, and that
+  definition, not a list here, says which modules are hubs. Add to a hub
+  only by design and with the master's approval, after
   [counting its reverse dependencies](execution.md#builds-and-throughput):
   an edit to a hub rebuilds most of the tree.
 - **Leaf rule.** A declaration nothing uses is a leaf, and every leaf must
-  be independently valuable or deleted (`scripts/GATES.md`, "Leaf audit"). A
-  new shared lemma needs at least two real consumers; delete what your
-  change leaves unused. The published leaf count is generated (the same
-  section names the generator), never hand-edited.
+  be independently valuable or deleted (`scripts/GATES.md`, "Leaf audit").
+  Where a new shared declaration is born is step 4 of the workflow in
+  `docs/COMMON_API.md`; a declaration your change leaves with no user is a
+  leaf under this rule: delete it or justify it. The published leaf count is
+  generated ("Leaf audit" names the generator), never hand-edited.
 - **Generated files** (`Blanc/Lift/**/Cert.lean`, registered `Check*.lean`,
   the recipe lookup, counts) come only from their registered generator
   (`scripts/GATES.md`, "Rules": "Generated artifacts come from their

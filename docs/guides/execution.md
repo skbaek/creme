@@ -111,6 +111,41 @@ runner cannot release between rows, take **one** hold sized for its Lean rows,
 not for the whole script, and release the instant the last Lean row finishes.
 Rows that do not elaborate take no hold at all.
 
+### Timing-authoritative runs and mutation campaigns
+
+The `exclusive` hold is in place before the run starts. A sibling's own gate
+lock is its last line of defence, not the coordination mechanism: a `REFUSED`
+from it means two runs competed for the host, which is a scheduling defect to
+fix, never a transient to retry around. Whether a gate asks for the hold
+itself differs by repository (today Jaune's gates take none, and Blanc's
+elaborating gates request their own under the goal worktree's label), so read
+the sibling's `scripts/GATES.md` and settle the outer hold as
+[the briefs guide](briefs.md#name-the-hold-the-gates-themselves-take) says.
+
+The siblings' timing gates refuse while a Lean language server holds a large
+environment. Before the timed command, preview with
+`python3 -m creme reclaim --dry-run`, and rerun without `--dry-run` only after
+reading the preview; host guidance may name the reclaim form that frees a
+resident server on this machine. If reclaim reports `UNAVAILABLE`, leave the
+servers alone and defer the run: never substitute a platform command or a
+bare signal, and a measurement taken with the gate's `--force` is never
+evidence.
+Run no other work of the task beside the timed command, bracket it with
+`python3 -m creme telemetry`, and release the hold the moment it ends. Static
+inventory and report processing take no hold.
+
+### Long gates
+
+A sibling catalogue may mark an action long (Jaune's: expected to exceed
+1,000 seconds, judged as it will actually run, parallel mode included). A long
+gate is an evidence obligation, and a session does not start one on its own
+judgment: it runs when the goal or brief names it. Otherwise it goes back to
+whoever assigned the work, with a named owner (a worker returns it to the
+master; an ordinary session asks the user), and it passes before the merge.
+It never substitutes for the cheap gates. Everything shorter runs inline, in
+the background when one command would outlast a foreground tool call
+([above](#wait-in-one-call-never-poll-by-hand)).
+
 ### Reading `status`
 
 | line | means | do |

@@ -103,7 +103,8 @@ CLIENTS: dict[str, Client] = {
         # another harness, toolset, and quota pool.
         families={
             family: ("low", "medium", "high")
-            for family in ("gemini-3.8-flash", "gemini-4-argon", "claude-sonnet-5-5", "claude-opus-5-5")
+            for family in ("gemini-3.8-flash", "gemini-4-argon", "gemini-4-carbon",
+                           "claude-sonnet-5-5", "claude-opus-5-5")
         },
         routes={
             "antigravity-run": "one-shot `creme antigravity run` (read-only or --write), any master",
@@ -130,6 +131,7 @@ def default_weights(client: Any) -> dict[str, Any]:
         "gemini-3.8-flash": 1.0,
         # Uncalibrated prior (2026-10-18); Argon has its own weekly-only pool.
         "gemini-4-argon": 4.0,
+        "gemini-4-carbon": 1.0,  # neutral uncalibrated prior; no measured cost yet
         "claude-sonnet-5-5": 2.0,
         "claude-opus-5-5": 8.0,
     }

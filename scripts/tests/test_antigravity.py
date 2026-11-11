@@ -112,6 +112,7 @@ else:
         self.assertEqual(antigravity.pool_for_model("claude-sonnet"), "3p")
         self.assertEqual(antigravity.pool_for_model("gpt-oss-20b"), "3p")
         self.assertEqual(antigravity.pool_for_model("gemini-4-argon-high"), "argon")
+        self.assertEqual(antigravity.pool_for_model("gemini-4-carbon-high"), "gemini")
         self.assertEqual(antigravity.pool_for_model("gemini-3.8-flash-high"), "gemini")
         with self.assertRaises(ValueError):
             antigravity.pool_for_model("mystery-model")

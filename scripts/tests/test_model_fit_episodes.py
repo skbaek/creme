@@ -1317,6 +1317,15 @@ class AntigravityClaudeOptionTest(unittest.TestCase):
             self.assertFalse(ep.check_capability("claude-code", family, "high", "claude-agent-tool")[0])
         self.assertFalse(ep.check_capability("antigravity", "opus", "high", "antigravity-run")[0])
 
+    def test_carbon_supports_only_advertised_efforts_and_route(self) -> None:
+        for effort in ("low", "medium", "high"):
+            self.assertEqual(
+                ep.check_capability("antigravity", "gemini-4-carbon", effort, "antigravity-run"),
+                (True, "eligible"),
+            )
+        self.assertFalse(ep.check_capability("antigravity", "gemini-4-carbon", "xhigh", "antigravity-run")[0])
+        self.assertFalse(ep.check_capability("codex", "gemini-4-carbon", "high", "codex-subagent")[0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,9 +17,13 @@ python3 -m creme antigravity run --brief FILE|- --target DIR [--model M] \
     [--lean-goal GOAL] [--json]
 ```
 
-Four families are in use: `gemini-3.8-flash` (the default; user decision
+Five families are in use: `gemini-3.8-flash` (the default; user decision
 2026-09-25), since 2026-10-04 `claude-sonnet-5-5` and `claude-opus-5-5`, and
 since 2026-10-18 `gemini-4-argon` (user instruction: start its calibration).
+`gemini-4-carbon` is available at low/medium/high (verified with `agy models`,
+user-requested review route, 2026-11-11). It uses the ordinary Gemini quota
+admission path and has no measured model-fit cost yet. Adding its catalogue
+entry does not change an existing population or choose it without a dispatch.
 `--model` takes the family and `--effort` (`low`, `medium` or `high`, the only
 levels `agy` exposes) picks the level; the CLI builds the slug, e.g.
 `claude-opus-5-5-medium`. A conflicting full slug is refused, as `agy` itself

@@ -2782,6 +2782,42 @@ class LaunchAndWatchAdmissionTest(unittest.TestCase):
         self.assertEqual(corrupt, 0, status)
         self.assertEqual([(row["action"], row["verdict"]) for row in rows], [("retract", "RETRACTED")])
 
+    def test_a_normal_hold_heartbeat_stop_is_readable(self):
+        from datetime import datetime, timezone
+
+        root = Path(self.tmp.name)
+        semaphore._write_json(semaphore.hold_heartbeats_path(root), {
+            "schema_version": semaphore.HOLD_HEARTBEAT_SCHEMA_VERSION,
+            "heartbeats": {"goal": {
+                "pid": os.getpid(), "owner_pid": os.getpid(), "interval": 60,
+                "beats": 1, "hold_acquired_at": 1.0, "started_at": 1.0,
+                "stopped_at": None,
+            }},
+        })
+        semaphore._record_hold_heartbeat_stop("goal", os.getpid(), "the hold was released")
+
+        rows, corrupt, status = semaphore.read_log(datetime(2000, 1, 1, tzinfo=timezone.utc))
+        self.assertEqual(status, "OK")
+        self.assertEqual(corrupt, 0)
+        self.assertEqual([(row["action"], row["verdict"]) for row in rows],
+                         [("hold-heartbeat", "STOPPED")])
+
+    def test_log_reader_still_counts_malformed_and_unknown_rows(self):
+        from datetime import datetime, timezone
+
+        semaphore._log("master-renew", "goal", "OK", "holder verified")
+        semaphore._log("master-renew", "goal", "STOPPED", "unsupported action/verdict")
+        semaphore._log("hold-heartbeat", "goal", "UNKNOWN", "unsupported verdict")
+        semaphore._log("hold-heartbeat", "goal", "STOPPED", None)
+        with semaphore.log_path().open("a", encoding="utf-8") as handle:
+            handle.write('{"time":\n')
+
+        rows, corrupt, status = semaphore.read_log(datetime(2000, 1, 1, tzinfo=timezone.utc))
+        self.assertEqual(status, "OK")
+        self.assertEqual(corrupt, 4)
+        self.assertEqual([(row["action"], row["verdict"]) for row in rows],
+                         [("master-renew", "OK")])
+
     def test_swap_pressure_still_drains_admission(self):
         adapter = HeadroomAdapter(free_percent=81, total_gib=24)
         sample = adapter.memory_headroom()

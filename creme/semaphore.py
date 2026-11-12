@@ -279,7 +279,10 @@ def _valid_log_row(row: Any) -> bool:
     return (
         isinstance(row, dict)
         and all(isinstance(row.get(key), str) for key in ("time", "action", "label", "verdict", "detail"))
-        and row["verdict"] in {"OK", "REFUSED", "RETRACTED"}
+        and (
+            row["verdict"] in {"OK", "REFUSED", "RETRACTED"}
+            or (row["action"] == "hold-heartbeat" and row["verdict"] == "STOPPED")
+        )
     )
 
 

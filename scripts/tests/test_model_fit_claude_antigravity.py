@@ -510,6 +510,29 @@ class AntigravityEpisodeBinding(unittest.TestCase):
         finally:
             store.close()
 
+    def test_requested_hydrogen_xhigh_override_records_actual_model_and_usage(self):
+        run_dir = agy_run(self.root, init="gemini-4-hydrogen-xhigh")
+        verdict = run_dir / "verdict.json"
+        verdict.write_text(json.dumps({"run": "run1", "family": "gemini-4-hydrogen",
+                                       "effort": "xhigh", "init_model": "gemini-4-hydrogen-xhigh"}))
+        code, summary, launched = self._run(
+            "--model", "gemini-4-hydrogen", "--effort", "xhigh", "--episode", "ep",
+            "--override-reason", "user explicitly requested Hydrogen xhigh", run_dir=run_dir)
+        self.assertEqual(code, 0)
+        self.assertTrue(launched.called)
+        self.assertTrue(summary["model_fit"]["captured"], summary["model_fit"])
+        self.assertTrue(summary["model_fit"]["usage_complete"])
+        store = R.open_runtime(self.fit)
+        try:
+            launch = store.conn.execute(
+                "SELECT option, release, override_reason FROM launches WHERE episode_id='ep'").fetchone()
+            self.assertEqual(launch["option"], "gemini-4-hydrogen/xhigh")
+            self.assertEqual(launch["release"], "gemini-4-hydrogen")
+            self.assertEqual(launch["override_reason"], "user explicitly requested Hydrogen xhigh")
+            self.assertEqual(E.episode_accounting(store, "ep")["spend_uncapped_tokens"], 23341)
+        finally:
+            store.close()
+
     def test_unbound_run_records_nothing(self):
         code, summary, launched = self._run("--model", "claude-sonnet-5-5", "--effort", "low",
                                             run_dir=agy_run(self.root))

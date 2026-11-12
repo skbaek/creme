@@ -187,6 +187,22 @@ class ModelFitPolicyTests(unittest.TestCase):
         self.assertEqual(outcome.returncode, 0, outcome.stderr)
         self.assertIn("event=recorded", outcome.stdout)
 
+    def test_existing_state_backfills_newly_onboarded_family_and_effort_weights(self):
+        policy.recommend(self.directory, "antigravity", "review-audit", default="gemini-3.8-flash/high")
+        path = self.directory / "state" / "antigravity.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        del state["weights"]["family"]["gemini-4-hydrogen"]
+        del state["weights"]["family"]["gemini-4-argon"]
+        del state["weights"]["effort"]["xhigh"]
+        del state["task_types"]["review-audit"]["cells"]["gemini-4-hydrogen/xhigh"]
+        path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        table = policy.policy_table(self.directory, "antigravity")
+        self.assertIn("review-audit", table)
+        reloaded = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(reloaded["weights"]["family"]["gemini-4-hydrogen"], 1.0)
+        self.assertEqual(reloaded["weights"]["effort"]["xhigh"], 3.0)
+        self.assertIn("gemini-4-hydrogen/xhigh", reloaded["task_types"]["review-audit"]["cells"])
+
 
 if __name__ == "__main__":
     unittest.main()

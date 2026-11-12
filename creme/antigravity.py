@@ -26,6 +26,8 @@ DEFAULT_FLOOR = DEFAULT_MIN_REMAINING_FRACTION
 DEFAULT_FAMILY = "gemini-3.8-flash"
 # Provisional until the effort-ladder experiment (goal store reports/antigravity-effort-ladder-20260925.md) decides; user does not assume high is optimal.
 DEFAULT_EFFORT = "medium"
+EFFORTS = ("low", "medium", "high", "xhigh")
+XHIGH_FAMILIES = ("gemini-4-hydrogen",)
 DEFAULT_BINARY = Path("~/.local/bin/agy")
 SETTINGS_ENV = "CREME_AGY_SETTINGS"
 BINARY_ENV = "CREME_AGY_BIN"
@@ -37,14 +39,20 @@ class AntigravityError(RuntimeError):
 
 
 def resolve_model(model: str, effort: str) -> str:
-    for suffix in ("-low", "-medium", "-high"):
+    family = model
+    for suffix in tuple(f"-{level}" for level in EFFORTS):
         if model.endswith(suffix):
             selected = suffix[1:]
+            family = model[:-len(suffix)]
             if selected != effort:
                 raise ValueError(
                     f"model {model!r} has effort {selected!r}, conflicting with effort {effort!r}"
                 )
+            if effort == "xhigh" and family not in XHIGH_FAMILIES:
+                raise ValueError(f"model {family!r} does not advertise effort {effort!r}")
             return model
+    if effort == "xhigh" and family not in XHIGH_FAMILIES:
+        raise ValueError(f"model {family!r} does not advertise effort {effort!r}")
     return f"{model}-{effort}"
 
 
@@ -496,7 +504,7 @@ def _run_id() -> str:
 
 def _base_summary(model: str, effort: str, pool: str) -> dict:
     family = model
-    for suffix in ("-low", "-medium", "-high"):
+    for suffix in tuple(f"-{level}" for level in EFFORTS):
         if model.endswith(suffix):
             family = model[:-len(suffix)]
             break
@@ -644,11 +652,11 @@ def run(
     if summary["reasons"]:
         summary["exit"] = EXIT_USAGE
         return EXIT_USAGE, summary
-    if not target_path.is_dir() or effort not in ("low", "medium", "high") or timeout_seconds < 1:
+    if not target_path.is_dir() or effort not in EFFORTS or timeout_seconds < 1:
         reasons = []
         if not target_path.is_dir():
             reasons.append(f"target is not an existing directory: {target_path}")
-        if effort not in ("low", "medium", "high"):
+        if effort not in EFFORTS:
             reasons.append(f"invalid effort: {effort}")
         if timeout_seconds < 1:
             reasons.append("timeout_seconds must be positive")

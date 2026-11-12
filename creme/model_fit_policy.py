@@ -107,8 +107,13 @@ def _check_state(state: dict[str, Any], client: model_fit.Client) -> None:
     if state.get("schema") != 1 or state.get("client") != client.name:
         raise PolicyError(f"state for {client.name} has an unsupported schema or client")
     weights = state.get("weights")
-    if not isinstance(weights, dict) or not isinstance(weights.get("family"), dict):
+    if not isinstance(weights, dict) or not isinstance(weights.get("family"), dict) or not isinstance(weights.get("effort"), dict):
         raise PolicyError(f"state for {client.name} has invalid weights")
+    defaults = model_fit.default_weights(client)
+    for family, value in defaults["family"].items():
+        weights["family"].setdefault(family, value)
+    for effort, value in defaults["effort"].items():
+        weights["effort"].setdefault(effort, value)
 
 
 def _save(path: Path, state: dict[str, Any]) -> None:
@@ -436,7 +441,8 @@ def policy_table(directory: Path, client: str) -> str:
             "| task type | recommended | known good | recent | next probe candidate | since_probe |",
             "|---|---|---|---|---|---:|",
         ]
-        for task_type, task in state.get("task_types", {}).items():
+        for task_type in list(state.get("task_types", {})):
+            task = _ensure_task(state, selected, task_type)
             recent = ", ".join(task.get("recent", [])) or "—"
             rows.append(
                 f"| {task_type} | {task.get('recommended') or '—'} | "

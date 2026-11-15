@@ -663,6 +663,36 @@ def check_shared_goal_stack(workspace: Path, profile: Optional[dict[str, Any]]) 
     )]
 
 
+def check_attribution(repos: dict[str, Path], goal_store: Optional[Path] = None) -> list[Check]:
+    """Report attribution hook install state and scan Creme for leaked digests.
+
+    Not installed is a warning (adoption is per host); a repository-owned
+    hook or ``core.hooksPath`` that blocks installation is a warning naming
+    it. A known acquisition digest in a tracked file of a public repository
+    fails: attribution data belongs only in the private goal store.
+    """
+    from . import attribution
+
+    present = {name: path for name, path in repos.items() if path.is_dir()}
+    rows = {name: attribution.install_status(path) for name, path in present.items()}
+    states = {row["status"] for row in rows.values()}
+    detail = ", ".join(f"{name}={row['status']}" for name, row in rows.items()) or "no repositories"
+    status = STATUS_OK if states == {"installed"} else STATUS_WARN
+    checks = [Check("attribution hooks", status, detail + (
+        "" if status == STATUS_OK else "; see docs/guides/attribution.md"))]
+    digests = attribution.known_digests(present, goal_store)
+    hits = []
+    for name, path in present.items():
+        if name == "goal-store":
+            continue
+        hits.extend(f"{name}:{hit}" for hit in attribution.tracked_digest_hits(path, digests))
+    checks.append(Check(
+        "attribution privacy", STATUS_FAIL if hits else STATUS_OK,
+        f"acquisition digests in public tracked files: {hits}" if hits
+        else f"no known digest ({len(digests)}) in public tracked files"))
+    return checks
+
+
 def run_doctor(
     root: Path,
     cwd: Path,
@@ -700,6 +730,13 @@ def run_doctor(
     checks.extend(check_muse_pseudo_subagent(root))
     checks.extend(check_host_wrappers(shared_root))
     checks.extend(check_public_runtime_boundary(root))
+    store_name = (profile or {}).get("workspace", {}).get("goal_store") if profile else None
+    attribution_repos = {"creme": shared_root, "jaune": workspace / jaune_name,
+                         "blanc": workspace / blanc_name}
+    if store_name:
+        attribution_repos["goal-store"] = workspace / store_name
+    checks.extend(check_attribution(attribution_repos,
+                                    workspace / store_name if store_name else None))
     facts = selected.static_facts()
     checks.append(Check(
         "platform adapter", STATUS_OK if facts.status == "OK" else STATUS_FAIL,

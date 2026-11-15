@@ -39,6 +39,7 @@ from . import model_fit_policy
 from . import goal_stack
 from . import goal_stack_store
 from . import host_comms
+from . import attribution, attribution_cli
 from . import master_operations
 from . import master_reconcile
 from . import master_retire
@@ -679,8 +680,33 @@ def cmd_master_start(arguments: argparse.Namespace) -> int:
         return 2
     if result["status"] == "master" and arguments.client == "claude":
         result["claude_telemetry"] = _master_telemetry(start=True)
+    if result["status"] == "master":
+        result["attribution"] = _attribution_start(location, arguments)
     _json(result)
     return 0 if result["status"] in {"master", "reader", "takeover-required"} else 2
+
+
+def _attribution_start(location, arguments: argparse.Namespace) -> dict:
+    """Publish the session start and any journal left behind; never fails entry."""
+    try:
+        return attribution.on_master_start(location, client=arguments.client,
+                                           model=arguments.model, effort=arguments.effort)
+    except Exception as exc:  # entry stands; the next publication point retries
+        return {"status": "error", "detail": str(exc)}
+
+
+def _attribution_end(location, event: dict, payload: dict) -> Optional[dict]:
+    """At a master end event: census the session, publish the end record."""
+    if event.get("kind") != "master" or payload.get("action") != "end":
+        return None
+    try:
+        return attribution.on_master_end(
+            location, digest=event["actor"]["acquisition_digest"],
+            client=event["actor"]["client"], model=payload.get("model", ""),
+            effort=payload.get("effort", ""),
+            events=master_runtime.read_record(location.record_root).events)
+    except Exception as exc:  # the end event is durable; publish again by hand
+        return {"status": "error", "detail": str(exc)}
 
 
 def _read_event_source(source: str) -> bytes:
@@ -771,6 +797,7 @@ def cmd_master_event(arguments: argparse.Namespace) -> int:
         })
         return 2
     normalized = (*normalized, *result.normalized_modes)
+    attributed = _attribution_end(location, result.event, payload)
     _json({
         "status": "OK",
         "event": {
@@ -781,6 +808,7 @@ def cmd_master_event(arguments: argparse.Namespace) -> int:
         "source": result.board["source"],
         "board_repaired": result.repaired_stale_board,
         "modes_normalized": [change.to_dict() for change in normalized],
+        **({"attribution": attributed} if attributed is not None else {}),
     })
     return 0
 
@@ -3273,6 +3301,7 @@ def parser() -> argparse.ArgumentParser:
     luna_serve.set_defaults(func=cmd_luna_reserve_broker_serve)
 
     muse_cli.register(commands)
+    attribution_cli.register(commands)
     return root
 
 

@@ -30,6 +30,23 @@ GIT_ENV = {
     "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
     "GIT_CONFIG_NOSYSTEM": "1",
 }
+# These tests name real public URLs to prove the guard refuses them. Git must
+# never be able to reach the network from here, even with the guard disabled
+# by a mutation: a control run once pushed a fixture ledger to a real public
+# remote with the host's stored credentials. Only local transports are allowed.
+NO_NETWORK = {"GIT_ALLOW_PROTOCOL": "file", "GIT_TERMINAL_PROMPT": "0"}
+GIT_ENV.update(NO_NETWORK)
+_NO_NETWORK = mock.patch.dict(os.environ, NO_NETWORK)
+
+
+def setUpModule():
+    _NO_NETWORK.start()
+
+
+def tearDownModule():
+    _NO_NETWORK.stop()
+
+
 LEASES = {"wsl": "a" * 32, "mac": "b" * 32}
 
 

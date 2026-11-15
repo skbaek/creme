@@ -1075,6 +1075,32 @@ class LedgerWorktreeConfigTest(Fixture):
             self.mac.publish()
         self.assertEqual(self.public_ledger(), [])
 
+    def test_rewrite_rule_with_a_spaced_base_is_refused(self):
+        # R3-1: a base containing a space must be read as Git reads it.
+        self.opened()
+        spaced = self.base / "pub lic.git"
+        git(self.mac.plans, "config", f"url.{spaced}.pushInsteadOf", str(self.plans_origin))
+        with self.assertRaisesRegex(attr.AttributionError, "redirect"):
+            self.mac.publish()
+        self.assertEqual(self.public_ledger(), [])
+
+    def test_a_tied_rewrite_rule_refuses_whichever_git_would_pick(self):
+        # R3-1: an identity rule tied with a redirecting one never wins the check.
+        # The redirecting base appears first, the identity rule follows, and the
+        # redirect comes back in a second section, so a longest-prefix emulation
+        # that takes the first tie in file order sees only the identity.
+        self.opened()
+        config = Path(git(self.mac.plans, "rev-parse", "--git-path", "config").strip())
+        if not config.is_absolute():
+            config = self.mac.plans / config
+        with config.open("a", encoding="utf-8") as stream:
+            stream.write(f'[url "{self.blanc_origin}"]\n\tpushInsteadOf = unused-prefix:\n'
+                         f'[url "{self.plans_origin}"]\n\tpushInsteadOf = {self.plans_origin}\n'
+                         f'[url "{self.blanc_origin}"]\n\tpushInsteadOf = {self.plans_origin}\n')
+        with self.assertRaisesRegex(attr.AttributionError, "redirect"):
+            self.mac.publish()
+        self.assertEqual(self.public_ledger(), [])
+
 
 class CanonicalFormsTest(Fixture):
     """R2-2: more spellings and local forms of a public repository."""

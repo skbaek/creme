@@ -29,12 +29,14 @@ its schema and this guide.
 - Publication never pushes to a remote name, whose push URLs can differ by
   worktree (`config.worktree`) or by branch (`includeIf.onbranch`). It
   pushes to, and fetches from, one literal URL with an explicit refspec:
-  `remote.origin.url` with `insteadOf` applied, resolved in the same working
+  `remote.origin.url` with `insteadOf` applied (Git's own answer, from
+  `git ls-remote --get-url origin`), resolved in the same working
   directory as the push that uses it (the goal store's checkout for the
   opening push, the ledger worktree for every later one; the two must
   agree). `pushurl` is never used. It refuses when `origin` has more than
-  one URL, when Git would rewrite the literal URL again (`insteadOf` or
-  `pushInsteadOf`), when a remote is named after it, and when it reaches a
+  one URL, when any `insteadOf` or `pushInsteadOf` rule matching the literal
+  URL would change it (without emulating which rule Git would pick), when a
+  remote is named after it, and when it reaches a
   public repository: any fetch or push URL of any remote of Creme, Jaune or
   Blanc, their public GitHub origins, or a local path reaching one of those
   repositories (its work tree, `.git`, a linked worktree, a symlink, or
@@ -45,7 +47,9 @@ its schema and this guide.
   handled in the path; local paths through `realpath`). Residual: SSH host
   aliases from `~/.ssh/config` and literal IP addresses for a public host are
   not resolved; closing that would need the goal store's origin pinned in the
-  host profile.
+  host profile. A rewrite rule written to the goal store's config in the
+  milliseconds between resolution and the push is not caught before the
+  push; the after-push confirmation reports it.
 - Never copy ledger or journal contents into a public repository. Where a
   public artifact needs a fact, restate it without host or session.
 - `attribution privacy-check --repo NAME|PATH --base REV` flags, in the

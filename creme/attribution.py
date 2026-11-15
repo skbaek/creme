@@ -682,22 +682,27 @@ def public_urls(public_repos: Iterable[Path]) -> set[str]:
 
 def _rewrite_rules(cwd: Path, kind: str) -> list[tuple[str, str]]:
     """``url.<base>.<kind>`` rules as (prefix, base), as Git reads them in ``cwd``."""
-    result = _git(cwd, "config", "--get-regexp", rf"^url\..*\.{kind}$", check=False)
+    # -z: records end in NUL and key and value are split by a newline, so a
+    # base or prefix containing spaces is read exactly as Git reads it.
+    result = _git(cwd, "config", "-z", "--get-regexp", rf"^url\..*\.{kind}$", check=False)
     rules = []
-    for line in result.stdout.decode("utf-8", "replace").splitlines():
-        key, _, prefix = line.partition(" ")
-        suffix = "." + kind
-        if key.lower().endswith(suffix) and key.startswith("url."):
+    suffix = "." + kind
+    for record in result.stdout.decode("utf-8", "replace").split("\0"):
+        key, _, prefix = record.partition("\n")
+        if key.lower().startswith("url.") and key.lower().endswith(suffix):
             rules.append((prefix, key[len("url."):-len(suffix)]))
     return rules
 
 
-def _rewrite(url: str, rules: list[tuple[str, str]]) -> str:
-    matches = [(prefix, base) for prefix, base in rules if url.startswith(prefix)]
-    if not matches:
-        return url
-    prefix, base = max(matches, key=lambda rule: len(rule[0]))
-    return base + url[len(prefix):]
+def _redirects(url: str, rules: list[tuple[str, str]]) -> bool:
+    """Whether any rule could rewrite ``url`` to something else.
+
+    Git's choice among matching rules (longest prefix, ties by first
+    appearance of the base) is not emulated: any matching rule that is not
+    the identity refuses, whichever Git would pick.
+    """
+    return any(url.startswith(prefix) and base + url[len(prefix):] != url
+               for prefix, base in rules)
 
 
 def resolve_target(cwd: Path, goal_store: Path, remote: str, public_repos: Iterable[Path]) -> str:
@@ -717,10 +722,14 @@ def resolve_target(cwd: Path, goal_store: Path, remote: str, public_repos: Itera
         raise AttributionError(f"remote {remote!r} must have exactly one URL here; nothing published")
     fetch_rules = _rewrite_rules(cwd, "insteadof")
     push_rules = _rewrite_rules(cwd, "pushinsteadof")
-    target = _rewrite(urls[0].strip(), fetch_rules)
+    # Git's own answer for the fetch URL with insteadOf applied.
+    got = _git(cwd, "ls-remote", "--get-url", remote, check=False)
+    target = got.stdout.decode("utf-8", "replace").strip()
+    if got.returncode != 0 or not target:
+        raise AttributionError(f"cannot resolve the URL of remote {remote!r} here; nothing published")
     if git_urls.is_local(target):
         target = git_urls.local_path(target, goal_store)
-    if _rewrite(target, fetch_rules) != target or _rewrite(target, push_rules) != target:
+    if _redirects(target, fetch_rules) or _redirects(target, push_rules):
         raise AttributionError(
             f"URL rewriting (insteadOf/pushInsteadOf) would redirect the publication target "
             f"of remote {remote!r}; nothing published")

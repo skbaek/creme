@@ -190,7 +190,9 @@ On the user's direction to start as master, the session runs:
 
    It acquires the lease, appends the `master` event with the live
    reconciliation, and on a new acquisition starts the one detached heartbeat
-   itself; do not start another. For `--client claude` it also starts the
+   itself; do not start another. On a host that adopted
+   [commit attribution](attribution.md) it also publishes the session start
+   and any journal a predecessor left (`attribution` in its output). For `--client claude` it also starts the
    loopback Claude Code telemetry receiver (`creme claude-telemetry`) that
    model-fit needs for subagent output tokens; `semaphore master-release`
    stops it. It never runs as a login item. Verify a renewal in
@@ -349,7 +351,11 @@ master does before its session ends for any reason it can foresee:
    coordinator that never touched Lean has nothing to reclaim.
 4. Append a `master` event saying the session is ending and what the next
    master should do first. The writer updates the derived board; live goal
-   ordering remains solely in the stack.
+   ordering remains solely in the stack. On a host that adopted
+   [commit attribution](attribution.md), the end event also runs the census
+   over the session and publishes the end record; its `attribution` output
+   names the `unattributed` count. If it reports an error, run
+   `python3 -m creme attribution publish` before releasing.
 5. `~/creme/.semaphore/semaphore master-release`.
 
 Closing without these steps loses in-flight work. Full application exit with
@@ -447,7 +453,7 @@ returns.
 Entering as master authorizes all routine Git operations required to coordinate
 the host and its remotes: creating, pruning, and removing per-goal worktrees;
 fetching remotes; merging or fast-forwarding remote tracking, join, and worker
-branches; committing and pushing goal, stack, and host-comms branches; and
+branches; committing and pushing goal, stack, host-comms and attribution branches; and
 merging to or pushing a sibling's default branch under the protocol below. Do
 not ask the user for conversational confirmation of these operations. In
 clients whose command-approval cache matches by binary and subcommand prefix
@@ -471,13 +477,20 @@ order. Every step is evidence on the exact candidate, never on the branch
    shared upstream module invalidating most of Blanc. If the merge touched a
    shared upstream module, a fork table, a gate script, a pin, or a
    generated artifact, run the full catalogue, not the selected set.
-4. Merge without rewriting history, push the default branch, and push the
+4. On a host that adopted [commit attribution](attribution.md), run
+   `python3 -m creme attribution merge-check --repo NAME RANGE` over the
+   commits the merge brings in (for example `origin/main..CANDIDATE`), and for
+   a merge commit made here, over it before pushing. It publishes the journal
+   and refuses commits created on this host without a record; attribute each
+   with `attribution adopt --repo NAME SHA --reason TEXT` and rerun. Never
+   merge or push past a refusal.
+5. Merge without rewriting history, push the default branch, and push the
    goal branch's final state. Never force-push. Delete the goal branch and
    remove its worktree once the goal is closed.
-5. Append a `merge` event: candidate commit, resulting default-branch commit,
+6. Append a `merge` event: candidate commit, resulting default-branch commit,
    the gate evidence pointer, and whether the merge is audit-worthy (it
    touched anything in step 3's list, a published surface, or a claim count).
-6. A Blanc bump of its Jaune pin is reserved for the user under the decision
+7. A Blanc bump of its Jaune pin is reserved for the user under the decision
    table below and is itself a merge-class event after approval. Rehearse it
    with the owned-build wrapper's census mode in the goal's rehearsal tree
    before the bump commit exists on a branch.

@@ -17,25 +17,22 @@ which cannot conflict, and pushing again a bounded number of times.
 Writes (send, ack) authenticate through the master lease exactly as stack
 mutations do. Reads (inbox, show, thread, watch) never acquire; they fetch,
 fast-forward this host's copy and attach the worktree locally on first use.
-Git plumbing comes from :mod:`creme.goal_stack_git`.
+Git plumbing comes from :mod:`creme.goal_stack_git` and the channel
+machinery, shared with commit attribution, from :mod:`creme.git_channel`.
 """
 from __future__ import annotations
 
-import contextlib
-import fcntl
-import os
 import re
 import secrets
 import stat
-import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Optional
 
-from . import goal_stack, goal_stack_git as shared, goal_stack_store as store
-from . import master_runtime as runtime, semaphore
+from . import git_channel as channels, goal_stack, goal_stack_git as shared
+from . import goal_stack_store as store
 
 COMMS_DIR = ".host-comms"
 DEFAULT_BRANCH = "host-comms"
@@ -45,7 +42,7 @@ ACKS = "acks"
 LOCK_NAME = "creme-host-comms.lock"
 ALL = "all"
 DEFAULT_INTERVAL = 60
-MAX_PUBLISH_ATTEMPTS = 6
+MAX_PUBLISH_ATTEMPTS = channels.MAX_PUBLISH_ATTEMPTS
 MAX_SUBJECT_LEN = 200
 MAX_NOTE_LEN = 2000
 MAX_BODY_BYTES = 64 * 1024
@@ -339,48 +336,30 @@ def thread(channel: Channel, message_id: str) -> list[Message]:
 
 # -- worktree, lock and sync ------------------------------------------------
 
+REMEDY = "move them out of " + COMMS_DIR + "/ (messages are only written by `master comms`)"
+
+
+def _spec() -> channels.Spec:
+    return channels.Spec(directory=COMMS_DIR, branch=DEFAULT_BRANCH, lock_name=LOCK_NAME,
+                         readme=README.encode(), opening="host-comms: open the channel",
+                         remedy=REMEDY, error=CommsError, remote=DEFAULT_REMOTE)
+
 
 def worktree_path(root: Path) -> Path:
-    return Path(root) / COMMS_DIR
+    return channels.worktree_path(root, _spec())
 
 
-@contextlib.contextmanager
-def _lock(root: Path) -> Iterator[None]:
+def _lock(root: Path):
     """Serialize this host's git work on the channel (readers fetch too)."""
-    common = Path(shared.out(root, "rev-parse", "--git-common-dir"))
-    path = common if common.is_absolute() else Path(root) / common
-    descriptor = os.open(path / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        finally:
-            os.close(descriptor)
+    return channels.lock(root, _spec())
 
 
 def _ignore(root: Path) -> None:
-    """Ignore the worktree in this clone only, so no tracked file changes."""
-    if shared.git(root, "check-ignore", "-q", "--no-index", "--",
-                  f"{COMMS_DIR}/x", check=False).returncode == 0:
-        return
-    exclude = Path(shared.out(root, "rev-parse", "--git-path", "info/exclude"))
-    exclude = exclude if exclude.is_absolute() else Path(root) / exclude
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    existing = exclude.read_bytes() if exclude.exists() else b""
-    prefix = b"" if not existing or existing.endswith(b"\n") else b"\n"
-    exclude.write_bytes(existing + prefix + b"/" + COMMS_DIR.encode() + b"/\n")
+    channels.ignore(root, _spec())
 
 
 def _create_branch(root: Path, remote: str, branch: str, host: str) -> bool:
-    """Publish the channel's history-free first commit; False if another host won."""
-    with tempfile.TemporaryDirectory() as scratch:
-        env = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
-        tree = shared.write_tree(root, {"README.md": README.encode()}, env)
-    first = shared.commit_tree(root, tree, f"host-comms: open the channel (host {host})")
-    pushed = shared.git(root, "push", "--quiet", remote, f"{first}:refs/heads/{branch}", check=False)
-    return pushed.returncode == 0
+    return channels.create_branch(root, _spec(), remote, branch, host)
 
 
 def attach(root: Path, *, create: bool, host: str, remote: str = DEFAULT_REMOTE,
@@ -390,71 +369,21 @@ def attach(root: Path, *, create: bool, host: str, remote: str = DEFAULT_REMOTE,
     Returns None when the channel does not exist yet and ``create`` is false.
     Call with the channel lock held.
     """
-    root = Path(root)
-    path = worktree_path(root)
-    if path.is_symlink() or (path.exists() and not path.is_dir()):
-        raise CommsError(f"{path} must be a directory, not a link or file")
-    if path.exists():
-        current = shared.out(path, "symbolic-ref", "--short", "HEAD")
-        if current != branch:
-            raise CommsError(f"{COMMS_DIR} has {current!r} checked out, not {branch!r}")
-        return path
-    if not shared.remote_branch_exists(root, remote, branch):
-        if not create:
-            return None
-        if not _create_branch(root, remote, branch, host) and not \
-                shared.remote_branch_exists(root, remote, branch):
-            raise CommsError(f"could not publish {remote}/{branch}; channel not opened")
-    tracking = shared.tracking_ref(remote, branch)
-    shared.git(root, "fetch", "--quiet", remote, f"refs/heads/{branch}:{tracking}")
-    canonical = shared.out(root, "rev-parse", "--verify", tracking)
-    local = shared.git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
-    if local.returncode == 0:
-        if not shared.is_ancestor(root, local.stdout.decode().strip(), canonical):
-            raise CommsError(f"local branch {branch!r} diverges from {remote}/{branch}")
-        shared.git(root, "branch", "-f", branch, canonical)
-    else:
-        shared.git(root, "branch", branch, canonical)
-    shared.configure_upstream(root, remote, branch)
-    _ignore(root)
-    shared.git(root, "worktree", "add", "--quiet", COMMS_DIR, branch)
-    return path
-
-
-REMEDY = "move them out of " + COMMS_DIR + "/ (messages are only written by `master comms`)"
+    return channels.attach(root, _spec(), create=create, host=host, remote=remote, branch=branch)
 
 
 def _rebase(worktree: Path, onto: str) -> None:
-    result = shared.git(worktree, "-c", "commit.gpgsign=false", "rebase", "--quiet", onto, check=False)
-    if result.returncode:
-        shared.git(worktree, "rebase", "--abort", check=False)
-        raise CommsError("could not rebase unpublished channel commits: "
-                         + result.stderr.decode("utf-8", "replace").strip())
+    channels.rebase(worktree, onto, _spec())
 
 
 def changed_paths(worktree: Path) -> list[tuple[str, str]]:
     """Paths any commit on this copy modified or deleted after adding them."""
-    listed = shared.out(worktree, "log", "--format=", "--name-status", "--no-renames",
-                        "--diff-filter=MDT", "HEAD")
-    problems: dict[str, str] = {}
-    for line in listed.splitlines():
-        status, _, path = line.partition("\t")
-        if path and path not in problems:
-            problems[path] = f"changed after publication (git status {status}); files are immutable"
-    return sorted(problems.items())
+    return channels.changed_paths(worktree)
 
 
 def sync(worktree: Path) -> None:
     """Fetch, then fast-forward or rebase local-only (unpublished) commits."""
-    shared.require_clean(worktree, REMEDY)
-    remote_head = shared.fetch(worktree)
-    local = shared.head(worktree)
-    if local == remote_head or shared.is_ancestor(worktree, remote_head, local):
-        return
-    if shared.is_ancestor(worktree, local, remote_head):
-        shared.git(worktree, "merge", "--ff-only", "--quiet", remote_head)
-    else:
-        _rebase(worktree, remote_head)
+    channels.sync(worktree, _spec())
 
 
 def read_channel(root: Path, host: Optional[str] = None, *, remote: str = DEFAULT_REMOTE,
@@ -480,22 +409,7 @@ def read_channel(root: Path, host: Optional[str] = None, *, remote: str = DEFAUL
 
 def _authorized(record_root: Path, writer, action: Callable[[], dict]) -> dict:
     """Run ``action`` inside the master lease transaction stack writes use."""
-    writer = writer or runtime.RecordWriter(record_root)
-    if writer.root != record_root:
-        raise CommsError("writer and channel must use the same master record")
-    runtime._renew_or_refuse(writer.renew)
-    runtime._normalize_lock_prerequisites(record_root)
-    with runtime._locked_record(record_root):
-        try:
-            with writer.authority_transaction() as lease:
-                runtime._actor_from_snapshot(lease)
-                return action()
-        except semaphore.MasterAuthorityRefused as exc:
-            raise runtime.RenewalRefused(f"master renewal refused: {exc}") from exc
-
-
-def _drop_tip(worktree: Path) -> None:
-    shared.git(worktree, "reset", "--hard", "--quiet", "HEAD~1")
+    return channels.authorized(record_root, writer, action, _spec())
 
 
 def publish(worktree: Path, files: dict[str, bytes], message: str) -> str:
@@ -504,45 +418,7 @@ def publish(worktree: Path, files: dict[str, bytes], message: str) -> str:
     The new commit is always the tip; when publication fails it is dropped,
     so a refused write leaves nothing behind.
     """
-    for relative in files:
-        if (worktree / relative).exists() or (worktree / relative).is_symlink():
-            raise CommsError(f"{relative} already exists; channel files are immutable")
-    written = []
-    try:
-        for relative, data in files.items():
-            path = worktree / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-            written.append(path)
-        shared.git(worktree, "add", "--", *files)
-        shared.git(worktree, "-c", "commit.gpgsign=false", "commit", "--no-verify", "--quiet",
-                   "-m", message)
-    except shared.SharedStackError:
-        shared.git(worktree, "reset", "--quiet", check=False)
-        for path in written:
-            path.unlink(missing_ok=True)
-        raise
-    for _ in range(MAX_PUBLISH_ATTEMPTS):
-        published, detail = shared.push(worktree)
-        if published:
-            return shared.head(worktree)
-        try:
-            remote_head = shared.fetch(worktree)
-        except shared.SharedStackError as exc:
-            _drop_tip(worktree)
-            raise CommsError(f"could not publish; nothing sent: {exc}") from exc
-        if shared.is_ancestor(worktree, remote_head, "HEAD"):
-            _drop_tip(worktree)
-            raise CommsError(f"could not publish; nothing sent: {detail}")
-        # Another host published first. Only new, distinct paths exist on
-        # either side, so the rebase cannot conflict.
-        try:
-            _rebase(worktree, remote_head)
-        except CommsError:
-            _drop_tip(worktree)
-            raise
-    _drop_tip(worktree)
-    raise CommsError("channel kept advancing on other hosts; nothing sent; retry")
+    return channels.publish(worktree, files, message, _spec())
 
 
 def new_id(host: str, now: datetime) -> str:

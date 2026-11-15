@@ -39,6 +39,14 @@ class Spec:
     remedy: str
     error: type
     remote: str = shared.DEFAULT_REMOTE
+    # When set, fetch and push name ``remote`` and the branch explicitly and
+    # never follow the branch's configured upstream.
+    explicit_remote: bool = False
+    # Untracked paths this predicate accepts never block a write (they are
+    # never committed either: publication adds only its own files).
+    untracked_ok: Optional[Callable[[str], bool]] = None
+    # Extra patterns added to the clone's ``info/exclude`` on attach.
+    extra_excludes: tuple = ()
 
 
 def worktree_path(root: Path, spec: Spec) -> Path:
@@ -63,15 +71,20 @@ def lock(root: Path, spec: Spec) -> Iterator[None]:
 
 def ignore(root: Path, spec: Spec) -> None:
     """Ignore the worktree in this clone only, so no tracked file changes."""
-    if shared.git(root, "check-ignore", "-q", "--no-index", "--",
-                  f"{spec.directory}/x", check=False).returncode == 0:
-        return
     exclude = Path(shared.out(root, "rev-parse", "--git-path", "info/exclude"))
     exclude = exclude if exclude.is_absolute() else Path(root) / exclude
-    exclude.parent.mkdir(parents=True, exist_ok=True)
+    wanted = []
+    if shared.git(root, "check-ignore", "-q", "--no-index", "--",
+                  f"{spec.directory}/x", check=False).returncode != 0:
+        wanted.append("/" + spec.directory + "/")
     existing = exclude.read_bytes() if exclude.exists() else b""
+    lines = existing.decode("utf-8", "replace").splitlines()
+    wanted += [pattern for pattern in spec.extra_excludes if pattern not in lines]
+    if not wanted:
+        return
+    exclude.parent.mkdir(parents=True, exist_ok=True)
     prefix = b"" if not existing or existing.endswith(b"\n") else b"\n"
-    exclude.write_bytes(existing + prefix + b"/" + spec.directory.encode() + b"/\n")
+    exclude.write_bytes(existing + prefix + "".join(f"{w}\n" for w in wanted).encode())
 
 
 def create_branch(root: Path, spec: Spec, remote: str, branch: str, host: str) -> bool:
@@ -144,18 +157,75 @@ def changed_paths(worktree: Path) -> list[tuple[str, str]]:
     return sorted(problems.items())
 
 
-def sync(worktree: Path, spec: Spec,
-         rebase_onto: Optional[Callable[[Path, str], None]] = None) -> None:
+def blocking_paths(worktree: Path, spec: Spec) -> list[str]:
+    """Uncommitted paths that block a write; accepted untracked files do not."""
+    status = shared.git(worktree, "status", "--porcelain", "--untracked-files=all").stdout.decode(
+        "utf-8", "replace")
+    found = []
+    for line in status.splitlines():
+        if not line.strip():
+            continue
+        code, path = line[:2], line[3:]
+        if code == "??" and spec.untracked_ok is not None and spec.untracked_ok(path):
+            continue
+        found.append(path)
+    return found
+
+
+def require_clean(worktree: Path, spec: Spec) -> None:
+    paths = blocking_paths(worktree, spec)
+    if paths:
+        shown = ", ".join(paths[:5]) + (" ..." if len(paths) > 5 else "")
+        raise shared.SharedStackError(
+            f"{worktree.name} worktree has uncommitted or untracked paths ({shown}); {spec.remedy}")
+
+
+def fetch(worktree: Path, spec: Spec) -> str:
+    """The canonical branch head, fetched without force."""
+    if not spec.explicit_remote:
+        return shared.fetch(worktree)
+    tracking = shared.tracking_ref(spec.remote, spec.branch)
+    result = shared.git(worktree, "fetch", "--quiet", spec.remote,
+                        f"refs/heads/{spec.branch}:{tracking}", check=False)
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise shared.SharedStackError(
+            f"canonical {spec.branch} unreachable or rewritten ({spec.remote}/{spec.branch}): {detail}")
+    return shared.out(worktree, "rev-parse", "--verify", tracking)
+
+
+def push(worktree: Path, spec: Spec) -> tuple[bool, str]:
+    if not spec.explicit_remote:
+        return shared.push(worktree)
+    result = shared.git(worktree, "push", "--quiet", spec.remote,
+                        f"HEAD:refs/heads/{spec.branch}", check=False)
+    return result.returncode == 0, result.stderr.decode("utf-8", "replace").strip()
+
+
+def sync(worktree: Path, spec: Spec) -> None:
     """Fetch, then fast-forward or rebase local-only (unpublished) commits."""
-    shared.require_clean(worktree, spec.remedy)
-    remote_head = shared.fetch(worktree)
+    require_clean(worktree, spec)
+    remote_head = fetch(worktree, spec)
     local = shared.head(worktree)
     if local == remote_head or shared.is_ancestor(worktree, remote_head, local):
         return
     if shared.is_ancestor(worktree, local, remote_head):
         shared.git(worktree, "merge", "--ff-only", "--quiet", remote_head)
     else:
-        (rebase_onto or (lambda tree, onto: rebase(tree, onto, spec)))(worktree, remote_head)
+        rebase(worktree, remote_head, spec)
+
+
+def reset_to_remote(worktree: Path, spec: Spec) -> str:
+    """Fetch and discard local commits the origin does not have.
+
+    For channels whose source of truth is elsewhere until publication is
+    confirmed (attribution keeps its journal), an unpublished local commit
+    was never canonical and is rebuilt from that source.
+    """
+    require_clean(worktree, spec)
+    remote_head = fetch(worktree, spec)
+    shared.git(worktree, "reset", "--hard", "--quiet", remote_head)
+    return remote_head
 
 
 def _drop_tip(worktree: Path) -> None:
@@ -187,11 +257,15 @@ def publish(worktree: Path, files: dict[str, bytes], message: str, spec: Spec) -
             path.unlink(missing_ok=True)
         raise
     for _ in range(MAX_PUBLISH_ATTEMPTS):
-        published, detail = shared.push(worktree)
+        try:
+            published, detail = push(worktree, spec)
+        except Exception as exc:  # a timeout or crash must not strand the commit
+            _drop_tip(worktree)
+            raise spec.error(f"could not publish; nothing sent: {exc}") from exc
         if published:
             return shared.head(worktree)
         try:
-            remote_head = shared.fetch(worktree)
+            remote_head = fetch(worktree, spec)
         except shared.SharedStackError as exc:
             _drop_tip(worktree)
             raise spec.error(f"could not publish; nothing sent: {exc}") from exc

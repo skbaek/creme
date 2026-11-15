@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from . import git_urls
 from .adapters import Adapter, get_adapter
 from .codex_approvals import approval_checks
 from .guidance import GuidanceValidation
@@ -47,14 +48,8 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _normalize_origin(url: str) -> str:
-    value = url.strip()
-    value = re.sub(r"^[A-Za-z][A-Za-z0-9+.\-]*://", "", value)
-    value = re.sub(r"^[^@/]+@", "", value)
-    if ":" in value and "/" not in value.split(":", 1)[0]:
-        value = value.replace(":", "/", 1)
-    if value.endswith(".git"):
-        value = value[:-4]
-    return value.rstrip("/")
+    """Display form of an origin URL (shared canonicaliser in ``git_urls``)."""
+    return git_urls.display(url)
 
 
 def _repo_root_from_cwd(cwd: Path) -> Optional[Path]:
@@ -677,9 +672,19 @@ def check_attribution(repos: dict[str, Path], goal_store: Optional[Path] = None)
     rows = {name: attribution.install_status(path) for name, path in present.items()}
     states = {row["status"] for row in rows.values()}
     detail = ", ".join(f"{name}={row['status']}" for name, row in rows.items()) or "no repositories"
-    status = STATUS_OK if states == {"installed"} else STATUS_WARN
+    if "unmarked" in states:
+        status = STATUS_FAIL
+        detail += ("; hooks without the adoption marker: the merge check refuses until "
+                   "`attribution install` restores it")
+    else:
+        status = STATUS_OK if states == {"installed"} else STATUS_WARN
     checks = [Check("attribution hooks", status, detail + (
         "" if status == STATUS_OK else "; see docs/guides/attribution.md"))]
+    scoped = [f"{name}: {item}" for name, row in rows.items()
+              for item in row.get("worktree_hooks_paths", [])]
+    if scoped:
+        checks.append(Check("attribution worktree hooks", STATUS_WARN,
+                            f"per-worktree core.hooksPath bypasses the hooks there: {scoped}"))
     digests = attribution.known_digests(present, goal_store)
     hits = []
     for name, path in present.items():

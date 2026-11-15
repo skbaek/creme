@@ -248,8 +248,8 @@ class CaptureTest(Fixture):
         self.mac.set_lease(LEASES["mac"], renewed_at=time.time() - 7200)
         self.mac.commit()
         [record] = self.mac.records()
-        self.assertEqual((record["acquisition_digest"], record["lease_state"]),
-                         (self.mac.digest, "expired"))
+        self.assertEqual((record["acquisition_digest"], record["lease_state"], record["stale_lease"]),
+                         ("none", "expired", self.mac.digest))
 
     def test_hook_never_fails_a_commit_and_always_exits_zero(self):
         self.mac.install()
@@ -370,7 +370,7 @@ class LedgerTest(Fixture):
         self.mac.commit()
         self.mac.publish()
         self.wsl.commit()
-        with mock.patch.object(channels, "sync", lambda worktree, spec, rebase_onto=None: None):
+        with mock.patch.object(channels, "reset_to_remote", lambda worktree, spec: None):
             self.wsl.publish()  # stale copy: rejected push, rebase, retry
         self.mac.commit(name="second")
         self.mac.publish()
@@ -389,7 +389,8 @@ class LedgerTest(Fixture):
         started = attr.on_master_start(self.mac.location(), client="claude", model="opus",
                                        effort="high", writer=self.mac.writer(), host="mac")
         self.assertEqual(started["published"], 1)
-        self.assertIn(f"hosts/mac/sessions/{self.mac.digest}/start-", started["session_file"])
+        [session_file] = started["session_files"]
+        self.assertIn(f"hosts/mac/sessions/{self.mac.digest}/start-", session_file)
         ledger = self.mac.ledger()
         self.assertEqual([(r["sha"], r["acquisition_digest"]) for r in ledger.records],
                          [(stale, predecessor)])
@@ -512,7 +513,7 @@ class MergeCheckTest(Fixture):
         self.assertNotIn(recorded, [row["sha"] for row in result["unrecorded"]])
         self.assertNotIn(theirs, [row["sha"] for row in result["unrecorded"]])
         adopted = attr.adopt(self.mac.repos, "blanc", [missed], reason="made with hooks off",
-                             host="mac", identity=hook.lease_identity(str(self.mac.state), time.time()))
+                             host="mac", adopter=hook.lease_identity(str(self.mac.state), time.time()))
         self.assertEqual(adopted["adopted"][0]["sha"], missed)
         result = attr.merge_check(self.mac.repos, "blanc", "origin/main~1..candidate",
                                   publish_first=self.publish_first)
@@ -520,7 +521,9 @@ class MergeCheckTest(Fixture):
         record = [r for r in self.mac.ledger().records if r["sha"] == missed][0]
         self.assertEqual((record["source"], record["reason"], record["hook"]),
                          ("census", "made with hooks off", "adopt"))
-        self.assertEqual(record["acquisition_digest"], self.mac.digest)
+        self.assertEqual(record["acquisition_digest"], "unknown")
+        self.assertEqual(record["adopted_by"]["acquisition_digest"], self.mac.digest)
+        self.assertEqual(record["goal"], "unknown")  # made in the primary checkout
 
     def test_publication_failure_refuses_the_check(self):
         self.mac.install()
@@ -595,9 +598,11 @@ class ReportTest(Fixture):
         report = attr.build_report(self.mac.ledger(), {"blanc": self.mac.blanc},
                                    attr.Filters(since=start, until=time.time() + 1))
         rows = report["sessions"][0]["repositories"]["blanc"]["main"]
-        matched = [row for row in rows if row["sha"] == rewritten]
-        self.assertEqual(matched[0]["matched"], "patch-id")
+        self.assertNotIn(rewritten, [row["sha"] for row in rows])  # never under a session
+        self.assertEqual([(m["sha"], m["matches"]) for m in report["matched_by_patch_id"]],
+                         [(rewritten, original)])
         self.assertEqual(report["unattributed"], [])
+        self.assertIn("matched by patch-id, not attributed", attr.render_report(report))
 
     def test_report_includes_unpublished_local_records(self):
         self.mac.install()
@@ -638,6 +643,12 @@ class PrivacyTest(Fixture):
         hits = self.planted("docs/x.md", "built on the mac master\n")
         self.assertEqual([h["rule"] for h in hits], ["host name"])
 
+    def test_host_name_is_matched_in_any_case_as_a_word(self):
+        hits = self.planted("NOTES.md", "Done by the Mac master. The MAC host did it.\n",
+                            message="Done on the Mac master")
+        self.assertEqual([h["rule"] for h in hits], ["host name", "host name"])
+        self.assertEqual(self.planted("OTHER.md", "mac-host mac_master host=mac1 macOS\n"), [])
+
     def test_digest_session_field_and_message_are_flagged(self):
         hits = self.planted("creme/x.py", f'value = "{self.mac.digest}"\n')
         self.assertEqual([h["rule"] for h in hits], ["acquisition digest"])
@@ -655,9 +666,351 @@ class PrivacyTest(Fixture):
         self.mac.install()
         self.mac.commit()
         self.mac.commit(name="leak.txt", text=f"{self.mac.digest}\n")
-        checks = doctor.check_attribution({"blanc": self.mac.blanc}, None)
-        self.assertEqual(checks[1].status, doctor.STATUS_FAIL)
-        self.assertIn("blanc:leak.txt", checks[1].detail)
+        checks = {c.name: c for c in doctor.check_attribution({"blanc": self.mac.blanc}, None)}
+        self.assertEqual(checks["attribution privacy"].status, doctor.STATUS_FAIL)
+        self.assertIn("blanc:leak.txt", checks["attribution privacy"].detail)
+
+
+
+class GuardTest(Fixture):
+    """F1: publication goes only to the goal store's own, non-public origin."""
+
+    def guard(self):
+        return attr.require_private_remote(self.mac.plans, "origin", [self.mac.blanc])
+
+    def test_every_public_spelling_is_refused(self):
+        spellings = [
+            "https://github.com/skbaek/creme", "https://github.com/skbaek/Creme.git",
+            "https://github.com/Skbaek/creme", "https://github.com/skbaek/creme.git/",
+            "ssh://git@github.com:22/skbaek/creme.git", "https://www.github.com/skbaek/creme",
+            "ssh://git@ssh.github.com:443/skbaek/blanc.git", "git@github.com:skbaek/jaune.git",
+            "https://GitHub.com/skbaek/creme", "https://github.com//skbaek/creme",
+            str(self.blanc_origin), str(self.blanc_origin) + "/", str(self.mac.blanc),
+            str(self.mac.blanc / ".git"), f"file://{self.blanc_origin}",
+        ]
+        for url in spellings:
+            git(self.mac.plans, "remote", "set-url", "origin", url)
+            with self.assertRaisesRegex(attr.AttributionError, "public repository", msg=url):
+                self.guard()
+
+    def test_insteadof_alias_of_a_public_remote_is_refused(self):
+        git(self.mac.blanc, "config", "url.https://github.com/.insteadOf", "gh:")
+        git(self.mac.blanc, "remote", "set-url", "origin", "gh:someone/otherpublic")
+        git(self.mac.plans, "remote", "set-url", "origin", "https://github.com/someone/otherpublic.git")
+        with self.assertRaisesRegex(attr.AttributionError, "public repository"):
+            self.guard()
+
+    def test_a_second_push_url_never_leaks(self):
+        self.mac.install()
+        self.mac.commit()
+        git(self.mac.plans, "config", "--add", "remote.origin.pushurl", str(self.plans_origin))
+        git(self.mac.plans, "config", "--add", "remote.origin.pushurl", str(self.blanc_origin))
+        with self.assertRaisesRegex(attr.AttributionError, "other than its own origin"):
+            self.mac.publish()
+        self.assertEqual(git(self.blanc_origin, "branch", "--list", attr.DEFAULT_BRANCH), "")
+        git(self.mac.plans, "config", "--unset-all", "remote.origin.pushurl")
+        git(self.mac.plans, "config", "remote.origin.pushurl", str(self.plans_origin) + "/")
+        self.assertEqual(self.mac.publish()["published"], 1)  # same origin, other spelling
+
+    def test_push_names_origin_never_the_branch_upstream(self):
+        self.mac.install()
+        self.mac.publish()
+        self.mac.commit()
+        git(self.mac.plans, "remote", "add", "mirror", str(self.blanc_origin))
+        git(self.mac.plans, "push", "-q", "mirror", attr.DEFAULT_BRANCH)
+        git(self.mac.plans, "fetch", "-q", "mirror")
+        git(self.mac.plans, "config", "branch.attribution.remote", "mirror")
+        before = git(self.blanc_origin, "ls-tree", "-r", "--name-only", attr.DEFAULT_BRANCH)
+        self.assertEqual(self.mac.publish()["published"], 1)
+        self.assertEqual(git(self.blanc_origin, "ls-tree", "-r", "--name-only", attr.DEFAULT_BRANCH),
+                         before)
+        self.assertTrue([p for p in self.ledger_paths() if p.startswith("hosts/mac/batches/")])
+
+
+class PublicationFailureTest(Fixture):
+    """F2, F7, F10: the journal stays the source of truth until the origin holds it."""
+
+    def test_push_timeout_keeps_the_journal_and_the_next_publish_sends_it(self):
+        self.mac.install()
+        self.mac.publish()
+        self.mac.commit()
+        with mock.patch.object(channels, "push",
+                               side_effect=attr.shared.SharedStackError("git push failed: timed out")):
+            with self.assertRaisesRegex(attr.AttributionError, "nothing sent"):
+                self.mac.publish()
+        worktree = self.mac.plans / attr.LEDGER_DIR
+        self.assertEqual(git(worktree, "rev-list", "--count", "origin/attribution..HEAD"), "0")
+        self.assertEqual([e.published for e in attr.journal(self.mac.blanc)], [False])
+        self.assertEqual(self.mac.publish()["published"], 1)
+        self.assertEqual([e.published for e in attr.journal(self.mac.blanc)], [True])
+        self.assertEqual(len(self.wsl.ledger().records), 1)
+
+    def test_kill_between_commit_and_push_is_rebuilt_not_trusted(self):
+        self.mac.install()
+        self.mac.publish()
+        self.mac.commit()
+        with mock.patch.object(channels, "push", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.mac.publish()
+        worktree = self.mac.plans / attr.LEDGER_DIR
+        self.assertEqual(git(worktree, "rev-list", "--count", "origin/attribution..HEAD"), "1")
+        self.assertEqual([e.published for e in attr.journal(self.mac.blanc)], [False])
+        self.assertEqual(self.mac.publish()["published"], 1)
+        self.assertEqual([e.published for e in attr.journal(self.mac.blanc)], [True])
+        self.assertEqual(len(self.wsl.ledger().records), 1)
+        self.assertEqual(len([p for p in self.ledger_paths() if "/batches/" in p]), 1)
+
+    def test_offline_end_record_is_published_later(self):
+        self.mac.install()
+        events = [{"kind": "master", "timestamp": attr.iso(time.time() - 60).replace("Z", ".000000Z"),
+                   "actor": {"client": "claude", "acquisition_digest": self.mac.digest}}]
+        attr.on_master_start(self.mac.location(), client="claude", model="opus", effort="high",
+                             writer=self.mac.writer(), host="mac")
+        git(self.mac.blanc, "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty",
+            "-m", "missed")
+        real = git(self.mac.plans, "remote", "get-url", "origin")
+        git(self.mac.plans, "remote", "set-url", "origin", str(self.base / "offline.git"))
+        ended = attr.on_master_end(self.mac.location(), digest=self.mac.digest, client="claude",
+                                   model="opus", effort="high", events=events,
+                                   writer=self.mac.writer(), host="mac")
+        self.assertEqual((ended["status"], ended["unattributed"]), ("error", 1))
+        git(self.mac.plans, "remote", "set-url", "origin", real)
+        result = self.mac.publish()
+        self.assertEqual(len(result["session_files"]), 1)
+        session = self.mac.ledger().sessions[("mac", self.mac.digest)]
+        self.assertTrue(session["ended_at"])
+        self.assertEqual(len(session["census"]), 1)
+
+    def test_foreign_host_record_is_quarantined_not_fatal(self):
+        self.mac.install()
+        self.mac.commit()
+        entry = attr.journal(self.mac.blanc)[0]
+        forged = dict(entry.record, id=entry.record["id"] + "x", host="elsewhere")
+        (entry.path.parent / f"{forged['id']}.json").write_text(json.dumps(forged))
+        result = self.mac.publish()
+        self.assertEqual((result["published"], [q["host"] for q in result["quarantined"]]),
+                         (1, ["elsewhere"]))
+        self.assertTrue((attr.journal_root(self.mac.blanc) / "quarantine" / f"{forged['id']}.json").exists())
+        self.assertEqual(self.mac.publish()["quarantined"], [])
+
+    def test_stray_untracked_files_do_not_block(self):
+        self.mac.install()
+        self.mac.publish()
+        self.mac.commit()
+        worktree = self.mac.plans / attr.LEDGER_DIR
+        (worktree / ".DS_Store").write_bytes(b"x")
+        (worktree / "notes.txt").write_text("scratch\n")
+        (worktree / "hosts" / "mac").mkdir(parents=True, exist_ok=True)
+        (worktree / "hosts" / "mac" / ".DS_Store").write_bytes(b"x")
+        result = attr.merge_check(self.mac.repos, "blanc", "HEAD~1..HEAD",
+                                  publish_first=self.mac.publish)
+        self.assertEqual(result["status"], "OK")
+        self.assertEqual(result["published"]["published"], 1)
+        (worktree / "hosts" / "mac" / "forged.json").write_text("{}")
+        with self.assertRaisesRegex(attr.AttributionError, "untracked"):
+            self.mac.publish()
+
+
+class AdoptTest(Fixture):
+    """F3: adopt only this host's census, without claiming the creation session."""
+
+    def test_adopt_records_unknown_session_with_adopter_and_goal(self):
+        self.mac.install()
+        self.wsl.install()
+        self.mac.set_lease("c" * 32)
+        worktree = self.mac.blanc / ".worktrees" / "some-goal-v1"
+        git(self.mac.blanc, "worktree", "add", "-q", "-b", "g", str(worktree))
+        git(worktree, "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty",
+            "-m", "missed in A")
+        missed = git(worktree, "rev-parse", "HEAD")
+        self.mac.set_lease(LEASES["mac"])
+        adopter = hook.lease_identity(str(self.mac.state), time.time())
+        attr.adopt(self.mac.repos, "blanc", [missed], reason="hooks were off", host="mac",
+                   adopter=adopter)
+        record = [r for r in self.mac.records() if r["sha"] == missed][0]
+        self.assertEqual(record["acquisition_digest"], "unknown")
+        self.assertEqual(record["adopted_by"]["acquisition_digest"], self.mac.digest)
+        self.assertEqual(record["goal"], "some-goal-v1")
+        self.assertTrue(record["created_at"])
+        theirs = self.wsl.commit(name="w")
+        git(self.wsl.blanc, "push", "-q", "origin", "main")
+        git(self.mac.blanc, "pull", "-q", "--ff-only", "origin", "main")
+        with self.assertRaisesRegex(attr.AttributionError, "not in this host's census"):
+            attr.adopt(self.mac.repos, "blanc", [theirs], reason="oops", host="mac", adopter=adopter)
+        with self.assertRaisesRegex(attr.AttributionError, "not in this host's census"):
+            attr.adopt(self.mac.repos, "blanc", [missed], reason="again", host="mac", adopter=adopter)
+        self.mac.publish()
+        text = attr.render_report(attr.build_report(self.mac.ledger(), self.mac.repos,
+                                                    attr.Filters(), host="mac"))
+        self.assertIn("[adopted: hooks were off]", text)
+        self.assertIn("session unknown", text)
+
+
+class CensusPersistenceTest(Fixture):
+    """F5, F6, F10, F12: the census and merge check judge what they must, no more."""
+
+    def test_census_survives_worktree_and_branch_removal(self):
+        self.mac.install()
+        start = time.time() - 1
+        worktree = self.mac.blanc / ".worktrees" / "goal-x"
+        git(self.mac.blanc, "worktree", "add", "-q", "-b", "gx", str(worktree))
+        (worktree / "a").write_text("a\n")
+        git(worktree, "add", "a")
+        git(worktree, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "wt commit")
+        self.mac.commit(name="m")
+        git(worktree, "-c", "core.hooksPath=/dev/null", "rebase", "-q", "main")
+        tip = git(worktree, "rev-parse", "HEAD")
+        self.assertIn(tip, [r["sha"] for r in attr.census(self.mac.repos, start, time.time() + 1)])
+        git(self.mac.blanc, "merge", "-q", "--ff-only", "gx")
+        git(self.mac.blanc, "worktree", "remove", str(worktree))
+        git(self.mac.blanc, "branch", "-d", "gx")
+        rows = attr.census(self.mac.repos, start, time.time() + 1)
+        self.assertIn(tip, [r["sha"] for r in rows])
+        self.assertEqual([r["goal"] for r in rows if r["sha"] == tip], ["goal-x"])
+        result = attr.merge_check(self.mac.repos, "blanc", "origin/main..main",
+                                  publish_first=self.mac.publish)
+        self.assertEqual(result["status"], "refused")
+        self.assertIn(tip, [r["sha"] for r in result["unrecorded"]])
+
+    def test_missing_marker_with_hooks_refuses_and_reinstall_keeps_adoption_time(self):
+        self.mac.install()
+        adopted_at = attr.adoption(self.mac.blanc)[1]
+        (attr.journal_root(self.mac.blanc) / hook.INSTALLED).unlink()
+        git(self.mac.blanc, "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty",
+            "-m", "missed")
+        result = attr.merge_check(self.mac.repos, "blanc", "HEAD~1..HEAD",
+                                  publish_first=self.mac.publish)
+        self.assertEqual(result["status"], "refused")
+        self.assertIn("attribution install", result["remedy"])
+        self.assertEqual(attr.install_status(self.mac.blanc)["status"], "unmarked")
+        checks = {c.name: c for c in doctor.check_attribution(self.mac.repos, None)}
+        self.assertEqual(checks["attribution hooks"].status, doctor.STATUS_FAIL)
+        time.sleep(1.1)
+        self.mac.install()
+        self.assertLessEqual(attr.adoption(self.mac.blanc)[1], adopted_at + 1)
+        result = attr.merge_check(self.mac.repos, "blanc", "HEAD~1..HEAD",
+                                  publish_first=self.mac.publish)
+        self.assertEqual(result["status"], "refused")
+
+    def test_fast_forward_and_abort_entries_are_not_creations(self):
+        self.mac.install()
+        self.wsl.install()
+        theirs = self.wsl.commit(name="w")
+        git(self.wsl.blanc, "push", "-q", "origin", "main")
+        git(self.mac.blanc, "fetch", "-q", "origin")
+        git(self.mac.blanc, "cherry-pick", "--ff", "origin/main")
+        self.assertEqual(git(self.mac.blanc, "rev-parse", "HEAD"), theirs)
+        patch = self.base / "bad.patch"
+        patch.write_text(
+            "From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n"
+            "From: a <a@b>\nDate: Mon, 1 Jan 2026 00:00:00 +0000\nSubject: [PATCH] x\n\n---\n"
+            " nofile | 1 +\n\ndiff --git a/nofile b/nofile\nindex 1111111..2222222 100644\n"
+            "--- a/nofile\n+++ b/nofile\n@@ -1 +1 @@\n-a\n+b\n")
+        subprocess.run(["git", "-C", str(self.mac.blanc), "am", str(patch)], capture_output=True)
+        subprocess.run(["git", "-C", str(self.mac.blanc), "am", "--abort"], capture_output=True)
+        self.assertEqual(attr.census(self.mac.repos, 0, time.time() + 1), [])
+        result = attr.merge_check(self.mac.repos, "blanc", "HEAD~1..HEAD",
+                                  publish_first=self.mac.publish)
+        self.assertEqual(result["status"], "OK")
+
+    def test_partial_install_judges_only_adopted_repositories(self):
+        attr.install({"goal-store": self.mac.plans}, python=sys.executable, script=attr.SCRIPT,
+                     state_dir=self.mac.state, profile=self.mac.profile)
+        start = time.time() - 1
+        self.mac.commit()  # blanc never adopted here
+        self.assertEqual(attr.census(self.mac.repos, start, time.time() + 1), [])
+        report = attr.build_report(attr.Ledger(attached=False), self.mac.repos,
+                                   attr.Filters(since=start, until=time.time() + 1), host="mac")
+        self.assertEqual(report["unattributed"], [])
+
+    def test_worktree_scoped_hooks_path_is_reported(self):
+        self.mac.install()
+        git(self.mac.blanc, "config", "extensions.worktreeConfig", "true")
+        worktree = self.mac.blanc / ".worktrees" / "access-control"
+        git(self.mac.blanc, "worktree", "add", "-q", "-b", "ac", str(worktree))
+        git(worktree, "config", "--worktree", "core.hooksPath", "/dev/null")
+        checks = {c.name: c for c in doctor.check_attribution(self.mac.repos, None)}
+        self.assertEqual(checks["attribution worktree hooks"].status, doctor.STATUS_WARN)
+        self.assertIn("access-control", checks["attribution worktree hooks"].detail)
+
+    def test_retire_adoption_is_deliberate_and_recorded(self):
+        self.mac.install()
+        attr.uninstall(self.mac.repos)
+        self.assertEqual(attr.adoption(self.mac.blanc)[0], "adopted")
+        result = attr.uninstall(self.mac.repos, retire_adoption=True)
+        self.assertIn("retired_at", result["retired"]["blanc"])
+        self.assertEqual(attr.adoption(self.mac.blanc)[0], "not-adopted")
+        self.assertTrue(list(attr.journal_root(self.mac.blanc).glob("retired-*.json")))
+
+
+class CaptureEdgeTest(Fixture):
+    """F8, F12: capture edge cases."""
+
+    def test_post_rewrite_continues_past_a_bad_target(self):
+        self.mac.install()
+        good = self.mac.commit()
+        attr.uninstall(self.mac.repos)
+        before = {r["id"] for r in self.mac.records()}
+        stdin = f"{'0' * 40} {'1' * 40}\n{'0' * 40} {good}\n".encode()
+        self.assertEqual(hook.run(["--repo", "blanc", "--state-dir", str(self.mac.state),
+                                   "post-rewrite", "rebase"], stdin, cwd=str(self.mac.blanc)), 0)
+        added = [r for r in self.mac.records() if r["id"] not in before]
+        self.assertEqual([(r["sha"], r["hook"]) for r in added], [(good, "post-rewrite")])
+        self.assertIn(good, added[0]["id"])  # ids carry the full SHA
+
+    def test_detached_primary_checkout_is_labelled_detached(self):
+        self.mac.install()
+        git(self.mac.blanc, "checkout", "-q", "--detach")
+        self.mac.commit(name="d")
+        self.assertEqual([r["goal"] for r in self.mac.records()], ["detached"])
+
+    def test_stale_lease_reports_under_none(self):
+        self.mac.install()
+        self.mac.set_lease("d" * 32, renewed_at=time.time() - 86400)
+        self.mac.commit()
+        self.mac.set_lease(LEASES["mac"])
+        self.mac.publish()
+        report = attr.build_report(self.mac.ledger(), self.mac.repos, attr.Filters(), host="mac")
+        self.assertEqual([s["acquisition_digest"] for s in report["sessions"]], ["none"])
+        self.assertIn("[stale lease]", attr.render_report(report))
+
+
+class ReportShapeTest(Fixture):
+    """F4, F11, F13: what the report attributes, folds and warns about."""
+
+    def test_patch_id_never_matches_across_repositories(self):
+        self.mac.install()
+        start = time.time() - 1
+        (self.mac.plans / "toolchain").write_text("v4.35.0\n")
+        git(self.mac.plans, "add", "toolchain")
+        git(self.mac.plans, "commit", "-q", "-m", "bump in repo A")
+        (self.wsl.blanc / "toolchain").write_text("v4.35.0\n")
+        git(self.wsl.blanc, "add", "toolchain")
+        git(self.wsl.blanc, "commit", "-q", "-m", "bump in repo B")
+        theirs = git(self.wsl.blanc, "rev-parse", "HEAD")
+        git(self.wsl.blanc, "push", "-q", "origin", "main")
+        git(self.mac.blanc, "pull", "-q", "--ff-only", "origin", "main")
+        self.mac.publish()
+        report = attr.build_report(self.mac.ledger(), self.mac.repos,
+                                   attr.Filters(since=start, until=time.time() + 1), host="mac")
+        self.assertEqual([u["sha"] for u in report["unattributed"]], [theirs])
+        self.assertEqual(report["matched_by_patch_id"], [])
+
+    def test_amended_commit_shows_final_sha_with_superseded_folded(self):
+        self.mac.install()
+        old = self.mac.commit(name="f")
+        git(self.mac.blanc, "commit", "-q", "--amend", "-m", "amended")
+        new = git(self.mac.blanc, "rev-parse", "HEAD")
+        self.mac.publish()
+        report = attr.build_report(self.mac.ledger(), self.mac.repos, attr.Filters(), host="mac")
+        rows = report["sessions"][0]["repositories"]["blanc"]["main"]
+        self.assertEqual([(r["sha"], r.get("supersedes")) for r in rows], [(new, [old])])
+        self.assertIn(f"[supersedes {old[:12]}]", attr.render_report(report))
+
+    def test_report_warns_without_ledger_or_host(self):
+        report = attr.build_report(attr.Ledger(attached=False), self.mac.repos, attr.Filters())
+        self.assertEqual(len(report["warnings"]), 2)
+        self.assertIn("warning: no ledger", attr.render_report(report))
 
 
 if __name__ == "__main__":

@@ -12,14 +12,19 @@ that clone, exactly like host comms (:mod:`creme.git_channel`). Each host
 writes only under ``hosts/<host>/``, every file once:
 
 - ``hosts/<host>/batches/<stamp>-<8 hex>.json``: published journal records;
-- ``hosts/<host>/sessions/<digest>/start-<stamp>.json`` and
-  ``end-<stamp>.json``: client, model, effort, start and end of one master
-  acquisition, the end carrying the census of unattributed commits.
+- ``hosts/<host>/sessions/<digest>/<start|end>-<stamp>-<4 hex>.json``:
+  client, model, effort, start and end of one master acquisition, the end
+  carrying the census of unattributed commits.
+
+The journal is the source of truth until publication is confirmed: a record
+or session file moves to ``published/`` only after the fetched origin holds
+it, and a local ledger commit the origin lacks is discarded and rebuilt.
 
 Privacy: attribution data lives only in the host-local journal and on the
-private goal store's ledger branch. Publication refuses a remote that is a
-public repository's, and nothing here writes to a tracked file of Creme,
-Jaune or Blanc.
+private goal store's ledger branch. Publication pushes only to the goal
+store's own origin, named explicitly, and refuses when any push URL differs
+from it or when it is any public repository's URL. Nothing here writes to a
+tracked file of Creme, Jaune or Blanc.
 """
 from __future__ import annotations
 
@@ -28,7 +33,6 @@ import os
 import re
 import secrets
 import shlex
-import stat
 import subprocess
 import sys
 import time
@@ -37,7 +41,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from . import attribution_hook as hook
-from . import git_channel as channels, goal_stack_git as shared
+from . import git_channel as channels, git_urls, goal_stack_git as shared
 
 LEDGER_DIR = ".attribution"
 DEFAULT_BRANCH = "attribution"
@@ -46,6 +50,11 @@ LOCK_NAME = "creme-attribution.lock"
 HOSTS = "hosts"
 BATCHES = "batches"
 SESSIONS = "sessions"
+CENSUS = "census"
+QUARANTINE = "quarantine"
+PENDING = "pending"
+RETIRED_PREFIX = "retired-"
+UNKNOWN = "unknown"
 MAX_BATCH = 2000
 MAX_LEDGER_FILE = 8 * 1024 * 1024
 HOOK_MARKER = "# creme-attribution-hook v1"
@@ -59,10 +68,14 @@ CREATION = re.compile(
     r"|^(pull --rebase|rebase( -i| -m| \(-i\))?)[^:]*\((pick|reword|squash|fixup|edit|continue)\):"
     r"|Merge made by"
 )
+# Reflog entries that move HEAD to an existing commit, though their command
+# name looks like a creation: ``cherry-pick --ff``, ``am --abort`` and kin.
+NOT_CREATION = re.compile(r"fast-forward|--abort|--quit|--skip", re.IGNORECASE)
 SESSION_FIELD = re.compile(
     r"(acquisition_digest|session_digest|liveness_digest|lease_id)[\"']?\s*[:=]\s*[\"']?[0-9a-f]{32,64}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+SESSION_ID_RE = re.compile(r"(start|end)-\d{8}T\d{6}Z-[0-9a-f]{4,8}")
 README = (
     "# Commit attribution ledger\n\n"
     "Which master session made each commit, published by each host under\n"
@@ -75,11 +88,17 @@ class AttributionError(ValueError):
     """An attribution operation refused."""
 
 
-def _spec() -> channels.Spec:
+def _untracked_ok(path: str) -> bool:
+    """Stray files outside ``hosts/`` (or Finder litter) never block publication."""
+    return not path.startswith(HOSTS + "/") or Path(path).name == ".DS_Store"
+
+
+def _spec(remote: str = DEFAULT_REMOTE) -> channels.Spec:
     return channels.Spec(directory=LEDGER_DIR, branch=DEFAULT_BRANCH, lock_name=LOCK_NAME,
                          readme=README.encode(), opening="attribution: open the ledger",
-                         remedy=f"move them out of {LEDGER_DIR}/ (only `attribution publish` writes)",
-                         error=AttributionError, remote=DEFAULT_REMOTE)
+                         remedy=f"move them out of {LEDGER_DIR}/{HOSTS}/ (only `attribution publish` writes)",
+                         error=AttributionError, remote=remote, explicit_remote=True,
+                         untracked_ok=_untracked_ok, extra_excludes=(".DS_Store",))
 
 
 def iso(seconds: float) -> str:
@@ -125,7 +144,17 @@ def journal_root(repo: Path) -> Path:
     return common_dir(repo) / hook.JOURNAL_ROOT
 
 
-# -- install --------------------------------------------------------------------
+def _write_json_once(path: Path, value: Any) -> bool:
+    """Create ``path`` (0600, missing parents 0700) unless it exists; True if written."""
+    hook.ensure_dir(str(path.parent))
+    try:
+        hook.write_new(str(path), (json.dumps(value, sort_keys=True) + "\n").encode("utf-8"))
+    except FileExistsError:
+        return False
+    return True
+
+
+# -- install and adoption -----------------------------------------------------------
 
 
 def render_hook(name: str, *, python: str, script: Path, repository: str, state_dir: Path,
@@ -157,6 +186,24 @@ def _hooks_path_setting(repo: Path) -> Optional[str]:
     return value or None
 
 
+def _worktree_hooks_paths(repo: Path) -> list[str]:
+    """Worktrees whose own ``config.worktree`` sets ``core.hooksPath``."""
+    listed = _git(repo, "worktree", "list", "--porcelain", check=False).stdout.decode(
+        "utf-8", "replace")
+    found = []
+    for line in listed.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        path = Path(line[len("worktree "):])
+        if not path.is_dir():
+            continue
+        value = _git(path, "config", "--worktree", "--get", "core.hooksPath", check=False)
+        text = value.stdout.decode("utf-8", "replace").strip()
+        if value.returncode == 0 and text:
+            found.append(f"{path.name}: core.hooksPath={text}")
+    return found
+
+
 def _ours(path: Path) -> bool:
     try:
         return HOOK_MARKER in path.read_text(encoding="utf-8", errors="replace").splitlines()[:3]
@@ -164,23 +211,61 @@ def _ours(path: Path) -> bool:
         return False
 
 
+def _our_hooks(repo: Path) -> list[str]:
+    hooks_dir = _hooks_dir(repo)
+    return [name for name in hook.HOOKS if (hooks_dir / name).is_file() and _ours(hooks_dir / name)]
+
+
+def _installed_at(repo: Path) -> Optional[float]:
+    try:
+        data = json.loads((journal_root(repo) / hook.INSTALLED).read_text(encoding="utf-8"))
+        return parse_time(data["installed_at"])
+    except (OSError, ValueError, KeyError, TypeError, AttributionError,
+            shared.SharedStackError):
+        return None
+
+
+def adoption(repo: Path) -> tuple[str, Optional[float]]:
+    """``adopted`` (with its time), ``unmarked`` or ``not-adopted``.
+
+    ``unmarked``: this installer's hooks are present but the adoption marker
+    is gone; every check that relies on adoption refuses until reinstalled.
+    """
+    try:
+        adopted = _installed_at(repo)
+        if adopted is not None:
+            return "adopted", adopted
+        return ("unmarked", None) if _our_hooks(repo) else ("not-adopted", None)
+    except (AttributionError, shared.SharedStackError):
+        return "not-adopted", None
+
+
 def install_status(repo: Path) -> dict:
-    """``installed``, ``absent``, ``partial``, ``foreign`` or ``hooks-path`` for one repo."""
+    """Install state of one repository, for ``status`` and ``doctor``.
+
+    ``installed``, ``absent``, ``partial``, ``foreign``, ``hooks-path`` or
+    ``unmarked`` (hooks without the adoption marker).
+    """
     try:
         hooks_dir = _hooks_dir(repo)
     except (AttributionError, shared.SharedStackError) as exc:
         return {"status": "unavailable", "detail": str(exc)}
     setting = _hooks_path_setting(repo)
-    ours = [name for name in hook.HOOKS if (hooks_dir / name).is_file() and _ours(hooks_dir / name)]
+    ours = _our_hooks(repo)
     foreign = [name for name in hook.HOOKS
                if (hooks_dir / name).exists() and name not in ours]
-    adopted = _installed_at(repo)
-    view = {"hooks": ours, "foreign": foreign,
-            "adopted_at": iso(adopted) if adopted is not None else None}
+    state, adopted = adoption(repo)
+    view = {"hooks": ours, "foreign": foreign, "adoption": state,
+            "adopted_at": iso(adopted) if adopted is not None else None,
+            "worktree_hooks_paths": _worktree_hooks_paths(repo)}
     if setting is not None:
         return {**view, "status": "hooks-path", "detail": f"core.hooksPath={setting}"}
     if foreign:
         return {**view, "status": "foreign", "detail": f"repository-owned hooks: {foreign}"}
+    if ours and state == "unmarked":
+        return {**view, "status": "unmarked",
+                "detail": "hooks present but the adoption marker is missing; "
+                          "run `attribution install` to restore it"}
     if len(ours) == len(hook.HOOKS):
         return {**view, "status": "installed", "detail": "all hooks installed"}
     if ours:
@@ -188,12 +273,30 @@ def install_status(repo: Path) -> dict:
     return {**view, "status": "absent", "detail": "no attribution hooks"}
 
 
+def _evidence_time(repo: Path) -> Optional[float]:
+    """Earliest sign of an earlier adoption: our hook files or journal records."""
+    times = []
+    for name in _our_hooks(repo):
+        try:
+            times.append((_hooks_dir(repo) / name).stat().st_mtime)
+        except OSError:
+            continue
+    for entry in journal(repo):
+        try:
+            times.append(parse_time(entry.record["recorded_at"]))
+        except (KeyError, AttributionError):
+            continue
+    return min(times) if times else None
+
+
 def install(repos: dict, *, python: Optional[str] = None, script: Path = SCRIPT,
             state_dir: Path, profile: Path, now: Optional[float] = None) -> dict:
     """Install the hooks in every repository, or refuse and change nothing.
 
     Refuses when ``core.hooksPath`` is set or any hook it would write exists
-    and was not written by this installer (a repository-owned hook).
+    and was not written by this installer (a repository-owned hook). An
+    existing adoption time is never reset: a missing marker is restored from
+    the earliest evidence of the earlier installation.
     """
     python = python or sys.executable
     moment = time.time() if now is None else now
@@ -212,6 +315,15 @@ def install(repos: dict, *, python: Optional[str] = None, script: Path = SCRIPT,
         raise AttributionError("install refused; nothing changed: " + "; ".join(refusals))
     installed = {}
     for name, repo in repos.items():
+        root = journal_root(repo)
+        hook.ensure_dir(str(root))
+        marker = root / hook.INSTALLED
+        if not marker.exists():
+            earlier = _evidence_time(repo)
+            adopted_at = min(moment, earlier) if earlier is not None else moment
+            hook.write_new(str(marker), (json.dumps(
+                {"schema": hook.SCHEMA, "repository": name, "installed_at": iso(adopted_at)},
+                sort_keys=True) + "\n").encode())
         hooks_dir = _hooks_dir(repo)
         hooks_dir.mkdir(parents=True, exist_ok=True)
         for item in hook.HOOKS:
@@ -221,20 +333,20 @@ def install(repos: dict, *, python: Optional[str] = None, script: Path = SCRIPT,
             temporary.write_text(text, encoding="utf-8")
             temporary.chmod(0o755)
             os.replace(temporary, hooks_dir / item)
-        root = journal_root(repo)
-        hook.ensure_dir(str(root))
-        marker = root / hook.INSTALLED
-        if not marker.exists():
-            hook.write_new(str(marker), (json.dumps(
-                {"schema": hook.SCHEMA, "repository": name, "installed_at": iso(moment)},
-                sort_keys=True) + "\n").encode())
         installed[name] = install_status(repo)
     return {"status": "OK", "repositories": installed}
 
 
-def uninstall(repos: dict) -> dict:
-    """Remove only hooks this installer wrote; adoption time is kept."""
-    removed = {}
+def uninstall(repos: dict, *, retire_adoption: bool = False, now: Optional[float] = None) -> dict:
+    """Remove only hooks this installer wrote.
+
+    Adoption is kept, so the merge check still judges commits made since it.
+    ``retire_adoption`` ends it deliberately: the marker becomes
+    ``retired-<stamp>.json`` recording when, and the repository reads as not
+    adopted afterwards.
+    """
+    moment = time.time() if now is None else now
+    removed, retired = {}, {}
     for name, repo in repos.items():
         hooks_dir = _hooks_dir(repo)
         removed[name] = []
@@ -243,16 +355,15 @@ def uninstall(repos: dict) -> dict:
             if path.is_file() and _ours(path):
                 path.unlink()
                 removed[name].append(item)
-    return {"status": "OK", "removed": removed}
-
-
-def _installed_at(repo: Path) -> Optional[float]:
-    try:
-        data = json.loads((journal_root(repo) / hook.INSTALLED).read_text(encoding="utf-8"))
-        return parse_time(data["installed_at"])
-    except (OSError, ValueError, KeyError, TypeError, AttributionError,
-            shared.SharedStackError):
-        return None
+        marker = journal_root(repo) / hook.INSTALLED
+        if retire_adoption and marker.exists():
+            data = json.loads(marker.read_text(encoding="utf-8"))
+            data["retired_at"] = iso(moment)
+            target = marker.parent / f"{RETIRED_PREFIX}{_stamp(moment)}.json"
+            hook.write_new(str(target), (json.dumps(data, sort_keys=True) + "\n").encode())
+            marker.unlink()
+            retired[name] = data
+    return {"status": "OK", "removed": removed, "retired": retired}
 
 
 # -- journal ----------------------------------------------------------------------
@@ -264,7 +375,7 @@ def valid_record(record: Any) -> bool:
             and SHA_RE.fullmatch(record["sha"]) is not None
             and isinstance(record.get("repository"), str)
             and isinstance(record.get("acquisition_digest"), str)
-            and (record["acquisition_digest"] == hook.NONE
+            and (record["acquisition_digest"] in (hook.NONE, UNKNOWN)
                  or DIGEST_RE.fullmatch(record["acquisition_digest"]) is not None))
 
 
@@ -297,28 +408,37 @@ def recorded_shas(repo: Path) -> set[str]:
     return {entry.record["sha"] for entry in journal(repo)}
 
 
-def adopt(repos: dict, repository: str, shas: Iterable[str], *, reason: str,
-          host: Optional[str], identity: dict, now: Optional[float] = None) -> dict:
-    """Record commits the hooks missed, with a reason and ``source: census``."""
-    if repository not in repos:
-        raise AttributionError(f"unknown repository {repository!r}; one of {sorted(repos)}")
-    if not isinstance(reason, str) or not reason.strip() or "\n" in reason:
-        raise AttributionError("--reason must be one nonempty line")
-    repo = Path(repos[repository])
+def _sessions_dir(goal_store: Path, published: bool) -> Path:
+    return journal_root(goal_store) / SESSIONS / (hook.PUBLISHED if published else PENDING)
+
+
+def write_session(goal_store: Path, record: dict, now: Optional[float] = None) -> Path:
+    """Journal a session start or end before any publication attempt."""
     moment = time.time() if now is None else now
-    where = hook.context(str(repo))
-    written = []
-    for sha in shas:
-        resolved = _git(repo, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}", check=False)
-        if resolved.returncode:
-            raise AttributionError(f"{sha} is not a commit in {repository}")
-        full = resolved.stdout.decode().strip()
-        record = hook.build_record(cwd=str(repo), sha=full, hook="adopt", repository=repository,
-                                   host=host, identity=identity, where=where, now=moment,
-                                   source="census", extra={"reason": reason.strip()})
-        hook.write_record(where["common"], record)
-        written.append({"sha": full, "id": record["id"]})
-    return {"status": "OK", "repository": repository, "adopted": written}
+    if record.get("kind") not in {"start", "end"}:
+        raise AttributionError("session kind must be start or end")
+    if DIGEST_RE.fullmatch(record.get("acquisition_digest") or "") is None:
+        raise AttributionError("session record needs the acquisition digest")
+    ident = f"{record['kind']}-{time.strftime(hook.STAMP, time.gmtime(moment))}-{secrets.token_hex(2)}"
+    path = _sessions_dir(goal_store, False) / f"{ident}.json"
+    _write_json_once(path, {**record, "id": ident, "schema": hook.SCHEMA})
+    return path
+
+
+def _pending_sessions(goal_store: Path) -> list[tuple[Path, dict]]:
+    directory = _sessions_dir(goal_store, False)
+    found = []
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.json")):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (isinstance(value, dict) and value.get("id") == path.stem
+                    and SESSION_ID_RE.fullmatch(path.stem)
+                    and DIGEST_RE.fullmatch(value.get("acquisition_digest") or "")):
+                found.append((path, value))
+    return found
 
 
 # -- census -----------------------------------------------------------------------
@@ -335,10 +455,7 @@ def _reflog_files(common: Path) -> list[Path]:
     worktrees = common / "worktrees"
     if worktrees.is_dir():
         for admin in sorted(worktrees.iterdir()):
-            try:
-                checkout = Path((admin / "gitdir").read_text(encoding="utf-8").strip()).parent
-            except OSError:
-                checkout = None
+            checkout = _admin_checkout(admin)
             if checkout is not None and checkout.name == LEDGER_DIR:
                 continue
             if (admin / "logs" / "HEAD").is_file():
@@ -346,12 +463,30 @@ def _reflog_files(common: Path) -> list[Path]:
     return files
 
 
+def _admin_checkout(admin: Path) -> Optional[Path]:
+    try:
+        return Path((admin / "gitdir").read_text(encoding="utf-8").strip()).parent
+    except OSError:
+        return None
+
+
+def _creation_goal(common: Path, log: str) -> str:
+    """The goal label of the worktree whose reflog shows the creation, if known."""
+    parts = log.split("/")
+    if len(parts) == 4 and parts[0] == "worktrees" and parts[2:] == ["logs", "HEAD"]:
+        checkout = _admin_checkout(common / "worktrees" / parts[1])
+        if checkout is not None:
+            label = hook.goal_label(str(checkout), "")
+            return label if label != "unknown" else UNKNOWN
+    return UNKNOWN
+
+
 def creations(repo: Path, since: float, until: float) -> dict[str, dict]:
     """Commits this clone created in [since, until], from its reflogs.
 
     Reflog entries that create a commit (commit, amend, merge commit,
-    cherry-pick, revert, am, rebase picks) are kept; checkouts, resets and
-    fast-forwards are not. The attribution ledger's own branch is skipped.
+    cherry-pick, revert, am, rebase picks) are kept; checkouts, resets,
+    fast-forwards and aborts are not. The ledger's own branch is skipped.
     """
     common = common_dir(repo)
     if (common / "reftable").exists():
@@ -374,66 +509,178 @@ def creations(repo: Path, since: float, until: float) -> dict[str, dict]:
                 continue
             if not since <= moment <= until or SHA_RE.fullmatch(new) is None or new == "0" * 40:
                 continue
-            if CREATION.search(message) is None:
+            if CREATION.search(message) is None or NOT_CREATION.search(message):
                 continue
+            log = path.relative_to(common).as_posix()
+            goal = _creation_goal(common, log)
             if new not in found or moment < found[new]["at"]:
-                found[new] = {"at": moment, "reflog": message[:120],
-                              "log": path.relative_to(common).as_posix()}
+                earlier_goal = found.get(new, {}).get("goal", UNKNOWN)
+                found[new] = {"at": moment, "reflog": message[:120], "log": log,
+                              "goal": goal if goal != UNKNOWN else earlier_goal}
+            elif found[new]["goal"] == UNKNOWN and goal != UNKNOWN:
+                found[new]["goal"] = goal  # the worktree reflog names the goal
     return found
 
 
+def known_creations(repo: Path, since: float, until: float, *, persist: bool = True) -> dict[str, dict]:
+    """Fresh reflog creations plus those an earlier scan persisted.
+
+    Each scan persists what it sees under ``census/`` in the journal area, so
+    a creation stays known after its worktree or branch (and so its reflog)
+    is removed, provided some census or merge check ran before the removal.
+    """
+    fresh = creations(repo, since, until)
+    directory = journal_root(repo) / CENSUS
+    if persist and fresh:
+        for sha, seen in fresh.items():
+            if not (directory / f"{sha}.json").exists():
+                _write_json_once(directory / f"{sha}.json", {"sha": sha, **seen})
+    merged = dict(fresh)
+    if directory.is_dir():
+        for path in directory.glob("*.json"):
+            if path.stem in merged or SHA_RE.fullmatch(path.stem) is None:
+                continue
+            try:
+                seen = json.loads(path.read_text(encoding="utf-8"))
+                at = float(seen["at"])
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if since <= at <= until:
+                merged[path.stem] = {"at": at, "reflog": seen.get("reflog", ""),
+                                     "log": seen.get("log", ""), "goal": seen.get("goal", UNKNOWN),
+                                     "persisted": True}
+    return merged
+
+
+def judged(repos: dict) -> dict:
+    """Repositories adopted on this host (or with unmarked hooks); only these are judged."""
+    return {name: Path(repo) for name, repo in repos.items()
+            if Path(repo).is_dir() and adoption(Path(repo))[0] != "not-adopted"}
+
+
 def census(repos: dict, since: float, until: float) -> list[dict]:
-    """Locally created commits in the window with no journal record."""
+    """Commits created here in the window, since adoption, with no journal record."""
     missing = []
-    for name, repo in repos.items():
-        recorded = recorded_shas(Path(repo))
-        for sha, seen in sorted(creations(Path(repo), since, until).items(),
+    for name, repo in judged(repos).items():
+        state, adopted_at = adoption(repo)
+        start = max(since, adopted_at) if adopted_at is not None else since
+        recorded = recorded_shas(repo)
+        for sha, seen in sorted(known_creations(repo, start, until).items(),
                                 key=lambda item: item[1]["at"]):
             if sha not in recorded:
                 missing.append({"repository": name, "sha": sha, "created_at": iso(seen["at"]),
-                                "reflog": seen["reflog"], "status": "unattributed"})
+                                "reflog": seen["reflog"], "goal": seen.get("goal", UNKNOWN),
+                                "status": "unattributed"})
     return missing
 
 
-# -- ledger -----------------------------------------------------------------------
+def adopt(repos: dict, repository: str, shas: Iterable[str], *, reason: str,
+          host: Optional[str], adopter: dict, now: Optional[float] = None) -> dict:
+    """Record commits this host's census lists, with a reason and ``source: census``.
+
+    The creation-time session is not known, so the record's session is
+    ``unknown``; ``adopted_by`` names the adopting session. Only commits this
+    host created since adoption and has no record of are accepted.
+    """
+    if repository not in repos:
+        raise AttributionError(f"unknown repository {repository!r}; one of {sorted(repos)}")
+    if not isinstance(reason, str) or not reason.strip() or "\n" in reason:
+        raise AttributionError("--reason must be one nonempty line")
+    repo = Path(repos[repository])
+    state, adopted_at = adoption(repo)
+    if state != "adopted":
+        raise AttributionError(f"{repository} is {state} on this host; nothing to adopt")
+    moment = time.time() if now is None else now
+    candidates = known_creations(repo, adopted_at, moment + 1)
+    recorded = recorded_shas(repo)
+    resolved_shas = []
+    for sha in shas:
+        resolved = _git(repo, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}", check=False)
+        full = resolved.stdout.decode().strip() if resolved.returncode == 0 else sha
+        if full not in candidates or full in recorded:
+            raise AttributionError(
+                f"{sha} is not in this host's census for {repository} (created here since adoption "
+                "and unrecorded); only those can be adopted; nothing adopted")
+        resolved_shas.append(full)
+    where = hook.context(str(repo))
+    identity = {"client": None, "acquisition_digest": UNKNOWN, "lease_state": UNKNOWN}
+    written = []
+    for full in resolved_shas:
+        seen = candidates[full]
+        record = hook.build_record(
+            cwd=str(repo), sha=full, hook="adopt", repository=repository, host=host,
+            identity=identity, where=where, now=moment, source="census",
+            extra={"reason": reason.strip(), "created_at": iso(seen["at"]),
+                   "adopted_by": {"acquisition_digest": adopter.get("acquisition_digest"),
+                                  "client": adopter.get("client")}})
+        record["goal"] = seen.get("goal") or UNKNOWN
+        record["branch"] = None
+        hook.write_record(where["common"], record)
+        written.append({"sha": full, "id": record["id"]})
+    return {"status": "OK", "repository": repository, "adopted": written}
 
 
-def _normalize(url: str, base: Path) -> str:
-    from .doctor import _normalize_origin
-
-    value = url.strip()
-    if "://" not in value and not re.match(r"^[^/]+@[^:]+:", value) and not re.match(r"^[^/:]+:", value):
-        candidate = Path(value).expanduser()
-        candidate = candidate if candidate.is_absolute() else base / candidate
-        return str(candidate.resolve())
-    if value.startswith("file://"):
-        return str(Path(value[len("file://"):]).resolve())
-    return _normalize_origin(value)
+# -- remote guard ---------------------------------------------------------------------
 
 
-def _remote_urls(repo: Path) -> list[str]:
-    result = _git(repo, "config", "--get-regexp", r"^remote\..*\.(url|pushurl)$", check=False)
-    return [line.split(" ", 1)[1] for line in result.stdout.decode("utf-8", "replace").splitlines()
-            if " " in line]
+def _urls(repo: Path, remote: str, *, push: bool) -> list[str]:
+    args = ["remote", "get-url", "--all"] + (["--push"] if push else []) + [remote]
+    result = _git(repo, *args, check=False)
+    if result.returncode:
+        return []
+    return [line.strip() for line in result.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+
+
+def _remotes(repo: Path) -> list[str]:
+    result = _git(repo, "remote", check=False)
+    return result.stdout.decode("utf-8", "replace").split() if result.returncode == 0 else []
+
+
+def public_urls(public_repos: Iterable[Path]) -> set[str]:
+    """Canonical URLs a public repository is reached by: its remotes and its own paths."""
+    public = set(PUBLIC_ORIGINS)  # already canonical
+    for repo in public_repos:
+        repo = Path(repo)
+        if not repo.is_dir():
+            continue
+        for path in (repo, repo / ".git"):
+            public.add(git_urls.canonical(str(path)))
+        try:
+            public.add(git_urls.canonical(str(common_dir(repo))))
+        except (AttributionError, shared.SharedStackError):
+            pass
+        for remote in _remotes(repo):
+            for url in _urls(repo, remote, push=False) + _urls(repo, remote, push=True):
+                public.add(git_urls.canonical(url, repo))
+    return public
 
 
 def require_private_remote(goal_store: Path, remote: str, public_repos: Iterable[Path]) -> str:
-    """Refuse to publish to any remote a public repository uses."""
-    own = _git(goal_store, "remote", "get-url", "--push", remote, check=False)
-    if own.returncode:
+    """Allow publication only to the goal store's own, non-public origin.
+
+    Every push URL of ``remote`` (after ``insteadOf`` expansion) must equal
+    its fetch URL, and that URL must not be any public repository's.
+    """
+    fetch = _urls(goal_store, remote, push=False)
+    if not fetch:
         raise AttributionError(f"goal store has no remote {remote!r}; nothing published")
-    target = _normalize(own.stdout.decode().strip(), goal_store)
-    public = set(PUBLIC_ORIGINS)
-    for repo in public_repos:
-        try:
-            public.update(_normalize(url, Path(repo)) for url in _remote_urls(Path(repo)))
-        except (AttributionError, shared.SharedStackError):
-            continue
-    if target in public:
+    own = {git_urls.canonical(url, goal_store) for url in fetch}
+    if len(own) != 1:
+        raise AttributionError(f"remote {remote!r} has several fetch URLs; nothing published")
+    target = next(iter(own))
+    pushes = {git_urls.canonical(url, goal_store) for url in _urls(goal_store, remote, push=True)}
+    if pushes - own:
+        raise AttributionError(
+            f"remote {remote!r} pushes to a URL other than its own origin; "
+            "attribution publishes only to the goal store's origin; nothing published")
+    if target in public_urls(public_repos):
         raise AttributionError(
             f"remote {remote!r} of the goal store is a public repository's remote; "
             "attribution data stays on the private goal store only; nothing published")
     return target
+
+
+# -- ledger -----------------------------------------------------------------------
 
 
 @dataclass
@@ -442,52 +689,60 @@ class Ledger:
     sessions: dict = field(default_factory=dict)
     problems: list = field(default_factory=list)
     attached: bool = True
+    paths: set = field(default_factory=set)
 
 
-def _ledger_files(worktree: Path) -> Iterable[tuple[str, Path]]:
-    base = worktree / HOSTS
-    if not base.is_dir() or base.is_symlink():
-        return
-    for path in sorted(base.rglob("*")):
-        if path.is_file() or path.is_symlink():
-            yield path.relative_to(worktree).as_posix(), path
+def _tree_files(worktree: Path, rev: str) -> Iterable[tuple[str, bytes]]:
+    listed = _git(worktree, "ls-tree", "-r", "-z", "--long", rev, "--", HOSTS, check=False)
+    for entry in listed.stdout.decode("utf-8", "replace").split("\0"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition("\t")
+        fields = meta.split()
+        if len(fields) < 4 or fields[1] != "blob" or fields[0] not in {"100644", "100755"}:
+            yield path, b""
+            continue
+        if fields[3].isdigit() and int(fields[3]) > MAX_LEDGER_FILE:
+            yield path, b""
+            continue
+        yield path, _git(worktree, "cat-file", "blob", fields[2]).stdout
 
 
-def load_ledger(worktree: Path) -> Ledger:
-    """Parse a ledger copy; malformed files become problems, never crashes."""
+def load_ledger(worktree: Path, rev: str = "HEAD") -> Ledger:
+    """Parse the ledger as committed at ``rev``; malformed files become problems."""
     ledger = Ledger()
-    for relative, path in _ledger_files(worktree):
+    for relative, data in _tree_files(worktree, rev):
+        ledger.paths.add(relative)
         parts = relative.split("/")
         try:
-            info = path.lstat()
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_LEDGER_FILE:
+            if not data:
                 raise AttributionError("not a regular file of bounded size")
-            data = json.loads(path.read_text(encoding="utf-8"))
+            value = json.loads(data.decode("utf-8"))
             host = parts[1]
             if len(parts) == 4 and parts[2] == BATCHES:
-                if not isinstance(data, dict) or data.get("host") != host:
+                if not isinstance(value, dict) or value.get("host") != host:
                     raise AttributionError("batch host does not match its path")
-                for record in data.get("records", []):
+                for record in value.get("records", []):
                     if not valid_record(record) or record.get("host") != host:
                         raise AttributionError("batch holds a malformed or foreign record")
-                ledger.records.extend(data["records"])
+                ledger.records.extend(value["records"])
             elif len(parts) == 5 and parts[2] == SESSIONS:
                 kind = parts[4].split("-", 1)[0]
-                if (not isinstance(data, dict) or data.get("host") != host
-                        or data.get("acquisition_digest") != parts[3]
+                if (not isinstance(value, dict) or value.get("host") != host
+                        or value.get("acquisition_digest") != parts[3]
                         or kind not in {"start", "end"}):
                     raise AttributionError("session file does not match its path")
                 session = ledger.sessions.setdefault((host, parts[3]), {
                     "host": host, "acquisition_digest": parts[3]})
                 for key in ("client", "model", "effort", "started_at"):
-                    if data.get(key) is not None and session.get(key) is None:
-                        session[key] = data[key]
+                    if value.get(key) is not None and session.get(key) is None:
+                        session[key] = value[key]
                 if kind == "end":
-                    session["ended_at"] = max(session.get("ended_at") or "", data.get("ended_at") or "")
-                    session.setdefault("census", []).extend(data.get("census", []))
+                    session["ended_at"] = max(session.get("ended_at") or "", value.get("ended_at") or "")
+                    session.setdefault("census", []).extend(value.get("census", []))
             else:
                 raise AttributionError("unexpected ledger path")
-        except (OSError, ValueError, AttributionError, AttributeError, TypeError) as exc:
+        except (ValueError, AttributionError, AttributeError, TypeError, UnicodeError) as exc:
             ledger.problems.append((relative, str(exc)))
     return ledger
 
@@ -495,17 +750,19 @@ def load_ledger(worktree: Path) -> Ledger:
 def read_ledger(goal_store: Path, host: str, *, remote: str = DEFAULT_REMOTE,
                 branch: str = DEFAULT_BRANCH, fetch: bool = True) -> Ledger:
     """Fetch and read the ledger without acquiring the master lease."""
-    spec = _spec()
+    spec = _spec(remote)
     try:
         with channels.lock(goal_store, spec):
-            worktree = channels.attach(goal_store, spec, create=False, host=host,
-                                       remote=remote, branch=branch) if fetch else \
-                (channels.worktree_path(goal_store, spec)
-                 if channels.worktree_path(goal_store, spec).is_dir() else None)
+            path = channels.worktree_path(goal_store, spec)
+            if fetch:
+                worktree = channels.attach(goal_store, spec, create=False, host=host,
+                                           remote=remote, branch=branch)
+                if worktree is not None:
+                    channels.reset_to_remote(worktree, spec)
+            else:
+                worktree = path if path.is_dir() else None
             if worktree is None:
                 return Ledger(attached=False)
-            if fetch:
-                channels.sync(worktree, spec)
             problems = channels.changed_paths(worktree)
             ledger = load_ledger(worktree)
     except shared.SharedStackError as exc:
@@ -522,83 +779,99 @@ def _dump(value: Any) -> bytes:
     return (json.dumps(value, indent=1, sort_keys=True) + "\n").encode("utf-8")
 
 
-def publish(goal_store: Path, repos: dict, *, host: str, record_root: Path, writer=None,
-            public_repos: Iterable[Path] = (), session: Optional[dict] = None,
-            now: Optional[float] = None, remote: str = DEFAULT_REMOTE,
-            branch: str = DEFAULT_BRANCH) -> dict:
-    """Publish every unpublished journal record (and a session file) to the ledger.
+def _move(path: Path, folder: str) -> None:
+    target = path.parent.parent / folder
+    hook.ensure_dir(str(target))
+    try:
+        os.replace(path, target / path.name)
+    except OSError:
+        pass  # the next publication finds it on the origin and moves it then
 
-    Master only. Includes any journal a dead predecessor left. Records reach
-    the ledger or stay in the journal; a journal file moves to ``published/``
-    only after its batch is on the origin.
+
+def publish(goal_store: Path, repos: dict, *, host: str, record_root: Path, writer=None,
+            public_repos: Iterable[Path] = (), now: Optional[float] = None,
+            remote: str = DEFAULT_REMOTE, branch: str = DEFAULT_BRANCH) -> dict:
+    """Publish every unpublished journal record and session file to the ledger.
+
+    Master only. Includes anything a dead predecessor left. "Already
+    published" is decided from the fetched origin, never the local tree; a
+    local ledger commit the origin lacks is discarded and rebuilt from the
+    journal; journal files move to ``published/`` only once the fetched
+    origin holds them. A record naming another host is quarantined.
     """
     if hook.HOST_RE.fullmatch(host or "") is None:
         raise AttributionError("this host has no valid name; attribution refuses unnamed hosts "
                                "(python3 -m creme set-host-name NAME)")
     require_private_remote(goal_store, remote, public_repos)
-    spec = _spec()
+    spec = _spec(remote)
     moment = time.time() if now is None else now
 
-    def action(lease) -> dict:
-        from . import master_runtime as runtime
-
-        digest = runtime._actor_from_snapshot(lease)["acquisition_digest"]
+    def action() -> dict:
         with channels.lock(goal_store, spec):
             worktree = channels.attach(goal_store, spec, create=True, host=host,
                                        remote=remote, branch=branch)
-            channels.sync(worktree, spec)
-            present = {record["id"] for record in load_ledger(worktree).records
-                       if record.get("host") == host}
+            channels.reset_to_remote(worktree, spec)
+            published = load_ledger(worktree)
+            present = {r["id"] for r in published.records if r.get("host") == host}
             pending: list[JournalEntry] = []
             for repo in repos.values():
-                pending.extend(entry for entry in journal(Path(repo)) if not entry.published)
-            files: dict[str, bytes] = {}
-            fresh = []
+                if Path(repo).is_dir():
+                    pending.extend(entry for entry in journal(Path(repo)) if not entry.published)
+            quarantined, fresh = [], []
             for entry in pending:
-                if entry.record["id"] in present:
-                    continue
                 if entry.record.get("host") not in (None, host):
-                    raise AttributionError(f"journal record {entry.record['id']} names host "
-                                           f"{entry.record.get('host')!r}, not {host!r}")
-                fresh.append({**entry.record, "host": host})
+                    _move(entry.path, QUARANTINE)
+                    quarantined.append({"id": entry.record["id"], "host": entry.record.get("host")})
+                    continue
+                if entry.record["id"] not in present:
+                    fresh.append({**entry.record, "host": host})
+            pending = [e for e in pending if e.record["id"] not in {q["id"] for q in quarantined}]
+            files: dict[str, bytes] = {}
             for index in range(0, len(fresh), MAX_BATCH):
                 relative = f"{HOSTS}/{host}/{BATCHES}/{_stamp(moment)}-{secrets.token_hex(4)}.json"
                 files[relative] = _dump({"schema": hook.SCHEMA, "host": host,
                                          "published_at": iso(moment),
                                          "records": fresh[index:index + MAX_BATCH]})
-            session_path = None
-            if session is not None:
-                session_path = (f"{HOSTS}/{host}/{SESSIONS}/{digest}/"
-                                f"{session['kind']}-{_stamp(moment)}-{secrets.token_hex(2)}.json")
-                files[session_path] = _dump({**session, "acquisition_digest": digest,
-                                             "host": host, "schema": hook.SCHEMA})
+            sessions = _pending_sessions(goal_store)
+            session_paths = {}
+            for path, value in sessions:
+                relative = f"{HOSTS}/{host}/{SESSIONS}/{value['acquisition_digest']}/{value['id']}.json"
+                session_paths[relative] = path
+                if relative not in published.paths:
+                    files[relative] = _dump({**value, "host": host})
             commit = None
             if files:
+                session_count = sum(1 for relative in files if f"/{SESSIONS}/" in relative)
                 commit = channels.publish(
                     worktree, files,
-                    f"attribution: {host} publishes {len(fresh)} record(s)"
-                    + (f" and a session {session['kind']}" if session else ""), spec)
+                    f"attribution: {host} publishes {len(fresh)} record(s) and "
+                    f"{session_count} session file(s)", spec)
+                remote_head = channels.fetch(worktree, spec)
+                if not shared.is_ancestor(worktree, commit, remote_head):
+                    raise AttributionError("the origin does not hold the published commit; "
+                                           "journal kept for the next publication")
+            confirmed = load_ledger(worktree, shared.tracking_ref(remote, branch)) if files else published
+            on_origin = {r["id"] for r in confirmed.records if r.get("host") == host}
             for entry in pending:
-                target = entry.path.parent.parent / hook.PUBLISHED
-                hook.ensure_dir(str(target))
-                try:
-                    os.replace(entry.path, target / entry.path.name)
-                except OSError:
-                    pass  # the next publication skips it by id
+                if entry.record["id"] in on_origin:
+                    _move(entry.path, hook.PUBLISHED)
+            for relative, path in session_paths.items():
+                if relative in confirmed.paths:
+                    _move(path, hook.PUBLISHED)
             return {"status": "OK", "published": len(fresh), "commit": commit,
-                    "session_file": session_path, "host": host}
+                    "session_files": sorted(r for r in session_paths if r in files),
+                    "quarantined": quarantined, "host": host}
 
     try:
-        return channels.authorized(record_root, writer, action, spec, pass_lease=True)
+        return channels.authorized(record_root, writer, action, spec)
     except shared.SharedStackError as exc:
         raise AttributionError(str(exc)) from exc
 
 
-def session_record(kind: str, *, client: str, model: str, effort: str,
+def session_record(kind: str, *, digest: str, client: str, model: str, effort: str,
                    started_at: Optional[str], ended_at: Optional[str] = None,
                    census_rows: Optional[list] = None) -> dict:
-    """A session start or end; publication binds it to the current acquisition."""
-    record = {"kind": kind, "client": client, "model": model,
+    record = {"kind": kind, "acquisition_digest": digest, "client": client, "model": model,
               "effort": effort, "started_at": started_at}
     if kind == "end":
         record["ended_at"] = ended_at
@@ -615,19 +888,23 @@ def merge_check(repos: dict, repository: str, rev_range: str, *, publish_first, 
 
     ``publish_first`` publishes the journal (it raises on failure, which
     refuses the check). Commits created on other hosts or before adoption
-    are outside the claim and pass.
+    are outside the claim and pass. Hooks without the adoption marker refuse.
     """
     if repository not in repos:
         raise AttributionError(f"unknown repository {repository!r}; one of {sorted(repos)}")
     repo = Path(repos[repository])
-    adopted = _installed_at(repo)
-    if adopted is None:
+    state, adopted = adoption(repo)
+    if state == "unmarked":
+        return {"status": "refused", "repository": repository,
+                "detail": "attribution hooks are installed but the adoption marker is missing",
+                "remedy": "python3 -m creme attribution install (restores the marker)"}
+    if state == "not-adopted":
         return {"status": "not-adopted", "repository": repository,
                 "detail": "attribution is not adopted in this repository on this host"}
     published = publish_first()
     listed = _out(repo, "rev-list", rev_range).split()
     moment = time.time() if now is None else now
-    created = creations(repo, adopted, moment + 1)
+    created = known_creations(repo, adopted, moment + 1)
     recorded = recorded_shas(repo)
     refused = [{"sha": sha, "created_at": iso(created[sha]["at"]), "reflog": created[sha]["reflog"]}
                for sha in listed if sha in created and sha not in recorded]
@@ -682,24 +959,35 @@ def _window_commits(repo: Path, since: float, until: float) -> list[tuple[str, f
 
 
 def _patch_id(repo: Path, sha: str) -> Optional[str]:
-    try:
-        return hook.patch_id(str(repo), sha)
-    except Exception:
-        return None
+    return hook.safe_patch_id(str(repo), sha)
+
+
+def _session_key(record: dict) -> tuple:
+    return (record.get("host"), record["acquisition_digest"])
 
 
 def build_report(ledger: Ledger, repos: dict, filters: Filters, *, local: Iterable[dict] = (),
-                 now: Optional[float] = None) -> dict:
+                 now: Optional[float] = None, host: Optional[str] = None) -> dict:
     """Group ledger records (plus local unpublished ones) by session, repository, goal.
 
-    Subjects come from local Git at report time. When the report has a time
-    window (given, or a session's start and end), commits in the window that
-    no host recorded are listed as ``unattributed`` (or matched by patch-id).
+    Subjects come from local Git at report time. A rewritten commit shows its
+    final SHA with the superseded ones folded under it. When the report has a
+    time window (given, or a session's start and end), commits in the window
+    in repositories adopted here that no host recorded are listed as
+    ``unattributed``; those whose patch-id equals a recorded commit's in the
+    same repository are listed separately as matched, never attributed.
     """
     moment = time.time() if now is None else now
+    warnings = []
+    if not ledger.attached:
+        warnings.append("no ledger is attached on this host; only this host's journal was read")
+    if host is None:
+        warnings.append("this host has no name; the ledger was not read")
     published_ids = {record["id"] for record in ledger.records}
     records = list(ledger.records) + [dict(record, unpublished=True) for record in local
                                       if record["id"] not in published_ids]
+    successor = {(r["repository"], r["rewritten_from"]): r["sha"] for r in records
+                 if r.get("rewritten_from")}
     seen: dict[tuple, dict] = {}
     for record in sorted(records, key=lambda r: (r.get("recorded_at", ""), r["id"])):
         seen.setdefault((record.get("host"), record["repository"], record["sha"]), record)
@@ -707,16 +995,15 @@ def build_report(ledger: Ledger, repos: dict, filters: Filters, *, local: Iterab
     sessions = ledger.sessions
     since, until = filters.since, filters.until
     if filters.session:
-        matches = {key for key in {(r.get("host"), r["acquisition_digest"]) for r in records}
-                   | set(sessions) if key[1].startswith(filters.session)}
+        matches = {key for key in {_session_key(r) for r in records} | set(sessions)
+                   if key[1].startswith(filters.session)}
         if not matches:
             raise AttributionError(f"no session matches {filters.session!r}")
         times = []
         for key in matches:
             meta = sessions.get(key, {})
             times += [parse_time(meta[k]) for k in ("started_at", "ended_at") if meta.get(k)]
-            times += [parse_time(r["recorded_at"]) for r in records
-                      if (r.get("host"), r["acquisition_digest"]) == key]
+            times += [parse_time(r["recorded_at"]) for r in records if _session_key(r) == key]
         if times and since is None:
             since = min(times)
         if times and until is None:
@@ -738,35 +1025,53 @@ def build_report(ledger: Ledger, repos: dict, filters: Filters, *, local: Iterab
         return True
 
     chosen = [record for record in records if selected(record)]
+    chosen_keys = {(r["repository"], r["sha"]) for r in chosen}
+
+    def final(repository: str, sha: str) -> str:
+        visited = {sha}
+        while (repository, sha) in successor and successor[(repository, sha)] not in visited:
+            sha = successor[(repository, sha)]
+            visited.add(sha)
+        return sha
+
+    superseded: dict[tuple, list] = {}
+    shown = []
+    for record in chosen:
+        end = final(record["repository"], record["sha"])
+        if end != record["sha"] and (record["repository"], end) in chosen_keys:
+            superseded.setdefault((record["repository"], end), []).append(record["sha"])
+        else:
+            shown.append(record)
     unattributed: list[dict] = []
+    matched: list[dict] = []
     if since is not None and until is not None and not filters.goal:
         known = {(r["repository"], r["sha"]) for r in records}
-        by_patch: dict[str, dict] = {}
+        by_patch: dict[tuple, dict] = {}
         for record in records:
             if record.get("patch_id"):
-                by_patch.setdefault(record["patch_id"], record)
-        for name, repo in repos.items():
-            for sha, at in _window_commits(Path(repo), since, until):
+                by_patch.setdefault((record["repository"], record["patch_id"]), record)
+        for name, repo in judged(repos).items():
+            for sha, at in _window_commits(repo, since, until):
                 if (name, sha) in known:
                     continue
-                pid = _patch_id(Path(repo), sha) if by_patch else None
-                origin = by_patch.get(pid) if pid else None
-                if origin is not None and selected(origin):
-                    chosen.append({**origin, "sha": sha, "repository": name,
-                                   "matched": "patch-id", "matched_from": origin["sha"]})
-                    known.add((name, sha))
-                elif origin is None:
+                pid = _patch_id(repo, sha) if by_patch else None
+                origin = by_patch.get((name, pid)) if pid else None
+                if origin is not None:
+                    matched.append({"repository": name, "sha": sha, "committed_at": iso(at),
+                                    "matches": origin["sha"], "matched_host": origin.get("host"),
+                                    "status": "matched by patch-id, not attributed"})
+                else:
                     unattributed.append({"repository": name, "sha": sha,
                                          "committed_at": iso(at), "status": "unattributed"})
     subjects: dict[tuple, str] = {}
     for name, repo in repos.items():
-        shas = [r["sha"] for r in chosen if r["repository"] == name] + \
-               [u["sha"] for u in unattributed if u["repository"] == name]
+        shas = [r["sha"] for r in shown if r["repository"] == name] + \
+               [u["sha"] for u in unattributed + matched if u["repository"] == name]
         for sha, subject in _subjects(Path(repo), shas).items():
             subjects[(name, sha)] = subject
     grouped: dict[tuple, dict] = {}
-    for record in sorted(chosen, key=lambda r: (r.get("recorded_at", ""), r["sha"])):
-        key = (record.get("host"), record["acquisition_digest"])
+    for record in sorted(shown, key=lambda r: (r.get("recorded_at", ""), r["sha"])):
+        key = _session_key(record)
         meta = sessions.get(key, {})
         session = grouped.setdefault(key, {
             "host": key[0], "acquisition_digest": key[1],
@@ -780,14 +1085,18 @@ def build_report(ledger: Ledger, repos: dict, filters: Filters, *, local: Iterab
                                        "(not in the local clone)"),
                "recorded_at": record.get("recorded_at"), "hook": record.get("hook"),
                "source": record.get("source")}
-        for extra in ("matched", "matched_from", "unpublished", "reason", "lease_state"):
+        for extra in ("unpublished", "reason", "lease_state", "stale_lease", "adopted_by",
+                      "created_at"):
             if record.get(extra) is not None:
                 row[extra] = record[extra]
+        folded = superseded.get((record["repository"], record["sha"]))
+        if folded:
+            row["supersedes"] = sorted(set(folded))
         goals.setdefault(record.get("goal") or "(none)", []).append(row)
-    for row in unattributed:
+    for row in unattributed + matched:
         row["subject"] = subjects.get((row["repository"], row["sha"]), "(not in the local clone)")
     census_rows = [dict(row, host=key[0]) for key, meta in sessions.items()
-                   if any(key == s for s in grouped) for row in meta.get("census", [])]
+                   if key in grouped for row in meta.get("census", [])]
     return {
         "schema": 1,
         "filters": {"session": filters.session, "host": filters.host, "goal": filters.goal,
@@ -796,13 +1105,28 @@ def build_report(ledger: Ledger, repos: dict, filters: Filters, *, local: Iterab
         "sessions": sorted(grouped.values(), key=lambda s: (s.get("started_at") or "", s["host"] or "",
                                                             s["acquisition_digest"])),
         "unattributed": unattributed,
+        "matched_by_patch_id": matched,
         "session_census": census_rows,
+        "warnings": warnings,
         "problems": [{"path": p, "reason": r} for p, r in ledger.problems],
     }
 
 
+def _row_flags(row: dict) -> str:
+    flags = []
+    if row.get("reason") is not None and row.get("source") == "census":
+        flags.append(f"adopted: {row['reason']}")
+    if row.get("stale_lease"):
+        flags.append("stale lease")
+    if row.get("unpublished"):
+        flags.append("unpublished")
+    if row.get("supersedes"):
+        flags.append("supersedes " + ", ".join(sha[:12] for sha in row["supersedes"]))
+    return "".join(f" [{flag}]" for flag in flags)
+
+
 def render_report(report: dict) -> str:
-    lines = []
+    lines = [f"warning: {text}" for text in report.get("warnings", [])]
     for session in report["sessions"]:
         digest = session["acquisition_digest"]
         lines.append(
@@ -813,13 +1137,16 @@ def render_report(report: dict) -> str:
             for goal, rows in sorted(goals.items()):
                 lines.append(f"  {repository} / {goal}: {len(rows)} commit(s)")
                 for row in rows:
-                    flags = "".join(f" [{flag}]" for flag in ("matched", "unpublished")
-                                    if row.get(flag))
-                    lines.append(f"    {row['sha'][:12]} {row['subject']}{flags}")
+                    lines.append(f"    {row['sha'][:12]} {row['subject']}{_row_flags(row)}")
     if report["unattributed"]:
         lines.append(f"unattributed: {len(report['unattributed'])} commit(s)")
         for row in report["unattributed"]:
             lines.append(f"  {row['repository']} {row['sha'][:12]} {row['committed_at']} {row['subject']}")
+    if report.get("matched_by_patch_id"):
+        lines.append(f"matched by patch-id, not attributed: {len(report['matched_by_patch_id'])} commit(s)")
+        for row in report["matched_by_patch_id"]:
+            lines.append(f"  {row['repository']} {row['sha'][:12]} {row['subject']} "
+                         f"(same patch as {row['matches'][:12]} recorded by {row['matched_host']})")
     for problem in report["problems"]:
         lines.append(f"problem {problem['path']}: {problem['reason']}")
     return "\n".join(lines) + ("\n" if lines else "")
@@ -833,19 +1160,25 @@ def known_digests(repos: dict, goal_store: Optional[Path] = None) -> set[str]:
     digests = set()
     for repo in repos.values():
         try:
-            digests.update(e.record["acquisition_digest"] for e in journal(Path(repo)))
+            for entry in journal(Path(repo)):
+                record = entry.record
+                digests.add(record["acquisition_digest"])
+                digests.add(record.get("stale_lease") or hook.NONE)
+                digests.add((record.get("adopted_by") or {}).get("acquisition_digest") or hook.NONE)
         except (AttributionError, shared.SharedStackError):
             continue
     if goal_store is not None and (Path(goal_store) / LEDGER_DIR).is_dir():
-        ledger = load_ledger(Path(goal_store) / LEDGER_DIR)
-        digests.update(r["acquisition_digest"] for r in ledger.records)
-        digests.update(key[1] for key in ledger.sessions)
-    digests.discard(hook.NONE)
-    return digests
+        try:
+            ledger = load_ledger(Path(goal_store) / LEDGER_DIR)
+            digests.update(r["acquisition_digest"] for r in ledger.records)
+            digests.update(key[1] for key in ledger.sessions)
+        except (AttributionError, shared.SharedStackError):
+            pass
+    return {d for d in digests if isinstance(d, str) and DIGEST_RE.fullmatch(d)}
 
 
 def _word(host: str) -> re.Pattern:
-    return re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(host) + r"(?![A-Za-z0-9_-])")
+    return re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(host) + r"(?![A-Za-z0-9_-])", re.IGNORECASE)
 
 
 TEST_TREE = "scripts/tests/"
@@ -855,10 +1188,10 @@ def privacy_check(repo: Path, base: str, *, host: Optional[str], digests: Iterab
                   head: str = "HEAD") -> list[dict]:
     """Private attribution data in ``base..head``: added lines and commit metadata.
 
-    Flags this host's name as a word, any known acquisition digest, and a
-    session field carrying a hex value. Test fixtures (``scripts/tests/``)
-    may use synthetic host names and identifiers, so only known digests are
-    flagged there.
+    Flags this host's name as a word in any letter case, any known
+    acquisition digest, and a session field carrying a hex value. Test
+    fixtures (``scripts/tests/``) may use synthetic host names and
+    identifiers, so only known digests are flagged there.
     """
     digests = sorted(set(digests))
     word = _word(host) if host else None
@@ -918,8 +1251,7 @@ def public_repositories(location) -> list:
 
 
 def adopted(repos: dict) -> bool:
-    return any(_installed_at(Path(repo)) is not None for repo in repos.values()
-               if Path(repo).is_dir())
+    return bool(judged(repos))
 
 
 def _local_host(host: Optional[str]) -> Optional[str]:
@@ -930,18 +1262,26 @@ def _local_host(host: Optional[str]) -> Optional[str]:
     return goal_stack_store.local_host_name()
 
 
+def _current_digest(location, writer) -> str:
+    from . import master_runtime as runtime
+
+    writer = writer or runtime.RecordWriter(location.record_root)
+    return runtime._actor_from_snapshot(writer.lease_snapshot())["acquisition_digest"]
+
+
 def on_master_start(location, *, client: str, model: str, effort: str, writer=None,
                     host: Optional[str] = None, now: Optional[float] = None) -> dict:
-    """At ``master start``: publish the session start and any journal left behind."""
+    """At ``master start``: journal the session start, then publish everything pending."""
     repos = {k: v for k, v in repositories(location).items() if v.is_dir()}
     if not adopted(repos):
         return {"status": "not-adopted"}
     moment = time.time() if now is None else now
+    write_session(location.goal_store, session_record(
+        "start", digest=_current_digest(location, writer), client=client, model=model,
+        effort=effort, started_at=iso(moment)), now=moment)
     return publish(location.goal_store, repos, host=_local_host(host),
                    record_root=location.record_root, writer=writer,
-                   public_repos=public_repositories(location),
-                   session=session_record("start", client=client, model=model, effort=effort,
-                                          started_at=iso(moment)), now=moment)
+                   public_repos=public_repositories(location), now=moment)
 
 
 def session_started_at(events: Iterable[dict], digest: str) -> Optional[str]:
@@ -954,7 +1294,11 @@ def session_started_at(events: Iterable[dict], digest: str) -> Optional[str]:
 def on_master_end(location, *, digest: str, client: str, model: str, effort: str,
                   events: Iterable[dict], writer=None, host: Optional[str] = None,
                   now: Optional[float] = None) -> dict:
-    """At ``master end``: census the session window, then publish the end record."""
+    """At ``master end``: census the session, journal the end record, then publish.
+
+    The end record is journaled before publication, so a failed publication
+    is retried by any later one (``attribution publish``, the next start).
+    """
     repos = {k: v for k, v in repositories(location).items() if v.is_dir()}
     if not adopted(repos):
         return {"status": "not-adopted"}
@@ -962,10 +1306,15 @@ def on_master_end(location, *, digest: str, client: str, model: str, effort: str
     started = session_started_at(events, digest)
     since = parse_time(started) if started else moment
     rows = census(repos, since, moment)
-    result = publish(location.goal_store, repos, host=_local_host(host),
-                     record_root=location.record_root, writer=writer,
-                     public_repos=public_repositories(location),
-                     session=session_record("end", client=client, model=model, effort=effort,
-                                            started_at=started, ended_at=iso(moment),
-                                            census_rows=rows), now=moment)
-    return {**result, "unattributed": len(rows), "census": rows}
+    write_session(location.goal_store, session_record(
+        "end", digest=digest, client=client, model=model, effort=effort, started_at=started,
+        ended_at=iso(moment), census_rows=rows), now=moment)
+    summary = {"unattributed": len(rows), "census": rows}
+    try:
+        result = publish(location.goal_store, repos, host=_local_host(host),
+                         record_root=location.record_root, writer=writer,
+                         public_repos=public_repositories(location), now=moment)
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc), "end_record": "journaled; publish later",
+                **summary}
+    return {**result, **summary}

@@ -85,7 +85,7 @@ def cmd_install(arguments: argparse.Namespace) -> int:
 @_guarded
 def cmd_uninstall(arguments: argparse.Namespace) -> int:
     _json(attr.uninstall({k: v for k, v in _repos(_location(), arguments.repo).items()
-                          if v.is_dir()}))
+                          if v.is_dir()}, retire_adoption=arguments.retire_adoption))
     return 0
 
 
@@ -164,7 +164,7 @@ def cmd_adopt(arguments: argparse.Namespace) -> int:
 
     def action(lease) -> dict:
         return attr.adopt(repos, arguments.repo, arguments.sha, reason=arguments.reason,
-                          host=_host(), identity=_identity(lease))
+                          host=_host(), adopter=_identity(lease))
 
     _json(channels.authorized(location.record_root, None, action, attr._spec(), pass_lease=True))
     return 0
@@ -185,7 +185,7 @@ def cmd_report(arguments: argparse.Namespace) -> int:
         session=arguments.session, host=arguments.host, goal=arguments.goal,
         since=attr.parse_time(arguments.since) if arguments.since else None,
         until=attr.parse_time(arguments.until) if arguments.until else None)
-    report = attr.build_report(ledger, repos, filters, local=local)
+    report = attr.build_report(ledger, repos, filters, local=local, host=host)
     if arguments.json:
         _json(report)
     else:
@@ -223,6 +223,9 @@ def register(commands) -> None:
 
     uninstall = sub.add_parser("uninstall", help="remove only hooks this installer wrote")
     uninstall.add_argument("--repo", action="append", metavar="NAME")
+    uninstall.add_argument("--retire-adoption", action="store_true",
+                           help="also end adoption (recorded as retired-<stamp>.json); "
+                                "without it the merge check still judges commits since adoption")
     uninstall.set_defaults(func=cmd_uninstall)
 
     status = sub.add_parser("status", help="hook install state of the configured repositories")
@@ -243,7 +246,7 @@ def register(commands) -> None:
     check.add_argument("range", metavar="RANGE", help="e.g. origin/main..CANDIDATE")
     check.set_defaults(func=cmd_merge_check)
 
-    adopt = sub.add_parser("adopt", help="record commits the hooks missed, with a reason (master only)")
+    adopt = sub.add_parser("adopt", help="record commits this host's census lists, with a reason (master only)")
     adopt.add_argument("--repo", required=True, metavar="NAME")
     adopt.add_argument("sha", nargs="+", metavar="SHA")
     adopt.add_argument("--reason", required=True, metavar="TEXT")

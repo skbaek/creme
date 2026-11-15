@@ -200,6 +200,18 @@ class HostCommsTest(CommsFixture):
         self.assertEqual(shared.head(worktree), head)
         self.assertTrue(shared.clean(worktree))
 
+    def test_push_exception_leaves_nothing_behind(self):
+        self.wsl.send("mac")
+        worktree = self.wsl.plans / comms.COMMS_DIR
+        head = shared.head(worktree)
+        with mock.patch.object(shared, "push",
+                               side_effect=shared.SharedStackError("git push failed: timed out")):
+            with self.assertRaisesRegex(comms.CommsError, "nothing sent"):
+                self.wsl.send("mac", subject="lost")
+        self.assertEqual(shared.head(worktree), head)
+        self.assertTrue(shared.clean(worktree))
+        self.assertEqual(len(self.mac.inbox()), 1)
+
     def test_writes_refuse_without_the_master_lease(self):
         denied = writer(self.wsl.record, renew=lambda: (False, "foreign master"))
         with self.assertRaises(runtime.RenewalRefused):

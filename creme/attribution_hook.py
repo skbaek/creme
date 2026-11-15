@@ -75,10 +75,17 @@ def journal_root(common_dir: str) -> str:
 
 
 def ensure_dir(path: str) -> None:
-    """Create ``path`` 0700 if absent; an existing directory keeps its mode."""
-    if not os.path.isdir(path):
-        os.makedirs(path, mode=0o700, exist_ok=True)
-        os.chmod(path, 0o700)
+    """Create ``path`` and any missing parents 0700; existing ones keep their mode."""
+    if os.path.isdir(path):
+        return
+    parent = os.path.dirname(os.path.normpath(path))
+    if parent and parent != path:
+        ensure_dir(parent)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        return
+    os.chmod(path, 0o700)
 
 
 def write_new(path: str, data: bytes) -> None:
@@ -124,7 +131,11 @@ def lease_identity(state_dir: Optional[str], now: float) -> Dict[str, Optional[s
     """The host's master lease as (client, acquisition digest, lease state).
 
     Mirrors ``master_runtime._actor_from_snapshot``. A lease file that is
-    absent, empty or malformed reads as no lease.
+    absent, empty or malformed reads as no lease. A lease past its renewal
+    window is not held: the digest is ``none`` and the old digest is kept as
+    ``stale_lease`` so a report can say so. ``CREME_SEMAPHORE_DIR``, the
+    operator's explicit semaphore override for every Creme command, wins over
+    the directory recorded at install time.
     """
     blank = {"client": None, "acquisition_digest": NONE, "lease_state": NONE}
     override = os.environ.get("CREME_SEMAPHORE_DIR")
@@ -147,19 +158,30 @@ def lease_identity(state_dir: Optional[str], now: float) -> Dict[str, Optional[s
     except (KeyError, TypeError, ValueError):
         expired = True
     valid_client = isinstance(client, str) and CLIENT_RE.fullmatch(client) is not None
+    if expired:
+        return {"client": None, "acquisition_digest": NONE, "lease_state": "expired",
+                "stale_lease": digest}
     return {"client": client if valid_client else None, "acquisition_digest": digest,
-            "lease_state": "expired" if expired else "live"}
+            "lease_state": "live"}
 
 
 def goal_label(toplevel: str, branch: str) -> str:
-    """``.worktrees/GOAL`` (or ``GOAL-control`` etc.) gives GOAL; else the branch."""
+    """``.worktrees/GOAL`` (or ``GOAL-control`` etc.) gives GOAL; else the branch.
+
+    A detached primary checkout is ``detached``. The ``-control``,
+    ``-mutation`` and ``-rehearsal`` suffixes are the host's sanctioned
+    disposable-tree names, so a goal ID ending in those words is ambiguous
+    host-wide already.
+    """
     parent, name = os.path.split(os.path.normpath(toplevel))
     if os.path.basename(parent) == ".worktrees" and name:
         for suffix in SANCTIONED_SUFFIXES:
             if name.endswith("-" + suffix) and len(name) > len(suffix) + 1:
                 return name[:-len(suffix) - 1]
         return name
-    return branch if branch and branch != "HEAD" else "main"
+    if branch == "HEAD":
+        return "detached"
+    return branch or "unknown"
 
 
 def safe_patch_id(cwd: str, sha: str) -> Optional[str]:
@@ -198,7 +220,7 @@ def context(cwd: str) -> Dict[str, str]:
 
 
 def record_id(sha: str, hook: str, now: float) -> str:
-    return f"{time.strftime(STAMP, time.gmtime(now))}-{sha[:12]}-{hook}-{secrets.token_hex(4)}"
+    return f"{time.strftime(STAMP, time.gmtime(now))}-{sha}-{hook}-{secrets.token_hex(4)}"
 
 
 def build_record(*, cwd: str, sha: str, hook: str, repository: str, host: Optional[str],
@@ -209,6 +231,7 @@ def build_record(*, cwd: str, sha: str, hook: str, repository: str, host: Option
         "host": host, "client": identity["client"],
         "acquisition_digest": identity["acquisition_digest"],
         "lease_state": identity["lease_state"], "repository": repository,
+        **({"stale_lease": identity["stale_lease"]} if identity.get("stale_lease") else {}),
         "goal": goal_label(where["toplevel"], where["branch"]), "branch": where["branch"],
         "recorded_at": iso(now),
     }
@@ -278,11 +301,14 @@ def run(argv: List[str], stdin: bytes, cwd: Optional[str] = None,
         identity = lease_identity(options.get("state-dir"), moment)
         host = host_name(options.get("profile"))
         for target in targets(hook, args, cwd, stdin):
-            record = build_record(cwd=cwd, sha=str(target["sha"]), hook=hook,
-                                  repository=options.get("repo", "unknown"), host=host,
-                                  identity=identity, where=where, now=moment,
-                                  extra=target["extra"])  # type: ignore[arg-type]
-            write_record(common, record)
+            try:  # one bad target (say, a pruned rewrite source) never loses the rest
+                record = build_record(cwd=cwd, sha=str(target["sha"]), hook=hook,
+                                      repository=options.get("repo", "unknown"), host=host,
+                                      identity=identity, where=where, now=moment,
+                                      extra=target["extra"])  # type: ignore[arg-type]
+                write_record(common, record)
+            except Exception as exc:
+                log_error(common, f"{hook} {target['sha']}: {type(exc).__name__}: {exc}")
     except Exception as exc:  # the hook never fails a commit
         log_error(common, f"{type(exc).__name__}: {exc}")
     return 0

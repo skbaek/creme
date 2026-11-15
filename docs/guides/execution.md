@@ -134,6 +134,13 @@ Run no other work of the task beside the timed command, bracket it with
 `python3 -m creme telemetry`, and release the hold the moment it ends. Static
 inventory and report processing take no hold.
 
+A control that disables a guard against reaching a remote runs with network
+transports disabled (`GIT_ALLOW_PROTOCOL=file`, `GIT_TERMINAL_PROMPT=0` for
+Git), and so does any test that names a reachable real remote. With the guard
+mutated off, the code under test does exactly what the guard prevents, with
+the host's stored credentials: on 2026-11-15 such a control pushed a test
+ledger to a public repository.
+
 ### Long gates
 
 A sibling catalogue may mark an action long (Jaune's: expected to exceed

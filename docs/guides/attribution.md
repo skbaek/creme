@@ -26,15 +26,26 @@ host-local journal (inside its Git directory, never tracked or pushed) and on
 the private goal store's `attribution` branch. Creme tracks only this code,
 its schema and this guide.
 
-- Publication pushes only to the goal store's `origin`, named explicitly with
-  an explicit refspec (never the branch's configured upstream). It refuses
-  unless every push URL of `origin`, after `insteadOf`/`pushInsteadOf`
-  expansion, is the same repository as its fetch URL, and refuses when that
-  URL is any public repository's: any fetch or push URL of any remote of
-  Creme, Jaune or Blanc, their public GitHub origins, or the local path of
-  one of those clones. URLs are compared in a canonical form (scheme, user,
-  port, `www.`, duplicate and trailing slashes and `.git` dropped, case
-  folded, local paths through `realpath`; `creme/git_urls.py`).
+- Publication never pushes to a remote name, whose push URLs can differ by
+  worktree (`config.worktree`) or by branch (`includeIf.onbranch`). It
+  pushes to, and fetches from, one literal URL with an explicit refspec:
+  `remote.origin.url` with `insteadOf` applied, resolved in the same working
+  directory as the push that uses it (the goal store's checkout for the
+  opening push, the ledger worktree for every later one; the two must
+  agree). `pushurl` is never used. It refuses when `origin` has more than
+  one URL, when Git would rewrite the literal URL again (`insteadOf` or
+  `pushInsteadOf`), when a remote is named after it, and when it reaches a
+  public repository: any fetch or push URL of any remote of Creme, Jaune or
+  Blanc, their public GitHub origins, or a local path reaching one of those
+  repositories (its work tree, `.git`, a linked worktree, a symlink, or
+  `PATH.git`, resolved through `git rev-parse --git-common-dir`). URLs are
+  compared in a canonical form (`creme/git_urls.py`: scheme, user, port,
+  brackets, trailing dots and `www.` dropped from the host; percent-decoding,
+  dot segments, case folding, duplicate and trailing slashes and `.git`
+  handled in the path; local paths through `realpath`). Residual: SSH host
+  aliases from `~/.ssh/config` and literal IP addresses for a public host are
+  not resolved; closing that would need the goal store's origin pinned in the
+  host profile.
 - Never copy ledger or journal contents into a public repository. Where a
   public artifact needs a fact, restate it without host or session.
 - `attribution privacy-check --repo NAME|PATH --base REV` flags, in the
@@ -65,7 +76,9 @@ SHA, parents, patch-id (non-merge commits; null if it cannot be computed in
 time), goal label (`.worktrees/GOAL` and its `-control`, `-mutation` and
 `-rehearsal` trees give `GOAL`, the host's sanctioned disposable-tree names,
 so a goal ID ending in those words is ambiguous host-wide already; a
-primary checkout gives its branch, or `detached`), commit and record times,
+primary checkout gives its branch, or `detached`, which includes rebase
+picks made in a primary checkout, since Git detaches HEAD during a rebase),
+commit and record times,
 hook, and for `post-rewrite` the rewritten SHA. A lease past its renewal
 window is not held: the record says `none` and keeps the old digest as
 `stale_lease`, which the report marks `[stale lease]`. The lease is read
@@ -158,7 +171,9 @@ deliberately and records when, as `retired-<stamp>.json`.
 reads this host's copy) plus this host's unpublished journal, and groups by
 session, repository and goal, resolving subjects from local Git at report
 time. An amended or rebased commit shows its final SHA with the superseded
-ones folded under it (`[supersedes ...]`). With a time window
+ones folded under it (`[supersedes ...]`) when both were recorded in the same
+session; a commit superseded by another session's rewrite, or an adopted
+one, stays under its own session marked `[superseded by ...]`. With a time window
 (`--since/--until`, or a session's start and end), commits in the window in
 repositories adopted here that no host recorded are listed as
 `unattributed`; those with the same patch-id as a recorded commit in the

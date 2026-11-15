@@ -40,13 +40,20 @@ class Spec:
     error: type
     remote: str = shared.DEFAULT_REMOTE
     # When set, fetch and push name ``remote`` and the branch explicitly and
-    # never follow the branch's configured upstream.
+    # never follow the branch's configured upstream. ``remote`` may then be a
+    # literal URL; ``tracking_remote`` names the remote-tracking ref and the
+    # upstream recorded on attach (default: ``remote``).
     explicit_remote: bool = False
+    tracking_remote: Optional[str] = None
     # Untracked paths this predicate accepts never block a write (they are
     # never committed either: publication adds only its own files).
     untracked_ok: Optional[Callable[[str], bool]] = None
     # Extra patterns added to the clone's ``info/exclude`` on attach.
     extra_excludes: tuple = ()
+
+
+def _tracking_name(spec: Spec, remote: str) -> str:
+    return spec.tracking_remote or remote
 
 
 def worktree_path(root: Path, spec: Spec) -> Path:
@@ -121,7 +128,7 @@ def attach(root: Path, spec: Spec, *, create: bool, host: str, remote: Optional[
         if not create_branch(root, spec, remote, branch, host) and not \
                 shared.remote_branch_exists(root, remote, branch):
             raise spec.error(f"could not publish {remote}/{branch}; channel not opened")
-    tracking = shared.tracking_ref(remote, branch)
+    tracking = shared.tracking_ref(_tracking_name(spec, remote), branch)
     shared.git(root, "fetch", "--quiet", remote, f"refs/heads/{branch}:{tracking}")
     canonical = shared.out(root, "rev-parse", "--verify", tracking)
     local = shared.git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
@@ -131,7 +138,7 @@ def attach(root: Path, spec: Spec, *, create: bool, host: str, remote: Optional[
         shared.git(root, "branch", "-f", branch, canonical)
     else:
         shared.git(root, "branch", branch, canonical)
-    shared.configure_upstream(root, remote, branch)
+    shared.configure_upstream(root, _tracking_name(spec, remote), branch)
     ignore(root, spec)
     shared.git(root, "worktree", "add", "--quiet", spec.directory, branch)
     return path
@@ -184,13 +191,14 @@ def fetch(worktree: Path, spec: Spec) -> str:
     """The canonical branch head, fetched without force."""
     if not spec.explicit_remote:
         return shared.fetch(worktree)
-    tracking = shared.tracking_ref(spec.remote, spec.branch)
+    tracking = shared.tracking_ref(_tracking_name(spec, spec.remote), spec.branch)
     result = shared.git(worktree, "fetch", "--quiet", spec.remote,
                         f"refs/heads/{spec.branch}:{tracking}", check=False)
     if result.returncode:
         detail = result.stderr.decode("utf-8", "replace").strip()
         raise shared.SharedStackError(
-            f"canonical {spec.branch} unreachable or rewritten ({spec.remote}/{spec.branch}): {detail}")
+            f"canonical {spec.branch} unreachable or rewritten "
+            f"({_tracking_name(spec, spec.remote)}/{spec.branch}): {detail}")
     return shared.out(worktree, "rev-parse", "--verify", tracking)
 
 

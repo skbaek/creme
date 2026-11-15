@@ -93,11 +93,13 @@ def _untracked_ok(path: str) -> bool:
     return not path.startswith(HOSTS + "/") or Path(path).name == ".DS_Store"
 
 
-def _spec(remote: str = DEFAULT_REMOTE) -> channels.Spec:
+def _spec(remote: str = DEFAULT_REMOTE, tracking: Optional[str] = None) -> channels.Spec:
+    """The ledger channel; ``remote`` may be a validated literal URL named ``tracking``."""
     return channels.Spec(directory=LEDGER_DIR, branch=DEFAULT_BRANCH, lock_name=LOCK_NAME,
                          readme=README.encode(), opening="attribution: open the ledger",
                          remedy=f"move them out of {LEDGER_DIR}/{HOSTS}/ (only `attribution publish` writes)",
                          error=AttributionError, remote=remote, explicit_remote=True,
+                         tracking_remote=tracking,
                          untracked_ok=_untracked_ok, extra_excludes=(".DS_Store",))
 
 
@@ -636,48 +638,106 @@ def _remotes(repo: Path) -> list[str]:
     return result.stdout.decode("utf-8", "replace").split() if result.returncode == 0 else []
 
 
+def _local_identities(url: str, base: Path) -> set[str]:
+    """Canonical forms of every repository a local URL can reach.
+
+    The path itself, ``PATH.git`` (Git's fallback), and the Git common
+    directory and its work tree when the target is a repository, so a linked
+    worktree, a work tree and its ``.git`` all name the same repository.
+    """
+    path = git_urls.local_path(url, base)
+    found = {git_urls.canonical(path)}
+    for candidate in (path, path + ".git"):
+        if not os.path.exists(candidate):
+            continue
+        found.add(git_urls.canonical(candidate))
+        if os.path.isdir(candidate):
+            result = _git(Path(candidate), "rev-parse", "--path-format=absolute", "--git-common-dir",
+                          check=False)
+            common = result.stdout.decode("utf-8", "replace").strip()
+            if result.returncode == 0 and common:
+                found.add(git_urls.canonical(common))
+                if Path(common).name == ".git":
+                    found.add(git_urls.canonical(str(Path(common).parent)))
+    return found
+
+
+def _identities(url: str, base: Path) -> set[str]:
+    return _local_identities(url, base) if git_urls.is_local(url) else {git_urls.canonical(url, base)}
+
+
 def public_urls(public_repos: Iterable[Path]) -> set[str]:
-    """Canonical URLs a public repository is reached by: its remotes and its own paths."""
+    """Canonical forms a public repository is reached by: its remotes and its own paths."""
     public = set(PUBLIC_ORIGINS)  # already canonical
     for repo in public_repos:
         repo = Path(repo)
         if not repo.is_dir():
             continue
-        for path in (repo, repo / ".git"):
-            public.add(git_urls.canonical(str(path)))
-        try:
-            public.add(git_urls.canonical(str(common_dir(repo))))
-        except (AttributionError, shared.SharedStackError):
-            pass
+        public |= _local_identities(str(repo), repo)
         for remote in _remotes(repo):
             for url in _urls(repo, remote, push=False) + _urls(repo, remote, push=True):
-                public.add(git_urls.canonical(url, repo))
+                public |= _identities(url, repo)
     return public
 
 
-def require_private_remote(goal_store: Path, remote: str, public_repos: Iterable[Path]) -> str:
-    """Allow publication only to the goal store's own, non-public origin.
+def _rewrite_rules(cwd: Path, kind: str) -> list[tuple[str, str]]:
+    """``url.<base>.<kind>`` rules as (prefix, base), as Git reads them in ``cwd``."""
+    result = _git(cwd, "config", "--get-regexp", rf"^url\..*\.{kind}$", check=False)
+    rules = []
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        key, _, prefix = line.partition(" ")
+        suffix = "." + kind
+        if key.lower().endswith(suffix) and key.startswith("url."):
+            rules.append((prefix, key[len("url."):-len(suffix)]))
+    return rules
 
-    Every push URL of ``remote`` (after ``insteadOf`` expansion) must equal
-    its fetch URL, and that URL must not be any public repository's.
+
+def _rewrite(url: str, rules: list[tuple[str, str]]) -> str:
+    matches = [(prefix, base) for prefix, base in rules if url.startswith(prefix)]
+    if not matches:
+        return url
+    prefix, base = max(matches, key=lambda rule: len(rule[0]))
+    return base + url[len(prefix):]
+
+
+def resolve_target(cwd: Path, goal_store: Path, remote: str, public_repos: Iterable[Path]) -> str:
+    """The one literal URL to fetch from and push to, validated as Git sees it in ``cwd``.
+
+    Publication never pushes to a remote name: a name's push URLs can differ
+    by worktree (``config.worktree``) or by branch (``includeIf.onbranch``).
+    The target is ``remote.<remote>.url`` with ``insteadOf`` applied, read in
+    the same working directory as the push that will use it. It must be the
+    only URL of that remote, Git must not rewrite it again (``insteadOf``,
+    ``pushInsteadOf``), no remote may be named after it, and it must not
+    reach any public repository. Push URLs (``pushurl``) are never used.
     """
-    fetch = _urls(goal_store, remote, push=False)
-    if not fetch:
-        raise AttributionError(f"goal store has no remote {remote!r}; nothing published")
-    own = {git_urls.canonical(url, goal_store) for url in fetch}
-    if len(own) != 1:
-        raise AttributionError(f"remote {remote!r} has several fetch URLs; nothing published")
-    target = next(iter(own))
-    pushes = {git_urls.canonical(url, goal_store) for url in _urls(goal_store, remote, push=True)}
-    if pushes - own:
+    raw = _git(cwd, "config", "--get-all", f"remote.{remote}.url", check=False)
+    urls = [line for line in raw.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+    if len(urls) != 1:
+        raise AttributionError(f"remote {remote!r} must have exactly one URL here; nothing published")
+    fetch_rules = _rewrite_rules(cwd, "insteadof")
+    push_rules = _rewrite_rules(cwd, "pushinsteadof")
+    target = _rewrite(urls[0].strip(), fetch_rules)
+    if git_urls.is_local(target):
+        target = git_urls.local_path(target, goal_store)
+    if _rewrite(target, fetch_rules) != target or _rewrite(target, push_rules) != target:
         raise AttributionError(
-            f"remote {remote!r} pushes to a URL other than its own origin; "
-            "attribution publishes only to the goal store's origin; nothing published")
-    if target in public_urls(public_repos):
+            f"URL rewriting (insteadOf/pushInsteadOf) would redirect the publication target "
+            f"of remote {remote!r}; nothing published")
+    names = _git(cwd, "config", "--name-only", "--get-regexp", r"^remote\.", check=False)
+    for key in names.stdout.decode("utf-8", "replace").splitlines():
+        if key.startswith(f"remote.{target}."):
+            raise AttributionError("a remote is named after the publication URL; nothing published")
+    if _identities(target, goal_store) & public_urls(public_repos):
         raise AttributionError(
             f"remote {remote!r} of the goal store is a public repository's remote; "
             "attribution data stays on the private goal store only; nothing published")
     return target
+
+
+def require_private_remote(goal_store: Path, remote: str, public_repos: Iterable[Path]) -> str:
+    """The validated publication URL as the goal store's own checkout resolves it."""
+    return resolve_target(goal_store, goal_store, remote, public_repos)
 
 
 # -- ledger -----------------------------------------------------------------------
@@ -693,19 +753,39 @@ class Ledger:
 
 
 def _tree_files(worktree: Path, rev: str) -> Iterable[tuple[str, bytes]]:
+    """Every file under ``hosts/`` at ``rev``: one ``ls-tree`` and one ``cat-file --batch``.
+
+    Anything that is not a regular blob of bounded size yields empty bytes,
+    which the loader reports as a problem.
+    """
     listed = _git(worktree, "ls-tree", "-r", "-z", "--long", rev, "--", HOSTS, check=False)
+    entries, wanted = [], []
     for entry in listed.stdout.decode("utf-8", "replace").split("\0"):
         if not entry:
             continue
         meta, _, path = entry.partition("\t")
         fields = meta.split()
-        if len(fields) < 4 or fields[1] != "blob" or fields[0] not in {"100644", "100755"}:
-            yield path, b""
-            continue
-        if fields[3].isdigit() and int(fields[3]) > MAX_LEDGER_FILE:
-            yield path, b""
-            continue
-        yield path, _git(worktree, "cat-file", "blob", fields[2]).stdout
+        ok = (len(fields) >= 4 and fields[1] == "blob" and fields[0] in {"100644", "100755"}
+              and fields[3].isdigit() and int(fields[3]) <= MAX_LEDGER_FILE)
+        entries.append((path, fields[2] if ok else None))
+        if ok:
+            wanted.append(fields[2])
+    blobs: dict[str, bytes] = {}
+    if wanted:
+        output = _git(worktree, "cat-file", "--batch",
+                      stdin=("\n".join(dict.fromkeys(wanted)) + "\n").encode()).stdout
+        position = 0
+        while position < len(output):
+            newline = output.index(b"\n", position)
+            header = output[position:newline].decode("ascii", "replace").split()
+            position = newline + 1
+            if len(header) < 3 or header[1] != "blob":
+                continue
+            size = int(header[2])
+            blobs[header[0]] = output[position:position + size]
+            position += size + 1
+    for path, oid in entries:
+        yield path, blobs.get(oid, b"") if oid else b""
 
 
 def load_ledger(worktree: Path, rev: str = "HEAD") -> Ledger:
@@ -802,14 +882,24 @@ def publish(goal_store: Path, repos: dict, *, host: str, record_root: Path, writ
     if hook.HOST_RE.fullmatch(host or "") is None:
         raise AttributionError("this host has no valid name; attribution refuses unnamed hosts "
                                "(python3 -m creme set-host-name NAME)")
-    require_private_remote(goal_store, remote, public_repos)
-    spec = _spec(remote)
+    public_repos = list(public_repos)
+    # The opening push (if any) runs in the goal store's checkout: validate there.
+    root_target = resolve_target(goal_store, goal_store, remote, public_repos)
+    root_spec = _spec(root_target, remote)
     moment = time.time() if now is None else now
 
     def action() -> dict:
-        with channels.lock(goal_store, spec):
-            worktree = channels.attach(goal_store, spec, create=True, host=host,
-                                       remote=remote, branch=branch)
+        with channels.lock(goal_store, root_spec):
+            worktree = channels.attach(goal_store, root_spec, create=True, host=host,
+                                       remote=root_target, branch=branch)
+            # Every later fetch and push runs in the ledger worktree, whose own
+            # configuration (config.worktree, includeIf.onbranch) can differ.
+            target = resolve_target(worktree, goal_store, remote, public_repos)
+            if target != root_target:
+                raise AttributionError(
+                    "the ledger worktree resolves the publication URL differently from the goal "
+                    "store's checkout; nothing published")
+            spec = _spec(target, remote)
             channels.reset_to_remote(worktree, spec)
             published = load_ledger(worktree)
             present = {r["id"] for r in published.records if r.get("host") == host}
@@ -863,7 +953,7 @@ def publish(goal_store: Path, repos: dict, *, host: str, record_root: Path, writ
                     "quarantined": quarantined, "host": host}
 
     try:
-        return channels.authorized(record_root, writer, action, spec)
+        return channels.authorized(record_root, writer, action, root_spec)
     except shared.SharedStackError as exc:
         raise AttributionError(str(exc)) from exc
 
@@ -1034,14 +1124,24 @@ def build_report(ledger: Ledger, repos: dict, filters: Filters, *, local: Iterab
             visited.add(sha)
         return sha
 
+    by_key = {(r["repository"], r["sha"]): r for r in records}
     superseded: dict[tuple, list] = {}
     shown = []
     for record in chosen:
         end = final(record["repository"], record["sha"])
-        if end != record["sha"] and (record["repository"], end) in chosen_keys:
+        if end == record["sha"]:
+            shown.append(record)
+            continue
+        successor_record = by_key.get((record["repository"], end))
+        same_session = (successor_record is not None
+                        and _session_key(successor_record) == _session_key(record))
+        # Fold only within one session: a later session that rebased an earlier
+        # one's commits must not take them over. Adopted rows are never folded.
+        if (same_session and record.get("source") != "census"
+                and (record["repository"], end) in chosen_keys):
             superseded.setdefault((record["repository"], end), []).append(record["sha"])
         else:
-            shown.append(record)
+            shown.append(dict(record, superseded_by=end))
     unattributed: list[dict] = []
     matched: list[dict] = []
     if since is not None and until is not None and not filters.goal:
@@ -1086,7 +1186,7 @@ def build_report(ledger: Ledger, repos: dict, filters: Filters, *, local: Iterab
                "recorded_at": record.get("recorded_at"), "hook": record.get("hook"),
                "source": record.get("source")}
         for extra in ("unpublished", "reason", "lease_state", "stale_lease", "adopted_by",
-                      "created_at"):
+                      "created_at", "superseded_by"):
             if record.get(extra) is not None:
                 row[extra] = record[extra]
         folded = superseded.get((record["repository"], record["sha"]))
@@ -1122,6 +1222,8 @@ def _row_flags(row: dict) -> str:
         flags.append("unpublished")
     if row.get("supersedes"):
         flags.append("supersedes " + ", ".join(sha[:12] for sha in row["supersedes"]))
+    if row.get("superseded_by"):
+        flags.append(f"superseded by {row['superseded_by'][:12]}")
     return "".join(f" [{flag}]" for flag in flags)
 
 

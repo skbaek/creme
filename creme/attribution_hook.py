@@ -220,14 +220,16 @@ def context(cwd: str) -> Dict[str, str]:
 
 
 def record_id(sha: str, hook: str, now: float) -> str:
-    return f"{time.strftime(STAMP, time.gmtime(now))}-{sha}-{hook}-{secrets.token_hex(4)}"
+    return f"{time.strftime(STAMP, time.gmtime(now))}-{sha[:12]}-{hook}-{secrets.token_hex(4)}"
 
 
 def build_record(*, cwd: str, sha: str, hook: str, repository: str, host: Optional[str],
                  identity: Dict[str, Optional[str]], where: Dict[str, str], now: float,
                  source: str = "hook", extra: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    facts = commit_facts(cwd, sha)  # resolves HEAD, so the id carries the real SHA
     record: Dict[str, object] = {
-        "schema": SCHEMA, "id": record_id(sha, hook, now), "source": source, "hook": hook,
+        "schema": SCHEMA, "id": record_id(str(facts["sha"]), hook, now), "source": source,
+        "hook": hook,
         "host": host, "client": identity["client"],
         "acquisition_digest": identity["acquisition_digest"],
         "lease_state": identity["lease_state"], "repository": repository,
@@ -235,7 +237,7 @@ def build_record(*, cwd: str, sha: str, hook: str, repository: str, host: Option
         "goal": goal_label(where["toplevel"], where["branch"]), "branch": where["branch"],
         "recorded_at": iso(now),
     }
-    record.update(commit_facts(cwd, sha))
+    record.update(facts)
     if extra:
         record.update(extra)
     return record

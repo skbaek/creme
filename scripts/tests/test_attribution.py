@@ -705,12 +705,10 @@ class GuardTest(Fixture):
         self.mac.commit()
         git(self.mac.plans, "config", "--add", "remote.origin.pushurl", str(self.plans_origin))
         git(self.mac.plans, "config", "--add", "remote.origin.pushurl", str(self.blanc_origin))
-        with self.assertRaisesRegex(attr.AttributionError, "other than its own origin"):
-            self.mac.publish()
+        # Push URLs are never used: publication pushes to the one validated URL.
+        self.assertEqual(self.mac.publish()["published"], 1)
         self.assertEqual(git(self.blanc_origin, "branch", "--list", attr.DEFAULT_BRANCH), "")
-        git(self.mac.plans, "config", "--unset-all", "remote.origin.pushurl")
-        git(self.mac.plans, "config", "remote.origin.pushurl", str(self.plans_origin) + "/")
-        self.assertEqual(self.mac.publish()["published"], 1)  # same origin, other spelling
+        self.assertTrue([p for p in self.ledger_paths() if p.startswith("hosts/mac/batches/")])
 
     def test_push_names_origin_never_the_branch_upstream(self):
         self.mac.install()
@@ -956,7 +954,7 @@ class CaptureEdgeTest(Fixture):
                                    "post-rewrite", "rebase"], stdin, cwd=str(self.mac.blanc)), 0)
         added = [r for r in self.mac.records() if r["id"] not in before]
         self.assertEqual([(r["sha"], r["hook"]) for r in added], [(good, "post-rewrite")])
-        self.assertIn(good, added[0]["id"])  # ids carry the full SHA
+        self.assertIn(good[:12], added[0]["id"])  # ids carry the resolved SHA prefix
 
     def test_detached_primary_checkout_is_labelled_detached(self):
         self.mac.install()
@@ -1011,6 +1009,152 @@ class ReportShapeTest(Fixture):
         report = attr.build_report(attr.Ledger(attached=False), self.mac.repos, attr.Filters())
         self.assertEqual(len(report["warnings"]), 2)
         self.assertIn("warning: no ledger", attr.render_report(report))
+
+
+
+class LedgerWorktreeConfigTest(Fixture):
+    """R2-1: the target is resolved where the push runs, the ledger worktree."""
+
+    def opened(self):
+        self.mac.install()
+        self.mac.publish()
+        self.mac.commit()
+        return self.mac.plans / attr.LEDGER_DIR
+
+    def public_ledger(self):
+        result = subprocess.run(["git", "-C", str(self.blanc_origin), "ls-tree", "-r", "--name-only",
+                                 attr.DEFAULT_BRANCH], capture_output=True, text=True)
+        return result.stdout.split() if result.returncode == 0 else []
+
+    def test_worktree_scoped_pushurl_never_redirects_the_push(self):
+        worktree = self.opened()
+        git(self.mac.plans, "config", "extensions.worktreeConfig", "true")
+        git(worktree, "config", "--worktree", "remote.origin.pushurl", str(self.blanc_origin))
+        self.assertEqual(self.mac.publish()["published"], 1)
+        self.assertEqual(self.public_ledger(), [])
+        self.assertEqual(len([p for p in self.ledger_paths() if "/batches/" in p]), 1)
+
+    def test_onbranch_include_pushurl_never_redirects_the_push(self):
+        self.opened()
+        include = self.base / "extra.cfg"
+        include.write_text(f'[remote "origin"]\n\tpushurl = {self.blanc_origin}\n')
+        git(self.mac.plans, "config", "includeIf.onbranch:attribution.path", str(include))
+        self.assertEqual(self.mac.publish()["published"], 1)
+        self.assertEqual(self.public_ledger(), [])
+
+    def test_onbranch_include_rewrite_or_url_is_refused(self):
+        self.opened()
+        include = self.base / "rewrite.cfg"
+        include.write_text(f'[url "{self.blanc_origin}"]\n\tpushInsteadOf = {self.plans_origin}\n')
+        git(self.mac.plans, "config", "includeIf.onbranch:attribution.path", str(include))
+        with self.assertRaisesRegex(attr.AttributionError, "redirect"):
+            self.mac.publish()
+        include.write_text(f'[remote "origin"]\n\turl = {self.blanc_origin}\n')
+        with self.assertRaisesRegex(attr.AttributionError, "exactly one URL|public|differently"):
+            self.mac.publish()
+        self.assertEqual(self.public_ledger(), [])
+        self.assertEqual([e.published for e in attr.journal(self.mac.blanc)], [False])
+
+    def test_root_rewrite_and_remote_named_after_the_url_are_refused(self):
+        self.mac.install()
+        self.mac.commit()
+        git(self.mac.plans, "config", f"url.{self.blanc_origin}.pushInsteadOf", str(self.plans_origin))
+        with self.assertRaisesRegex(attr.AttributionError, "redirect"):
+            self.mac.publish()
+        git(self.mac.plans, "config", "--unset", f"url.{self.blanc_origin}.pushInsteadOf")
+        git(self.mac.plans, "config", f"remote.{self.plans_origin}.pushurl", str(self.blanc_origin))
+        with self.assertRaisesRegex(attr.AttributionError, "named after"):
+            self.mac.publish()
+        self.assertEqual(self.public_ledger(), [])
+
+
+class CanonicalFormsTest(Fixture):
+    """R2-2: more spellings and local forms of a public repository."""
+
+    def guard(self):
+        return attr.require_private_remote(self.mac.plans, "origin", [self.mac.blanc])
+
+    def test_more_network_spellings_are_refused(self):
+        for url in ["https://github.com./skbaek/creme.git", "git@github.com.:skbaek/creme.git",
+                    "https://github.com/skbaek/%63reme.git", "https://github.com/skbaek/creme%2Egit",
+                    "https://github.com/skbaek/x/../creme.git", "https://github.com/skbaek/./creme.git",
+                    "HTTPS://GITHUB.COM/SKBAEK/CREME.GIT", "https://github.com/skbaek/creme.GIT",
+                    "https://user:tok@github.com/skbaek/creme.git", "git+ssh://git@github.com/skbaek/creme.git",
+                    "github.com:skbaek/creme.git", "https://github.com/skbaek/creme.git#main",
+                    "https://github.com/skbaek/creme.git.git", "ssh://git@[github.com]:22/skbaek/creme.git"]:
+            git(self.mac.plans, "remote", "set-url", "origin", url)
+            with self.assertRaisesRegex(attr.AttributionError, "public repository", msg=url):
+                self.guard()
+
+    def test_local_forms_of_a_public_repository_are_refused(self):
+        worktree = self.mac.blanc / ".worktrees" / "g"
+        git(self.mac.blanc, "worktree", "add", "-q", "-b", "g", str(worktree))
+        link = self.base / "link.git"
+        link.symlink_to(self.blanc_origin)
+        for url in [str(self.blanc_origin)[:-len(".git")], str(worktree),
+                    str(self.mac.blanc / ".git" / "worktrees" / "g") + "/../..", str(link),
+                    "file://localhost" + str(self.blanc_origin), str(self.base / "x" / ".." / "blanc.git")]:
+            git(self.mac.plans, "remote", "set-url", "origin", url)
+            with self.assertRaisesRegex(attr.AttributionError, "public repository", msg=url):
+                self.guard()
+        git(self.mac.plans, "remote", "set-url", "origin", str(self.plans_origin))
+        self.assertTrue(self.guard())
+
+
+class SessionFoldTest(Fixture):
+    """R2-4: a later session's rebase does not take over an earlier session's commits."""
+
+    def test_rebase_in_a_later_session_keeps_the_earlier_rows(self):
+        self.mac.install()
+        self.mac.set_lease("c" * 32)
+        first = self.mac.digest
+        git(self.mac.blanc, "checkout", "-q", "-b", "cand")
+        old = self.mac.commit(name="x")
+        git(self.mac.blanc, "checkout", "-q", "main")
+        self.mac.commit(name="m")
+        self.mac.set_lease(LEASES["mac"])
+        git(self.mac.blanc, "checkout", "-q", "cand")
+        git(self.mac.blanc, "rebase", "-q", "main")
+        new = git(self.mac.blanc, "rev-parse", "HEAD")
+        self.mac.publish()
+        report = attr.build_report(self.mac.ledger(), self.mac.repos, attr.Filters(), host="mac")
+        rows = {s["acquisition_digest"]: [r for g in s["repositories"].values() for rs in g.values()
+                                          for r in rs] for s in report["sessions"]}
+        earlier = [r for r in rows[first] if r["sha"] == old]
+        self.assertEqual(earlier[0]["superseded_by"], new)
+        later = [r for r in rows[self.mac.digest] if r["sha"] == new]
+        self.assertNotIn("supersedes", later[0])
+        self.assertIn(f"[superseded by {new[:12]}]", attr.render_report(report))
+
+
+class LedgerScaleTest(unittest.TestCase):
+    """R2-5: a ledger load costs a fixed number of Git processes, not one per file."""
+
+    def test_six_hundred_files_load_with_two_git_processes(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, GIT_ENV):
+            repo = Path(temp) / "ledger"
+            subprocess.run(["git", "init", "-q", "-b", attr.DEFAULT_BRANCH, str(repo)], check=True)
+            batches = repo / "hosts" / "mac" / "batches"
+            batches.mkdir(parents=True)
+            for index in range(600):
+                record = {"schema": 1, "id": f"r{index}", "sha": f"{index:040x}", "repository": "blanc",
+                          "acquisition_digest": "none", "host": "mac"}
+                (batches / f"{index:04d}.json").write_text(json.dumps(
+                    {"schema": 1, "host": "mac", "records": [record]}))
+            git(repo, "add", ".")
+            git(repo, "commit", "-q", "-m", "ledger")
+            real = attr._git
+            calls = []
+
+            def counting(*args, **kwargs):
+                calls.append(args[1:3])
+                return real(*args, **kwargs)
+
+            with mock.patch.object(attr, "_git", side_effect=counting):
+                ledger = attr.load_ledger(repo)
+            self.assertEqual(len(ledger.records), 600)
+            self.assertEqual(ledger.problems, [])
+            self.assertLessEqual(len(calls), 2, calls[:5])
 
 
 if __name__ == "__main__":

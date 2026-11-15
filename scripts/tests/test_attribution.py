@@ -174,6 +174,8 @@ class CaptureTest(Fixture):
         self.assertEqual(git(plain, "rev-parse", "HEAD"), sha)
         [record] = self.mac.records()
         self.assertEqual(record["sha"], sha)
+        self.assertIn(sha[:12], record["id"])  # the resolved SHA, never "HEAD"
+        self.assertNotIn("HEAD", record["id"])
         self.assertEqual(record["host"], "mac")
         self.assertEqual(record["client"], "claude")
         self.assertEqual(record["acquisition_digest"], self.mac.digest)
@@ -1030,8 +1032,11 @@ class LedgerWorktreeConfigTest(Fixture):
         worktree = self.opened()
         git(self.mac.plans, "config", "extensions.worktreeConfig", "true")
         git(worktree, "config", "--worktree", "remote.origin.pushurl", str(self.blanc_origin))
-        self.assertEqual(self.mac.publish()["published"], 1)
-        self.assertEqual(self.public_ledger(), [])
+        try:
+            result = self.mac.publish()
+        finally:  # the leak check holds whether or not publication succeeded
+            self.assertEqual(self.public_ledger(), [])
+        self.assertEqual(result["published"], 1)
         self.assertEqual(len([p for p in self.ledger_paths() if "/batches/" in p]), 1)
 
     def test_onbranch_include_pushurl_never_redirects_the_push(self):
@@ -1039,8 +1044,11 @@ class LedgerWorktreeConfigTest(Fixture):
         include = self.base / "extra.cfg"
         include.write_text(f'[remote "origin"]\n\tpushurl = {self.blanc_origin}\n')
         git(self.mac.plans, "config", "includeIf.onbranch:attribution.path", str(include))
-        self.assertEqual(self.mac.publish()["published"], 1)
-        self.assertEqual(self.public_ledger(), [])
+        try:
+            result = self.mac.publish()
+        finally:
+            self.assertEqual(self.public_ledger(), [])
+        self.assertEqual(result["published"], 1)
 
     def test_onbranch_include_rewrite_or_url_is_refused(self):
         self.opened()
@@ -1120,7 +1128,9 @@ class SessionFoldTest(Fixture):
         report = attr.build_report(self.mac.ledger(), self.mac.repos, attr.Filters(), host="mac")
         rows = {s["acquisition_digest"]: [r for g in s["repositories"].values() for rs in g.values()
                                           for r in rs] for s in report["sessions"]}
+        self.assertIn(first, rows)  # the earlier session keeps its own rows
         earlier = [r for r in rows[first] if r["sha"] == old]
+        self.assertEqual(len(earlier), 1)
         self.assertEqual(earlier[0]["superseded_by"], new)
         later = [r for r in rows[self.mac.digest] if r["sha"] == new]
         self.assertNotIn("supersedes", later[0])

@@ -270,6 +270,16 @@ class CaptureTest(Fixture):
         self.assertEqual(hook.run([], b"", cwd=str(self.base)), 0)
         self.assertIn("unknown hook", (journal / hook.LOG).read_text())
 
+    def test_patch_id_failure_keeps_the_record(self):
+        self.mac.install()
+        attr.uninstall(self.mac.repos)
+        sha = self.mac.commit()
+        with mock.patch.object(hook, "patch_id", side_effect=subprocess.TimeoutExpired("git", 10)):
+            self.assertEqual(hook.run(["--repo", "blanc", "--state-dir", str(self.mac.state),
+                                       "post-commit"], b"", cwd=str(self.mac.blanc)), 0)
+        [record] = self.mac.records()
+        self.assertEqual((record["sha"], record["patch_id"]), (sha, None))
+
     def test_hook_never_reads_an_open_stdin(self):
         self.mac.install()
         reader, writer_end = os.pipe()  # a stdin that never closes

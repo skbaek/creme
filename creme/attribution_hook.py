@@ -162,6 +162,14 @@ def goal_label(toplevel: str, branch: str) -> str:
     return branch if branch and branch != "HEAD" else "main"
 
 
+def safe_patch_id(cwd: str, sha: str) -> Optional[str]:
+    """The patch-id, or None when it cannot be computed in time (record kept)."""
+    try:
+        return patch_id(cwd, sha)
+    except Exception:
+        return None
+
+
 def patch_id(cwd: str, sha: str) -> Optional[str]:
     diff = subprocess.run(["git", "-C", cwd, "diff-tree", "-p", "--no-color", "--root", sha],
                           capture_output=True, timeout=GIT_TIMEOUT, check=False)
@@ -176,7 +184,7 @@ def commit_facts(cwd: str, sha: str) -> Dict[str, object]:
     full, parents, committed = raw.split("\x00")
     parent_list = parents.split()
     return {"sha": full, "parents": parent_list, "committed_at": iso(int(committed)),
-            "patch_id": patch_id(cwd, full) if len(parent_list) == 1 or not parent_list else None}
+            "patch_id": safe_patch_id(cwd, full) if len(parent_list) <= 1 else None}
 
 
 def context(cwd: str) -> Dict[str, str]:

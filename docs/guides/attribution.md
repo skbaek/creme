@@ -26,14 +26,21 @@ host-local journal (inside its Git directory, never tracked or pushed) and on
 the private goal store's `attribution` branch. Creme tracks only this code,
 its schema and this guide.
 
-- Publication refuses a remote that any public repository uses (the Creme,
-  Jaune and Blanc remotes, and their public GitHub origins).
+- Publication pushes only to the goal store's `origin`, named explicitly with
+  an explicit refspec (never the branch's configured upstream). It refuses
+  unless every push URL of `origin`, after `insteadOf`/`pushInsteadOf`
+  expansion, is the same repository as its fetch URL, and refuses when that
+  URL is any public repository's: any fetch or push URL of any remote of
+  Creme, Jaune or Blanc, their public GitHub origins, or the local path of
+  one of those clones. URLs are compared in a canonical form (scheme, user,
+  port, `www.`, duplicate and trailing slashes and `.git` dropped, case
+  folded, local paths through `realpath`; `creme/git_urls.py`).
 - Never copy ledger or journal contents into a public repository. Where a
   public artifact needs a fact, restate it without host or session.
 - `attribution privacy-check --repo NAME|PATH --base REV` flags, in the
   added lines and the commit metadata of `REV..HEAD`, this host's name as a
-  word, any acquisition digest this host knows, and a session field carrying
-  a hex value. Test fixtures under `scripts/tests/` may use synthetic host
+  word in any letter case, any acquisition digest this host knows, and a
+  session field carrying a hex value. Test fixtures under `scripts/tests/` may use synthetic host
   names; known digests are flagged there too. `doctor` fails when a known
   digest appears in a tracked file of Creme, Jaune or Blanc.
 
@@ -53,13 +60,20 @@ Each record is one write-once JSON file in
 `<git-common-dir>/creme-attribution/journal/` (directories `0700`, files
 `0600`): host (from the host profile), client and `acquisition_digest` of the
 lease in `.semaphore/state/master.json` (the same digest master events carry,
-so records join `master/events.jsonl`; `none` without a lease) and whether
-that lease was still within its window, repository, SHA, parents, patch-id
-(non-merge commits), goal label (`.worktrees/GOAL` and its `-control`,
-`-mutation` and `-rehearsal` trees give `GOAL`; a primary checkout gives its
-branch), commit and record times, hook, and for `post-rewrite` the rewritten
-SHA. Raw session identifiers are never written. Commits in the ledger's own
-worktree are not recorded.
+so records join `master/events.jsonl`; `none` without a lease), repository,
+SHA, parents, patch-id (non-merge commits; null if it cannot be computed in
+time), goal label (`.worktrees/GOAL` and its `-control`, `-mutation` and
+`-rehearsal` trees give `GOAL`, the host's sanctioned disposable-tree names,
+so a goal ID ending in those words is ambiguous host-wide already; a
+primary checkout gives its branch, or `detached`), commit and record times,
+hook, and for `post-rewrite` the rewritten SHA. A lease past its renewal
+window is not held: the record says `none` and keeps the old digest as
+`stale_lease`, which the report marks `[stale lease]`. The lease is read
+from the semaphore directory recorded at install time unless the committer
+sets `CREME_SEMAPHORE_DIR`, the operator's explicit override for every
+Creme command. Raw session identifiers are never written. Commits in the
+ledger's own worktree are not recorded, and one bad `post-rewrite` target
+never loses the others.
 
 Measured on Git 2.50 (Apple Git-155), which hooks fire:
 
@@ -88,45 +102,75 @@ like [host comms](host-comms.md). Each host writes only under
 
 Publication commits new files and pushes without force; a rejected push
 fetches, rebases the never-published commit and retries a bounded number of
-times. A journal file moves to `published/` only after its batch reached the
-origin, so records reach the ledger or stay in the journal.
+times. The journal is the source of truth until the origin holds a record:
+which records are already published is read from the fetched origin, never
+the local tree; a local ledger commit the origin lacks (a push that timed
+out or was killed) is discarded and rebuilt from the journal; any exception
+from the push drops the new commit; and a journal or session file moves to
+`published/` only after the fetched origin holds it. A journal record that
+names another host is moved to `quarantine/` and reported, never published
+and never fatal. Untracked files outside `hosts/` in the ledger worktree
+(and `.DS_Store` anywhere) are ignored; any other untracked file under
+`hosts/` blocks publication until moved.
 
 **Publication points.** `master start` (which also publishes any journal a
 dead predecessor left, with that predecessor's digest), the `master` event
 with `action: end`, `attribution publish`, and `attribution merge-check`,
-which publishes before it reads. Publication authenticates through the
-master lease as host comms writes do. A failed publication never fails
-`master start` or the end event; the result says so and the next point
-retries.
+which publishes before it reads. Session start and end records are written
+to the host-local journal first, so every publication sends any session
+record a failed one left. Publication authenticates through the master
+lease as host comms writes do. A failed publication never fails `master
+start` or the end event; the result says so and the next point retries.
 
-**Census.** The census lists commits this clone created in a window (from
-its reflogs: commits, amends, merge commits, cherry-picks, reverts, `am`,
-rebase picks; never checkouts, resets or fast-forwards) that have no journal
-record, as `unattributed`. The end event runs it over the session window and
-publishes the rows in the end record; its output names the count.
+**Census.** The census lists commits this clone created in a window since
+adoption (from its reflogs: commits, amends, merge commits, cherry-picks,
+reverts, `am`, rebase picks; never checkouts, resets, fast-forwards such as
+`cherry-pick --ff`, or aborts such as `am --abort`) that have no journal
+record, as `unattributed`. It judges only repositories adopted on this host.
+Every census and merge check persists the creations it sees under
+`census/` in the journal area and unions them with later scans, so a
+creation stays known after its worktree or branch is removed. Removing a
+worktree before any census or merge check ran loses that reflog evidence;
+the windowed report remains the backstop. The end event runs the census
+over the session window and publishes the rows in the end record; its
+output names the count.
 
 **Merge check.** Before merging to or pushing a default branch the master
 runs `attribution merge-check --repo NAME RANGE`. It publishes, then refuses
 (exit 2) every commit in the range created on this host since adoption that
-has no record. Commits created on other hosts or before adoption pass. Attribute a
-refused commit with `attribution adopt --repo NAME SHA... --reason TEXT`,
-which records it under the current lease with `source: census`, `hook: adopt`
-and the reason, then run the check again. The check is never advisory on an
-adopted repository; adoption time survives `uninstall`.
+has no record. Commits created on other hosts or before adoption pass. It is
+a step of the master merge protocol, not a push hook: a push hook would sit
+on the public repositories' push path. Attribute a refused commit with
+`attribution adopt --repo NAME SHA... --reason TEXT`. Adopt accepts only
+commits in this host's census (created here since adoption, unrecorded).
+The creation-time session is not known, so the record's session is
+`unknown`; it carries `adopted_by` (the adopting session), the reflog
+creation time, the goal label of the creating worktree when its reflog
+shows it (else `unknown`), `source: census` and the reason; the text report
+prints `[adopted: reason]`. Then run the check again. The check is never
+advisory on an adopted repository. Hooks present without the adoption
+marker make it refuse (and `doctor` fail) until `attribution install`
+restores the marker; reinstalling never moves an adoption time later.
+`uninstall` keeps adoption; `uninstall --retire-adoption` ends it
+deliberately and records when, as `retired-<stamp>.json`.
 
 **Report.** `attribution report` reads the ledger (fetching it; `--no-fetch`
 reads this host's copy) plus this host's unpublished journal, and groups by
 session, repository and goal, resolving subjects from local Git at report
-time. With a time window (`--since/--until`, or a session's start and end),
-commits in the window that no host recorded are listed as `unattributed`,
-except those matching a recorded commit's patch-id (rebased or merged
-elsewhere), which are listed under that session as `matched: patch-id`.
+time. An amended or rebased commit shows its final SHA with the superseded
+ones folded under it (`[supersedes ...]`). With a time window
+(`--since/--until`, or a session's start and end), commits in the window in
+repositories adopted here that no host recorded are listed as
+`unattributed`; those with the same patch-id as a recorded commit in the
+same repository are listed separately as "matched by patch-id, not
+attributed", never under a session. The report warns when no ledger is
+attached or the host has no name.
 
 ## Commands
 
 ```sh
 python3 -m creme attribution install [--repo NAME]... [--python PATH]
-python3 -m creme attribution uninstall [--repo NAME]...
+python3 -m creme attribution uninstall [--repo NAME]... [--retire-adoption]
 python3 -m creme attribution status [--json]
 python3 -m creme attribution publish
 python3 -m creme attribution census [--since TIME] [--until TIME]
@@ -140,7 +184,9 @@ Repository names are the configured ones: `creme`, `jaune`, `blanc` and
 `goal-store`. `TIME` is `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]Z`. `install`
 refuses, changing nothing, when `core.hooksPath` is set or a hook it would
 write exists and was not written by it; reinstalling over its own hooks is
-allowed. `doctor` reports the install state of the four repositories.
+allowed. `doctor` reports the install state of the four repositories,
+fails on hooks without the adoption marker, and warns on a worktree whose
+own `config.worktree` sets `core.hooksPath` (its commits bypass the hooks).
 
 ## Adoption
 

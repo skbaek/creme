@@ -96,7 +96,9 @@ build while useful work remains; a build you wait on is the narrowest target
 that unblocks your next step. Downstream rebuilds after batched shared edits
 run in the background, speculatively and without `--wait`, so they never delay
 blocking work. The whole tree and full catalogue run on the landing candidate,
-to confirm rather than to discover. See
+to confirm rather than to discover. A per-file Lean analysis tool runs as a
+Lake facet or under a trace-hash cache, and its report gives cold and warm
+times. See
 [builds and throughput](docs/guides/execution.md#builds-and-throughput).
 
 ## Verification and evidence

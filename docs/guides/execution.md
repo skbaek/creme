@@ -382,6 +382,16 @@ Classify each build by who waits on it.
 7. **Measure.** A pass report states how long its agents were blocked on
    builds, holds or gates, so a change of practice can be judged by its
    effect on throughput.
+8. **Per-file analysis tools are incremental.** A tool that elaborates or
+   analyses Lean files one by one (an exporter, a capture, a linter, a census)
+   runs as a Lake module facet, or keys its cache by Lake's trace hash, so an
+   unchanged file and its unaffected dependents are reused, never
+   re-elaborated. A brief for such a tool requires it, and its report states
+   two times: cold (empty cache) and warm (one file changed). Re-elaborating
+   the whole tree after a small change is a defect to fix, not a cost to
+   accept. The 2026-11-16 Jaune naming capture ran outside Lake and
+   re-elaborated about 250 modules (about 55 min) after a three-file fix while
+   the host sat almost idle.
 
 Bare `lake build`, MCP `lean_build`, `lean_profile_proof`, language-server
 dependency builds, and startup cache downloads are refused or disabled. The

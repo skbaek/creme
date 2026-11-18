@@ -114,6 +114,7 @@ else:
         self.assertEqual(antigravity.pool_for_model("gemini-4-argon-high"), "argon")
         self.assertEqual(antigravity.pool_for_model("gemini-4-carbon-high"), "gemini")
         self.assertEqual(antigravity.pool_for_model("gemini-4-hydrogen-xhigh"), "gemini")
+        self.assertEqual(antigravity.pool_for_model("gemini-4-neon-xhigh"), "gemini")
         self.assertEqual(antigravity.pool_for_model("gemini-3.8-flash-high"), "gemini")
         with self.assertRaises(ValueError):
             antigravity.pool_for_model("mystery-model")
@@ -123,6 +124,9 @@ else:
         self.assertEqual(antigravity.resolve_model("gemini-3.8-flash-high", "high"), "gemini-3.8-flash-high")
         self.assertEqual(antigravity.resolve_model("gemini-4-hydrogen", "xhigh"), "gemini-4-hydrogen-xhigh")
         self.assertEqual(antigravity.resolve_model("gemini-4-hydrogen-xhigh", "xhigh"), "gemini-4-hydrogen-xhigh")
+        self.assertEqual(antigravity.resolve_model("gemini-4-neon", "xhigh"), "gemini-4-neon-xhigh")
+        self.assertEqual(antigravity.resolve_model("gemini-4-neon-xhigh", "xhigh"), "gemini-4-neon-xhigh")
+        self.assertEqual(antigravity.model_fit_option("gemini-4-neon", "xhigh"), "gemini-4-neon/xhigh")
         with self.assertRaisesRegex(ValueError, "gemini-4-carbon.*xhigh"):
             antigravity.resolve_model("gemini-4-carbon", "xhigh")
         with self.assertRaisesRegex(ValueError, "gemini-3.8-flash-high.*medium"):

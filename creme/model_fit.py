@@ -108,6 +108,7 @@ CLIENTS: dict[str, Client] = {
                                "claude-sonnet-5-5", "claude-opus-5-5")
             },
             "gemini-4-hydrogen": ("low", "medium", "high", "xhigh"),
+            "gemini-4-neon": ("low", "medium", "high", "xhigh"),
         },
         routes={
             "antigravity-run": "one-shot `creme antigravity run` (read-only or --write), any master",
@@ -136,6 +137,7 @@ def default_weights(client: Any) -> dict[str, Any]:
         "gemini-4-argon": 4.0,
         "gemini-4-carbon": 1.0,  # neutral uncalibrated prior; no measured cost yet
         "gemini-4-hydrogen": 1.0,  # neutral uncalibrated prior; no measured cost yet
+        "gemini-4-neon": 1.0,  # neutral uncalibrated prior; no measured cost yet
         "claude-sonnet-5-5": 2.0,
         "claude-opus-5-5": 8.0,
     }

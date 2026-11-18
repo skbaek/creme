@@ -17,17 +17,20 @@ python3 -m creme antigravity run --brief FILE|- --target DIR [--model M] \
     [--lean-goal GOAL] [--json]
 ```
 
-Six families are in use: `gemini-3.8-flash` (the default; user decision
+Seven families are in use: `gemini-3.8-flash` (the default; user decision
 2026-09-25), since 2026-10-04 `claude-sonnet-5-5` and `claude-opus-5-5`,
 since 2026-10-18 `gemini-4-argon` (user instruction: start its calibration),
-since 2026-11-11 `gemini-4-carbon` at low/medium/high, and since 2026-11-13
-`gemini-4-hydrogen` at low/medium/high/xhigh (verified with `agy models`, user
-instruction: add to legitimate usable options for data collection). Both Carbon
-and Hydrogen use the ordinary Gemini quota admission path and start with neutral
+since 2026-11-11 `gemini-4-carbon` at low/medium/high, since 2026-11-13
+`gemini-4-hydrogen` at low/medium/high/xhigh, and since 2026-11-19
+`gemini-4-neon` at low/medium/high/xhigh (verified with `agy models` and
+`agy -p /usage`, user instruction: make Neon an available option in the
+model/effort selection system for this and future sessions). Carbon, Hydrogen,
+and Neon use the ordinary Gemini quota admission path and start with neutral
 uncalibrated model-fit priors. Adding a catalogue entry does not change an
 existing immutable population or choose it without a dispatch.
 `--model` takes the family and `--effort` (`low`, `medium`, `high`, or `xhigh`
-for `gemini-4-hydrogen` only) picks the level; the CLI builds the slug, e.g.
+for `gemini-4-hydrogen` and `gemini-4-neon` only) picks the level; the CLI
+builds the slug, e.g.
 `claude-opus-5-5-medium`. A conflicting full slug is refused, as `agy` itself
 refuses it. The default effort is provisional (`medium`) until the effort-ladder
 experiment decides. Record a dispatch as an episode of the `antigravity` client

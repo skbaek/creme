@@ -89,6 +89,12 @@ def _new_state(client: model_fit.Client) -> dict[str, Any]:
     }
 
 
+def _ensure_cells(task: dict[str, Any], client: model_fit.Client) -> None:
+    cells = task.setdefault("cells", {})
+    for option in client.options():
+        cells.setdefault(option, {"n": N_INITIAL, "count": 0, "costs": []})
+
+
 def _ensure_task(state: dict[str, Any], client: model_fit.Client, task_type: str) -> dict[str, Any]:
     task_types = state.setdefault("task_types", {})
     task = task_types.setdefault(task_type, _new_task(client))
@@ -97,9 +103,7 @@ def _ensure_task(state: dict[str, Any], client: model_fit.Client, task_type: str
     task.setdefault("recent", [])
     task.setdefault("since_probe", 0)
     task.setdefault("pending", {})
-    cells = task.setdefault("cells", {})
-    for option in client.options():
-        cells.setdefault(option, {"n": N_INITIAL, "count": 0, "costs": []})
+    _ensure_cells(task, client)
     return task
 
 
@@ -331,6 +335,7 @@ def outcome(
         raise PolicyError("tokens must be zero or positive")
     with _locked_state(directory, selected) as (state, _):
         task, entry = _find_pending(state, dispatch_id)
+        _ensure_cells(task, selected)
         option = entry["option"]
         _option(selected, option)
         probe = bool(entry["probe"])

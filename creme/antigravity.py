@@ -27,7 +27,7 @@ DEFAULT_FAMILY = "gemini-3.8-flash"
 # Provisional until the effort-ladder experiment (goal store reports/antigravity-effort-ladder-20260925.md) decides; user does not assume high is optimal.
 DEFAULT_EFFORT = "medium"
 EFFORTS = ("low", "medium", "high", "xhigh")
-XHIGH_FAMILIES = ("gemini-4-hydrogen",)
+XHIGH_FAMILIES = ("gemini-4-hydrogen", "gemini-4-neon")
 DEFAULT_BINARY = Path("~/.local/bin/agy")
 SETTINGS_ENV = "CREME_AGY_SETTINGS"
 BINARY_ENV = "CREME_AGY_BIN"

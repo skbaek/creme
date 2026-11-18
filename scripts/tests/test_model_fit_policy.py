@@ -192,16 +192,36 @@ class ModelFitPolicyTests(unittest.TestCase):
         path = self.directory / "state" / "antigravity.json"
         state = json.loads(path.read_text(encoding="utf-8"))
         del state["weights"]["family"]["gemini-4-hydrogen"]
+        del state["weights"]["family"]["gemini-4-neon"]
         del state["weights"]["family"]["gemini-4-argon"]
         del state["weights"]["effort"]["xhigh"]
         del state["task_types"]["review-audit"]["cells"]["gemini-4-hydrogen/xhigh"]
+        del state["task_types"]["review-audit"]["cells"]["gemini-4-neon/xhigh"]
         path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
         table = policy.policy_table(self.directory, "antigravity")
         self.assertIn("review-audit", table)
         reloaded = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(reloaded["weights"]["family"]["gemini-4-hydrogen"], 1.0)
+        self.assertEqual(reloaded["weights"]["family"]["gemini-4-neon"], 1.0)
         self.assertEqual(reloaded["weights"]["effort"]["xhigh"], 3.0)
         self.assertIn("gemini-4-hydrogen/xhigh", reloaded["task_types"]["review-audit"]["cells"])
+        self.assertIn("gemini-4-neon/xhigh", reloaded["task_types"]["review-audit"]["cells"])
+
+    def test_outcome_demote_backfills_missing_cells_before_cost_lookup(self):
+        first = policy.recommend(self.directory, "antigravity", "review-audit", default="gemini-3.8-flash/low")
+        policy.outcome(self.directory, "antigravity", first["dispatch_id"], "fail")
+        second = policy.recommend(self.directory, "antigravity", "review-audit")
+        path = self.directory / "state" / "antigravity.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        del state["weights"]["family"]["gemini-4-neon"]
+        for option in ("gemini-4-neon/low", "gemini-4-neon/medium", "gemini-4-neon/high", "gemini-4-neon/xhigh"):
+            del state["task_types"]["review-audit"]["cells"][option]
+        path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        result = policy.outcome(self.directory, "antigravity", second["dispatch_id"], "fail")
+        self.assertEqual(result["event"], "demoted")
+        reloaded = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(reloaded["weights"]["family"]["gemini-4-neon"], 1.0)
+        self.assertIn("gemini-4-neon/xhigh", reloaded["task_types"]["review-audit"]["cells"])
 
 
 if __name__ == "__main__":

@@ -1335,6 +1335,15 @@ class AntigravityClaudeOptionTest(unittest.TestCase):
         self.assertFalse(ep.check_capability("antigravity", "gemini-4-hydrogen", "max", "antigravity-run")[0])
         self.assertFalse(ep.check_capability("codex", "gemini-4-hydrogen", "xhigh", "codex-subagent")[0])
 
+    def test_neon_supports_low_through_xhigh_and_route(self) -> None:
+        for effort in ("low", "medium", "high", "xhigh"):
+            self.assertEqual(
+                ep.check_capability("antigravity", "gemini-4-neon", effort, "antigravity-run"),
+                (True, "eligible"),
+            )
+        self.assertFalse(ep.check_capability("antigravity", "gemini-4-neon", "max", "antigravity-run")[0])
+        self.assertFalse(ep.check_capability("codex", "gemini-4-neon", "xhigh", "codex-subagent")[0])
+
 
 if __name__ == "__main__":
     unittest.main()

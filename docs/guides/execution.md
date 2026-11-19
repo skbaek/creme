@@ -373,7 +373,13 @@ Classify each build by who waits on it.
 5. **The master keeps work in flight.** Keep enough independent units running
    (workers, pseudo-subagents, the other host) that one build, gate or catalogue
    never stalls the whole operation. Before launching a long build, name what
-   proceeds while it runs.
+   proceeds while it runs. The master itself does host-free work during a
+   long job: design of the next cuts, decision packets, reviews of worker
+   output, and asking whether the job is needed at all. It does not poll on
+   timed wakeups, and it does not pause the other workers without also
+   giving them host-free work. On 2026-11-19 a Jaune refactoring session sat
+   idle for hours while one renaming-check run (snapshot, compare, re-snapshot)
+   was on the critical path.
 6. **Reduce build cost by construction.** Before editing a module whose
    dependents are most of the tree, count its reverse dependencies; prefer an
    additive owner or twin downstream of it; if the deep edit is still needed,
@@ -392,6 +398,16 @@ Classify each build by who waits on it.
    accept. The 2026-11-16 Jaune naming capture ran outside Lake and
    re-elaborated about 250 modules (about 55 min) after a three-file fix while
    the host sat almost idle.
+   The same holds for the comparison that consumes such captures. It loads and
+   compares only the modules a change touches and their dependents, one module
+   or environment at a time, never every environment at once. Fix a tool that
+   violates this **before** the campaign that will run it repeatedly. Never
+   change a capture or comparison tool while its captures are in flight: the
+   change invalidates them. On 2026-11-19 the unfixed naming tool cost one
+   relocation check about six hours. Each check made a 3,278 s cold snapshot.
+   One whole-tree compare stalled at the 14 GiB scope limit at more than 15 GB.
+   A mid-run tool change voided both snapshots. One environment still needed
+   more than 14 GiB.
 
 Bare `lake build`, MCP `lean_build`, `lean_profile_proof`, language-server
 dependency builds, and startup cache downloads are refused or disabled. The

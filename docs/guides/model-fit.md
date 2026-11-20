@@ -121,7 +121,17 @@ route, effort, harness, material context and fixed recovery recipe. A material
 change gets a new population identity; historical evidence remains inspectable.
 Incidental brief wording is not a new population. Actual launch differs from
 proposal only with an explicit override reason, and statistics follow actual
-identity. Sol means `gpt-6.1-sol`; retired `gpt-6-sol` data is not replacement data.
+identity. Use the exact `release` and the effort in `actual` returned by
+`episode prepare` to launch a worker. The current native Codex releases are
+`gpt-6.2-sol` and `gpt-6.2-astra`. On each host, `python3 -m creme model-fit
+episode refresh-codex` creates immutable successors for populations configured
+with 6.1 Sol or 6 Astra. New preparations through an existing population ID also
+resolve its successor. Use the returned `policy_id` for its table and mode.
+A successor keeps the declared task, feasible options, effort defaults and
+exploration settings. Its replacement releases start with separate measurements.
+Earlier episodes, pending receipts and their generation tables retain their
+actual release IDs. Gather samples from genuine tasks on both tiers and
+verify their outcomes and costs through the ordinary acceptance workflow.
 
 A cold default is provisional. Cumulative moments use only the fully joined
 prefix in each candidate's pre-outcome launch order. Later completions count

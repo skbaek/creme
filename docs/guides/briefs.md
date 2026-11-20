@@ -143,9 +143,9 @@ model, and re-dispatch the remainder to smaller workers.
 ## Model choice
 
 Use the client-visible model name, not a redundant API-family prefix or suffix
-that the user does not select. As reconciled on 2026-09-23, the workflow's
-Codex choices are **Astra**, **Sol**, and **Luna** (Sol is GPT-6.1 Sol since
-2026-09-30; GPT-6 Sol and Terra are retired); its Claude Code choices are **Fable**, **Opus** (Opus 5.5), and
+that the user does not select. For Codex, select **6.2 Sol** (`gpt-6.2-sol`) for standard work and **6.2 Astra**
+(`gpt-6.2-astra`) for frontier work as of 2026-11-20. Luna remains available for efficient
+bounded work. The Claude Code choices are **Fable**, **Opus** (Opus 5.5), and
 **Sonnet**; its Muse choice, reconciled 2026-09-11, is
 **muse-spark**, selected at launch with `--model`. Recheck those names at
 launch rather than treating this snapshot as a permanent product catalogue.

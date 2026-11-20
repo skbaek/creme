@@ -137,6 +137,42 @@ class RuntimeTest(unittest.TestCase):
                          credits if credits is not None else CREDITS,
                          master, f"opp#{episode_id}")
 
+    def test_codex_upgrade_keeps_old_receipts_and_routes_new_work_by_release(self):
+        from unittest.mock import patch
+
+        previous = {"sol": "gpt-6.1-sol", "astra": "gpt-6-astra"}
+        current = {"sol": "gpt-6.2-sol", "astra": "gpt-6.2-astra"}
+        for family, old_release in previous.items():
+            option = family + "/high"
+            old_id = "old-" + family
+            candidate = dict(option=option, release=old_release, route="codex-subagent",
+                             recipe_version="review", prior_tokens=100)
+            config = base_config(execution_client="codex", default=option, candidates=[candidate])
+            with patch.dict(E.CODEX_CURRENT_RELEASES, previous):
+                R.configure(self.store, old_id, config)
+                prior = self.prepare("past-" + family, old_id)
+            self.assertEqual(R.configure(self.store, old_id, config)["policy_id"], old_id)
+            with self.assertRaisesRegex(R.RuntimeError, current[family]):
+                R.configure(self.store, "fresh-" + old_id, config)
+            self.assertEqual(self.prepare("past-" + family, old_id), prior)
+            new = self.prepare("next-" + family, old_id)
+            self.assertEqual(new["release"], current[family])
+            self.assertNotEqual(new["policy_id"], old_id)
+            self.assertEqual(self.prepare("next-" + family, old_id), new)
+            self.assertEqual(R.refresh_codex(self.store)["successors"][old_id], new["policy_id"])
+            self.assertEqual(R._policy(self.store, old_id)[1], config)
+            for episode in ("past-", "next-"):
+                result = R.submit(self.store, run_receipt(episode + family, episode + "run-" + family,
+                                  option, release=old_release, route="codex-subagent"))
+                if episode == "past-":
+                    self.assertEqual(result["status"], "applied")
+                    R.submit(self.store, accept_receipt(episode + family))
+                else:
+                    self.assertEqual(result["status"], "pending")
+            _, updated = R._policy(self.store, new["policy_id"])
+            self.assertEqual(R.statistics(self.store, updated, updated["candidates"][0]).n, 0)
+            self.assertEqual(R.statistics(self.store, config, candidate).n, 1)
+
     def candidate(self, config, option=LOW):
         return next(c for c in config["candidates"]
                     if c["option"] == option)

@@ -37,15 +37,9 @@ from . import model_fit
 
 SCHEMA_VERSION = 4
 
-# Release identity is always observed, never synthesized: every actual launch
-# must carry the real effective model id reported by its adapter. The store
-# invents no family/month release names and never substitutes a human label
-# for an observed id. The one explicit migration rule is Sol: the current
-# tool-catalogue id is ``gpt-6.1-sol``; the retired ``gpt-6-sol`` (and any
-# other sol-family id, including the human label ``GPT-6.1``) is rejected,
-# never recorded as current evidence. The exact observed id is retained.
-SOL_CURRENT_IDS = frozenset({"gpt-6.1-sol"})
-SOL_RETIRED_IDS = frozenset({"gpt-6-sol"})
+# Keep dispatch identity distinct from releases observed on earlier episodes.
+CODEX_CURRENT_RELEASES = {"sol": "gpt-6.2-sol", "astra": "gpt-6.2-astra"}
+CODEX_PREVIOUS_RELEASES = {"sol": "gpt-6.1-sol", "astra": "gpt-6-astra"}
 
 # Efforts a route cannot execute, rejected before launch (never a failure).
 # Muse broker routes have no "none" effort in the live catalogue
@@ -813,8 +807,8 @@ def register_launch(
     model: it is not a failure and earns no cost or credit.
 
     ``release`` is the adapter-observed effective model id and is required:
-    the store never synthesizes a release. Sol-family launches must carry
-    exactly ``gpt-6.1-sol``.
+    the store never synthesizes a release. A receipt from a superseded
+    Codex release may still close a matching historical episode.
 
     One episode has one pre-outcome owner: its first (initial) launch fixes
     the owner option and owner generation (initial setting plus the
@@ -839,16 +833,19 @@ def register_launch(
         raise CapabilityError(reason)
     if not release or not str(release).strip():
         raise EpisodeError("an actual launch must carry its adapter-observed effective release id")
-    if family == "sol":
-        if release in SOL_RETIRED_IDS:
-            raise EpisodeError(
-                f"release {release!r} is retired for Sol; current evidence requires"
-                f" one of {sorted(SOL_CURRENT_IDS)}")
-        if release not in SOL_CURRENT_IDS:
-            raise EpisodeError(
-                f"a sol-family launch must carry an observed current catalogue id"
-                f" {sorted(SOL_CURRENT_IDS)}, not {release!r}")
     option = f"{family}/{effort}"
+    if family in CODEX_CURRENT_RELEASES and release != CODEX_CURRENT_RELEASES[family]:
+        # A predecessor can finish after an upgrade. Accept its observed id
+        # only for an existing matching launch or a predeclared old population.
+        historical = release == CODEX_PREVIOUS_RELEASES[family] and conn.execute(
+            """SELECT 1 FROM launches WHERE run_id=? AND episode_id=? AND option=? AND release=?
+               UNION ALL SELECT 1 FROM fit_opportunities o JOIN fit_policies p USING(policy_id),
+               json_each(p.config, '$.candidates') c WHERE o.episode_id=?
+               AND json_extract(c.value,'$.option')=? AND json_extract(c.value,'$.release')=?
+               LIMIT 1""", (run_id, episode_id, option, release, episode_id, option, release)
+        ).fetchone()
+        if not historical:
+            raise EpisodeError(f"{family} requires observed release {CODEX_CURRENT_RELEASES[family]}, got {release!r}")
     descriptor = material_descriptor(_load(episode["context"]) or {},
                                      episode["material_band"] or "")
     generation = generation_key(release, route, episode["recipe_version"],

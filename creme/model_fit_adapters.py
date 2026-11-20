@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 from . import model_fit_capture as C
+from . import model_fit_episodes as E
 from . import model_fit_runtime as R
 
 
@@ -32,8 +33,11 @@ def codex_run(path, episode_id, run_id, family, route, harness_version,
         raise C.CaptureError("native rollout lacks effective release/effort metadata")
     # A Luna reserve rollout's turn context names the reserve catalogue model
     # (`gpt-reserve`), the same id the broker records as its observed release.
-    observed_family = {"gpt-6.1-sol": "sol", "gpt-6-astra": "astra", "gpt-6-luna": "luna",
-                       "gpt-reserve": "luna-reserve"}.get(after["model"])
+    families = {release: family_name for versions in
+                (E.CODEX_CURRENT_RELEASES, E.CODEX_PREVIOUS_RELEASES)
+                for family_name, release in versions.items()}
+    families.update({"gpt-6-luna": "luna", "gpt-reserve": "luna-reserve"})
+    observed_family = families.get(after["model"])
     if observed_family != family and not (family == "luna-reserve" and observed_family == "luna"):
         raise C.CaptureError("observed native release does not match its family")
     if before is None:

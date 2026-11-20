@@ -162,8 +162,8 @@ class EpisodeTest(unittest.TestCase):
         self.make_episode(client="codex", route="codex-subagent")
         launch = ep.register_launch(self.store, "r-sol", "ep-1", "sol", "high",
                                     "codex-subagent", "h1", ["sol/high"],
-                                    release="gpt-6.1-sol")
-        self.assertEqual(launch["release"], "gpt-6.1-sol")
+                                    release="gpt-6.2-sol")
+        self.assertEqual(launch["release"], "gpt-6.2-sol")
         # The retired native id is rejected for current Sol...
         with self.assertRaises(ep.EpisodeError):
             ep.register_launch(self.store, "r-old", "ep-1", "sol", "high",

@@ -2284,6 +2284,8 @@ def cmd_model_fit_episode(arguments: argparse.Namespace) -> int:
             store = runtime.open_runtime(directory)
             if action == "configure":
                 result = runtime.configure(store, **request)
+            elif action == "refresh-codex":
+                result = runtime.refresh_codex(store)
             elif action == "prepare":
                 result = runtime.prepare(store, **request)
             elif action in {"receipt", "accept"}:
@@ -3047,7 +3049,7 @@ def parser() -> argparse.ArgumentParser:
     fit = commands.add_parser("model-fit", help="per-client model/effort fit tables in the goal store")
     fit_commands = fit.add_subparsers(dest="fit_action", required=True)
     episode = fit_commands.add_parser("episode", help="durable within-client episode selection and acceptance")
-    episode.add_argument("episode_action", choices=("configure", "prepare", "receipt", "accept", "mode", "cancel", "table", "reconcile", "health", "snapshot"))
+    episode.add_argument("episode_action", choices=("configure", "refresh-codex", "prepare", "receipt", "accept", "mode", "cancel", "table", "reconcile", "health", "snapshot"))
     episode.add_argument("--from", dest="from_file", metavar="JSON", help="structured request file, or - for stdin")
     episode.add_argument("--dir", help="private model-fit directory; defaults to configured goal store")
     episode.set_defaults(func=cmd_model_fit_episode)

@@ -20,7 +20,7 @@ from creme.pseudo_broker import SessionRecord
 from scripts.tests.test_model_fit_runtime import base_config, accept_receipt
 
 
-def context(model="gpt-6.1-sol", effort="high", shape="effort"):
+def context(model="gpt-6.2-sol", effort="high", shape="effort"):
     payload = {"model": model}
     if shape == "collaboration":
         payload["collaboration_mode"] = {"settings": {"reasoning_effort": effort}}
@@ -67,7 +67,7 @@ class AdapterControls(unittest.TestCase):
         option = MODEL_FAMILIES[model] + "/high" if muse else "sol/high"
         config = base_config(execution_client=client, default=option, candidates=[{
             "option": option, "prior_tokens": 100,
-            "release": model if muse else "gpt-6.1-sol",
+            "release": model if muse else "gpt-6.2-sol",
             "recipe_version": "r1", "route": "muse-broker" if muse else "codex-subagent"}])
         R.configure(self.store, "policy", config, "active")
         R.prepare(self.store, episode, "policy", [{"milestone": "done", "credit": 1}],
@@ -101,7 +101,7 @@ class AdapterControls(unittest.TestCase):
                 path = self.rollout(shape, context(shape=shape), counter(100, 20))
                 receipt = self.native(path)
                 self.assertEqual((receipt["release"], receipt["option"]),
-                                 ("gpt-6.1-sol", "sol/high"))
+                                 ("gpt-6.2-sol", "sol/high"))
                 usage = receipt["segments"][0]["usage"]
                 self.assertEqual((usage["total_input"], usage["total_output"]), (100, 20))
                 self.assertEqual(usage["observed_effort"], "high")
@@ -109,12 +109,20 @@ class AdapterControls(unittest.TestCase):
                 self.assertTrue(receipt["usage_complete"])
 
     def test_native_metadata_gaps_and_family_mismatch_refuse(self):
-        for name, metadata in (("no-context", None), ("no-effort", {"type": "turn_context", "payload": {"model": "gpt-6.1-sol"}}),
+        for name, metadata in (("no-context", None), ("no-effort", {"type": "turn_context", "payload": {"model": "gpt-6.2-sol"}}),
                                ("retired", context("gpt-6-sol")), ("wrong-family", context("gpt-6-astra"))):
             with self.subTest(name=name):
                 path = self.rollout(name, *([metadata] if metadata else []), counter(100, 20))
                 with self.assertRaises(C.CaptureError):
                     self.native(path)
+
+    def test_native_astra_and_superseded_receipts_keep_observed_identity(self):
+        for family, release in (("astra", "gpt-6.2-astra"), ("astra", "gpt-6-astra"),
+                                ("sol", "gpt-6.1-sol")):
+            with self.subTest(release=release):
+                path = self.rollout(release, context(release, "medium"), counter(80, 10))
+                receipt = A.codex_run(path, "ep", release, family, "codex-subagent", "h1", "completed")
+                self.assertEqual((receipt["release"], receipt["option"]), (release, family + "/medium"))
 
     def test_luna_reserve_rollout_imports_its_observed_reserve_release(self):
         path = self.rollout("reserve", context("gpt-reserve", "medium"), counter(100, 20))
@@ -143,7 +151,7 @@ class AdapterControls(unittest.TestCase):
         self.append(path, context(), counter(110, 25))
         receipt = self.native(path, before=before)
         usage = receipt["segments"][0]["usage"]
-        self.assertEqual((receipt["release"], receipt["option"]), ("gpt-6.1-sol", "sol/high"))
+        self.assertEqual((receipt["release"], receipt["option"]), ("gpt-6.2-sol", "sol/high"))
         self.assertEqual((usage["total_input"], usage["total_output"]), (10, 5))
         self.assertTrue(before["identity_changed"], "capture must not mutate saved historical evidence")
 

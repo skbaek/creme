@@ -21,7 +21,7 @@ Configure once for a fixed authorized population (`configure --from FILE`):
     "candidates": [
       {
         "option": "sol/high",
-        "release": "gpt-6.1-sol",
+        "release": "gpt-6.2-sol",
         "route": "codex-subagent",
         "recipe_version": "review-and-master-verify-v1",
         "prior_tokens": 100000,

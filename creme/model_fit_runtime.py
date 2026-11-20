@@ -54,6 +54,11 @@ def configure(store, policy_id: str, config: dict, mode: str = "shadow"):
         raise RuntimeError("mode must be shadow, active or off")
     if not policy_id or not config.get("context_version") or not config.get("harness_version"):
         raise RuntimeError("policy, context_version and harness_version are required")
+    # Replaying an immutable configuration is valid even after its releases
+    # leave the dispatch catalogue. New work resolves the successor in prepare.
+    existing = store.conn.execute("SELECT config FROM fit_policies WHERE policy_id=?", (policy_id,)).fetchone()
+    if existing and existing["config"] == encode(config):
+        return _policy(store, policy_id)[0]
     if config.get("task_type") not in E.model_fit.TASK_TYPES:
         raise RuntimeError("unknown task type")
     candidates = config.get("candidates", [])
@@ -65,8 +70,8 @@ def configure(store, policy_id: str, config: dict, mode: str = "shadow"):
             raise RuntimeError(reason)
         if not c.get("release") or not c.get("recipe_version"):
             raise RuntimeError("candidate needs an observed catalogue release and fixed recipe")
-        if family == "sol" and c["release"] not in E.SOL_CURRENT_IDS:
-            raise RuntimeError("retired or unknown Sol release")
+        if family in E.CODEX_CURRENT_RELEASES and c["release"] != E.CODEX_CURRENT_RELEASES[family]:
+            raise RuntimeError(f"{family} population requires {E.CODEX_CURRENT_RELEASES[family]}")
         candidate = Candidate(c["option"], c.get("token_bound"), c["prior_tokens"],
                               c.get("bound_assumption", "unavailable"))
         candidate.validate()
@@ -91,6 +96,41 @@ def configure(store, policy_id: str, config: dict, mode: str = "shadow"):
         store.conn.execute("INSERT INTO fit_policies VALUES (?,?,?,?,?)",
                            (policy_id, encode(config), mode, config["default"], E._now()))
     return _policy(store, policy_id)[0]
+
+
+def _current_codex_population(store, policy_id):
+    policy, config = _policy(store, policy_id)
+    if config["execution_client"] != "codex":
+        return policy, config
+    candidates = []
+    for candidate in config["candidates"]:
+        family = candidate["option"].split("/")[0]
+        release = candidate["release"]
+        if family in E.CODEX_CURRENT_RELEASES and release != E.CODEX_CURRENT_RELEASES[family]:
+            if release != E.CODEX_PREVIOUS_RELEASES[family]:
+                raise RuntimeError(f"unexpected release {release!r} for {family} in {policy_id}")
+            candidate = {**candidate, "release": E.CODEX_CURRENT_RELEASES[family]}
+        candidates.append(candidate)
+    if candidates == config["candidates"]:
+        return policy, config
+    successor = policy_id + "-codex-6.2"
+    config = {**config, "candidates": candidates}
+    return configure(store, successor, config, policy["mode"]), config
+
+
+def refresh_codex(store):
+    """Create immutable successors for this host's existing Codex populations."""
+    with E._write_txn(store.conn):
+        rows = store.conn.execute(
+            "SELECT policy_id FROM fit_policies WHERE json_extract(config,'$.execution_client')='codex' "
+            "ORDER BY policy_id").fetchall()
+        successors = {}
+        for row in rows:
+            old = row["policy_id"]
+            current, _ = _current_codex_population(store, old)
+            if old != current["policy_id"]:
+                successors[old] = current["policy_id"]
+    return {"status": "OK", "successors": successors}
 
 
 def set_mode(store, policy_id, mode, reason, event_id):
@@ -216,7 +256,8 @@ def prepare(store, episode_id, policy_id, milestones, master_client, opportunity
             if encode(previous_request) != encode(request):
                 raise E.ConflictError("opportunity id reused with changed task")
             return json.loads(prior["decision"])
-        policy, config = _policy(store, policy_id)
+        policy, config = _current_codex_population(store, policy_id)
+        policy_id = policy["policy_id"]
         if (features or {}) != config.get("context_features", {}):
             raise RuntimeError("task features differ from this fixed context; choose another policy population")
         seq = store.conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM fit_opportunities WHERE policy_id=?",
@@ -239,6 +280,7 @@ def prepare(store, episode_id, policy_id, milestones, master_client, opportunity
                  budget=asdict(budget), selection_probability=1.0,
                  eligible_options=[c["option"] for c in config["candidates"]])
         candidate = next(c for c in config["candidates"] if c["option"] == actual)
+        d["release"] = candidate["release"]
         E.create_episode(store, episode_id, config["execution_client"], config["task_type"],
                           milestones, candidate["recipe_version"], master_client,
                           context=context_descriptor(config), route=candidate["route"])

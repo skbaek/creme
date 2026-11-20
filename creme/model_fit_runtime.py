@@ -115,7 +115,10 @@ def _current_codex_population(store, policy_id):
         return policy, config
     successor = policy_id + "-codex-6.2"
     config = {**config, "candidates": candidates}
-    return configure(store, successor, config, policy["mode"]), config
+    current = configure(store, successor, config, policy["mode"])
+    store.conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)",
+                       ("codex-predecessor:" + successor, policy_id))
+    return current, config
 
 
 def refresh_codex(store):
@@ -137,11 +140,11 @@ def set_mode(store, policy_id, mode, reason, event_id):
     if mode not in {"off", "shadow", "active"} or not reason:
         raise RuntimeError("mode and reason required")
     with E._write_txn(store.conn):
-        _policy(store, policy_id)
+        current, _ = _current_codex_population(store, policy_id)
         if E._record_event(store.conn, event_id, "policy.mode",
                             {"policy_id": policy_id, "mode": mode, "reason": reason}):
-            store.conn.execute("UPDATE fit_policies SET mode=? WHERE policy_id=?", (mode, policy_id))
-    return _policy(store, policy_id)[0]
+            store.conn.execute("UPDATE fit_policies SET mode=? WHERE policy_id=?", (mode, current["policy_id"]))
+    return _policy(store, current["policy_id"])[0]
 
 
 def context_descriptor(config):
@@ -184,12 +187,20 @@ def statistics(store, config, candidate):
     # order in which adapters happened to register their completed launches.
     # Until an actual identity arrives, an earlier pending proposal might
     # become any candidate via override, so conservatively block its context.
+    family = candidate["option"].split("/")[0]
+    catalogue_clause = ""
+    catalogue_args = ()
+    if family in E.CODEX_CURRENT_RELEASES:
+        catalogue_clause = " AND " + E.CODEX_OPPORTUNITY_RELEASE + "=?"
+        catalogue_args = (f"$.codex_releases.{family}", *E.CODEX_PREVIOUS_RELEASES.values(),
+                          E.CODEX_PREVIOUS_RELEASES[family], E.CODEX_CURRENT_RELEASES[family],
+                          candidate["release"])
     unknown_before = store.conn.execute("""SELECT MIN(e.rowid) FROM episodes e
         JOIN fit_opportunities o USING(episode_id) WHERE e.execution_client=?
         AND e.task_type=? AND e.context=? AND e.recipe_version=?
-        AND e.owner_option IS NULL AND o.status='pending'""",
-        (config['execution_client'],config['task_type'],E._dump(context_descriptor(config)),
-         candidate['recipe_version'])).fetchone()[0]
+        AND e.owner_option IS NULL AND o.status='pending'""" + catalogue_clause,
+        (config['execution_client'], config['task_type'], E._dump(context_descriptor(config)),
+         candidate['recipe_version'], *catalogue_args)).fetchone()[0]
     cutoff = unknown_before if unknown_before is not None else 9223372036854775807
     rows = store.conn.execute("""WITH population AS (
         SELECT e.*, e.rowid AS dispatch_order, COALESCE((SELECT SUM(CAST(s.amount_tokens AS REAL)) FROM spend_ledger s
@@ -208,33 +219,48 @@ def statistics(store, config, candidate):
                    max(0, rows["c2"] - rows["cost"]**2/n) if n else 0, rows["maxcost"])
 
 
+def _budget_scope(store, policy_id):
+    # Migration moves the dispatch population while retaining its one allowance.
+    row = store.conn.execute("SELECT value FROM meta WHERE key=?",
+                             ("codex-predecessor:" + policy_id,)).fetchone()
+    if row:
+        return row["value"], policy_id
+    successor = policy_id + "-codex-6.2"
+    registered = store.conn.execute("SELECT value FROM meta WHERE key=?",
+                                    ("codex-predecessor:" + successor,)).fetchone()
+    if registered and registered["value"] == policy_id:
+        return policy_id, successor
+    return policy_id, policy_id
+
+
 def _budget(store, policy_id, config):
     # Aggregate on disk: normal dispatch never loads lifetime rows into memory.
     # Usage already mirrors into the spend ledger, so only that ledger counts.
     cte = """WITH population AS (
-      SELECT o.sequence, o.status, e.owner_option, e.status AS episode_status,
+      SELECT ROW_NUMBER() OVER (ORDER BY o.rowid) AS position, o.policy_id, o.status, e.owner_option, e.status AS episode_status,
         json_extract(o.decision,'$.actual') AS selected,
         json_extract(o.decision,'$.actual_exploration') AS trial,
         json_extract(o.decision,'$.reservation') AS reservation,
         COALESCE((SELECT SUM(CAST(s.amount_tokens AS REAL)) FROM spend_ledger s
           WHERE s.episode_id=o.episode_id AND s.amount_tokens!='null'),0) AS cost,
         EXISTS(SELECT 1 FROM spend_ledger s WHERE s.episode_id=o.episode_id AND s.amount_tokens='null') AS unknown
-      FROM fit_opportunities o LEFT JOIN episodes e ON e.episode_id=o.episode_id WHERE policy_id=?
+      FROM fit_opportunities o LEFT JOIN episodes e ON e.episode_id=o.episode_id WHERE policy_id IN (?,?)
     ) """
+    scope = _budget_scope(store, policy_id)
     row = store.conn.execute(cte + """SELECT
       COALESCE(SUM(CASE WHEN trial AND status!='cancelled' THEN cost ELSE 0 END),0) AS spent,
       COALESCE(SUM(CASE WHEN NOT trial OR status='cancelled' THEN cost ELSE 0 END),0) AS normal,
       COALESCE(SUM(CASE WHEN trial AND status!='cancelled' AND episode_status!='closed'
                        THEN MAX(0,reservation-cost) ELSE 0 END),0) AS reserved,
       COALESCE(SUM(CASE WHEN trial AND status!='cancelled' AND episode_status!='closed' THEN 1 ELSE 0 END),0) AS concurrent,
-      COALESCE(MAX(CASE WHEN trial AND status!='cancelled' THEN sequence ELSE 0 END),0) AS last,
+      COALESCE(MAX(CASE WHEN trial AND status!='cancelled' THEN position ELSE 0 END),0) AS last,
       COALESCE(SUM(CASE WHEN trial AND status!='cancelled' THEN 1 ELSE 0 END),0) AS count,
       COALESCE(MAX(CASE WHEN trial AND status!='cancelled' THEN unknown ELSE 0 END),0) AS unknown
-      FROM population""", (policy_id,)).fetchone()
+      FROM population""", scope).fetchone()
     counts = store.conn.execute(cte + """SELECT COALESCE(owner_option,selected) AS option,
       SUM(CASE WHEN owner_option IS NOT NULL THEN 1 ELSE 0 END) AS launched,
       SUM(CASE WHEN owner_option IS NULL AND status='pending' THEN 1 ELSE 0 END) AS pending
-      FROM population GROUP BY option""", (policy_id,)).fetchall()
+      FROM population WHERE policy_id=? GROUP BY option""", (*scope, policy_id)).fetchall()
     trials = {r['option']: r['launched'] for r in counts}
     pending = {r['option']: r['pending'] for r in counts}
     allowance = config.get('seed_allowance',0) + config.get('learning_fraction',.1)*row['normal']
@@ -253,6 +279,10 @@ def prepare(store, episode_id, policy_id, milestones, master_client, opportunity
         if prior:
             previous_request = json.loads(prior["request"])
             previous_request.setdefault("features", {})
+            if request["policy_id"] != previous_request["policy_id"]:
+                current, _ = _current_codex_population(store, request["policy_id"])
+                if current["policy_id"] == prior["policy_id"]:
+                    request["policy_id"] = previous_request["policy_id"]
             if encode(previous_request) != encode(request):
                 raise E.ConflictError("opportunity id reused with changed task")
             return json.loads(prior["decision"])
@@ -260,8 +290,8 @@ def prepare(store, episode_id, policy_id, milestones, master_client, opportunity
         policy_id = policy["policy_id"]
         if (features or {}) != config.get("context_features", {}):
             raise RuntimeError("task features differ from this fixed context; choose another policy population")
-        seq = store.conn.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM fit_opportunities WHERE policy_id=?",
-                                 (policy_id,)).fetchone()[0]
+        seq = store.conn.execute("SELECT COUNT(*)+1 FROM fit_opportunities WHERE policy_id IN (?,?)",
+                                 _budget_scope(store, policy_id)).fetchone()[0]
         candidates = [Candidate(c["option"], c.get("token_bound"), c["prior_tokens"],
                                  c.get("bound_assumption", "unavailable")) for c in config["candidates"]]
         moments = {c["option"]: statistics(store, config, c) for c in config["candidates"]}
@@ -281,6 +311,8 @@ def prepare(store, episode_id, policy_id, milestones, master_client, opportunity
                  eligible_options=[c["option"] for c in config["candidates"]])
         candidate = next(c for c in config["candidates"] if c["option"] == actual)
         d["release"] = candidate["release"]
+        if config["execution_client"] == "codex":
+            d["codex_releases"] = dict(E.CODEX_CURRENT_RELEASES)
         E.create_episode(store, episode_id, config["execution_client"], config["task_type"],
                           milestones, candidate["recipe_version"], master_client,
                           context=context_descriptor(config), route=candidate["route"])

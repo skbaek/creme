@@ -126,12 +126,17 @@ identity. Use the exact `release` and the effort in `actual` returned by
 `gpt-6.2-sol` and `gpt-6.2-astra`. On each host, `python3 -m creme model-fit
 episode refresh-codex` creates immutable successors for populations configured
 with 6.1 Sol or 6 Astra. New preparations through an existing population ID also
-resolve its successor. Use the returned `policy_id` for its table and mode.
+resolve its successor. Use the returned `policy_id` for the current table.
+Mode changes through either ID control new dispatches. The pair shares one
+exploration allowance, pending-trial limit and opportunity clock.
 A successor keeps the declared task, feasible options, effort defaults and
 exploration settings. Its replacement releases start with separate measurements.
 Earlier episodes, pending receipts and their generation tables retain their
 actual release IDs. Gather samples from genuine tasks on both tiers and
 verify their outcomes and costs through the ordinary acceptance workflow.
+Keep each observation in its declared task and context band. As ordinary code
+changes, proof work, fact-finding and reviews arrive, use their own populations
+and record the effective effort along with the release.
 
 A cold default is provisional. Cumulative moments use only the fully joined
 prefix in each candidate's pre-outcome launch order. Later completions count

@@ -41,6 +41,13 @@ SCHEMA_VERSION = 4
 CODEX_CURRENT_RELEASES = {"sol": "gpt-6.2-sol", "astra": "gpt-6.2-astra"}
 CODEX_PREVIOUS_RELEASES = {"sol": "gpt-6.1-sol", "astra": "gpt-6-astra"}
 
+# Older decisions predate catalogue snapshots. The first 6.2 migration
+# recorded the selected release. Earlier dispatches recorded neither field.
+CODEX_OPPORTUNITY_RELEASE = """COALESCE(json_extract(o.decision, ?),
+    CASE WHEN json_extract(o.decision,'$.release') IS NULL
+      OR json_extract(o.decision,'$.release') IN (?,?) THEN ? ELSE ? END)"""
+
+
 # Efforts a route cannot execute, rejected before launch (never a failure).
 # Muse broker routes have no "none" effort in the live catalogue
 # (creme/muse_client.py EFFORTS), while model_fit still lists none for
@@ -834,18 +841,19 @@ def register_launch(
     if not release or not str(release).strip():
         raise EpisodeError("an actual launch must carry its adapter-observed effective release id")
     option = f"{family}/{effort}"
-    if family in CODEX_CURRENT_RELEASES and release != CODEX_CURRENT_RELEASES[family]:
-        # A predecessor can finish after an upgrade. Accept its observed id
-        # only for an existing matching launch or a predeclared old population.
-        historical = release == CODEX_PREVIOUS_RELEASES[family] and conn.execute(
-            """SELECT 1 FROM launches WHERE run_id=? AND episode_id=? AND option=? AND release=?
-               UNION ALL SELECT 1 FROM fit_opportunities o JOIN fit_policies p USING(policy_id),
-               json_each(p.config, '$.candidates') c WHERE o.episode_id=?
-               AND json_extract(c.value,'$.option')=? AND json_extract(c.value,'$.release')=?
-               LIMIT 1""", (run_id, episode_id, option, release, episode_id, option, release)
+    if family in CODEX_CURRENT_RELEASES:
+        # A historical override may belong to a family outside the proposal.
+        # Its original dispatch catalogue still bounds the observed release.
+        expected = conn.execute(
+            "SELECT " + CODEX_OPPORTUNITY_RELEASE + " FROM fit_opportunities o WHERE episode_id=?",
+            (f"$.codex_releases.{family}", *CODEX_PREVIOUS_RELEASES.values(),
+             CODEX_PREVIOUS_RELEASES[family], CODEX_CURRENT_RELEASES[family], episode_id)
         ).fetchone()
-        if not historical:
-            raise EpisodeError(f"{family} requires observed release {CODEX_CURRENT_RELEASES[family]}, got {release!r}")
+        expected_release = expected[0] if expected else CODEX_CURRENT_RELEASES[family]
+        if release != expected_release and not conn.execute(
+            "SELECT 1 FROM launches WHERE run_id=? AND episode_id=? AND option=? AND release=?",
+            (run_id, episode_id, option, release)).fetchone():
+            raise EpisodeError(f"{family} requires observed release {expected_release}, got {release!r}")
     descriptor = material_descriptor(_load(episode["context"]) or {},
                                      episode["material_band"] or "")
     generation = generation_key(release, route, episode["recipe_version"],

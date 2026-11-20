@@ -173,6 +173,47 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(R.statistics(self.store, updated, updated["candidates"][0]).n, 0)
             self.assertEqual(R.statistics(self.store, config, candidate).n, 1)
 
+    def test_codex_migration_shares_controls_and_partitions_pending_receipts(self):
+        from unittest.mock import patch
+
+        previous = dict(E.CODEX_PREVIOUS_RELEASES)
+        option = "sol/high"
+        candidates = [dict(option=option, release=previous["sol"], route="codex-subagent",
+                           recipe_version="review", prior_tokens=100)]
+        config = base_config(execution_client="codex", default=option, candidates=candidates,
+                             seed_allowance=100, learning_fraction=0)
+        with patch.dict(E.CODEX_CURRENT_RELEASES, previous):
+            R.configure(self.store, "legacy", config, mode="active")
+            for n in range(1, 10):
+                self.prepare(str(n), "legacy")
+                R.cancel(self.store, str(n), "fixture cancellation")
+            self.assertTrue(self.prepare("10", "legacy")["actual_exploration"])
+        successor = R.refresh_codex(self.store)["successors"]["legacy"]
+        # Exercise the original durable request shape written before migration.
+        self.store.conn.execute("""UPDATE fit_opportunities SET decision=
+            json_remove(decision,'$.release','$.codex_releases') WHERE episode_id='10'""")
+        self.store.conn.commit()
+        for n in range(11, 21):
+            decision = self.prepare(str(n), "legacy")
+        self.assertEqual(self.prepare("20", successor), decision)
+        self.assertEqual(decision["opportunity"], 20)
+        self.assertFalse(decision["actual_exploration"])
+        budget = R.table(self.store, successor)["budget"]
+        self.assertEqual((budget["reserved"], budget["pending"]), (100, 1))
+        R.set_mode(self.store, "legacy", "off", "rollback", "rollback-62")
+        self.assertEqual(self.prepare("21", successor)["mode"], "off")
+        # The old unknown launch cannot hold back an accepted 6.2 owner.
+        R.submit(self.store, run_receipt("11", "new-run", option, route="codex-subagent",
+                                        release=E.CODEX_CURRENT_RELEASES["sol"]))
+        R.submit(self.store, accept_receipt("11"))
+        self.assertEqual(R.table(self.store, successor)["candidates"][0]["moments"]["n"], 1)
+        result = R.submit(self.store, run_receipt("10", "historical-override", "astra/high",
+                          route="codex-subagent", release=previous["astra"],
+                          override_reason="historical independent review"))
+        self.assertEqual(result["status"], "applied")
+        R.submit(self.store, accept_receipt("10"))
+        self.assertEqual(R.closure(self.store, "10"), {"episode_status": "closed"})
+
     def candidate(self, config, option=LOW):
         return next(c for c in config["candidates"]
                     if c["option"] == option)

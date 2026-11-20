@@ -78,8 +78,7 @@ One normal acceptance can import a native run (`accept --from FILE`):
     "route": "codex-subagent",
     "harness_version": "native-subagent-v1",
     "terminal": "completed",
-    "attempt_index": 1,
-    "telemetry": "/absolute/path/to/plans/model-fit/runtime/claude-otel"
+    "attempt_index": 1
   }],
   "master_segments": [{
     "id": "measured-master-window-id",

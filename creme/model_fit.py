@@ -71,7 +71,8 @@ CLIENTS: dict[str, Client] = {
         prefix="cx",
         title="Codex",
         families={
-            **{family: STANDARD_EFFORTS for family in ("astra", "sol", "luna")},
+            **{family: (*STANDARD_EFFORTS, "ultra") for family in ("astra", "sol")},
+            "luna": STANDARD_EFFORTS,
             "luna-reserve": STANDARD_EFFORTS,
         },
         routes={
@@ -149,6 +150,7 @@ def default_weights(client: Any) -> dict[str, Any]:
         "high": 2.0,
         "xhigh": 3.0,
         "max": 5.0,
+        "ultra": 5.0,  # Same provisional prior as max until measured on Codex.
     }
     return {
         "family": {family: family_weights[family] for family in selected.families},

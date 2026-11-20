@@ -214,6 +214,17 @@ class RuntimeTest(unittest.TestCase):
         R.submit(self.store, accept_receipt("10"))
         self.assertEqual(R.closure(self.store, "10"), {"episode_status": "closed"})
 
+    def test_current_native_ultra_is_selectable_for_both_new_models(self):
+        for family, release in E.CODEX_CURRENT_RELEASES.items():
+            option = family + "/ultra"
+            config = base_config(execution_client="codex", default=option, candidates=[
+                dict(option=option, release=release, route="codex-subagent",
+                     recipe_version="review", prior_tokens=100)])
+            R.configure(self.store, family, config)
+            decision = self.prepare("ultra-" + family, family)
+            self.assertEqual((decision["release"], decision["actual"]), (release, option))
+        self.assertFalse(E.check_capability("codex", "luna-reserve", "ultra", "luna-reserve-run")[0])
+
     def candidate(self, config, option=LOW):
         return next(c for c in config["candidates"]
                     if c["option"] == option)

@@ -123,7 +123,9 @@ Incidental brief wording is not a new population. Actual launch differs from
 proposal only with an explicit override reason, and statistics follow actual
 identity. Use the exact `release` and the effort in `actual` returned by
 `episode prepare` to launch a worker. The current native Codex releases are
-`gpt-6.2-sol` and `gpt-6.2-astra`. On each host, `python3 -m creme model-fit
+`gpt-6.2-sol` and `gpt-6.2-astra`. Both support low, medium, high, xhigh,
+max and ultra on the native worker interface. Configure the efforts allowed
+for the task population. On each host, `python3 -m creme model-fit
 episode refresh-codex` creates immutable successors for populations configured
 with 6.1 Sol or 6 Astra. New preparations through an existing population ID also
 resolve its successor. Use the returned `policy_id` for the current table.

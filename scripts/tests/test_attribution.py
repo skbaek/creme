@@ -611,7 +611,10 @@ class ReportTest(Fixture):
         original = self.mac.commit(name="p")
         self.mac.publish()
         git(self.mac.blanc, "reset", "-q", "--hard", "HEAD~1")
-        git(self.mac.blanc, "-c", "core.hooksPath=/dev/null", "cherry-pick", original)
+        # Git dates have one-second precision. Make the rewritten commit
+        # distinct even when both commits land in the same second.
+        git(self.mac.blanc, "-c", "core.hooksPath=/dev/null", "cherry-pick", original,
+            env={"GIT_COMMITTER_NAME": "Rewrite fixture"})
         rewritten = git(self.mac.blanc, "rev-parse", "HEAD")
         self.assertNotEqual(rewritten, original)
         report = attr.build_report(self.mac.ledger(), {"blanc": self.mac.blanc},
